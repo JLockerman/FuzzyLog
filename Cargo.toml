@@ -1,0 +1,9 @@
+[package]
+name = "fuzzy_log"
+version = "0.1.0"
+authors = ["J <joshua.lockerman@yale.edu>"]
+
+[dependencies]
+bitflags = "0.3"
+custom_derive = "0.1.2"
+newtype_derive = "0.1.2"
