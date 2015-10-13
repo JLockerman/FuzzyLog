@@ -8,10 +8,10 @@ extern crate uuid;
 
 use std::collections::HashMap;
 use std::collections::hash_map;
-use std::marker::PhantomData;
 use std::time::Duration;
 use uuid::Uuid;
 
+mod local_horizons;
 
 pub trait Store<V> {
     fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult;
@@ -103,15 +103,10 @@ where V: Copy, S: Store<V>, H: Horizon {
     pub horizon: H,
     local_horizon: HashMap<order, entry>,
     upcalls: HashMap<order, Box<Fn(V) -> bool>>,
-    _pd: PhantomData<*mut V>,
 }
 
-unsafe impl<V, S, H> Send for FuzzyLog<V, S, H>
-where V: Copy, S: Store<V>, H: Horizon {}
-
-unsafe impl<V, S, H> Sync for FuzzyLog<V, S, H>
-where V: Copy, S: Store<V>, H: Horizon {}
-
+//TODO should impl some trait FuzzyLog instead of providing methods directly to allow for better sharing?
+//TODO allow dynamic register of new upcalls?
 impl<V, S, H> FuzzyLog<V, S, H>
 where V: Copy, S: Store<V>, H: Horizon{
     pub fn new(store: S, horizon: H, upcalls: HashMap<order, Box<Fn(V) -> bool>>) -> Self {
@@ -120,7 +115,6 @@ where V: Copy, S: Store<V>, H: Horizon{
             horizon: horizon,
             local_horizon: HashMap::new(),
             upcalls: upcalls,
-            _pd: PhantomData,
         }
     }
 
@@ -308,109 +302,69 @@ mod test {
 
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::hash::Hash;
     use std::mem;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    impl<V: Copy> Store<V> for HashMap<OrderIndex, Entry<V>> {
-        fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
-            use std::collections::hash_map::Entry::*;
-            match self.entry(key) {
-                Occupied(..) => Err(InsertErr::AlreadyWritten),
-                Vacant(v) => {
-                    v.insert(val);
-                    Ok(())
-                }
-            }
-        }
+    use std::fmt::{Debug, Formatter, Result as FmtResult};
 
-        fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-            HashMap::get(self, &key).cloned().ok_or(GetErr::NoValue)
-        }
-    }
-
-    impl<V: Copy, S> Store<V> for Mutex<S>
-    where S: Store<V> {
-        fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
-            self.lock().unwrap().insert(key, val)
-        }
-
-        fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-            self.lock().unwrap().get(key)
-        }
-    }
-
-    impl<V: Copy, S> Store<V> for RefCell<S>
-    where S: Store<V> {
-        fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
-            self.borrow_mut().insert(key, val)
-        }
-
-        fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-            self.borrow_mut().get(key)
-        }
-    }
-
-    impl<V: Copy, S> Store<V> for Arc<Mutex<S>>
-    where S: Store<V> {
-        fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
-            self.lock().unwrap().insert(key, val)
-        }
-
-        fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-            self.lock().unwrap().get(key)
-        }
-    }
-
-    impl<H> Horizon for Arc<Mutex<H>>
-    where H: Horizon {
-        fn get_horizon(&mut self, ord: order) -> entry {
-            self.lock().unwrap().get_horizon(ord)
-        }
-
-        fn update_horizon(&mut self, ord: order, index: entry) -> entry {
-            self.lock().unwrap().update_horizon(ord, index)
-        }
-    }
-/*
-    #[derive(Debug)]
-    struct Map<K, V, S, H>
-    where K: Hash + Eq + Copy, V: Copy,
-          S: Store<Entry<MapEntry<K, V>>>,
-          H: Horizon {
-        map: HashMap<K, V>,
-        store: S,
-        horizon: H,
-        our_order: order,
-        observed_horizon: HashMap<(order, entry), u64>,
-    }
-
-    impl<K, V, S, H> Map<K, V, S, H>
-    where K: Hash + Eq + Copy, V: Copy,
-          S: Store<LocalEntry<MapEntry<K, V>>> + Borrow<S>,
-          H: Horizon, {
-
-        fn put(&mut self, key: K, val: V) -> Option<V> {
-            //TODO handle failures
-            let next_entry = self.horizon.get_horizon(self.our_order);
-            //TODO self.apply_updates(..)
-            //     self.observed_horizon.update(..)
-            let inserted = self.store.insert((self.our_order, next_entry),
-                LocalEntry{data: EntryKind::Data(MapEntry(key, val))});
-            inserted.unwrap(); //TODO
-            let last_read_entry = self.horizon.update_horizon(self.our_order, next_entry);
-            //TODO last_read_entry?
-            self.map.insert(key, val)
-        }
-
-        fn get(&mut self, key: K) -> Option<V> {
-            panic!()
-        }
-    }*/
 
     #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
     struct MapEntry<K, V>(K, V);
+
+    struct Map<K, V, S, H>
+    where K: Hash + Eq + Copy, V: Copy,
+          S: Store<MapEntry<K, V>>,
+          H: Horizon, {
+        log: FuzzyLog<MapEntry<K, V>, S, H>,
+        local_view: Rc<RefCell<HashMap<K, V>>>,
+        order: order,
+    }
+
+    impl<K: 'static, V: 'static, S, H> Map<K, V, S, H>
+    where K: Hash + Eq + Copy, V: Copy,
+          S: Store<MapEntry<K, V>>,
+          H: Horizon, {
+
+        pub fn new(store: S, horizon: H, ord: order) -> Map<K, V, S, H> {
+            let local_view = Rc::new(RefCell::new(HashMap::new()));
+            let re = local_view.clone();
+            Map {
+                log: FuzzyLog::new(store, horizon, collect!(
+                    ord =>
+                    Box::new(
+                        move |MapEntry(k, v)| {
+                            re.borrow_mut().insert(k, v);
+                            true
+                        }) as Box<Fn(_) -> _>
+                )),
+                order: ord,
+                local_view: local_view,
+            }
+        }
+
+        pub fn put(&mut self, key: K, val: V) {
+            self.log.append(self.order, MapEntry(key, val), vec![]);
+            //TODO deps
+        }
+
+        pub fn get(&mut self, key: K) -> Option<V> {
+            self.log.play_foward(self.order);
+            self.local_view.borrow().get(&key).cloned()
+        }
+    }
+
+    impl<K, V, S, H> Debug for Map<K, V, S, H>
+    where K: Hash + Eq + Copy + Debug, V: Copy + Debug,
+          S: Store<MapEntry<K, V>>,
+          H: Horizon, {
+
+        fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
+            formatter.debug_struct("Map").field("local_view", &self.local_view).finish()
+        }
+    }
 
     #[test]
     fn test_threaded() {
@@ -467,14 +421,26 @@ mod test {
             map.insert(9, 20);
             map
         };
-        //println!("{:#?}", *log.store.lock().unwrap());
         assert_eq!(*map1.borrow(), cannonical_map1);
         assert_eq!(*map0.borrow(), cannonical_map0);
     }
 
-
     #[test]
     fn test_1_column() {
+        let store = HashMap::new();
+        let horizon = HashMap::new();
+        let mut map = Map::new(store, horizon, 2.into());
+        map.put(0, 1);
+        map.put(1, 17);
+        map.put(32, 5);
+        assert_eq!(map.get(1), Some(17));
+        assert_eq!(*map.local_view.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
+        assert_eq!(map.get(0), Some(1));
+        assert_eq!(map.get(32), Some(5));
+    }
+
+    #[test]
+    fn test_1_column_ni() {
         let store = HashMap::new();
         let horizon = HashMap::new();
         let map = Rc::new(RefCell::new(HashMap::new()));
