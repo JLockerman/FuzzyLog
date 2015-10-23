@@ -2,16 +2,23 @@
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
 #[macro_use] extern crate grabbag_macros;
+#[macro_use] extern crate log;
 #[macro_use] extern crate newtype_derive;
 
+extern crate hyper;
+extern crate rustc_serialize;
 extern crate uuid;
 
 use std::collections::HashMap;
 use std::collections::hash_map;
+use std::convert::Into;
 use std::time::Duration;
 use uuid::Uuid;
 
-mod local_horizons;
+extern crate rusoto;
+
+pub mod local_horizons;
+pub mod dynamo_store;
 
 pub trait Store<V> {
     fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult;
@@ -23,7 +30,7 @@ pub type OrderIndex = (order, entry);
 pub type InsertResult = Result<(), InsertErr>;
 pub type GetResult<T> = Result<T, GetErr>;
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RustcDecodable, RustcEncodable)]
 pub enum Entry<V> {
     Data(V, Vec<OrderIndex>),
     TransactionCommit{uuid: Uuid, start_entries: Vec<OrderIndex>}, //TODO do commits need dependencies?
@@ -54,15 +61,31 @@ pub enum GetErr {
 }
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
     #[allow(non_camel_case_types)]
     pub struct order(u32);
 }
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
     #[allow(non_camel_case_types)]
     pub struct entry(u32);
+}
+
+pub fn order_index_to_u64(o: OrderIndex) -> u64 {
+    let hig: u32 = o.0.into();
+    let low: u32 = o.1.into();
+    let hig = (hig as u64) << 32;
+    let low = low as u64;
+    hig | low
+}
+
+pub fn u64_to_order_index(u: u64) -> OrderIndex {
+    let ord = (u & 0xFFFFFFFF00000000) >> 32;
+    let ent = u & 0x00000000FFFFFFFF;
+    let ord: u32 = ord as u32;
+    let ent: u32 = ent as u32;
+    (ord.into(), ent.into())
 }
 
 pub trait Horizon {
@@ -146,6 +169,7 @@ where V: Copy, S: Store<V>, H: Horizon{
 
     pub fn get_next_unseen(&mut self, column: order) -> Option<OrderIndex> {
         let index = self.local_horizon.get(&column).cloned().unwrap_or(0.into()) + 1;
+        trace!("next unseen: {:?}", (column, index));
         let ent = self.store.get((column, index)).clone();
         let ent = match ent { Err(GetErr::NoValue) => return None, Ok(e) => e };
         self.play_deps(ent.dependencies());
@@ -171,6 +195,7 @@ where V: Copy, S: Store<V>, H: Horizon{
         let transaction_start_entries;
         let mut timed_out = false;
         'find_commit: loop {
+            trace!("transaction reading: {:?}", (commit_column, next_entry));
             let next = self.store.get((commit_column, next_entry)).clone();
             match next {
                 Err(GetErr::NoValue) if timed_out => {
@@ -311,16 +336,16 @@ mod test {
     use std::fmt::{Debug, Formatter, Result as FmtResult};
 
 
-    #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-    struct MapEntry<K, V>(K, V);
+    #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, RustcDecodable, RustcEncodable)]
+    pub struct MapEntry<K, V>(pub K, pub V);
 
-    struct Map<K, V, S, H>
+    pub struct Map<K, V, S, H>
     where K: Hash + Eq + Copy, V: Copy,
           S: Store<MapEntry<K, V>>,
           H: Horizon, {
-        log: FuzzyLog<MapEntry<K, V>, S, H>,
-        local_view: Rc<RefCell<HashMap<K, V>>>,
-        order: order,
+        pub log: FuzzyLog<MapEntry<K, V>, S, H>,
+        pub local_view: Rc<RefCell<HashMap<K, V>>>,
+        pub order: order,
     }
 
     impl<K: 'static, V: 'static, S, H> Map<K, V, S, H>
