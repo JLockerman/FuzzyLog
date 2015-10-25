@@ -203,9 +203,10 @@ mod test {
         let region = Region::UsEast1;
         let table = "FLTable";
         let creds = provider.get_credentials().ok().unwrap();
-        delete_entry(&table, &region, creds, (0.into(), 1.into()));
+        delete_entry(&table, &region, creds, (2.into(), 0.into()));
+        let index = order_index_to_u64((2.into(), 0.into()));
         {
-            let payload = super::build_put_string(table, 1, MapEntry(0, 32)).into_bytes();
+            let payload = super::build_put_string(table, index, MapEntry(0, 32)).into_bytes();
             let mut request = SignedRequest::new("POST", "dynamodb", &region, "/");
             request.set_content_type("application/x-amz-json-1.0");
             request.add_header("X-Amz-Target", "DynamoDB_20120810.PutItem");
@@ -215,7 +216,7 @@ mod test {
             assert_eq!(status, 200);
         }
         {
-            let payload = super::build_get_string(table, 1).into_bytes();
+            let payload = super::build_get_string(table, index).into_bytes();
             //println!("payload:\n{}\n", String::from_utf8_lossy(&*payload));
             let mut request = SignedRequest::new("POST", "dynamodb", &region, "/");
             request.set_content_type("application/x-amz-json-1.0");
@@ -227,7 +228,7 @@ mod test {
             let mut body = String::new();
             result.read_to_string(&mut body).unwrap();
             assert_eq!(status, 200);
-            assert_eq!(body, "{\"Item\":{\"Entry\":{\"B\":\"eyJfZmllbGQwIjowLCJfZmllbGQxIjozMn0=\"},\"OrderIndex\":{\"N\":\"1\"}}}");
+            assert_eq!(body, "{\"Item\":{\"Entry\":{\"B\":\"eyJfZmllbGQwIjowLCJfZmllbGQxIjozMn0=\"},\"OrderIndex\":{\"N\":\"8589934592\"}}}");
             //println!("status {} {}", status, body)
         }
     }
@@ -239,8 +240,9 @@ mod test {
         let region = Region::UsEast1;
         let table = "FLTable";
         let creds = provider.get_credentials().ok().unwrap();
-        delete_entry(&table, &region, creds, (0.into(), 1.into()));
-        let payload = super::build_put_string(table, 1, MapEntry(0, 32)).into_bytes();
+        delete_entry(&table, &region, creds, (1.into(), 0.into()));
+        let index = order_index_to_u64((1.into(), 0.into()));
+        let payload = super::build_put_string(table, index, MapEntry(0, 32)).into_bytes();
         //println!("payload:\n{}\n", String::from_utf8_lossy(&*payload));
         let mut request = SignedRequest::new("POST", "dynamodb", &region, "/");
         request.set_content_type("application/x-amz-json-1.0");
