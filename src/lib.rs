@@ -11,6 +11,9 @@ extern crate uuid;
 
 extern crate rusoto;
 
+#[macro_use]
+mod general_tests;
+
 pub mod prelude;
 pub mod local_store;
 pub mod dynamo_store;
