@@ -162,7 +162,7 @@ mod test {
     use std::mem;
     use std::sync::{Arc, Mutex};
 
-    fn new_store<K, V>() -> Arc<Mutex<HashMap<K, V>>>
+    fn new_store<K, V>(_: Vec<OrderIndex>) -> Arc<Mutex<HashMap<K, V>>>
     where K: Eq + Hash {
         Arc::new(Mutex::new(HashMap::new()))
     }

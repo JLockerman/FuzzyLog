@@ -288,25 +288,15 @@ mod test {
         trace!("{:?}", result);
     }
 
-    fn new_dyndb_store() -> DynDBStore<&'static str> {
-        let mut store = DynDBStore::new("FLTable", Region::UsEast1,
+    fn new_dyndb_store(to_delete: Vec<OrderIndex>) -> DynDBStore<&'static str> {
+        let store = DynDBStore::new("FLTable", Region::UsEast1,
             DefaultAWSCredentialsProviderChain::new()
                 .get_credentials().ok().unwrap().clone());
-        clear_columns(&mut store);
-        store
-    }
-
-    fn clear_columns<S: AsRef<str>>(store: &mut DynDBStore<S>) {
-        for i in 0..50 {
+        for i in to_delete {
             delete_entry(&store.table_name, &store.region,
-                &store.credentials, (0.into(), i.into()));
-            delete_entry(&store.table_name, &store.region,
-                &store.credentials, (1.into(), i.into()));
-            delete_entry(&store.table_name, &store.region,
-                    &store.credentials, (2.into(), i.into()));
-            delete_entry(&store.table_name, &store.region,
-                &store.credentials, (3.into(), i.into()));
+                &store.credentials, i);
         }
+        store
     }
 
     general_tests!(super::new_dyndb_store);
