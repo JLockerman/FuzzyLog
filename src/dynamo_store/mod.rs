@@ -304,7 +304,7 @@ mod test {
     }
 
     fn clear_columns<S: AsRef<str>>(store: &mut DynDBStore<S>) {
-        for i in 0..20 {
+        for i in 0..50 {
             delete_entry(&store.table_name, &store.region,
                 &store.credentials, (0.into(), i.into()));
             delete_entry(&store.table_name, &store.region,
