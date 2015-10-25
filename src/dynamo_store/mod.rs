@@ -12,7 +12,7 @@ use rustc_serialize::base64::{Config, ToBase64, FromBase64, CharacterSet, Newlin
 
 use hyper::status::StatusCode;
 
-use super::*;
+use prelude::*;
 
 #[derive(Debug)]
 pub struct DynDBStore<S: AsRef<str>> {
@@ -184,9 +184,10 @@ fn build_delete_string(table_name: &str, index: u64) -> String {
 mod test {
     extern crate env_logger;
 
+    use prelude::*;
+
     use super::*;
-    use super::super::*;
-    use super::super::test::{Map, MapEntry};
+    use local_store::{Map, MapEntry};
 
     use std::cell::RefCell;
     use std::collections::HashMap;
