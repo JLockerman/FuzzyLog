@@ -10,4 +10,11 @@ To also run dynamodb tests (This requires credidentials in either an enviroment 
 
     cargo test --release --features dynamodb_tests
 
-(note that the first compilation will be slow)
+(note that the first compilation will be slow)  
+
+in mac os you need to add
+
+    [credential]
+	helper = osxkeychain
+
+to you `.gitconfig`
