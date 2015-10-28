@@ -21,6 +21,7 @@ pub enum Entry<V> {
     TransactionCommit{uuid: Uuid, start_entries: Vec<OrderIndex>}, //TODO do commits need dependencies?
     TransactionStart(V, order, Uuid, Vec<OrderIndex>), //TODO do Starts need dependencies?
     TransactionAbort(Uuid), //TODO do Starts need dependencies?
+    Multiput{data: V, columns: Vec<order>, deps: Vec<OrderIndex>},
 }
 
 impl<V> Entry<V> {
@@ -30,6 +31,7 @@ impl<V> Entry<V> {
             &Entry::TransactionCommit{..} => &[],
             &Entry::TransactionAbort(..) => &[],
             &Entry::TransactionStart(_, _, _, ref deps) => &deps,
+            &Entry::Multiput{ref deps, ..} => &deps,
         }
     }
 }
@@ -135,17 +137,54 @@ where V: Copy, S: Store<V>, H: Horizon{
         self.play_deps(ent.dependencies());
         match ent {
             Entry::TransactionStart(data, commit_column, uuid, _) => {
+                trace!("TransactionStart");
                 self.play_transaction((column, index), commit_column, uuid, data);
             }
-            Entry::TransactionCommit{..} => {} //TODO skip?
-            Entry::TransactionAbort(..) => {} //TODO skip?
+            Entry::Multiput{columns, ..} => {
+                //TODO
+                trace!("Multiput");
+                self.read_multiput(index, &columns);
+            }
+            Entry::TransactionCommit{..} => { trace!("TransactionCommit"); } //TODO skip?
+            Entry::TransactionAbort(..) => { trace!("TransactionAbort"); } //TODO skip?
 
             Entry::Data(data, _) => {
+                trace!("Data");
                 self.upcalls.get(&column).map(|f| f(data));
             }
         }
         self.local_horizon.insert(column, index);
         Some((column, index))
+    }
+
+    fn read_multiput(&mut self, row: entry, columns: &[order]) {
+        for column in columns {
+            trace!("check multiput row {:?} col {:?}", row, column);
+            //skip if we've already seen this multiput
+            if self.local_horizon.get(&column)
+                .map_or(false, |r| r >= &row) {
+                trace!("already seen this multiput");
+                return
+            }
+        }
+
+        'find_puts: for column in columns {
+            let put_entry = self.store.get((*column, row))
+                .clone().expect("invalid entry");
+            if let Entry::Multiput{data, columns: put_cols, deps} = put_entry {
+                if put_cols == columns {
+                    if self.upcalls.contains_key(&column) {
+                        //TODO just mark as stale
+                        self.play_until((*column, row - 1)); //TODO underflow
+                        self.play_deps(&deps);
+                        self.upcalls.get(&column).map(|f| f(data));
+                        self.local_horizon.insert(*column, row);
+                    }
+                    continue 'find_puts
+                }
+            }
+            return
+        }
     }
 
     fn play_transaction(&mut self, (start_column, _): OrderIndex, commit_column: order, start_uuid: Uuid, data: V) {
@@ -166,6 +205,7 @@ where V: Copy, S: Store<V>, H: Horizon{
                     }
                 }
                 Err(GetErr::NoValue) => {
+                    //TODO estimate based on RTT
                     thread::sleep(Duration::from_millis(100));
                     timed_out = true;
                     continue 'find_commit
@@ -188,6 +228,9 @@ where V: Copy, S: Store<V>, H: Horizon{
 
         self.upcalls.get(&start_column).map(|f| f(data));
 
+        //TODO instead, just mark all interesting columns not in the
+        //     transaction as stale, and only read the interesting
+        //     columns of the transaction
         for (column, index) in transaction_start_entries {
             if column != start_column {
                 self.play_until((column, index - 1)); //TODO underflow
@@ -220,10 +263,43 @@ where V: Copy, S: Store<V>, H: Horizon{
     }
 
     pub fn play_foward(&mut self, column: order) -> Option<OrderIndex> {
+        trace!("play_foward");
         let index = self.horizon.get_horizon(column);
         if index == 0.into() { return None }//TODO
         self.play_until((column, index));
         Some((column, index))
+    }
+
+    pub fn try_multiput(&mut self, offset: u32, mut columns: Vec<(order, V)>, deps: Vec<OrderIndex>) ->
+    Option<Vec<OrderIndex>>
+    {
+        use std::iter::FromIterator;
+        columns.sort_by(|a, b| a.0.cmp(&b.0));
+        let row = columns.iter().fold(1.into(), |old, c| {
+            let row = self.horizon.get_horizon(c.0);
+            if old < row { old } else { row }
+        }) + offset + 1;
+        trace!("multiput row {:?}", row);
+        let cols = Vec::from_iter(columns.iter().map(|&(c, _)| c));
+        let mut puts = Vec::new();
+        for &(column, val) in &columns {
+            let res = self.store.insert((column, row),
+                Entry::Multiput{data: val, columns: cols.clone(), deps: deps.clone()});
+            match res {
+                Err(InsertErr::AlreadyWritten) => {
+                    trace!("multiput {:?} {:?} failed", row, column);
+                    return None
+                }
+                Ok(()) => {
+                    trace!("multiput {:?} {:?} success", row, column);
+                    self.horizon.update_horizon(column, row);
+                    puts.push((column, row));
+                }
+            }
+            //TODO fillin
+            //self.local_horizon.insert(column, row);
+        }
+        Some(puts)
     }
 
     pub fn start_transaction(&mut self, mut columns: Vec<(order, V)>, deps: Vec<OrderIndex>) -> Transaction<V, S, H> {
@@ -232,7 +308,7 @@ where V: Copy, S: Store<V>, H: Horizon{
         let min = columns[0].0;
         let mut start_entries = Vec::new();
         let transaction_id = Uuid::new_v4();
-        for &(column, val)  in &columns {
+        for &(column, val) in &columns {
             let loc = self.append_entry(column,
                 Entry::TransactionStart(val, min, transaction_id, deps.clone()));
             start_entries.push(loc)

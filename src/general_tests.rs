@@ -9,7 +9,7 @@ macro_rules! general_tests {
 
         #[cfg(test)]
         mod general_tests {
-            //last column used is 14
+            //last column used is 18
 
             extern crate env_logger;
 
@@ -331,6 +331,120 @@ macro_rules! general_tests {
                 log.play_foward(14.into());
                 assert_eq!(*map.borrow(), collect![0 => 1, 1 => 17]);
             }
-        }
+
+            #[test]
+            fn test_multiput() {
+                let _ = env_logger::init();
+                let store = $new_store(
+                    vec![(15.into(), 0.into()), (15.into(), 1.into()),
+                    (15.into(), 2.into()), (15.into(), 3.into()),
+                    (16.into(), 0.into()), (16.into(), 1.into()),
+                    (16.into(), 2.into()), (16.into(), 3.into()),]
+                );
+                let horizon = HashMap::new();
+                let map = Rc::new(RefCell::new(HashMap::new()));
+                let mut upcalls: HashMap<_, Box<Fn(_) -> bool>> = HashMap::new();
+                let re1 = map.clone();
+                let re2 = map.clone();
+                upcalls.insert(15.into(), Box::new(move |MapEntry(k, v)| {
+                    trace!("MapEntry({:?}, {:?})", k, v);
+                    re1.borrow_mut().insert(k, v);
+                    true
+                }));
+                upcalls.insert(16.into(), Box::new(move |MapEntry(k, v)| {
+                    trace!("MapEntry({:?}, {:?})", k, v);
+                    re2.borrow_mut().insert(k, v);
+                    true
+                }));
+
+                let mut log = FuzzyLog::new(store, horizon, upcalls);
+                //try_multiput(&mut self, offset: u32, mut columns: Vec<(order, V)>, deps: Vec<OrderIndex>)
+                let columns = vec![(15.into(), MapEntry(13, 5)),
+                    (16.into(), MapEntry(92, 7))];
+                let v = log.try_multiput(0.into(), columns, vec![]);
+                assert_eq!(v, Some(vec![(15.into(), 1.into()),
+                    (16.into(), 1.into())]));
+
+                let columns = vec![(15.into(), MapEntry(3, 8)),
+                    (16.into(), MapEntry(2, 54))];
+                let v = log.try_multiput(0.into(), columns, vec![]);
+                assert_eq!(v, Some(vec![(15.into(), 2.into()),
+                    (16.into(), 2.into())]));
+
+                log.play_until((15.into(), 1.into()));
+
+                assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7]);
+                log.play_until((15.into(), 2.into()));
+                assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7, 3 => 8, 2 => 54]);
+            }
+
+            #[test]
+            fn test_threaded_multiput() {
+                let _ = env_logger::init();
+                let store = $new_store(
+                    (0..20).map(|i| (17.into(), i.into()))
+                        .chain((0..20).map(|i| (18.into(), i.into())))
+                        .collect()
+                );
+                let s = store.clone();
+                let s1 = store.clone();
+                let horizon = Arc::new(Mutex::new(HashMap::new()));
+                let h = horizon.clone();
+                let h1 = horizon.clone();
+                let map = Rc::new(RefCell::new(HashMap::new()));
+                let mut upcalls: HashMap<_, Box<Fn(_) -> bool>> = HashMap::new();
+                let re1 = map.clone();
+                let re2 = map.clone();
+                upcalls.insert(17.into(), Box::new(move |MapEntry(k, v)| {
+                    trace!("MapEntry({:?}, {:?})", k, v);
+                    re1.borrow_mut().insert(k, v);
+                    true
+                }));
+                upcalls.insert(18.into(), Box::new(move |MapEntry(k, v)| {
+                    trace!("MapEntry({:?}, {:?})", k, v);
+                    re2.borrow_mut().insert(k, v);
+                    true
+                }));
+
+                let mut log = FuzzyLog::new(store, horizon, upcalls);
+                //try_multiput(&mut self, offset: u32, mut columns: Vec<(order, V)>, deps: Vec<OrderIndex>)
+
+                let join = thread::spawn(move || {
+                    let mut log = FuzzyLog::new(s, h, HashMap::new());
+                    for i in 0..10 {
+                        let change = vec![(17.into(), MapEntry(i * 2, i * 2)), (18.into(), MapEntry(i * 2, i * 2))];
+                        let mut offset = 0;
+                        while log.try_multiput(offset, change.clone(), vec![]).is_none() {
+                            offset += 1;
+                        }
+                    }
+                });
+                let join1 = thread::spawn(|| {
+                    let mut log = FuzzyLog::new(s1, h1, HashMap::new());
+                    for i in 0..10 {
+                        let change = vec![(17.into(), MapEntry(i * 2 + 1, i * 2 + 1)), (18.into(), MapEntry(i * 2 + 1, i * 2 + 1))];
+                        let mut offset = 0;
+                        while log.try_multiput(offset, change.clone(), vec![]).is_none() {
+                            offset += 1;
+                        }
+                    }
+                });
+                join1.join().unwrap();
+                join.join().unwrap();
+
+                log.play_foward(17.into());
+
+                let cannonical_map = {
+                    let mut map = HashMap::new();
+                    for i in 0..20 {
+                        map.insert(i, i);
+                    }
+                    map
+                };
+                assert_eq!(*map.borrow(), cannonical_map);
+            }
+
+        }//End mod test
+
     };
 }
