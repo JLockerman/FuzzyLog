@@ -5,15 +5,19 @@
 #[macro_use] extern crate log;
 #[macro_use] extern crate newtype_derive;
 
+#[cfg(feature = "dynamodb_tests")]
 extern crate hyper;
+#[cfg(feature = "dynamodb_tests")]
+extern crate rusoto;
+
 extern crate rustc_serialize;
 extern crate uuid;
-
-extern crate rusoto;
 
 #[macro_use]
 mod general_tests;
 
 pub mod prelude;
 pub mod local_store;
+
+#[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;
