@@ -319,6 +319,10 @@ where V: Copy, S: Store<V>, H: Horizon{
             uuid: transaction_id,
         }
     }
+
+    pub fn local_horizon(&self) -> &HashMap<order, entry> {
+        &self.local_horizon
+    }
 }
 
 #[must_use]

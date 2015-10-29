@@ -9,7 +9,9 @@ use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-impl Horizon for HashMap<order, entry> {
+pub type LocalHorizon = HashMap<order, entry>;
+
+impl Horizon for LocalHorizon {
     fn get_horizon(&mut self, ord: order) -> entry {
         self.get(&ord).cloned().unwrap_or(0.into())
     }
@@ -33,7 +35,9 @@ impl Horizon for HashMap<order, entry> {
     }
 }
 
-impl<V: Copy> Store<V> for HashMap<OrderIndex, Entry<V>> {
+pub type LocalStore<V> = HashMap<OrderIndex, Entry<V>>;
+
+impl<V: Copy> Store<V> for LocalStore<V> {
     fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
         use std::collections::hash_map::Entry::*;
         match self.entry(key) {

@@ -1,0 +1,7 @@
+[package]
+name = "map"
+version = "0.1.0"
+authors = ["J <joshua.lockerman@yale.edu>"]
+
+[dependencies]
+fuzzy_log = {path = "../.."}
