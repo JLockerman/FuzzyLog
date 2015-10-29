@@ -361,13 +361,13 @@ macro_rules! general_tests {
                 //try_multiput(&mut self, offset: u32, mut columns: Vec<(order, V)>, deps: Vec<OrderIndex>)
                 let columns = vec![(15.into(), MapEntry(13, 5)),
                     (16.into(), MapEntry(92, 7))];
-                let v = log.try_multiput(0.into(), columns, vec![]);
+                let v = log.try_multiput(0u32.into(), columns, vec![]);
                 assert_eq!(v, Some(vec![(15.into(), 1.into()),
                     (16.into(), 1.into())]));
 
                 let columns = vec![(15.into(), MapEntry(3, 8)),
                     (16.into(), MapEntry(2, 54))];
-                let v = log.try_multiput(0.into(), columns, vec![]);
+                let v = log.try_multiput(0u32.into(), columns, vec![]);
                 assert_eq!(v, Some(vec![(15.into(), 2.into()),
                     (16.into(), 2.into())]));
 
