@@ -7,18 +7,13 @@ authors = ["J <joshua.lockerman@yale.edu>"]
 bitflags = "0.3"
 custom_derive = "0.1.2"
 grabbag_macros = "0.1.0"
-hyper = {version = "*", optional = true}
 newtype_derive = "0.1.2"
 uuid = "0.1.17"
 log = "^0.3.2"
 rustc-serialize = "0.3"
-rusoto = {git = "https://github.com/ProjectDelos/rusoto_test", optional = true}
 
 #[dependencies.rusoto]
 #git = "https://github.com/ProjectDelos/rusoto_test"
 
 [dev-dependencies]
 env_logger = "0.3"
-
-[features]
-dynamodb_tests = ["rusoto", "hyper"]
