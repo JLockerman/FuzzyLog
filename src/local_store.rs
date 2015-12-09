@@ -102,58 +102,6 @@ where H: Horizon {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, RustcDecodable, RustcEncodable)]
 pub struct MapEntry<K, V>(pub K, pub V);
 
-pub struct Map<K, V, S, H>
-where K: Hash + Eq + Copy, V: Copy,
-      S: Store<MapEntry<K, V>>,
-      H: Horizon, {
-    pub log: FuzzyLog<MapEntry<K, V>, S, H>,
-    pub local_view: Rc<RefCell<HashMap<K, V>>>,
-    pub order: order,
-}
-
-impl<K: 'static, V: 'static, S, H> Map<K, V, S, H>
-where K: Hash + Eq + Copy, V: Copy,
-      S: Store<MapEntry<K, V>>,
-      H: Horizon, {
-
-    pub fn new(store: S, horizon: H, ord: order) -> Map<K, V, S, H> {
-        let local_view = Rc::new(RefCell::new(HashMap::new()));
-        let re = local_view.clone();
-        Map {
-            log: FuzzyLog::new(store, horizon, collect!(
-                ord =>
-                Box::new(
-                    move |MapEntry(k, v)| {
-                        re.borrow_mut().insert(k, v);
-                        true
-                    }) as Box<Fn(_) -> _>
-            )),
-            order: ord,
-            local_view: local_view,
-        }
-    }
-
-    pub fn put(&mut self, key: K, val: V) {
-        self.log.append(self.order, MapEntry(key, val), vec![]);
-        //TODO deps
-    }
-
-    pub fn get(&mut self, key: K) -> Option<V> {
-        self.log.play_foward(self.order);
-        self.local_view.borrow().get(&key).cloned()
-    }
-}
-
-impl<K, V, S, H> Debug for Map<K, V, S, H>
-where K: Hash + Eq + Copy + Debug, V: Copy + Debug,
-      S: Store<MapEntry<K, V>>,
-      H: Horizon, {
-
-    fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
-        formatter.debug_struct("Map").field("local_view", &self.local_view).finish()
-    }
-}
-
 #[cfg(test)]
 mod test {
 
@@ -170,9 +118,62 @@ mod test {
     where K: Eq + Hash {
         Arc::new(Mutex::new(HashMap::new()))
     }
+    
+    pub struct Map<K, V, S, H>
+	where K: Hash + Eq + Copy, V: Copy,
+	      S: Store<MapEntry<K, V>>,
+	      H: Horizon, {
+	    pub log: FuzzyLog<MapEntry<K, V>, S, H>,
+	    pub local_view: Rc<RefCell<HashMap<K, V>>>,
+	    pub order: order,
+	}
+
+	impl<K: 'static, V: 'static, S, H> Map<K, V, S, H>
+	where K: Hash + Eq + Copy, V: Copy,
+	      S: Store<MapEntry<K, V>>,
+	      H: Horizon, {
+	
+	    pub fn new(store: S, horizon: H, ord: order) -> Map<K, V, S, H> {
+	        let local_view = Rc::new(RefCell::new(HashMap::new()));
+	        let re = local_view.clone();
+	        Map {
+	            log: FuzzyLog::new(store, horizon, collect!(
+	                ord =>
+	                Box::new(
+	                    move |MapEntry(k, v)| {
+	                        re.borrow_mut().insert(k, v);
+	                        true
+	                    }) as Box<Fn(_) -> _>
+	            )),
+	            order: ord,
+	            local_view: local_view,
+	        }
+	    }
+
+	    pub fn put(&mut self, key: K, val: V) {
+	        self.log.append(self.order, MapEntry(key, val), vec![]);
+	        //TODO deps
+	    }
+	
+	    pub fn get(&mut self, key: K) -> Option<V> {
+	        self.log.play_foward(self.order);
+	        self.local_view.borrow().get(&key).cloned()
+	    }
+	}
+
+	impl<K, V, S, H> Debug for Map<K, V, S, H>
+	where K: Hash + Eq + Copy + Debug, V: Copy + Debug,
+	      S: Store<MapEntry<K, V>>,
+	      H: Horizon, {
+	
+	    fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
+	        formatter.debug_struct("Map").field("local_view", &self.local_view).finish()
+	    }
+	}
 
     //TODO cannonical store tests
 
+    /* TODO
     #[test]
     fn test_1_column_ni_cannonical() {
         let store = HashMap::new();
@@ -207,7 +208,7 @@ mod test {
             (1.into(), 1.into()) => Entry::Data(MapEntry(0, 0), vec![last_index])
          };
         assert_eq!(log.store, cannonical);
-    }
+    }*/
 
     #[test]
     fn test_sizes() {

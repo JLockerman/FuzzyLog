@@ -172,6 +172,7 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
             }
 
+            #[cfg(FALSE)]
             #[test]
             fn test_transaction_1() {
                 let _ = env_logger::init();
@@ -219,6 +220,7 @@ macro_rules! general_tests {
                 assert_eq!(*map01.borrow(), collect![0 => 1, 4 => 17]);
             }
 
+            #[cfg(FALSE)]
             #[test]
             fn test_threaded_transaction() {
                 let _ = env_logger::init();
@@ -278,6 +280,7 @@ macro_rules! general_tests {
                 assert_eq!(*map0.borrow(), cannonical_map);
             }
 
+            #[cfg(FALSE)]
             #[test]
             fn test_abort_transaction() {
                 let _ = env_logger::init();
@@ -303,6 +306,7 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![0 => 1, 1 => 17]);
             }
 
+            #[cfg(FALSE)]
             #[test]
             fn test_transaction_timeout() {
                 use std::mem::forget;
@@ -332,6 +336,7 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![0 => 1, 1 => 17]);
             }
 
+            #[cfg(FALSE)]
             #[test]
             fn test_multiput() {
                 let _ = env_logger::init();
@@ -378,6 +383,7 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7, 3 => 8, 2 => 54]);
             }
 
+            #[cfg(FALSE)]
             #[test]
             fn test_threaded_multiput() {
                 let _ = env_logger::init();
