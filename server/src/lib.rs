@@ -4,9 +4,16 @@
 extern crate env_logger;
 extern crate fuzzy_log;
 
-use std::collections::HashMap;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
+//use std::collections::HashMap;
+//use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::{mem, ptr};
+
+use std::collections::BTreeMap as HashMap;
+use std::collections::btree_map::Entry::{Occupied, Vacant};
+
+
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 use fuzzy_log::prelude::*;
 use fuzzy_log::udp_store::*;
@@ -79,6 +86,19 @@ fn unoccupied_response(request_kind: Kind) -> Kind {
         Kind::Read => Kind::NoValue,
         _ => Kind::Ack,
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rss_log(core: u32, chain: u32, set: &Mutex<HashSet<(u32, u32)>>) -> u32 {
+	let mut set = set.lock().unwrap();
+	let other_core = if core == 0 { 1 } else { 0 };
+	set.insert((core, chain));
+	return if set.contains(&(other_core, chain)) { println!("err at {:?}", (core, chain)); 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn rss_log_init() -> Box<Mutex<HashSet<(u32, u16)>>> {
+	Box::new(Mutex::new(HashSet::new()))
 }
 
 /*

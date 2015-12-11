@@ -47,7 +47,7 @@ SRCS-y := start.c
 LDLIBS += -L$(RTE_SRCDIR)/target/release
 LDLIBS += -lserver
 
-CFLAGS += -O3
+CFLAGS += -O3 -std=gnu11
 CFLAGS += $(WERROR_FLAGS)
 
 PREBUILD += cargo_build
