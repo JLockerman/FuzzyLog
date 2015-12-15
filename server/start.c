@@ -55,6 +55,12 @@
 #include <rte_ip.h>
 #include <rte_udp.h>
 
+//#define DELOS_BENCHMARK 1
+
+#ifdef DELOS_BENCHMARK
+#include <math.h>
+#endif
+
 struct delos_header {
     uint8_t id[16];
 	uint32_t chain;
@@ -83,7 +89,7 @@ static const unsigned MBUF_CACHE_SIZE = 16;
 //		sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr *);
 static const uint16_t DELOS_MBUF_DATA_SIZE = 8192;
 
-#define DELOS_BENCHMARK 1
+static struct rte_mempool *audit_pool;
 
 #ifdef DELOS_BENCHMARK
 static void
@@ -100,9 +106,11 @@ print_stats(const unsigned lcore, const uint64_t *durations)
 		var += dif * dif;
 	}
 	var /= NUM_SAMPLES;
-	uint64_t hz = rte_get_tsc_hz();
-	//printf("lcore %u: mean time %"PRIu64", σ %"PRIu64", %"PRIu64"hz\n", lcore, mean, var, hz);
-	printf("lcore %u: mean time %"PRIu64", var %"PRIu64", %"PRIu64"hz\n", lcore, mean, var, hz);
+	//uint64_t hz = rte_get_tsc_hz();
+	uint64_t stddev = (uint64_t) sqrt(var);
+	//printf("lcore %u: mean time %"PRIu64", σ %"PRIu64", %"PRIu64"hz\n", lcore, mean, stddev, hz);
+	//TODO get hz from rte_get_tsc_hz
+	printf("lcore %u: mean time %"PRIu64"ns, σ %"PRIu64"ns\n", lcore, (uint64_t)(mean / 2.5), (uint64_t)(stddev / 2.5));
 }
 #endif
 
@@ -165,8 +173,18 @@ lcore_chain(__attribute__((unused)) void *arg) {
 		}
 
 		unsigned to_tx = nb_rx;
+		//printf("freecount %u\n", rte_mempool_free_count(audit_pool));
+		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
 		const uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
-
+		//rte_mempool_audit(audit_pool);
+		//printf("freecount %u\n", rte_mempool_free_count(audit_pool));
+		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
+		//rte_mbuf_refcnt_update(bufs[0], -1);
+		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
+		//rte_pktmbuf_free_seg(bufs[0]);
+		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
+		//printf("freecount %u\n\n", rte_mempool_free_count(audit_pool));
+		//rte_mempool_audit(audit_pool);
 		if (unlikely(nb_tx < nb_rx)) {
 			for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
 		}
@@ -201,19 +219,23 @@ distribute(const uint32_t ring_mask) {
 		if (unlikely(nb_rx == 0)) continue;
 
 		for(int i = 0; i < nb_rx; i++) {
-			struct rte_mbuf *mbuf = bufs[i];//TODO prefetch?
+			struct rte_mbuf *mbuf = bufs[i];
+			//TODO prefetch?
 			struct delos_header *header = rte_pktmbuf_mtod_offset(mbuf, struct delos_header*,
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
 					+ sizeof(struct udp_hdr));
 			//printf("header\n\tchain %u\n\tentry %u\n\t kind %u\n", header->chain, header->entry, header->kind);
 			uint32_t dst = header->chain & ring_mask;
-			if(unlikely(dst) == 0) {
-				//TODO transcations
+			if(unlikely(header->kind) == 3) { //TODO header format...
+				//TODO transactions
 			}
-			//if(rss_log(dst, header->chain, seen_set) != 0) rte_exit(EXIT_FAILURE, "chain dupe\n");
-			struct rte_ring* dst_ring = distributor_rings[dst];
-			//printf("dst_ring %u: %p\n", dst, dst_ring);
-			rte_ring_sp_enqueue(dst_ring, mbuf);
+			else {
+				//if(rss_log(dst, header->chain, seen_set) != 0) rte_exit(EXIT_FAILURE, "chain dupe\n");
+				struct rte_ring* dst_ring = distributor_rings[dst];
+				//printf("dst_ring %u: %p\n", dst, dst_ring);
+				//rte_pktmbuf_refcnt_update(mbuf, 1);
+				rte_ring_sp_enqueue(dst_ring, mbuf);
+			}
 
 #ifdef DELOS_BENCHMARK
 			dist_dur[iters] = rte_rdtsc() - start_tsc;
@@ -256,8 +278,7 @@ main(int argc, char **argv)
 		rte_panic("Cannot init EAL\n");
 
 	ret = rte_eth_dev_count();
-	if (ret == 0)
-		rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
+	if (ret == 0) rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
 	assert(ret == 2);
 
 	packet_pool = rte_pktmbuf_pool_create(_DELOS_MBUF_POOL, NUM_MBUFS,
@@ -268,7 +289,7 @@ main(int argc, char **argv)
 	if (packet_pool == NULL) {
 		rte_exit(EXIT_FAILURE, "Cannot get memory pool for buffers due to %s\n", rte_strerror(rte_errno));
 	}
-
+	audit_pool = packet_pool;
 	{
 		char ring_name[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
@@ -328,7 +349,7 @@ main(int argc, char **argv)
 		for(int i = 0; i < rx_rings; i++) {
 			retval = rte_eth_rx_queue_setup(port, i, 64,
 				rte_eth_dev_socket_id(port),
-				&info.default_rxconf,
+				&info.default_rxconf, //TODO
 				packet_pool);
 			if (retval < 0) rte_exit(EXIT_FAILURE, "RX queue failed\n");
 		}
