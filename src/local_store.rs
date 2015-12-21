@@ -4,10 +4,9 @@ use prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map;
-use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::hash::Hash;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+
+use uuid::Uuid;
 
 pub type LocalHorizon = HashMap<order, entry>;
 
@@ -35,22 +34,50 @@ impl Horizon for LocalHorizon {
     }
 }
 
-pub type LocalStore<V> = HashMap<OrderIndex, Entry<V>>;
+pub struct LocalStore<V: Clone> {
+     data: HashMap<OrderIndex, Entry<V>>,
+     horizon: HashMap<order, entry>,
+}
 
-impl<V: Copy> Store<V> for LocalStore<V> {
+impl<V: Clone> LocalStore<V> {
+    pub fn new() -> Self {
+        LocalStore {
+            data: HashMap::new(),
+            horizon: HashMap::new(),
+        }
+    }
+}
+
+impl<V: Clone> Store<V> for LocalStore<V> {
     fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
         use std::collections::hash_map::Entry::*;
-        match self.entry(key) {
+        match self.data.entry(key) {
             Occupied(..) => Err(InsertErr::AlreadyWritten),
             Vacant(v) => {
                 v.insert(val);
+                self.horizon.insert(key.0, key.1 + 1);
                 Ok(())
             }
         }
     }
 
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-        HashMap::get(self, &key).cloned().ok_or(GetErr::NoValue)
+        HashMap::get(&self.data, &key).cloned().ok_or(GetErr::NoValue)
+    }
+
+    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+        let entr = EntryContents::Multiput{data: &data, uuid: &Uuid::new_v4(),
+            columns: chains, deps: deps};
+        for &chain in chains {
+            let horizon = {
+                let horizon_loc = self.horizon.entry(chain).or_insert(1.into());
+                let horizon = *horizon_loc;
+                *horizon_loc = horizon + 1;
+                horizon
+            };
+            self.insert((chain, horizon), entr.clone_entry());
+        }
+        Ok(())
     }
 }
 
@@ -63,6 +90,10 @@ where S: Store<V> {
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
         self.lock().unwrap().get(key)
     }
+
+    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+        self.lock().unwrap().multi_append(chains, data, deps)
+    }
 }
 
 impl<V: Copy, S> Store<V> for RefCell<S>
@@ -74,16 +105,24 @@ where S: Store<V> {
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
         self.borrow_mut().get(key)
     }
+
+    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+        self.borrow_mut().multi_append(chains, data, deps)
+    }
 }
 
 impl<V: Copy, S> Store<V> for Arc<Mutex<S>>
 where S: Store<V> {
     fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
-        self.lock().unwrap().insert(key, val)
+        self.lock().expect("cannot acquire lock").insert(key, val)
     }
 
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-        self.lock().unwrap().get(key)
+        self.lock().expect("cannot acquire lock").get(key)
+    }
+
+    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+        self.lock().expect("cannot acquire lock").multi_append(chains, data, deps)
     }
 }
 
@@ -103,20 +142,23 @@ where H: Horizon {
 pub struct MapEntry<K, V>(pub K, pub V);
 
 #[cfg(test)]
-mod test {
+pub mod test {
 
     use prelude::*;
-    use local_store::{MapEntry};
+    use local_store::{LocalStore, MapEntry};
 
+	use std::cell::RefCell;
     use std::cmp::Eq;
     use std::collections::HashMap;
+    use std::fmt::{Debug, Formatter, Result as FmtResult};
     use std::hash::Hash;
     use std::mem;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    fn new_store<K, V>(_: Vec<OrderIndex>) -> Arc<Mutex<HashMap<K, V>>>
-    where K: Eq + Hash {
-        Arc::new(Mutex::new(HashMap::new()))
+    fn new_store<V>(_: Vec<OrderIndex>) -> Arc<Mutex<LocalStore<V>>>
+    where V: Clone {
+        Arc::new(Mutex::new(LocalStore::new()))
     }
     
     pub struct Map<K, V, S, H>

@@ -31,9 +31,15 @@ pub struct UdpStore<V> {
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[repr(C)]
 pub struct Header {
+	kind: Kind,
     id: Uuid,
     loc: OrderIndex,
-    kind: Kind,
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+#[repr(C)]
+pub struct TransactionHeader {
+	kind: Kind,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -221,6 +227,10 @@ impl<V: Copy> Store<V> for UdpStore<V> {
                 }
             }
         }
+    }
+
+    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+        panic!()
     }
 }
 
@@ -474,8 +484,8 @@ mod test {
         });
         forget(handle);
 
-        const addr_str: &'static str = "172.28.229.151:13265";
-        //const addr_str: &'static str = "127.0.0.1:13265";
+        //const addr_str: &'static str = "172.28.229.151:13265";
+        const addr_str: &'static str = "127.0.0.1:13265";
 
         unsafe {
             UdpStore {
@@ -559,7 +569,7 @@ mod test {
             }
         });*/
 
-        const addr_str: &'static str = "127.0.0.1:13265";
+        const addr_str: &'static str = "127.0.0.1:13270";
         let client = UdpSocket::v4().expect("unable to open client");
         let addr = addr_str.parse().expect("invalid inet address");
         let mut buff = Box::new([0;4096]);

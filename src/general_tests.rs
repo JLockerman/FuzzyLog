@@ -14,7 +14,8 @@ macro_rules! general_tests {
             extern crate env_logger;
 
             use prelude::*;
-            use local_store::{Map, MapEntry};
+            use local_store::MapEntry;
+            use local_store::test::Map;
             $(use $import;)*
 
             use std::cell::RefCell;
@@ -336,6 +337,11 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![0 => 1, 1 => 17]);
             }
 
+            struct TME<K, V> {
+                left: MapEntry<K, V>,
+                right: MapEntry<K, V>,
+            }
+
             #[cfg(FALSE)]
             #[test]
             fn test_multiput() {
@@ -383,7 +389,6 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7, 3 => 8, 2 => 54]);
             }
 
-            #[cfg(FALSE)]
             #[test]
             fn test_threaded_multiput() {
                 let _ = env_logger::init();
@@ -418,21 +423,17 @@ macro_rules! general_tests {
                 let join = thread::spawn(move || {
                     let mut log = FuzzyLog::new(s, h, HashMap::new());
                     for i in 0..10 {
-                        let change = vec![(17.into(), MapEntry(i * 2, i * 2)), (18.into(), MapEntry(i * 2, i * 2))];
-                        let mut offset = 0;
-                        while log.try_multiput(offset, change.clone(), vec![]).is_none() {
-                            offset += 1;
-                        }
+                        let change = vec![17.into(), 18.into()];
+                        let data = MapEntry(i * 2, i * 2);
+                        log.multiappend(change.clone(), data, vec![])
                     }
                 });
                 let join1 = thread::spawn(|| {
                     let mut log = FuzzyLog::new(s1, h1, HashMap::new());
                     for i in 0..10 {
-                        let change = vec![(17.into(), MapEntry(i * 2 + 1, i * 2 + 1)), (18.into(), MapEntry(i * 2 + 1, i * 2 + 1))];
-                        let mut offset = 0;
-                        while log.try_multiput(offset, change.clone(), vec![]).is_none() {
-                            offset += 1;
-                        }
+                        let change = vec![17.into(), 18.into()];
+                        let data = MapEntry(i * 2 + 1, i * 2 + 1);
+                        log.multiappend(change, data, vec![])
                     }
                 });
                 join1.join().unwrap();

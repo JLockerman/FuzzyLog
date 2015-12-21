@@ -62,10 +62,10 @@
 #endif
 
 struct delos_header {
+	uint32_t kind;
     uint8_t id[16];
 	uint32_t chain;
     uint32_t entry;
-    uint32_t kind;
 };
 
 extern void *init_log(void);
@@ -113,6 +113,13 @@ print_stats(const unsigned lcore, const uint64_t *durations)
 	printf("lcore %u: mean time %"PRIu64"ns, σ %"PRIu64"ns\n", lcore, (uint64_t)(mean / 2.5), (uint64_t)(stddev / 2.5));
 }
 #endif
+
+//static int
+//handle_multiappend(struct rte_mbuf *mbuf, void *log, const unsigned lcore_id) {
+//	struct delos_header *header = rte_pktmbuf_mtod_offset(mbuf, struct delos_header*,
+//			sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
+//			+ sizeof(struct udp_hdr));
+//}
 
 static __attribute__((noreturn)) int
 lcore_chain(__attribute__((unused)) void *arg) {
@@ -173,18 +180,7 @@ lcore_chain(__attribute__((unused)) void *arg) {
 		}
 
 		unsigned to_tx = nb_rx;
-		//printf("freecount %u\n", rte_mempool_free_count(audit_pool));
-		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
 		const uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
-		//rte_mempool_audit(audit_pool);
-		//printf("freecount %u\n", rte_mempool_free_count(audit_pool));
-		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
-		//rte_mbuf_refcnt_update(bufs[0], -1);
-		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
-		//rte_pktmbuf_free_seg(bufs[0]);
-		//printf("refcount %u\n", rte_mbuf_refcnt_read(bufs[0]));
-		//printf("freecount %u\n\n", rte_mempool_free_count(audit_pool));
-		//rte_mempool_audit(audit_pool);
 		if (unlikely(nb_tx < nb_rx)) {
 			for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
 		}
@@ -200,7 +196,7 @@ lcore_chain(__attribute__((unused)) void *arg) {
 }
 
 static void
-distribute(const uint32_t ring_mask) {
+distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 #ifdef DELOS_BENCHMARK
 	uint64_t dist_dur[NUM_SAMPLES];
 	int iters = 0;
@@ -225,15 +221,20 @@ distribute(const uint32_t ring_mask) {
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
 					+ sizeof(struct udp_hdr));
 			//printf("header\n\tchain %u\n\tentry %u\n\t kind %u\n", header->chain, header->entry, header->kind);
-			uint32_t dst = header->chain & ring_mask;
 			if(unlikely(header->kind) == 3) { //TODO header format...
 				//TODO transactions
+				//printf("dst_ring %u: %p\n", dst, dst_ring);
+				printf("ERROR, trasaction.\n");
+				rte_pktmbuf_refcnt_update(mbuf, num_slave_cores);
+				for(unsigned j = 0; j < num_slave_cores; j++) {
+					struct rte_ring* dst_ring = distributor_rings[j];
+					rte_ring_sp_enqueue(dst_ring, mbuf);
+				}
 			}
 			else {
+				uint32_t dst = header->chain & ring_mask;
 				//if(rss_log(dst, header->chain, seen_set) != 0) rte_exit(EXIT_FAILURE, "chain dupe\n");
 				struct rte_ring* dst_ring = distributor_rings[dst];
-				//printf("dst_ring %u: %p\n", dst, dst_ring);
-				//rte_pktmbuf_refcnt_update(mbuf, 1);
 				rte_ring_sp_enqueue(dst_ring, mbuf);
 			}
 
@@ -304,6 +305,7 @@ main(int argc, char **argv)
 			num_slave_cores += 1;
 		}
 	}
+	assert(num_slave_cores == rte_lcore_count() - 1);
 	num_rings = next_power_of_2(num_slave_cores);
 	ring_mask = num_rings - 1;
 	printf("num scores %d\n", num_slave_cores);
@@ -398,7 +400,7 @@ main(int argc, char **argv)
 		rte_eal_remote_launch(lcore_chain, NULL, lcore_id);
 	}
 	//TODO delay...
-	distribute(ring_mask);
+	distribute(ring_mask, num_slave_cores);
 
 	rte_eal_mp_wait_lcore();
 	return 0;
