@@ -21,8 +21,8 @@ use uuid::Uuid;
 pub struct UdpStore<V> {
     socket: UdpSocket,
     server_addr: SocketAddr,
-    receive_buffer: Box<Packet<V>>,
-    send_buffer: Box<Packet<V>>,
+    receive_buffer: Box<[u8; 4096]>,
+    send_buffer: Box<[u8; 4096]>,
     rtt: i64,
     dev: i64,
     _pd: PhantomData<V>,
@@ -83,7 +83,7 @@ impl<V: Copy> Store<V> for UdpStore<V> {
 
         let request_id = Uuid::new_v4();
 
-        *self.send_buffer = PacketBuilder {
+        *PacketBuilder::wrap_bytes_mut(&mut self.send_buffer) =PacketBuilder {
             header: Header {
                 loc: key,
                 id: request_id.clone(),
@@ -102,7 +102,7 @@ impl<V: Copy> Store<V> for UdpStore<V> {
         'send: loop {
             {
                 trace!("sending");
-                let buf = &mut SliceBuf::wrap(&self.send_buffer.as_bytes());
+                let buf = &mut SliceBuf::wrap(&*self.send_buffer.as_bytes());
                 self.socket.send_to(buf, &self.server_addr).expect("cannot send insert"); //TODO
             }
 
@@ -230,6 +230,11 @@ impl<V: Copy> Store<V> for UdpStore<V> {
     }
 
     fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+        use self::Kind::*;
+
+        let request_id = Uuid::new_v4();
+        let send: Box<TransactionPacket<V>> = unsafe { transmute(self.send_buffer) };
+        let recv: Box<TransactionPacket<V>> = unsafe { transmute(self.receive_buffer) };
         panic!()
     }
 }
@@ -252,6 +257,7 @@ impl<V: Clone> Clone for UdpStore<V> {
 impl<V> Packet<V> { //TODO validation
 
     pub fn wrap_bytes(bytes: &[u8]) -> &Self {
+        assert!(bytes.len() >= size_of::<Self>());
         let start = &bytes[0];
         unsafe {
             mem::transmute(start)
@@ -265,7 +271,7 @@ impl<V> Packet<V> { //TODO validation
     }
 
     pub fn wrap_bytes_mut(bytes: &mut [u8]) -> &mut Self {
-        assert_eq!(bytes.len(), size_of::<Self>());
+        assert!(bytes.len() >= size_of::<Self>());
         let start = &mut bytes[0];
         unsafe {
             mem::transmute(start)
