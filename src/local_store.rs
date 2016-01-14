@@ -173,6 +173,7 @@ mod test {
 
     //TODO cannonical store tests
 
+    /* TODO
     #[test]
     fn test_1_column_ni_cannonical() {
         let store = HashMap::new();
@@ -207,7 +208,7 @@ mod test {
             (1.into(), 1.into()) => Entry::Data(MapEntry(0, 0), vec![last_index])
          };
         assert_eq!(log.store, cannonical);
-    }
+    }*/
 
     #[test]
     fn test_sizes() {

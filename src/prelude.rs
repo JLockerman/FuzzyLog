@@ -1,12 +1,19 @@
 
 use std::collections::HashMap;
 use std::convert::Into;
+use std::fmt;
+use std::marker::PhantomData;
+use std::mem::{self, size_of};
+use std::ptr;
+use std::slice;
 use std::time::Duration;
 use std::thread;
 use uuid::Uuid;
 
+use self::EntryContents::*;
+
 pub trait Store<V> {
-    fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult;
+    fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult; //TODO nocopy
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>>;
 }
 
@@ -15,7 +22,396 @@ pub type OrderIndex = (order, entry);
 pub type InsertResult = Result<(), InsertErr>;
 pub type GetResult<T> = Result<T, GetErr>;
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RustcDecodable, RustcEncodable)]
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, RustcDecodable, RustcEncodable)]
+pub enum EntryKind {
+    Data,
+    TransactionCommit,
+    TransactionStart,
+    TransactionAbort,
+}
+
+pub const MAX_DATA_LEN: usize = 4096 - 8 - (4 + 8 + 16); //TODO
+
+#[repr(C)] //TODO
+pub struct Entry<V, D: ?Sized = [u8; MAX_DATA_LEN]> {
+    _pd: PhantomData<V>,
+    kind: EntryKind,
+    _padding: [u8; 1],
+    cols: u16, //padding for non-multiputs
+    data_bytes: u16,
+    dependency_bytes: u16,
+    data: D
+    // layout Optional uuid, [u8; data_bytes] [OrderIndex; dependency_bytes/size<OrderIndex>]
+}
+
+#[test]
+fn test_entry_size() {
+    use std::mem::size_of;
+    assert_eq!(size_of::<Entry<()>>(), 4096 - (4 + 8 + 16));
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryContents<'e, V:'e + ?Sized> {
+    Data(&'e V, &'e [OrderIndex]),
+    // Data:
+    // | Kind: 8 | data_bytes: u16 | dependency_bytes: u16 | data: data_bytes | dependencies: dependency_bytes
+    TransactionCommit{uuid: &'e Uuid, start_entries: &'e [OrderIndex],
+        deps: &'e [OrderIndex]}, //TODO do commits need dependencies?
+    // Commit:
+    // | 8 | u16 | u16 | uuid: size Uuid | start_entries: data_bytes / size OrderIndex | deps: dependency_bytes / size OrderIndex
+    TransactionStart(&'e V,  order,  &'e Uuid), //TODO do Starts need dependencies?
+    // Start:
+    // | 8 | u16 | u16 = 0 | uuid: size Uuid | order: size order | data: data_bytes |
+    TransactionAbort(&'e Uuid), //TODO do Aborts need dependencies?
+    // Abort:
+    // u16 = 0 | u16 = 0 | uuid: size Uuid | ... | 8 |
+    Multiput{data: &'e V, columns: &'e [order], deps: &'e [OrderIndex]},
+    // Multiput TODO
+}
+
+impl<V, D: ?Sized> Entry<V, D> {
+    fn data_start_offset(&self) -> isize {
+        match self.kind {
+            EntryKind::Data => 0 as isize,
+            EntryKind::TransactionAbort => size_of::<Uuid>() as isize,
+            EntryKind::TransactionCommit => size_of::<Uuid>() as isize,
+            EntryKind::TransactionStart => (size_of::<Uuid>() + size_of::<order>())
+                as isize,
+        }
+    }
+
+    pub fn kind(&self) -> EntryKind {
+        self.kind
+    }
+}
+
+//TODO impl<V> Entry<[V]>
+impl<V, D> Entry<V, D> {
+
+    fn contents<'s>(&'s self) -> EntryContents<'s, V> {
+        unsafe {
+            //let contents_ptr: *const u8 = &self.data as *const _;
+            //TODO this might be invalid...
+            let contents_ptr: *const u8 = &self.data as *const _ as *const u8;
+            let data_ptr = contents_ptr.offset(self.data_start_offset());
+            let dep_ptr:*const OrderIndex = data_ptr.offset(self.data_bytes as isize)
+                as *const _;
+            //println!("datap {:?} depp {:?}", data_ptr, dep_ptr);
+            let num_deps = (self.dependency_bytes as usize)
+                .checked_div(size_of::<OrderIndex>()).unwrap();
+            let deps = slice::from_raw_parts(dep_ptr, num_deps);
+            match self.kind {
+                EntryKind::Data => {
+                    //TODO assert_eq!(self.data_bytes as usize, size_of::<V>());
+                    let data = (data_ptr as *const _).as_ref().unwrap();
+                    Data(data, deps)
+                }
+                EntryKind::TransactionAbort => {
+                    /*assert_eq!(self.data_bytes as usize, size_of::<Uuid>());
+                    assert_eq!(self.dependency_bytes, 0);
+                    let uuid = (contents_ptr as *const _).as_ref().unwrap();
+                    TransactionAbort(uuid)*/
+                    panic!()
+                }
+                EntryKind::TransactionCommit => {
+                    /*let uuid = (contents_ptr as *const _).as_ref().unwrap();
+                    let starts_ptr = contents_ptr.offset(size_of::<Uuid>() as isize) as *const _;
+                    let starts_len = self.data_bytes as usize;
+                    let num_starts = starts_len.checked_div(size_of::<OrderIndex>()).unwrap();
+                    let start_entries = slice::from_raw_parts(starts_ptr, num_starts);
+                    TransactionCommit{uuid: uuid, start_entries: start_entries, deps: deps}*/
+                    panic!()
+                }
+                EntryKind::TransactionStart => {
+                    /*assert!(self.data_bytes as usize <=
+                        MAX_DATA_LEN as usize - (size_of::<order>() + size_of::<Uuid>()));
+                    let order_ptr = contents_ptr.offset(size_of::<Uuid>() as isize);
+                    let uuid = (contents_ptr as *const _).as_ref().unwrap();
+                    let ord = *(order_ptr as *const _);
+                    let data = (data_ptr as *const _).as_ref().unwrap();
+                    TransactionStart(data, ord, uuid)*/
+                    panic!()
+                }
+            }
+        }
+    }
+
+    fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
+        match self.contents() {
+            Data(_, ref deps) => &deps,
+            TransactionCommit{ref deps, ..} => &deps,
+            TransactionAbort(..) => &[],
+            TransactionStart(_, _, _) => &[],
+            Multiput{ref deps, ..} => deps,
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        unsafe {
+            let ptr: *const _ = self;
+            let ptr: *const u8 = ptr as *const _;
+            slice::from_raw_parts(ptr, size_of::<Self>())
+        }
+    }
+
+    pub unsafe fn from_bytes(bytes: &[u8]) -> Self {
+        assert_eq!(bytes.len(), size_of::<Self>());
+        let mut entr = mem::uninitialized::<Self>();
+        let ptr: *mut _ = &mut entr;
+        let ptr: *mut u8 = ptr as *mut _;
+        ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, size_of::<Self>());
+        entr
+    }
+
+    pub fn wrap_bytes(bytes: &[u8]) -> &Entry<[u8; MAX_DATA_LEN]> {
+        assert_eq!(bytes.len(), size_of::<Self>());
+        unsafe {
+            mem::transmute(&bytes[0])
+        }
+    }
+}
+
+impl<V: PartialEq> PartialEq for Entry<V> {
+    fn eq(&self, other: &Self) -> bool {
+        //TODO
+        self.contents() == other.contents()
+    }
+}
+
+impl<V: Eq> Eq for Entry<V> {}
+
+impl<V: fmt::Debug> fmt::Debug for Entry<V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{:?}", self.contents())
+    }
+}
+
+impl<V, D> Clone for Entry<V, D>
+where V: Clone {
+    fn clone(&self) -> Self {
+        //TODO
+        self.contents().clone_entry()
+    }
+}
+
+impl<'e, V> EntryContents<'e, V> {
+    pub fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
+        match self {
+            &Data(_, ref deps) => &deps,
+            &TransactionCommit{ref deps, ..} => &deps,
+            &TransactionAbort(..) => &[],
+            &TransactionStart(_, _, _) => &[],
+            &Multiput{ref deps, ..} => deps,
+        }
+    }
+}
+
+impl <'e, V: ?Sized> EntryContents<'e, V> {
+    fn data_start_offset(&self) -> isize {
+        match self {
+            &Data(..) => 0 as isize,
+            &TransactionAbort(..) => size_of::<Uuid>() as isize,
+            &TransactionCommit{..} => size_of::<Uuid>() as isize,
+            &TransactionStart(..) => (size_of::<Uuid>() + size_of::<order>())
+                as isize,
+            &Multiput{..} => panic!(),
+        }
+    }
+
+    fn kind(&self) -> EntryKind {
+        match self {
+            &Data(..) => EntryKind::Data,
+            &TransactionAbort(..) => EntryKind::TransactionAbort,
+            &TransactionCommit{..} => EntryKind::TransactionCommit,
+            &TransactionStart(..) => EntryKind::TransactionStart,
+            &Multiput{..} => panic!(),
+        }
+    }
+}
+
+impl<'e, V: Clone> EntryContents<'e, V> {
+
+    //TODO temporary
+    pub fn clone_entry<D = [u8; MAX_DATA_LEN]>(&self) -> Entry<V, D> {
+        use std::u16;
+        assert!(size_of::<V>() < u16::MAX as usize);
+        //pub struct Entry<V> {
+        //    _pd: PhantomData<V>,
+        //    data: [u8; MAX_DATA_LEN],
+            // layout Optional uuid, [u8; data_bytes] [OrderIndex; dependency_bytes/size<OrderIndex>]
+        //    kind: EntryKind,
+        //    data_bytes: u16,
+        //    dependency_bytes: u16,
+        //}
+        unsafe {
+            let mut entr = mem::uninitialized::<Entry<V, D>>();
+            let contents_ptr: *mut u8 = &mut entr.data as *mut _ as *mut u8;
+            let data_ptr = contents_ptr.offset(self.data_start_offset());
+            entr.kind = self.kind();
+            match self {
+                &Data(data, deps) => {
+                    // Data:
+                    // | data: data_bytes | dependencies: dependency_bytes | Kind: 8 | data_bytes: u16 | dependency_bytes: u16
+                    assert!(deps.len() < u16::MAX as usize);
+                    let data_ptr = data_ptr as *mut V;
+                    ptr::write(data_ptr, data.clone());
+                    entr.data_bytes = size_of::<V>() as u16;
+                    let dep_ptr = (data_ptr as *mut u8).offset(entr.data_bytes as isize);
+                    let dep_ptr = dep_ptr as *mut _;
+                    ptr::copy(deps.as_ptr(), dep_ptr, deps.len());
+                    entr.dependency_bytes = (deps.len() * size_of::<OrderIndex>())
+                        as u16;
+                    //println!("root {:?}\n datap {:?} depp {:?}\n datab {:?} depb {:?}", (&mut entr) as *mut _, data_ptr, dep_ptr, entr.data_bytes, entr.dependency_bytes);
+                    //println!("depp[0] {:?}", *dep_ptr);
+                }
+                /*&TransactionCommit{uuid, start_entries, deps} => {
+                    // Commit:
+                    // | uuid: size Uuid | start_entries: data_bytes / size OrderIndex | deps: dependency_bytes / size OrderIndex | 8 | u16 | u16
+                    //let uuid = (contents_ptr as *const _).as_ref().unwrap();
+                    /*assert!(deps.len() < u16::MAX as usize);
+                    let uuid_ptr = contents_ptr as *mut Uuid;
+                    ptr::write(uuid_ptr, *uuid);
+                    let starts_ptr = contents_ptr.offset(size_of::<Uuid>()
+                        as isize) as *mut OrderIndex;
+                    ptr::copy(start_entries.as_ptr(), starts_ptr, start_entries.len());
+                    entr.data_bytes = (start_entries.len() * size_of::<OrderIndex>()) as u16; //TODO overflow
+                    let dep_ptr = (data_ptr as *mut u8).offset(entr.data_bytes as isize);
+                    let dep_ptr = dep_ptr as *mut _;
+                    ptr::copy(deps.as_ptr(), dep_ptr, deps.len());
+                    entr.dependency_bytes = (deps.len() * size_of::<OrderIndex>())
+                        as u16;*/
+                    panic!()
+                }
+                &TransactionStart(data, commit_col, uuid) => {
+                    // Start:
+                    // | uuid: size Uuid | order: size order | data: data_bytes | ... | 8 | u16 | u16 = 0
+                    /*let uuid_ptr = contents_ptr as *mut Uuid;
+                    let order_ptr = contents_ptr.offset(size_of::<Uuid>() as isize)
+                        as *mut order;
+                    let data_ptr = data_ptr as *mut V;
+                    ptr::write(uuid_ptr, uuid.clone());
+                    ptr::write(order_ptr, commit_col.clone());
+                    ptr::write(data_ptr, data.clone());
+                    entr.data_bytes = size_of::<V>() as u16;
+                    entr.dependency_bytes = 0;*/
+                    panic!()
+                }
+                &TransactionAbort(uuid) => {
+                    // Abort:
+                    // | uuid: size Uuid | ... | 8 | u16 = 0 | u16 = 0
+                    //assert_eq!(self.data_bytes as usize, size_of::<Uuid>());
+                    //assert_eq!(self.dependency_bytes, 0);
+                    //let uuid = (contents_ptr as *const _).as_ref().unwrap();
+                    //TransactionAbort(uuid)
+                    /*let uuid_ptr = contents_ptr as *mut Uuid;
+                    ptr::write(uuid_ptr, uuid.clone());
+                    entr.data_bytes = size_of::<Uuid>() as u16;
+                    entr.dependency_bytes = 0;*/
+                    panic!()
+                }
+                &Multiput{..} => {
+                    panic!()
+                }*/
+                _ => panic!()
+            }
+            //TODO let dep_ptr = data_ptr.offset(self.data_bytes as isize) as *const _;
+            //TODO let num_deps = (self.dependency_bytes as usize).checked_div(size_of::<OrderIndex>()).unwrap();
+            //TODO let deps = slice::from_raw_parts(dep_ptr, num_deps);
+            entr
+        }
+    }
+}
+
+#[cfg(False)]
+#[test]
+fn start_entry_convert() {
+    use std::fmt::Debug;
+    test_(1231123, 32.into());
+    test_(3334, 16.into());
+    test_(1231123u64, 43.into());
+    test_((3334u64, 1231123), 87.into());
+
+    fn test_<T: Clone + Debug + Eq>(data: T, col: order) {
+        let id = Uuid::new_v4();
+        let ent1 = TransactionStart(&data, col, &id);
+        let entr = Box::new(ent1.clone_entry());
+        let ent2 = entr.contents();
+        assert_eq!(ent1, ent2);
+    }
+}
+
+#[cfg(False)]
+#[test]
+fn abort_entry_convert() {
+    use std::fmt::Debug;
+    test_::<()>();
+    test_::<i32>();
+    test_::<u64>();
+
+    fn test_<T: Clone + Debug + Eq>() {
+        let id = Uuid::new_v4();
+        let ent1: EntryContents<_> = TransactionAbort::<T>(&id);
+        let entr = Box::new(ent1.clone_entry());
+        let ent2: EntryContents<_> = entr.contents();
+        assert_eq!(ent1, ent2);
+    }
+}
+
+#[cfg(False)]
+#[test]
+fn commit_entry_convert() {
+    use std::fmt::Debug;
+    test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+    test_(3334, &[], &[]);
+    test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+    test_(3334u64, &[], &[]);
+    test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+    test_((3334u64, 1231123), &[], &[]);
+    test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+
+    test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())], &[(32.into(), 10.into()), (402.into(), 5111.into())]);
+    test_(3334, &[], &[(32.into(), 10.into()), (402.into(), 5111.into())]);
+    test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())], &[(32.into(), 10.into()), (402.into(), 5111.into())]);
+    test_(3334u64, &[], &[(32.into(), 10.into()), (402.into(), 5111.into())]);
+    test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[(32.into(), 10.into()), (402.into(), 5111.into())]);
+    test_((3334u64, 1231123), &[], &[(32.into(), 10.into()), (402.into(), 5111.into())]);
+    test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[(32.into(), 10.into()), (402.into(), 5111.into())]);
+
+    fn test_<T: Clone + Debug + Eq>(_: T, deps: &[OrderIndex], start_entries: &[OrderIndex]) {
+        let id = Uuid::new_v4();
+        let ent1 = TransactionCommit::<T>{
+            uuid: &id,
+            start_entries: &start_entries,
+            deps: &deps
+        };
+        let entr = Box::new(ent1.clone_entry());
+        let ent2 = entr.contents();
+        assert_eq!(ent1, ent2);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn data_entry_convert() {
+    use std::fmt::Debug;
+    test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())]);
+    test_(3334, &[]);
+    test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())]);
+    test_(3334u64, &[]);
+    test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())]);
+    test_((3334u64, 1231123), &[]);
+    test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())]);
+
+    fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex]) {
+        let ent1 = Data(&data, &deps);
+        let entr = Box::new(ent1.clone_entry::<[u8; MAX_DATA_LEN]>());
+        let ent2 = entr.contents();
+        assert_eq!(ent1, ent2);
+    }
+}
+
+/*#[derive(Debug, Hash, PartialEq, Eq, Clone, RustcDecodable, RustcEncodable)]
 pub enum Entry<V> {
     Data(V, Vec<OrderIndex>),
     TransactionCommit{uuid: Uuid, start_entries: Vec<OrderIndex>}, //TODO do commits need dependencies?
@@ -34,7 +430,7 @@ impl<V> Entry<V> {
             &Entry::Multiput{ref deps, ..} => &deps,
         }
     }
-}
+}*/
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum InsertErr {
@@ -47,13 +443,13 @@ pub enum GetErr {
 }
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
     #[allow(non_camel_case_types)]
     pub struct order(u32);
 }
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
     #[allow(non_camel_case_types)]
     pub struct entry(u32);
 }
@@ -104,26 +500,26 @@ where V: Copy, S: Store<V>, H: Horizon{
     }
 
     pub fn append(&mut self, column: order, data: V, deps: Vec<OrderIndex>) -> OrderIndex {
-        self.append_entry(column, Entry::Data(data, deps))
+        self.append_entry(column, Data(&data, &*deps))
     }
 
     pub fn try_append(&mut self, column: order, data: V, deps: Vec<OrderIndex>) -> Option<OrderIndex> {
         let next_entry = self.horizon.get_horizon(column);
         let insert_loc = (column, next_entry);
-        self.store.insert(insert_loc, Entry::Data(data, deps)).ok().map(|_| {
+        self.store.insert(insert_loc, Data(&data, &*deps).clone_entry()).ok().map(|_| {
             self.horizon.update_horizon(column, next_entry);
             insert_loc
         })
     }
 
-    fn append_entry(&mut self, column: order, ent: Entry<V>) -> OrderIndex {
+    fn append_entry(&mut self, column: order, ent: EntryContents<V>) -> OrderIndex {
         let mut inserted = false;
         let mut insert_loc = (column, 0.into());
         let mut next_entry = self.horizon.get_horizon(column);
         while !inserted {
             next_entry = next_entry + 1; //TODO jump ahead
             insert_loc = (column, next_entry);
-            inserted = self.store.insert(insert_loc, ent.clone()).is_ok();
+            inserted = self.store.insert(insert_loc, ent.clone_entry()).is_ok();
         }
         self.horizon.update_horizon(column, next_entry);
         insert_loc
@@ -135,22 +531,23 @@ where V: Copy, S: Store<V>, H: Horizon{
         let ent = self.store.get((column, index)).clone();
         let ent = match ent { Err(GetErr::NoValue) => return None, Ok(e) => e };
         self.play_deps(ent.dependencies());
-        match ent {
-            Entry::TransactionStart(data, commit_column, uuid, _) => {
+        match ent.contents() {
+            TransactionStart(data, commit_column, uuid) => {
                 trace!("TransactionStart");
-                self.play_transaction((column, index), commit_column, uuid, data);
+                //TODO clone
+                self.play_transaction((column, index), commit_column, uuid.clone(), data.clone());
             }
-            Entry::Multiput{columns, ..} => {
+            Multiput{columns, ..} => {
                 //TODO
                 trace!("Multiput");
-                self.read_multiput(index, &columns);
+                self.read_multiput(index, columns);
             }
-            Entry::TransactionCommit{..} => { trace!("TransactionCommit"); } //TODO skip?
-            Entry::TransactionAbort(..) => { trace!("TransactionAbort"); } //TODO skip?
+            TransactionCommit{..} => { trace!("TransactionCommit"); } //TODO skip?
+            TransactionAbort(..) => { trace!("TransactionAbort"); } //TODO skip?
 
-            Entry::Data(data, _) => {
+            Data(data, _) => {
                 trace!("Data");
-                self.upcalls.get(&column).map(|f| f(data));
+                self.upcalls.get(&column).map(|f| f(data.clone())); //TODO clone
             }
         }
         self.local_horizon.insert(column, index);
@@ -171,13 +568,14 @@ where V: Copy, S: Store<V>, H: Horizon{
         'find_puts: for column in columns {
             let put_entry = self.store.get((*column, row))
                 .clone().expect("invalid entry");
-            if let Entry::Multiput{data, columns: put_cols, deps} = put_entry {
+            if let Multiput{data, columns: put_cols, deps} = put_entry.contents() {
                 if put_cols == columns {
                     if self.upcalls.contains_key(&column) {
                         //TODO just mark as stale
                         self.play_until((*column, row - 1)); //TODO underflow
                         self.play_deps(&deps);
-                        self.upcalls.get(&column).map(|f| f(data));
+                        //TODO clone
+                        self.upcalls.get(&column).map(|f| f(data.clone()));
                         self.local_horizon.insert(*column, row);
                     }
                     continue 'find_puts
@@ -199,7 +597,7 @@ where V: Copy, S: Store<V>, H: Horizon{
             match next {
                 Err(GetErr::NoValue) if timed_out => {
                     let inserted = self.store.insert((commit_column, next_entry),
-                        Entry::TransactionAbort(start_uuid));
+                        TransactionAbort(&start_uuid).clone_entry());
                     if let Ok(..) = inserted {
                         return
                     }
@@ -210,16 +608,20 @@ where V: Copy, S: Store<V>, H: Horizon{
                     timed_out = true;
                     continue 'find_commit
                 }
-                Ok(Entry::TransactionCommit{uuid, start_entries}) =>
-                    if uuid == start_uuid {
-                        transaction_start_entries = start_entries;
-                        break 'find_commit
-                    },
-                Ok(Entry::TransactionAbort(uuid)) =>
-                    if uuid == start_uuid {
-                        return //local_horizon is updated in get_next_unseen
-                    },
-                Ok(..) => {}
+                Ok(entr) => {
+                    match entr.contents() {
+                        TransactionCommit{uuid, start_entries, ..} =>
+                            if uuid == &start_uuid {
+                                transaction_start_entries = Vec::from(start_entries);
+                                break 'find_commit
+                            },
+                        TransactionAbort(uuid) =>
+                            if uuid == &start_uuid {
+                                return //local_horizon is updated in get_next_unseen
+                            },
+                        _ => {}
+                    }
+                }
             }
             next_entry = next_entry + 1;
             timed_out = false;
@@ -235,11 +637,12 @@ where V: Copy, S: Store<V>, H: Horizon{
             if column != start_column {
                 self.play_until((column, index - 1)); //TODO underflow
                 let start_entry = self.store.get((column, index)).clone().expect("invalid commit entry");
-                if let Entry::TransactionStart(data, commit_col, uuid, deps) = start_entry {
+                if let TransactionStart(data, commit_col, uuid) =
+                    start_entry.contents() {
                     assert_eq!(commit_column, commit_col);
-                    assert_eq!(start_uuid, uuid);
-                    self.play_deps(&deps);
-                    self.upcalls.get(&column).map(|f| f(data));
+                    assert_eq!(&start_uuid, uuid);
+                    //self.play_deps(&deps); TODO
+                    self.upcalls.get(&column).map(|f| f(data.clone())); //TODO clone
                     self.local_horizon.insert(column, index);
                 }
                 else {
@@ -284,7 +687,7 @@ where V: Copy, S: Store<V>, H: Horizon{
         let mut puts = Vec::new();
         for &(column, val) in &columns {
             let res = self.store.insert((column, row),
-                Entry::Multiput{data: val, columns: cols.clone(), deps: deps.clone()});
+                Multiput{data: &val, columns: &*cols, deps: &*deps}.clone_entry());
             match res {
                 Err(InsertErr::AlreadyWritten) => {
                     trace!("multiput {:?} {:?} failed", row, column);
@@ -310,7 +713,7 @@ where V: Copy, S: Store<V>, H: Horizon{
         let transaction_id = Uuid::new_v4();
         for &(column, val) in &columns {
             let loc = self.append_entry(column,
-                Entry::TransactionStart(val, min, transaction_id, deps.clone()));
+                TransactionStart(&val, min, &transaction_id));
             start_entries.push(loc)
         }
         Transaction {
@@ -338,9 +741,10 @@ where V: 't + Copy, S: 't + Store<V>, H: 't + Horizon {
     pub fn commit(mut self) -> (OrderIndex, Vec<OrderIndex>) {
         let start_entries = self.start_entries.take().expect("Double committed transaction");
         (self.log.append_entry(start_entries[0].0,
-            Entry::TransactionCommit {
-                uuid: self.uuid,
-                start_entries: start_entries.clone()
+            TransactionCommit {
+                uuid: &self.uuid,
+                start_entries: &*start_entries,
+                deps: panic!(), //TODO
             }),
         start_entries)
     }
@@ -355,7 +759,7 @@ where V: 't + Copy, S: 't + Store<V>, H: 't + Horizon {
         let start_entries = self.start_entries.take();
         if let Some(entries) = start_entries {
             self.log.append_entry(entries[0].0,
-                Entry::TransactionAbort(self.uuid));
+                TransactionAbort(&self.uuid));
         }
     }
 }
