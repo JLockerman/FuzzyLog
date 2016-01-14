@@ -1,0 +1,10 @@
+[package]
+name = "echo"
+version = "0.1.0"
+authors = ["jlockerman"]
+
+[dependencies]
+uuid = "0.1.17"
+log = "^0.3.2"
+time = "0.1"
+

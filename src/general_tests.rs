@@ -337,11 +337,6 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![0 => 1, 1 => 17]);
             }
 
-            struct TME<K, V> {
-                left: MapEntry<K, V>,
-                right: MapEntry<K, V>,
-            }
-
             #[cfg(FALSE)]
             #[test]
             fn test_multiput() {
@@ -389,6 +384,7 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7, 3 => 8, 2 => 54]);
             }
 
+            #[cfg(FALSE)]
             #[test]
             fn test_threaded_multiput() {
                 let _ = env_logger::init();

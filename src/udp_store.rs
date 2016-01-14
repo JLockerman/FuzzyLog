@@ -1,17 +1,18 @@
 
 use prelude::*;
 
+use std::fmt::Debug;
 //use std::marker::{Unsize, PhantomData};
 use std::marker::{PhantomData};
 use std::mem::{self, size_of};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 //use std::ops::CoerceUnsized;
 use std::slice;
 use std::thread;
 
-use mio::buf::{SliceBuf, MutSliceBuf};
-use mio::udp::UdpSocket;
-use mio::unix;
+//use mio::buf::{SliceBuf, MutSliceBuf};
+//use mio::udp::UdpSocket;
+//use mio::unix;
 
 use time::precise_time_ns;
 
@@ -21,8 +22,8 @@ use uuid::Uuid;
 pub struct UdpStore<V> {
     socket: UdpSocket,
     server_addr: SocketAddr,
-    receive_buffer: Box<[u8; 4096]>,
-    send_buffer: Box<[u8; 4096]>,
+    receive_buffer: Box<Packet<V>>,
+    send_buffer: Box<Packet<V>>,
     rtt: i64,
     dev: i64,
     _pd: PhantomData<V>,
@@ -31,7 +32,7 @@ pub struct UdpStore<V> {
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[repr(C)]
 pub struct Header {
-	kind: Kind,
+    kind: Kind,
     id: Uuid,
     loc: OrderIndex,
 }
@@ -76,14 +77,61 @@ pub struct Packet {
 const SLEEP_NANOS: u32 = 8000; //TODO user settable
 const RTT: i64 = 80000;
 
-impl<V: Copy> Store<V> for UdpStore<V> {
+impl<V: Copy + Debug> UdpStore<V> {
+    #[inline(always)]
+    fn insert_ref(&mut self, key: OrderIndex, val: &mut Packet<V>, recv: &mut Packet<V>) -> InsertResult {
+        use self::Kind::*;
+
+        let request_id = Uuid::new_v4();
+        val.header = Header {
+            loc: key,
+            id: request_id.clone(),
+            kind: Write,
+        };
+        let val = &*val;
+        self.socket.send_to(val.as_bytes(), &self.server_addr)
+            .expect("cannot send insert");
+
+        //println!("sent");
+        'receive: loop {
+            let (size, addr) = self.socket.recv_from(recv.as_bytes_mut())
+                .expect("unable to receive ack");
+            if addr == self.server_addr {
+                match recv.header.kind {
+                    Written | AlreadyWritten => {
+                        if recv.header.loc == key {
+                            if recv.header.id == request_id {
+                                return Ok(())
+                            }
+                            return Err(InsertErr::AlreadyWritten)
+                        }
+                        else {
+                            //println!("key: {:?}\nloc: {:?}\nrecv\n{:#?}", key, self.receive_buffer.header.loc, recv);
+                            continue 'receive
+                        }
+                    }
+                    _ => {
+                        //println!("v {:?}", v);
+                        continue 'receive
+                    }
+                }
+            }
+            else {
+                //println!("packet {:?}", recv);
+                continue 'receive
+            }
+        }
+    }
+}
+
+impl<V: Copy + Debug> Store<V> for UdpStore<V> {
 
     fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
         use self::Kind::*;
 
         let request_id = Uuid::new_v4();
 
-        *PacketBuilder::wrap_bytes_mut(&mut self.send_buffer) =PacketBuilder {
+        *self.send_buffer = PacketBuilder {
             header: Header {
                 loc: key,
                 id: request_id.clone(),
@@ -91,6 +139,8 @@ impl<V: Copy> Store<V> for UdpStore<V> {
             },
             data: val.clone(),
         };
+
+        trace!("packet {:#?}", self.send_buffer.header);
 
         {
             //let fd = self.socket.as_raw_fd();
@@ -102,58 +152,48 @@ impl<V: Copy> Store<V> for UdpStore<V> {
         'send: loop {
             {
                 trace!("sending");
-                let buf = &mut SliceBuf::wrap(&*self.send_buffer.as_bytes());
-                self.socket.send_to(buf, &self.server_addr).expect("cannot send insert"); //TODO
+                self.socket.send_to(self.send_buffer.as_bytes(), &self.server_addr)
+                    .expect("cannot send insert"); //TODO
             }
 
             'receive: loop {
-                let response = {
-                    let borrow = &mut self.receive_buffer.as_bytes_mut();
-                    let buf = &mut MutSliceBuf::wrap(borrow);
-                    self.socket.recv_from(buf).expect("unable to receive ack") //TODO
+                let (size, addr) = {
+                    self.socket.recv_from(self.receive_buffer.as_bytes_mut())
+                        .expect("unable to receive ack") //TODO
+                        //precise_time_ns() as i64 - start_time < self.rtt + 4 * self.dev
                 };
-                match response { //TODO loop?
-                    Some(addr) if addr == self.server_addr => {
-                        match self.receive_buffer.header.kind {
-                            Written | AlreadyWritten => { //TODO types?
-                                trace!("correct response");
-                                if self.receive_buffer.header.loc == key {
-                                    //let rtt = precise_time_ns() as i64 - start_time;
-                                    //self.rtt = ((self.rtt * 4) / 5) + (rtt / 5);
-                                    let sample_rtt = precise_time_ns() as i64 - start_time;
-                                    let diff = sample_rtt - self.rtt;
-                                    self.dev = self.dev + (diff.abs() - self.dev) / 4;
-                                    self.rtt = self.rtt + (diff * 4 / 5);
-                                    if self.receive_buffer.header.id == request_id {
-                                        trace!("write success");
-                                        return Ok(())
-                                    }
-                                    return Err(InsertErr::AlreadyWritten)
+                trace!("got packet");
+                if addr == self.server_addr {
+                    match self.receive_buffer.header.kind {
+                        Written | AlreadyWritten => { //TODO types?
+                            trace!("correct response");
+                            if self.receive_buffer.header.loc == key {
+                                //let rtt = precise_time_ns() as i64 - start_time;
+                                //self.rtt = ((self.rtt * 4) / 5) + (rtt / 5);
+                                let sample_rtt = precise_time_ns() as i64 - start_time;
+                                let diff = sample_rtt - self.rtt;
+                                self.dev = self.dev + (diff.abs() - self.dev) / 4;
+                                self.rtt = self.rtt + (diff * 4 / 5);
+                                if self.receive_buffer.header.id == request_id {
+                                    trace!("write success");
+                                    return Ok(())
                                 }
-                                else {
-                                    continue 'receive
-                                }
+                                return Err(InsertErr::AlreadyWritten)
                             }
-                            v => {
-                                trace!("invalid response {:?}", v);
+                            else {
+                                println!("packet {:?}", self.receive_buffer);
                                 continue 'receive
                             }
                         }
-                    }
-                    Some(addr) => {
-                        trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
-                        continue 'receive
-                    }
-                    _ => {
-                        trace!("no response");
-                        if true {//precise_time_ns() as i64 - start_time < self.rtt + 4 * self.dev {
+                        v => {
+                            trace!("invalid response {:?}", v);
                             continue 'receive
                         }
-                        else {
-                        //TODO wait for rtt before resend
-                            continue 'send
-                        }
                     }
+                }
+                else {
+                    trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
+                    continue 'receive
                 }
             }
         }
@@ -174,68 +214,51 @@ impl<V: Copy> Store<V> for UdpStore<V> {
         'send: loop {
             {
                 trace!("sending");
-                let buf = &mut SliceBuf::wrap(&self.send_buffer.as_bytes());
-                self.socket.send_to(buf, &self.server_addr).expect("cannot send get"); //TODO
+                self.socket.send_to(self.send_buffer.as_bytes(), &self.server_addr)
+                    .expect("cannot send get"); //TODO
             }
 
             //thread::sleep(Duration::new(0, SLEEP_NANOS)); //TODO
 
-            let response = {
-                let borrow = &mut self.receive_buffer.as_bytes_mut();
-                let buf = &mut MutSliceBuf::wrap(borrow);
-                self.socket.recv_from(buf).expect("unable to receive ack") //TODO
+            let (size, addr) = {
+                self.socket.recv_from(self.receive_buffer.as_bytes_mut())
+                    .expect("unable to receive ack") //TODO
             };
-
-            match response { //TODO loop
-                Some(addr) if addr == self.server_addr => {
-                    trace!("correct addr");
-                    match self.receive_buffer.header.kind {
-                        Value => {
-                            //TODO validate...
-                            //TODO base on loc instead?
-                            if self.receive_buffer.header.loc == key {
-                                trace!("correct response");
-                                return Ok(self.receive_buffer.data.clone())
-                            }
-                            trace!("wrong loc {:?}, expected {:?}",
-                                self.receive_buffer.header.loc, key);
-                            continue 'send
+            if addr == self.server_addr {
+                trace!("correct addr");
+                match self.receive_buffer.header.kind {
+                    Value => {
+                        //TODO validate...
+                        //TODO base on loc instead?
+                        if self.receive_buffer.header.loc == key {
+                            trace!("correct response");
+                            return Ok(self.receive_buffer.data.clone())
                         }
-                        NoValue => {
-                            //TODO base on loc instead?
-                            if self.receive_buffer.header.loc == key {
-                                trace!("correct response");
-                                return Err(GetErr::NoValue)
-                            }
-                            trace!("wrong loc {:?}, expected {:?}",
-                                self.receive_buffer.header.loc, key);
-                            continue 'send
+                        trace!("wrong loc {:?}, expected {:?}",
+                            self.receive_buffer.header.loc, key);
+                        continue 'send
+                    }
+                    NoValue => {
+                        //TODO base on loc instead?
+                        if self.receive_buffer.header.loc == key {
+                            trace!("correct response");
+                            return Err(GetErr::NoValue)
                         }
-                        k => {
-                            trace!("invalid response, {:?}", k);
-                            continue 'send
-                        }
+                        trace!("wrong loc {:?}, expected {:?}",
+                            self.receive_buffer.header.loc, key);
+                        continue 'send
+                    }
+                    k => {
+                        trace!("invalid response, {:?}", k);
+                        continue 'send
                     }
                 }
-                Some(addr) => {
-                    trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
-                    continue 'send
-                }
-                _ => {
-                    trace!("no response");
-                    continue 'send
-                }
+            }
+            else {
+                trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
+                continue 'send
             }
         }
-    }
-
-    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
-        use self::Kind::*;
-
-        let request_id = Uuid::new_v4();
-        let send: Box<TransactionPacket<V>> = unsafe { transmute(self.send_buffer) };
-        let recv: Box<TransactionPacket<V>> = unsafe { transmute(self.receive_buffer) };
-        panic!()
     }
 }
 
@@ -243,7 +266,7 @@ impl<V: Clone> Clone for UdpStore<V> {
     fn clone(&self) -> Self {
         let &UdpStore {ref server_addr, ref receive_buffer, ref send_buffer, _pd, rtt, dev, ..} = self;
         UdpStore {
-            socket: UdpSocket::v4().expect("cannot clone"), //TODO
+            socket: UdpSocket::bind("0.0.0.0:0").expect("cannot clone"), //TODO
             server_addr: server_addr.clone(),
             receive_buffer: receive_buffer.clone(),
             send_buffer: send_buffer.clone(),
@@ -257,7 +280,6 @@ impl<V: Clone> Clone for UdpStore<V> {
 impl<V> Packet<V> { //TODO validation
 
     pub fn wrap_bytes(bytes: &[u8]) -> &Self {
-        assert!(bytes.len() >= size_of::<Self>());
         let start = &bytes[0];
         unsafe {
             mem::transmute(start)
@@ -271,7 +293,7 @@ impl<V> Packet<V> { //TODO validation
     }
 
     pub fn wrap_bytes_mut(bytes: &mut [u8]) -> &mut Self {
-        assert!(bytes.len() >= size_of::<Self>());
+        assert_eq!(bytes.len(), size_of::<Self>());
         let start = &mut bytes[0];
         unsafe {
             mem::transmute(start)
@@ -284,6 +306,7 @@ impl<V> Packet<V> { //TODO validation
         }*/
     }
 
+    #[inline(always)]
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {
             let ptr: *const _ = self as *const _ as *const _;
@@ -292,6 +315,7 @@ impl<V> Packet<V> { //TODO validation
         }
     }
 
+    #[inline(always)]
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
         unsafe {
             let ptr: *mut _ = self as *mut _ as *mut _;
@@ -336,12 +360,13 @@ mod test {
     use std::collections::HashMap;
     use std::collections::hash_map::Entry::{Occupied, Vacant};
     use std::mem::{self, forget, transmute};
+    use std::net::UdpSocket;
     use std::thread::spawn;
 
     use test::Bencher;
 
     use mio::buf::{MutSliceBuf, SliceBuf};
-    use mio::udp::UdpSocket;
+    //use mio::udp::UdpSocket;
 
     #[cfg(False)]
     #[test]
@@ -426,9 +451,10 @@ mod test {
     #[allow(non_upper_case_globals)]
     fn new_store<V>(_: Vec<OrderIndex>) -> UdpStore<V>
     where V: Clone {
-        let handle = spawn(move || {
+        /*let handle = spawn(move || {
             const addr_str: &'static str = "0.0.0.0:13265";
             let addr = addr_str.parse().expect("invalid inet address");
+            return; //TODO
             let receive = if let Ok(socket) =
                 UdpSocket::bound(&addr) {
                 socket
@@ -488,14 +514,15 @@ mod test {
                 }
             }
         });
-        forget(handle);
+        forget(handle);*/
 
-        //const addr_str: &'static str = "172.28.229.151:13265";
-        const addr_str: &'static str = "127.0.0.1:13265";
+        //const addr_str: &'static str = "172.28.229.152:13265";
+        const addr_str: &'static str = "10.21.7.4:13265";
+        //const addr_str: &'static str = "127.0.0.1:13265";
 
         unsafe {
             UdpStore {
-                socket: UdpSocket::v4().expect("unable to open store"),
+                socket: UdpSocket::bind("0.0.0.0:0").expect("unable to open store"),
                 server_addr: addr_str.parse().expect("invalid inet address"),
                 receive_buffer: Box::new(mem::zeroed()),
                 send_buffer: Box::new(mem::zeroed()),
@@ -508,6 +535,38 @@ mod test {
 
     general_tests!(super::new_store);
 
+    #[test]
+    fn test_external_write() {
+        let mut store = new_store(vec![]);
+        let mut send: Box<Packet<u64>> = Box::new(unsafe { mem::zeroed() });
+        send.data = EntryContents::Data(&48u64, &*vec![]).clone_entry();
+        let mut recv: Box<Packet<u64>> = Box::new(unsafe { mem::zeroed() });
+        
+        let res = store.insert_ref((1.into(), 1.into()), &mut *send, &mut *recv);
+        println!("res {:?}", res);
+    }
+
+    #[bench]
+    fn external_write(b: &mut Bencher) {
+        let mut store = new_store(vec![]);
+        let mut send: Box<Packet<u64>> = Box::new(unsafe { mem::zeroed() });
+        send.data = EntryContents::Data(&48u64, &*vec![]).clone_entry();
+        let mut recv: Box<Packet<u64>> = Box::new(unsafe { mem::zeroed() });
+        b.iter(|| {
+            store.insert_ref((1.into(), 1.into()), &mut *send, &mut *recv)
+        });
+    }
+
+    #[bench]
+    fn many_writes(b: &mut Bencher) {
+        let mut store = new_store(vec![]);
+        let mut i = 0;
+        b.iter(|| {
+            let entr = EntryContents::Data(&48u64, &*vec![]).clone_entry();
+            store.insert((17.into(), i.into()), entr);
+            i.wrapping_add(1);
+        });
+    }
 
     #[bench]
     fn bench_write(b: &mut Bencher) {
@@ -548,8 +607,33 @@ mod test {
         });
     }
 
+    //#[bench]
+    fn bench_rtt(b: &mut Bencher) {
+        use std::mem;
+        use mio::udp::UdpSocket;
+        const addr_str: &'static str = "10.21.7.4:13265"; 
+        let client = UdpSocket::v4().expect("unable to open client");
+        let addr = addr_str.parse().expect("invalid inet address");
+        let buff = Box::new([0u8; 4]);
+        let mut recv_buff = Box::new([0u8; 4096]);
+        b.iter(|| {
+            let a = {
+                let buff: &[u8] = &buff[..];
+                let buf = &mut SliceBuf::wrap(buff);
+                client.send_to(buf, &addr)
+            };
+            let mut recv = client.recv_from(&mut MutSliceBuf::wrap(&mut recv_buff[..]));
+            while let Ok(None) = recv {
+                recv = client.recv_from(&mut MutSliceBuf::wrap(&mut recv_buff[..]))
+            }
+            //println!("rec");
+            a
+        });
+    }
+
     #[bench]
-    fn bench_mio_udp_write(b: &mut Bencher) {
+    fn bench_mio_write(b: &mut Bencher) {
+        use mio::udp::UdpSocket;
         /*let handle = spawn(move || {
             const addr_str: &'static str = "0.0.0.0:13269";
             let addr = addr_str.parse().expect("invalid inet address");
@@ -575,30 +659,16 @@ mod test {
             }
         });*/
 
-        const addr_str: &'static str = "127.0.0.1:13270";
+        const addr_str: &'static str = "172.28.229.152:13266";
         let client = UdpSocket::v4().expect("unable to open client");
         let addr = addr_str.parse().expect("invalid inet address");
         let mut buff = Box::new([0;4096]);
         b.iter(|| {
-            let a = client.send_to(&mut SliceBuf::wrap(&[]), &addr);
+            let a = client.send_to(&mut SliceBuf::wrap(&buff[..]), &addr);
          //   let mut recv = client.recv_from(&mut MutSliceBuf::wrap(&mut buff[..]));
          //   while let Ok(None) = recv {
          //       recv = client.recv_from(&mut MutSliceBuf::wrap(&mut buff[..]))
          //   }
-            a
-        });
-    }
-
-    #[bench]
-    fn bench_std_udp_write(b: &mut Bencher) {
-        use std::net::{SocketAddr, UdpSocket};
-
-        const local_addr: &'static str = "0.0.0.0:13269";
-        let client = UdpSocket::bind(local_addr).unwrap();
-        const addr_str: &'static str = "127.0.0.1:13265";
-        let addr: SocketAddr = addr_str.parse().expect("invalid inet address");
-        b.iter(|| {
-            let a = client.send_to(&[], addr);
             a
         });
     }
