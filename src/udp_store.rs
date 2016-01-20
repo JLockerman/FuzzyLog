@@ -43,13 +43,20 @@ pub struct TransactionHeader {
 	kind: Kind,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+#[repr(C)]
+pub struct TransactionPacket<D: ?Sized> {
+    header: TransactionHeader,
+    data: D,
+}
+
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[repr(u32)]
 pub enum Kind {
-    Ack, Write, Read, Lock,
+    Ack, Write, Read, Multiput,
     Written, AlreadyWritten,
     Value, NoValue,
-    Locked, AlreadLocked,
+    MultiputSuccess, MultiputFailed,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -260,6 +267,78 @@ impl<V: Copy + Debug> Store<V> for UdpStore<V> {
             }
         }
     }
+
+    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+        use self::Kind::*;
+
+        let request_id = Uuid::new_v4();
+
+        *self.send_buffer.as_tansaction_packet_mut() = TransactionPacket {
+            header: TransactionHeader {
+                kind: Multiput,
+            },
+            data: EntryContents::Multiput {
+                data: &data,
+                uuid: &request_id,
+                columns: chains,
+                deps: deps}.clone_entry(), //TODO length
+        };
+
+        trace!("packet {:#?}", self.send_buffer.header);
+
+        {
+            //let fd = self.socket.as_raw_fd();
+
+        }
+
+        //TODO find server
+
+        trace!("at {:?}", self.socket.local_addr());
+        let start_time = precise_time_ns() as i64;
+        'send: loop {
+            {
+                trace!("sending");
+                self.socket.send_to(self.send_buffer.as_bytes(), &self.server_addr)
+                    .expect("cannot send insert"); //TODO
+            }
+
+            'receive: loop {
+                let (size, addr) = {
+                    self.socket.recv_from(self.receive_buffer.as_bytes_mut())
+                        .expect("unable to receive ack") //TODO
+                        //precise_time_ns() as i64 - start_time < self.rtt + 4 * self.dev
+                };
+                trace!("got packet");
+                if addr == self.server_addr {
+                    match self.receive_buffer.header.kind {
+                        MultiputSuccess => { //TODO types?
+                            trace!("correct response");
+                            if self.receive_buffer.as_tansaction_packet().get_id() == &request_id {
+                                trace!("write success");
+                                let sample_rtt = precise_time_ns() as i64 - start_time;
+                                let diff = sample_rtt - self.rtt;
+                                self.dev = self.dev + (diff.abs() - self.dev) / 4;
+                                self.rtt = self.rtt + (diff * 4 / 5);
+                                return Ok(())
+                            }
+                            else {
+                                println!("packet {:?}", self.receive_buffer);
+                                continue 'receive
+                            }
+                        }
+                        v => {
+                            trace!("invalid response {:?}", v);
+                            continue 'receive
+                        }
+                    }
+                }
+                else {
+                    trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
+                    continue 'receive
+                }
+            }
+        }
+    }
 }
 
 impl<V: Clone> Clone for UdpStore<V> {
@@ -273,6 +352,15 @@ impl<V: Clone> Clone for UdpStore<V> {
             rtt: rtt,
             dev: dev,
             _pd: _pd,
+        }
+    }
+}
+
+impl<V> TransactionPacket<Entry<V>> {
+    fn get_id(&self) ->&Uuid {
+        match self.data.contents() {
+            EntryContents::Multiput{uuid, ..} => uuid,
+            _ => unreachable!(),
         }
     }
 }
@@ -323,6 +411,20 @@ impl<V> Packet<V> { //TODO validation
         }
     }
 
+    #[inline(always)]
+    pub fn as_tansaction_packet(&self) -> &TransactionPacket<Entry<V>> {
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_tansaction_packet_mut(&mut self) -> &mut TransactionPacket<Entry<V>> {
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
     #[inline]
     pub fn get_kind(&self) -> Kind {
         self.header.kind
@@ -337,7 +439,7 @@ impl<V> Packet<V> { //TODO validation
     pub fn get_loc(&self) -> OrderIndex {
         self.header.loc
     }
-    
+
     #[inline]
     pub fn get_header(&self) -> &Header {
     	&self.header
@@ -541,7 +643,7 @@ mod test {
         let mut send: Box<Packet<u64>> = Box::new(unsafe { mem::zeroed() });
         send.data = EntryContents::Data(&48u64, &*vec![]).clone_entry();
         let mut recv: Box<Packet<u64>> = Box::new(unsafe { mem::zeroed() });
-        
+
         let res = store.insert_ref((1.into(), 1.into()), &mut *send, &mut *recv);
         println!("res {:?}", res);
     }
@@ -611,7 +713,7 @@ mod test {
     fn bench_rtt(b: &mut Bencher) {
         use std::mem;
         use mio::udp::UdpSocket;
-        const addr_str: &'static str = "10.21.7.4:13265"; 
+        const addr_str: &'static str = "10.21.7.4:13265";
         let client = UdpSocket::v4().expect("unable to open client");
         let addr = addr_str.parse().expect("invalid inet address");
         let buff = Box::new([0u8; 4]);

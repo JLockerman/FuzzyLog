@@ -15,7 +15,7 @@ use self::EntryContents::*;
 pub trait Store<V> {
     fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult; //TODO nocopy
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>>;
-    
+
     fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult; //TODO -> MultiAppebdResult
 }
 
@@ -71,7 +71,7 @@ pub enum EntryContents<'e, V:'e + ?Sized> {
     // u16 = 0 | u16 = 0 | uuid: size Uuid | ... | 8 |
     Multiput{data: &'e V, uuid: &'e Uuid, columns: &'e [order], deps: &'e [OrderIndex]}, //TODO id? committed?
     // Multiput
-    // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps 
+    // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps
 }
 
 impl<V, D: ?Sized> Entry<V, D> {
@@ -95,7 +95,7 @@ impl<V, D: ?Sized> Entry<V, D> {
 //TODO impl<V> Entry<[V]>
 impl<V, D> Entry<V, D> {
 
-    fn contents<'s>(&'s self) -> EntryContents<'s, V> {
+    pub fn contents<'s>(&'s self) -> EntryContents<'s, V> {
         unsafe {
             //let contents_ptr: *const u8 = &self.data as *const _;
             //TODO this might be invalid...
