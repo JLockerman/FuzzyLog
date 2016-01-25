@@ -5,17 +5,15 @@ authors = ["J <joshua.lockerman@yale.edu>"]
 
 [dependencies]
 bitflags = "0.3"
-custom_derive = "0.1.2"
-grabbag_macros = "0.1.0"
+custom_derive = "0.1"
+grabbag_macros = "0.1"
 mio = "0.4"
-newtype_derive = "0.1.2"
-uuid = "0.1.17"
-log = "^0.3.2"
-pnet = "*"
+newtype_derive = "0.1"
+uuid = "0.1"
+log = "0.3"
 rustc-serialize = "0.3"
 time = "0.1"
 
 
 [dev-dependencies]
 env_logger = "0.3"
-
