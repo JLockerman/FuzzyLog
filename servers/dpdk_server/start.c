@@ -230,6 +230,7 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 					struct rte_ring* dst_ring = distributor_rings[j];
 					rte_ring_sp_enqueue(dst_ring, mbuf);
 				}
+				//TODO ack immediately?
 			}
 			else {
 				uint32_t dst = header->chain & ring_mask;

@@ -39,12 +39,12 @@ pub const MAX_DATA_LEN: usize = 4096 - 8 - (4 + 8 + 16); //TODO
 #[repr(C)] //TODO
 pub struct Entry<V, D: ?Sized = [u8; MAX_DATA_LEN]> {
     _pd: PhantomData<V>,
-    kind: EntryKind,
-    _padding: [u8; 1],
-    cols: u16, //padding for non-multiputs
-    data_bytes: u16,
-    dependency_bytes: u16,
-    data: D
+    pub kind: EntryKind,
+    pub _padding: [u8; 1],
+    pub cols: u16, //padding for non-multiputs
+    pub data_bytes: u16,
+    pub dependency_bytes: u16,
+    pub data: D
     // layout Optional uuid, [u8; data_bytes] [OrderIndex; dependency_bytes/size<OrderIndex>]
 }
 
@@ -70,6 +70,16 @@ pub enum EntryContents<'e, V:'e + ?Sized> {
     // Abort:
     // u16 = 0 | u16 = 0 | uuid: size Uuid | ... | 8 |
     Multiput{data: &'e V, uuid: &'e Uuid, columns: &'e [order], deps: &'e [OrderIndex]}, //TODO id? committed?
+    // Multiput
+    // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EntryContentsMut<'e, V:'e + ?Sized> {
+    Data(&'e mut V, &'e mut [OrderIndex]),
+    // Data:
+    // | Kind: 8 | data_bytes: u16 | dependency_bytes: u16 | data: data_bytes | dependencies: dependency_bytes
+    Multiput{data: &'e mut V, uuid: &'e mut Uuid, columns: &'e mut [order], deps: &'e mut [OrderIndex]}, //TODO id? committed?
     // Multiput
     // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps
 }
@@ -146,6 +156,65 @@ impl<V, D> Entry<V, D> {
                     let uuid = (contents_ptr as *const _).as_ref().unwrap();
                     let ord = *(order_ptr as *const _);
                     let data = (data_ptr as *const _).as_ref().unwrap();
+                    TransactionStart(data, ord, uuid)*/
+                    panic!()
+                }
+            }
+        }
+    }
+
+    pub fn contents_mut<'s>(&'s mut self) -> EntryContentsMut<'s, V> {
+        unsafe {
+            use self::EntryContentsMut::*;
+            //let contents_ptr: *mut u8 = &self.data as *mut _;
+            //TODO this might be invalid...
+            let contents_ptr: *mut u8 = &mut self.data as *mut _ as *mut u8;
+            let data_ptr = contents_ptr.offset(self.data_start_offset());
+            let dep_ptr:*mut OrderIndex = data_ptr.offset(self.data_bytes as isize)
+                as *mut _;
+            //println!("datap {:?} depp {:?}", data_ptr, dep_ptr);
+            let num_deps = (self.dependency_bytes as usize)
+                .checked_div(size_of::<OrderIndex>()).unwrap();
+            let deps = slice::from_raw_parts_mut(dep_ptr, num_deps);
+            match self.kind {
+                EntryKind::Data => {
+                    //TODO assert_eq!(self.data_bytes as usize, size_of::<V>());
+                    let data = (data_ptr as *mut _).as_mut().unwrap();
+                    Data(data, deps)
+                }
+                EntryKind::Multiput => {
+                	let id_ptr: *mut Uuid = contents_ptr as *mut Uuid;
+                	let cols_ptr: *mut order = contents_ptr.offset(size_of::<Uuid>() as isize)
+                		as *mut _;
+
+                	let data = (data_ptr as *mut _).as_mut().unwrap();
+                	let uuid = id_ptr.as_mut().unwrap();
+                	let cols = slice::from_raw_parts_mut(cols_ptr, self.cols as usize);
+                	Multiput{data: data, uuid: uuid, columns: cols, deps: deps}
+                }
+                EntryKind::TransactionAbort => {
+                    /*assert_eq!(self.data_bytes as usize, size_of::<Uuid>());
+                    assert_eq!(self.dependency_bytes, 0);
+                    let uuid = (contents_ptr as *mut _).as_ref().unwrap();
+                    TransactionAbort(uuid)*/
+                    panic!()
+                }
+                EntryKind::TransactionCommit => {
+                    /*let uuid = (contents_ptr as *mut _).as_ref().unwrap();
+                    let starts_ptr = contents_ptr.offset(size_of::<Uuid>() as isize) as *mut _;
+                    let starts_len = self.data_bytes as usize;
+                    let num_starts = starts_len.checked_div(size_of::<OrderIndex>()).unwrap();
+                    let start_entries = slice::from_raw_parts(starts_ptr, num_starts);
+                    TransactionCommit{uuid: uuid, start_entries: start_entries, deps: deps}*/
+                    panic!()
+                }
+                EntryKind::TransactionStart => {
+                    /*assert!(self.data_bytes as usize <=
+                        MAX_DATA_LEN as usize - (size_of::<order>() + size_of::<Uuid>()));
+                    let order_ptr = contents_ptr.offset(size_of::<Uuid>() as isize);
+                    let uuid = (contents_ptr as *mut _).as_ref().unwrap();
+                    let ord = *(order_ptr as *mut _);
+                    let data = (data_ptr as *mut _).as_ref().unwrap();
                     TransactionStart(data, ord, uuid)*/
                     panic!()
                 }
