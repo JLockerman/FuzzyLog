@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["J <joshua.lockerman@yale.edu>"]
 
 [dependencies]
-bitflags = "0.3"
+bitflags = "0.4"
 custom_derive = "0.1"
 grabbag_macros = "0.1"
 mio = "0.4"

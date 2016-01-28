@@ -63,6 +63,7 @@ macro_rules! general_tests {
                     let mut last_index = (1.into(), 0.into());
                     for i in 0..10 {
                         last_index = log.append(1.into(), MapEntry(i * 2, i * 2), vec![]);
+                        trace!("T1 inserted {:?} at {:?}", (i * 2, i * 2), last_index);
                     }
                     log.append(2.into(), MapEntry(5, 17), vec![last_index]);
                 });
@@ -71,14 +72,17 @@ macro_rules! general_tests {
                     let mut last_index = (1.into(), 0.into());
                     for i in 0..10 {
                         last_index = log.append(1.into(), MapEntry(i * 2 + 1, i * 2 + 1), vec![]);
+                        trace!("T2 inserted {:?} at {:?}", (i * 2 + 1, i * 2 + 1), last_index);
                     }
                     log.append(2.into(), MapEntry(9, 20), vec![last_index]);
                 });
+                trace!("started threads");
                 join1.join().unwrap();
                 join.join().unwrap();
+                trace!("finished inserts");
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
                 log.play_foward(2.into());
-
+                trace!("finished reads");
                 let cannonical_map0 = {
                     let mut map = HashMap::new();
                     for i in 0..20 {

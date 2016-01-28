@@ -65,10 +65,10 @@ impl<V: Clone> Store<V> for LocalStore<V> {
         HashMap::get(&self.data, &key).cloned().ok_or(GetErr::NoValue)
     }
 
-    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
         let entr = EntryContents::Multiput{data: &data, uuid: &Uuid::new_v4(),
             columns: chains, deps: deps};
-        for &chain in chains {
+        for &(chain, _) in chains {
             let horizon = {
                 let horizon_loc = self.horizon.entry(chain).or_insert(1.into());
                 let horizon = *horizon_loc;
@@ -91,7 +91,7 @@ where S: Store<V> {
         self.lock().unwrap().get(key)
     }
 
-    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
         self.lock().unwrap().multi_append(chains, data, deps)
     }
 }
@@ -106,7 +106,7 @@ where S: Store<V> {
         self.borrow_mut().get(key)
     }
 
-    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
         self.borrow_mut().multi_append(chains, data, deps)
     }
 }
@@ -121,7 +121,7 @@ where S: Store<V> {
         self.lock().expect("cannot acquire lock").get(key)
     }
 
-    fn multi_append(&mut self, chains: &[order], data: V, deps: &[OrderIndex]) -> InsertResult {
+    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
         self.lock().expect("cannot acquire lock").multi_append(chains, data, deps)
     }
 }
@@ -160,7 +160,7 @@ pub mod test {
     where V: Clone {
         Arc::new(Mutex::new(LocalStore::new()))
     }
-    
+
     pub struct Map<K, V, S, H>
 	where K: Hash + Eq + Copy, V: Copy,
 	      S: Store<MapEntry<K, V>>,
@@ -174,7 +174,7 @@ pub mod test {
 	where K: Hash + Eq + Copy, V: Copy,
 	      S: Store<MapEntry<K, V>>,
 	      H: Horizon, {
-	
+
 	    pub fn new(store: S, horizon: H, ord: order) -> Map<K, V, S, H> {
 	        let local_view = Rc::new(RefCell::new(HashMap::new()));
 	        let re = local_view.clone();
@@ -196,7 +196,7 @@ pub mod test {
 	        self.log.append(self.order, MapEntry(key, val), vec![]);
 	        //TODO deps
 	    }
-	
+
 	    pub fn get(&mut self, key: K) -> Option<V> {
 	        self.log.play_foward(self.order);
 	        self.local_view.borrow().get(&key).cloned()
@@ -207,7 +207,7 @@ pub mod test {
 	where K: Hash + Eq + Copy + Debug, V: Copy + Debug,
 	      S: Store<MapEntry<K, V>>,
 	      H: Horizon, {
-	
+
 	    fn fmt(&self, formatter: &mut Formatter) -> FmtResult {
 	        formatter.debug_struct("Map").field("local_view", &self.local_view).finish()
 	    }
