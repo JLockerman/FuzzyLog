@@ -645,11 +645,30 @@ mod test {
     use super::EntryContents::*;
     use uuid::Uuid;
 
+    use std::marker::PhantomData;
+
 
     #[test]
     fn test_entry2_header() {
         use std::mem::size_of;
         assert_eq!(size_of::<Entry<(), ()>>(), 22);
+    }
+
+    #[repr(C)] //TODO
+    pub struct PrimEntry<V, F: ?Sized = [u8; MAX_DATA_LEN2]> {
+        _pd: PhantomData<V>,
+        pub id: [u64; 2],
+        pub kind: EntryKind::Kind,
+        pub _padding: [u8; 1],
+        pub data_bytes: u16,
+        pub dependency_bytes: u16,
+        pub flex: F,
+    }
+
+    #[test]
+    fn test_entry_primitive() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<()>>(), size_of::<PrimEntry<()>>());
     }
 
     #[test]

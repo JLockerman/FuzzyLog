@@ -16,76 +16,61 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use fuzzy_log::prelude::*;
-use fuzzy_log::udp_store::*;
+//use fuzzy_log::udp_store::*;
 
 #[no_mangle]
-pub extern "C" fn handle_packet(log: &mut HashMap<OrderIndex, Box<Packet<[u8; MAX_DATA_LEN]>>>, packet: &mut Packet<[u8; MAX_DATA_LEN]>)
+pub extern "C" fn handle_packet(log: &mut HashMap<OrderIndex, Box<Entry<(), DataFlex>>>, packet: &mut Entry<(), DataFlex>)
 {
-	trace!("{:#?}", packet.get_header());
+	trace!("{:#?}", packet.kind);
     let (kind, loc) = {
-        (packet.get_kind(), packet.get_loc())
+        (packet.kind, packet.flex.loc)
     };
 
-    if let Kind::Ack = kind {
-    	trace!("Got ACK");
+    if kind & EntryKind::Layout != EntryKind::Data {
+        trace!("bad packet");
         return
     }
 
     match log.entry(loc) {
         Vacant(e) => {
             trace!("Vacant entry {:?}", loc);
-            match kind {
-                Kind::Write => {
+            match kind & EntryKind::Layout {
+                EntryKind::Data => {
                     trace!("writing");
-                    packet.set_kind(Kind::Written);
-                    let data: Box<Packet<_>> = unsafe {
-                    	let mut ptr = Box::new(mem::uninitialized());
-                    	ptr::copy_nonoverlapping(packet, &mut *ptr, 1);
-                    	ptr
+                    //packet.set_kind(Kind::Written);
+                    let data: Box<Entry<_, DataFlex>> = unsafe {
+                        let mut ptr = Box::new(mem::uninitialized());
+                        ptr::copy_nonoverlapping(packet, &mut *ptr, 1);
+                        ptr.kind = kind | EntryKind::ReadSuccess;
+                        ptr
                     };
                     e.insert(data);
                 }
                 _ => {
-                	trace!("not write");
-                    packet.set_kind(unoccupied_response(kind));
+                    trace!("not write");
+                    //packet.set_kind(unoccupied_response(kind));
                 }
             }
         }
         Occupied(e) => {
             trace!("Occupied entry {:?}", loc);
             unsafe {
-            	ptr::copy_nonoverlapping::<Packet<_>>(&**e.get(), packet, 1);
+            	ptr::copy_nonoverlapping::<Entry<_, _>>(&**e.get(), packet, 1);
             }
             //*packet = *e.get().clone();
-            packet.set_kind(occupied_response(kind));;
+            //packet.set_kind(occupied_response(kind));;
         }
     }
-    trace!("=============>\n{:#?}", packet.get_header());
+    //trace!("=============>\n{:#?}", packet);
 }
 
 #[no_mangle]
-pub extern "C" fn init_log() -> Box<HashMap<OrderIndex, Box<Packet<()>>>> {
-	assert_eq!(mem::size_of::<Box<HashMap<OrderIndex, Box<Packet<()>>>>>(), mem::size_of::<*mut u8>());
+pub extern "C" fn init_log() -> Box<HashMap<OrderIndex, Box<Entry<()>>>> {
+	assert_eq!(mem::size_of::<Box<HashMap<OrderIndex, Box<Entry<()>>>>>(), mem::size_of::<*mut u8>());
 	let log = Box::new(HashMap::new());
 	trace!("logging start.");
 	trace!("log init as {:?}.", &*log as *const _);
 	log
-}
-
-fn occupied_response(request_kind: Kind) -> Kind {
-    match request_kind {
-        Kind::Write => Kind::AlreadyWritten,
-        Kind::Read => Kind::Value,
-        _ => Kind::Ack,
-    }
-}
-
-fn unoccupied_response(request_kind: Kind) -> Kind {
-    match request_kind {
-        Kind::Write => Kind::Written,
-        Kind::Read => Kind::NoValue,
-        _ => Kind::Ack,
-    }
 }
 
 #[no_mangle]

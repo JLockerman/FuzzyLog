@@ -61,11 +61,30 @@
 #include <math.h>
 #endif
 
+/*#[repr(C)]
+pub struct Entry<V, F: ?Sized = [u8; MAX_DATA_LEN2]> {
+    _pd: PhantomData<V>,
+    pub id: Uuid,
+    pub kind: EntryKind::Kind,
+    pub _padding: [u8; 1],
+    pub data_bytes: u16,
+    pub dependency_bytes: u16,
+    pub flex: F,
+}*/
+
+union delos_flex {
+	uint32_t loc[2];
+	uint16_t cols;
+};
+
 struct delos_header {
-	uint32_t kind;
-    uint8_t id[16];
-	uint32_t chain;
+	uint64_t id[2];
+	uint8_t kind;
+	uint8_t padding[1];
+	uint16_t data_bytes;
+	uint16_t dep_bytes;
     uint32_t entry;
+    union delos_flex flex;
 };
 
 extern void *init_log(void);
@@ -221,7 +240,7 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
 					+ sizeof(struct udp_hdr));
 			//printf("header\n\tchain %u\n\tentry %u\n\t kind %u\n", header->chain, header->entry, header->kind);
-			if(unlikely(header->kind) == 3) { //TODO header format...
+			if(unlikely(header->kind) == 2) { //TODO header format...
 				//TODO transactions
 				//printf("dst_ring %u: %p\n", dst, dst_ring);
 				printf("ERROR, trasaction.\n");
@@ -233,7 +252,7 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 				//TODO ack immediately?
 			}
 			else {
-				uint32_t dst = header->chain & ring_mask;
+				uint32_t dst = header->flex.loc[0] & ring_mask;
 				//if(rss_log(dst, header->chain, seen_set) != 0) rte_exit(EXIT_FAILURE, "chain dupe\n");
 				struct rte_ring* dst_ring = distributor_rings[dst];
 				rte_ring_sp_enqueue(dst_ring, mbuf);
