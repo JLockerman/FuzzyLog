@@ -21,22 +21,22 @@ use fuzzy_log::prelude::*;
 #[no_mangle]
 pub extern "C" fn handle_packet(log: &mut HashMap<OrderIndex, Box<Entry<(), DataFlex>>>, packet: &mut Entry<(), DataFlex>)
 {
-	trace!("{:#?}", packet.kind);
+    println!("{:#?}", packet.kind);
     let (kind, loc) = {
         (packet.kind, packet.flex.loc)
     };
 
-    if kind & EntryKind::Layout != EntryKind::Data {
-        trace!("bad packet");
+    if kind & EntryKind::Layout == EntryKind::Multiput {
+        println!("bad packet");
         return
     }
 
     match log.entry(loc) {
         Vacant(e) => {
-            trace!("Vacant entry {:?}", loc);
+            println!("Vacant entry {:?}", loc);
             match kind & EntryKind::Layout {
                 EntryKind::Data => {
-                    trace!("writing");
+                    println!("writing");
                     //packet.set_kind(Kind::Written);
                     let data: Box<Entry<_, DataFlex>> = unsafe {
                         let mut ptr = Box::new(mem::uninitialized());
@@ -47,13 +47,13 @@ pub extern "C" fn handle_packet(log: &mut HashMap<OrderIndex, Box<Entry<(), Data
                     e.insert(data);
                 }
                 _ => {
-                    trace!("not write");
+                    println!("not write");
                     //packet.set_kind(unoccupied_response(kind));
                 }
             }
         }
         Occupied(e) => {
-            trace!("Occupied entry {:?}", loc);
+            println!("Occupied entry {:?}", loc);
             unsafe {
             	ptr::copy_nonoverlapping::<Entry<_, _>>(&**e.get(), packet, 1);
             }
@@ -61,7 +61,7 @@ pub extern "C" fn handle_packet(log: &mut HashMap<OrderIndex, Box<Entry<(), Data
             //packet.set_kind(occupied_response(kind));;
         }
     }
-    //trace!("=============>\n{:#?}", packet);
+    //println!("=============>\n{:#?}", packet.contents());
 }
 
 #[no_mangle]
