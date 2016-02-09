@@ -36,6 +36,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <sched.h>
 #include <sys/queue.h>
 
 #include <rte_common.h>
@@ -72,23 +73,49 @@ pub struct Entry<V, F: ?Sized = [u8; MAX_DATA_LEN2]> {
     pub flex: F,
 }*/
 
-union delos_flex {
-	uint32_t loc[2];
-	uint16_t cols;
+#define MAX_MULTIAPPEND_CHAINS 509
+#define MULTIAPPEND_KIND 2
+
+
+struct OrderIndex {
+	uint32_t order;
+	uint32_t index;
 };
 
-struct delos_header {
+/*union delos_flex {
+	uint32_t loc[2];
+	uint16_t cols[2];
+};
+*/
+
+struct write_header {
 	uint64_t id[2];
 	uint8_t kind;
 	uint8_t padding[1];
 	uint16_t data_bytes;
 	uint16_t dep_bytes;
-    uint32_t entry;
-    union delos_flex flex;
+	uint32_t loc[2];
 };
 
+struct multi_header {
+	uint64_t id[2];
+	uint8_t kind;
+	uint8_t padding[1];
+	uint16_t data_bytes;
+	uint16_t dep_bytes;
+	uint16_t cols;
+};
+
+typedef union delos_header {
+	struct write_header write;
+	struct multi_header multi;
+} delos_header;
+
+_Static_assert(sizeof(union delos_header) == sizeof(struct write_header), "bad header size");
+
 extern void *init_log(void);
-extern void handle_packet(void*, uint8_t*);
+extern void handle_packet(void*, void*);
+extern void handle_multiappend(uint32_t, uint32_t, void*, void*);
 extern uint32_t rss_log(uint32_t, uint16_t, void *);
 extern void *rss_log_init(void);
 
@@ -97,6 +124,8 @@ extern void *rss_log_init(void);
 
 static uint16_t core_id[RTE_MAX_LCORE];
 static struct rte_ring *distributor_rings[RTE_MAX_LCORE];
+static struct rte_ring *to_multiappend_ack;
+static uint32_t ring_mask = 0;
 
 const uint8_t port = 1; //TODO
 static const char *_DELOS_MBUF_POOL = "DELOS_MBUF_POOL";
@@ -140,34 +169,23 @@ print_stats(const unsigned lcore, const uint64_t *durations)
 //			+ sizeof(struct udp_hdr));
 //}
 
+//struct sched_param schedp = {.sched_priority = 99};
+
 static __attribute__((noreturn)) int
-lcore_chain(__attribute__((unused)) void *arg) {
-#ifdef DELOS_BENCHMARK
-	uint64_t dist_dur[NUM_SAMPLES];
-	int iters = 0;
-#endif
-	if (rte_eth_dev_socket_id(port) > 0 &&
-			rte_eth_dev_socket_id(port) != (int)rte_socket_id()) {
-		printf("WARNING, port %u is on remote NUMA node %u to "
-			"polling thread on %u.\n\tPerformance will "
-			"not be optimal.\n", port, rte_eth_dev_socket_id(port), rte_socket_id());
-	}
-
-	void *log = init_log();
+lcore_ack(__attribute__((unused)) void *arg) {
 	const unsigned lcore_id = rte_lcore_id();
-	printf("Starting chain-server on core %u log %p.\n", lcore_id, log);
-
 	const uint32_t score_id = core_id[lcore_id];
-	struct rte_ring *ring = distributor_rings[score_id];
+
+	const char * ring_name = "to_ack";
+	struct rte_ring * const to_ack = rte_ring_create(ring_name,
+			128, rte_socket_id(),
+			RING_F_SP_ENQ | RING_F_SC_DEQ); //TODO wha? size?
+	struct rte_ring * const ring = to_multiappend_ack;
+	unsigned entries = 0;
+	printf("Starting ack on lcore %u.\n", lcore_id);
 	while(1) {
-		struct rte_mbuf *bufs[BURST_SIZE];
-#ifdef DELOS_BENCHMARK
-		uint64_t start_tsc = rte_rdtsc();
-#endif
+		struct rte_mbuf *bufs[BURST_SIZE * rte_lcore_count()];
 		const unsigned nb_rx = rte_ring_sc_dequeue_burst(ring, (void **)bufs, BURST_SIZE);
-
-		if (unlikely(nb_rx == 0)) continue;
-
 		for(unsigned i = 0; i < nb_rx; i++) {
 			struct rte_mbuf *mbuf = bufs[i];
 			{
@@ -193,9 +211,114 @@ lcore_chain(__attribute__((unused)) void *arg) {
 				udp->src_port = udp_temp;
 				mbuf->ol_flags |= PKT_TX_UDP_CKSUM;
 			}
-			uint8_t *data = rte_pktmbuf_mtod_offset(mbuf, uint8_t *,
-					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr *));
-			handle_packet(log , data);
+		}
+
+		int err = rte_ring_sp_enqueue_bulk(to_ack, (void * const*) bufs, nb_rx);
+		if(err != 0) { //TODO handle -EDQUOT instead
+			//TODO
+			assert(0 && "out of space in ack ring");
+		}
+		entries += nb_rx;
+		unsigned to_tx = 0;
+		for(unsigned i = 0; i < entries; i++) { //TODO this is dumb
+			struct rte_mbuf *curr_buf;
+			err = rte_ring_sc_dequeue(to_ack, (void **)&curr_buf);
+			assert(err == 0);
+			struct multi_header *header = rte_pktmbuf_mtod_offset(curr_buf, struct multi_header*,
+					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
+					+ sizeof(struct udp_hdr));
+			const uint16_t cols = header->cols;
+			struct OrderIndex *locations = (struct OrderIndex *)(char *)(&header->cols + 1); //how to top UB?
+			int append_finished = 1;
+			for(uint16_t j = 0; j < cols && append_finished; j++) {
+				append_finished = append_finished && (locations->index != 0);
+			}
+			if(append_finished) {
+				//TODO send in bursts
+				bufs[to_tx] = curr_buf;
+				to_tx += 1;
+				entries -= 1;
+			}
+			else {
+				rte_ring_sp_enqueue(to_ack, curr_buf);
+			}
+		}
+		if(to_tx > 0) {
+			//printf("acking %u\n", to_tx);
+			const uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
+			//TODO handle nb_tx
+			assert(nb_tx);
+		}
+	}
+}
+
+static __attribute__((noreturn)) int
+lcore_chain(__attribute__((unused)) void *arg) {
+#ifdef DELOS_BENCHMARK
+	uint64_t dist_dur[NUM_SAMPLES];
+	int iters = 0;
+#endif
+
+	const uint32_t local_ring_mask = ring_mask;
+	if (rte_eth_dev_socket_id(port) > 0 &&
+			rte_eth_dev_socket_id(port) != (int)rte_socket_id()) {
+		printf("WARNING, port %u is on remote NUMA node %u to "
+			"polling thread on %u.\n\tPerformance will "
+			"not be optimal.\n", port, rte_eth_dev_socket_id(port), rte_socket_id());
+	}
+
+	void *log = init_log();
+	const unsigned lcore_id = rte_lcore_id();
+	//int err = sched_setscheduler(0, SCHED_FIFO, &schedp);
+	//assert(err != -1 && "Could not set scheduler priority.");
+
+	const uint32_t score_id = core_id[lcore_id];
+	printf("Starting chain-server on core %u id %u log %p.\n", lcore_id, score_id, log);
+	struct rte_ring *ring = distributor_rings[score_id];
+	while(1) {
+		struct rte_mbuf *bufs[BURST_SIZE];
+#ifdef DELOS_BENCHMARK
+		uint64_t start_tsc = rte_rdtsc();
+#endif
+		const unsigned nb_rx = rte_ring_sc_dequeue_burst(ring, (void **)bufs, BURST_SIZE);
+
+		if (unlikely(nb_rx == 0)) continue;
+
+		for(unsigned i = 0; i < nb_rx; i++) {
+			struct rte_mbuf *mbuf = bufs[i];
+			struct write_header *data = rte_pktmbuf_mtod_offset(mbuf, struct write_header*,
+				sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr *));
+
+			if(unlikely(data->kind) == MULTIAPPEND_KIND) { //TODO unlikely?
+				handle_multiappend(score_id, local_ring_mask, log, data);
+				break;
+			}
+
+			{
+				struct ether_addr ether_temp;
+				struct ether_hdr *eth = rte_pktmbuf_mtod(mbuf, struct ether_hdr *);
+				ether_addr_copy(&eth->d_addr, &ether_temp);
+				ether_addr_copy(&eth->s_addr, &eth->d_addr);
+				ether_addr_copy(&ether_temp, &eth->s_addr);
+			}
+			{
+				struct ipv4_hdr *ip = rte_pktmbuf_mtod_offset(mbuf, struct ipv4_hdr *,
+						sizeof(struct ether_hdr));
+				uint32_t ip_temp = ip->dst_addr;
+				ip->dst_addr = ip->src_addr;
+				ip->src_addr = ip_temp;
+				//TODO checksum?
+			}
+			{
+				struct udp_hdr *udp = rte_pktmbuf_mtod_offset(mbuf, struct udp_hdr *,
+						sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)); //TODO IP IHL?
+				uint16_t udp_temp = udp->dst_port;
+				udp->dst_port = udp->src_port;
+				udp->src_port = udp_temp;
+				mbuf->ol_flags |= PKT_TX_UDP_CKSUM;
+			}
+
+			handle_packet(log, data);
 		}
 
 		unsigned to_tx = nb_rx;
@@ -222,37 +345,78 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 #endif
 	const unsigned lcore = rte_lcore_id();
 	const uint16_t rx_queue_id = 0;
+	assert(num_slave_cores < 65);
+	uint64_t multi_mask = 0; //TODO handle more than 64 cores? __int128?
+	for(uint32_t i = 0; i < num_slave_cores; i++) {
+		multi_mask |= 1 << i;
+	}
+
+	//int err = sched_setscheduler(0, SCHED_FIFO, &schedp);
+	//assert(err != -1);
 	printf("Starting distributor on lcore %u.\n", lcore);
 	while(1) {
+		//TODO handle chain 0
 		struct rte_mbuf *bufs[BURST_SIZE];
 
 #ifdef DELOS_BENCHMARK
 		uint64_t start_tsc = rte_rdtsc();
 #endif
 		const uint16_t nb_rx = rte_eth_rx_burst(port, rx_queue_id, bufs, BURST_SIZE);
-
 		if (unlikely(nb_rx == 0)) continue;
 
 		for(int i = 0; i < nb_rx; i++) {
 			struct rte_mbuf *mbuf = bufs[i];
 			//TODO prefetch?
-			struct delos_header *header = rte_pktmbuf_mtod_offset(mbuf, struct delos_header*,
+			delos_header *header = rte_pktmbuf_mtod_offset(mbuf, delos_header*,
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
 					+ sizeof(struct udp_hdr));
 			//printf("header\n\tchain %u\n\tentry %u\n\t kind %u\n", header->chain, header->entry, header->kind);
-			if(unlikely(header->kind) == 2) { //TODO header format...
-				//TODO transactions
+			if(unlikely(header->write.kind) == MULTIAPPEND_KIND) { //TODO header format...
+				//TODO non pow of 2 cores? transactions
 				//printf("dst_ring %u: %p\n", dst, dst_ring);
-				printf("ERROR, trasaction.\n");
-				rte_pktmbuf_refcnt_update(mbuf, num_slave_cores);
-				for(unsigned j = 0; j < num_slave_cores; j++) {
-					struct rte_ring* dst_ring = distributor_rings[j];
-					rte_ring_sp_enqueue(dst_ring, mbuf);
+				//printf("ERROR, trasaction.\n");
+				//rte_pktmbuf_refcnt_update(mbuf, num_slave_cores);
+				//printf("got multiappend\n");
+				struct multi_header* mheader = &header->multi;
+				uint16_t chains = mheader->cols;
+				if (chains > MAX_MULTIAPPEND_CHAINS) {
+					//TODO skip
+					assert(0 && "too much append");
 				}
+				if(chains == 0) {
+					printf("header {\n");
+					printf("\t        id = 0x%"PRIx64"%"PRIx64"\n;", mheader->id[0], mheader->id[1]);
+					printf("\t      kind = 0x%x\n;", mheader->kind);
+					printf("\t   padding = 0x%"PRIx8"\n;", mheader->padding[0]);
+					printf("\tdata_bytes = 0x%u\n;", mheader->data_bytes);
+					printf("\t dep_bytes = 0x%u\n;", mheader->dep_bytes);
+					printf("\t    chains = 0x%"PRIx16"\n;", mheader->cols);
+					printf("}\n");
+					assert(0 && "too little append");
+				}
+				//printf("it's valid\n");
+				struct OrderIndex *locations = (struct OrderIndex *)(char *)(&mheader->cols + 1);
+				uint64_t remaining_mask = multi_mask; //TODO handle chain 0
+				//for(uint16_t j = 0; j < chains; j++) {
+				//	printf("(%u, %u)\n", locations[j].order, locations[j].index);
+				//}
+				for(uint16_t j = 0; j < chains; j++) {
+					uint32_t dst = locations[j].order & ring_mask;
+					assert(locations[j].order != 0);
+					if((remaining_mask & (1 << dst)) != 0) {
+						//printf("multi sending %u to %u\n", locations[j].order, dst);
+						remaining_mask &= ~(1 << dst);
+						struct rte_ring* dst_ring = distributor_rings[dst];
+						rte_ring_sp_enqueue(dst_ring, mbuf);
+					}
+				}
+				rte_ring_sp_enqueue(to_multiappend_ack, mbuf);
 				//TODO ack immediately?
 			}
 			else {
-				uint32_t dst = header->flex.loc[0] & ring_mask;
+				struct write_header* wheader = &header->write;
+				uint32_t dst = wheader->loc[0] & ring_mask;
+				//printf("single sending %u to %u\n", wheader->loc[0], dst);
 				//if(rss_log(dst, header->chain, seen_set) != 0) rte_exit(EXIT_FAILURE, "chain dupe\n");
 				struct rte_ring* dst_ring = distributor_rings[dst];
 				rte_ring_sp_enqueue(dst_ring, mbuf);
@@ -288,11 +452,9 @@ int
 main(int argc, char **argv)
 {
 	int ret;
-	unsigned lcore_id;
+	unsigned lcore_id, ack_core_id = 0;
 	struct rte_mempool *packet_pool;
-	uint32_t num_slave_cores = 0;
 	uint32_t num_rings = 0;
-	uint32_t ring_mask = 0;
 
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
@@ -310,36 +472,47 @@ main(int argc, char **argv)
 	if (packet_pool == NULL) {
 		rte_exit(EXIT_FAILURE, "Cannot get memory pool for buffers due to %s\n", rte_strerror(rte_errno));
 	}
+	unsigned number_chain_cores = rte_lcore_count() - 2; //TODO
 	audit_pool = packet_pool;
 	{
+		uint32_t score_id = 0;
 		char ring_name[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-			core_id[lcore_id] = num_slave_cores;
-			snprintf(ring_name, 10, "d%u", num_slave_cores);
-			distributor_rings[num_slave_cores] = rte_ring_create(ring_name, 16, rte_socket_id(),
+			core_id[lcore_id] = score_id;
+			snprintf(ring_name, 10, "d%u", score_id);
+			if(score_id < number_chain_cores) {
+				distributor_rings[score_id] = rte_ring_create(ring_name, 16, rte_socket_id(),
 					RING_F_SP_ENQ | RING_F_SC_DEQ); //TODO size
-			if(distributor_rings[num_slave_cores] == NULL) {
-				rte_exit(EXIT_FAILURE, "Cannot init distributor ring %d memory "
-						"pool due to:\n\t%s\n", num_slave_cores, rte_strerror(rte_errno));
+				if(distributor_rings[score_id] == NULL) {
+					rte_exit(EXIT_FAILURE, "Cannot init distributor ring %d memory "
+						"pool due to:\n\t%s\n", score_id, rte_strerror(rte_errno));
+				}
 			}
-			num_slave_cores += 1;
+			else {
+				//last core acks multiappend packets
+				ack_core_id = lcore_id;
+				to_multiappend_ack = rte_ring_create(ring_name, 16, rte_socket_id(),
+					RING_F_SP_ENQ | RING_F_SC_DEQ);
+			}
+			score_id += 1;
 		}
+		assert(score_id == rte_lcore_count() - 1);
 	}
-	assert(num_slave_cores == rte_lcore_count() - 1);
-	num_rings = next_power_of_2(num_slave_cores);
+	num_rings = next_power_of_2(number_chain_cores);
 	ring_mask = num_rings - 1;
-	printf("num scores %d\n", num_slave_cores);
+	printf("num scores %u\n", rte_lcore_count() - 1);
+	printf("num ccores %u\n", number_chain_cores);
 	printf("num rings  %d\n", num_rings);
 	printf("ring mask  0x%x\n", ring_mask);
 
-	for(uint32_t i = num_slave_cores; i < num_rings; i++) {
-		distributor_rings[i] = distributor_rings[i % num_slave_cores];
+	for(uint32_t i = number_chain_cores; i < num_rings; i++) {
+		distributor_rings[i] = distributor_rings[i % number_chain_cores];
 	}
 	{
 		struct rte_eth_dev_info info;
 		int retval;
 		struct ether_addr addr;
-		const uint16_t rx_rings = 1, tx_rings = num_slave_cores;
+		const uint16_t rx_rings = 1, tx_rings = rte_lcore_count() - 1; //TODO
 		struct rte_eth_conf port_conf = {
 						.rxmode = {
 							.mq_mode	= ETH_MQ_RX_RSS,
@@ -415,12 +588,19 @@ main(int argc, char **argv)
 	//printf("mempool empty %d\n", rte_mempool_empty(packet_pool));
 
 	//seen_set = rss_log_init();
-	/* call lcore_hello() on every slave lcore */
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-		rte_eal_remote_launch(lcore_chain, NULL, lcore_id);
+	{
+		assert(ack_core_id > 0);
+		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+			if(lcore_id != ack_core_id) {
+				rte_eal_remote_launch(lcore_chain, NULL, lcore_id);
+			}
+			else {
+				rte_eal_remote_launch(lcore_ack, NULL, lcore_id);
+			}
+		}
 	}
 	//TODO delay...
-	distribute(ring_mask, num_slave_cores);
+	distribute(ring_mask, number_chain_cores);
 
 	rte_eal_mp_wait_lcore();
 	return 0;
