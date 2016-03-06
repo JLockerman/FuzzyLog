@@ -396,8 +396,8 @@ mod test {
         forget(handle);
 
         //const addr_str: &'static str = "172.28.229.152:13265";
-        //const addr_str: &'static str = "10.21.7.4:13265";
-        const addr_str: &'static str = "127.0.0.1:13265";
+        const addr_str: &'static str = "10.21.7.5:13265";
+        //const addr_str: &'static str = "127.0.0.1:13265";
 
         unsafe {
             UdpStore {

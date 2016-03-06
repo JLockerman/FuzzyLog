@@ -1,0 +1,2 @@
+change
+/proc/irq/*/... from ffff,ffffffff to fff,000ffffff

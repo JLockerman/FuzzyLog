@@ -355,8 +355,9 @@ impl<V: fmt::Debug> fmt::Debug for Entry<V> {
     }
 }
 
-impl<V> Clone for Entry<V>
-where V: Clone {
+impl<V> Copy for Entry<V> {}
+
+impl<V> Clone for Entry<V> {
     fn clone(&self) -> Self {
         //TODO
         unsafe {
@@ -365,6 +366,32 @@ where V: Clone {
             entr
         }
         //self.contents().clone_entry()
+    }
+}
+
+impl Clone for Entry<(), DataFlex> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        //TODO
+        unsafe {
+            let mut entr: Entry<(), DataFlex> = mem::uninitialized();
+            ptr::copy(self as *const _ as *const u8, &mut entr as *mut _ as *mut u8,
+                mem::size_of::<Entry<(), DataFlex<()>>>() + self.data_bytes as usize + self.dependency_bytes as usize);
+            entr
+        }
+    }
+}
+
+impl Clone for Entry<(), MultiFlex> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        //TODO
+        unsafe {
+            let mut entr: Entry<(), MultiFlex> = mem::uninitialized();
+            ptr::copy(self as *const _ as *const u8, &mut entr as *mut _ as *mut u8,
+                mem::size_of::<Entry<(), MultiFlex<()>>>() + self.data_bytes as usize + self.dependency_bytes as usize);
+            entr
+        }
     }
 }
 
