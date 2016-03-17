@@ -388,7 +388,7 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7, 3 => 8, 2 => 54]);
             }
 
-            //#[cfg(FALSE)]
+            #[cfg(FALSE)]
             #[test]
             fn test_threaded_multiput() {
                 let _ = env_logger::init();

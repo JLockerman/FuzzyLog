@@ -396,8 +396,8 @@ mod test {
         forget(handle);
 
         //const addr_str: &'static str = "172.28.229.152:13265";
-        //const addr_str: &'static str = "10.21.7.4:13265";
-        const addr_str: &'static str = "127.0.0.1:13265";
+        const addr_str: &'static str = "10.21.7.4:13265";
+        //const addr_str: &'static str = "127.0.0.1:13265";
 
         unsafe {
             UdpStore {
@@ -417,6 +417,17 @@ mod test {
     unsafe fn transmute_ref_mut<T, U>(t: &mut T) -> &mut U {
         assert_eq!(mem::size_of::<T>(), mem::size_of::<U>());
         mem::transmute(t)
+    }
+
+    #[bench]
+    fn many_writes(b: &mut Bencher) {
+        let mut store = new_store(vec![]);
+        let mut i = 0;
+        let entr = EntryContents::Data(&48u64, &*vec![]).clone_entry();
+        b.iter(|| {
+            store.insert((17.into(), i.into()), entr.clone());
+            i.wrapping_add(1);
+        });
     }
 /*
     #[test]
