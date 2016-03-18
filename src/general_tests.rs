@@ -65,7 +65,8 @@ macro_rules! general_tests {
                         last_index = log.append(1.into(), MapEntry(i * 2, i * 2), vec![]);
                         trace!("T1 inserted {:?} at {:?}", (i * 2, i * 2), last_index);
                     }
-                    log.append(2.into(), MapEntry(5, 17), vec![last_index]);
+                    let index2 = log.append(2.into(), MapEntry(5, 17), vec![last_index]);
+                    trace!("T1 inserted {:?} at {:?}", last_index, index2);
                 });
                 let join1 = thread::spawn(|| {
                     let mut log = FuzzyLog::new(s1, h1, HashMap::new());
@@ -74,7 +75,8 @@ macro_rules! general_tests {
                         last_index = log.append(1.into(), MapEntry(i * 2 + 1, i * 2 + 1), vec![]);
                         trace!("T2 inserted {:?} at {:?}", (i * 2 + 1, i * 2 + 1), last_index);
                     }
-                    log.append(2.into(), MapEntry(9, 20), vec![last_index]);
+                    let index2 = log.append(2.into(), MapEntry(9, 20), vec![last_index]);
+                    trace!("T2 inserted {:?} at {:?}", last_index, index2);
                 });
                 trace!("started threads");
                 join1.join().unwrap();

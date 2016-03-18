@@ -26,7 +26,7 @@ pub trait IsEntry<V> {
 
 pub type OrderIndex = (order, entry);
 
-pub type InsertResult = Result<(), InsertErr>;
+pub type InsertResult = Result<OrderIndex, InsertErr>;
 pub type GetResult<T> = Result<T, GetErr>;
 
 /*#[repr(u8)]
@@ -404,6 +404,7 @@ impl<'e, V: Clone> EntryContents<'e, V> {
             {
                 let e = &mut entr;
                 e.data_bytes = size_of::<V>() as u16;
+                assert_eq!(e.data_bytes as usize, size_of::<V>());
                 e.kind = self.kind();
                 let (data_ptr, data, deps) = match self {
                     &Data(data, deps) => {
@@ -521,9 +522,9 @@ where V: Copy, S: Store<V>, H: Horizon{
     pub fn try_append(&mut self, column: order, data: V, deps: Vec<OrderIndex>) -> Option<OrderIndex> {
         let next_entry = self.horizon.get_horizon(column);
         let insert_loc = (column, next_entry);
-        self.store.insert(insert_loc, Data(&data, &*deps).clone_entry()).ok().map(|_| {
-            self.horizon.update_horizon(column, next_entry);
-            insert_loc
+        self.store.insert(insert_loc, Data(&data, &*deps).clone_entry()).ok().map(|loc| {
+            self.horizon.update_horizon(column, loc.1);
+            loc
         })
     }
 
@@ -534,9 +535,15 @@ where V: Copy, S: Store<V>, H: Horizon{
         while !inserted {
             next_entry = next_entry + 1; //TODO jump ahead
             insert_loc = (column, next_entry);
-            inserted = self.store.insert(insert_loc, ent.clone_entry()).is_ok();
+            inserted = match self.store.insert(insert_loc, ent.clone_entry()) {
+                Err(..) => false,
+                Ok(loc) => {
+                    insert_loc = loc;
+                    true
+                }
+            }
         }
-        self.horizon.update_horizon(column, next_entry);
+        self.horizon.update_horizon(column, insert_loc.1);
         insert_loc
     }
 
@@ -544,7 +551,7 @@ where V: Copy, S: Store<V>, H: Horizon{
         let columns: Vec<OrderIndex> = columns.into_iter().map(|i| (i, 0.into())).collect();
         self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
         for &(column, _) in &*columns {
-            let next_entry =  self.horizon.get_horizon(column) + 1; //TODO
+            let next_entry = self.horizon.get_horizon(column) + 1; //TODO
             self.horizon.update_horizon(column, next_entry); //TODO
         }
     }
@@ -561,8 +568,8 @@ where V: Copy, S: Store<V>, H: Horizon{
                 trace!("Multiput");
                 self.read_multiput(column, data, uuid, columns);
             }
-            Data(data, _) => {
-                trace!("Data");
+            Data(data, deps) => {
+                trace!("Data {:?}", deps);
                 self.upcalls.get(&column).map(|f| f(data.clone())); //TODO clone
             }
         }
@@ -628,10 +635,16 @@ where V: Copy, S: Store<V>, H: Horizon{
 
     pub fn play_foward(&mut self, column: order) -> Option<OrderIndex> {
         trace!("play_foward");
-        let index = self.horizon.get_horizon(column);
-        if index == 0.into() { return None }//TODO
-        self.play_until((column, index));
-        Some((column, index))
+        //let index = self.horizon.get_horizon(column);
+        //trace!("play until {:?}", index);
+        //if index == 0.into() { return None }//TODO
+        //self.play_until((column, index));
+        //Some((column, index))
+        let mut res = None;
+        while let Some(index) = self.get_next_unseen(column) {
+            res = Some(index);
+        }
+        res
     }
 
     pub fn local_horizon(&self) -> &HashMap<order, entry> {

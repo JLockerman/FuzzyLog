@@ -49,7 +49,7 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
         let start_time = precise_time_ns() as i64;
         'send: loop {
             {
-                trace!("sending");
+                trace!("sending append");
                 self.socket.send_to(self.send_buffer.bytes(), &self.server_addr)
                     .expect("cannot send insert"); //TODO
             }
@@ -70,7 +70,7 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
                         EntryKind::Data => { //TODO types?
                             trace!("correct response");
                             let entr = unsafe { self.receive_buffer.as_data_entry() };
-                            if entr.flex.loc == key {
+                            if entr.id == request_id {
                                 //let rtt = precise_time_ns() as i64 - start_time;
                                 //self.rtt = ((self.rtt * 4) / 5) + (rtt / 5);
                                 let sample_rtt = precise_time_ns() as i64 - start_time;
@@ -78,8 +78,9 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
                                 self.dev = self.dev + (diff.abs() - self.dev) / 4;
                                 self.rtt = self.rtt + (diff * 4 / 5);
                                 if entr.id == request_id {
-                                    trace!("write success");
-                                    return Ok(())
+                                    trace!("write success @ {:?}", entr.flex.loc);
+                                    trace!("packet {:#?}", self.receive_buffer);
+                                    return Ok(entr.flex.loc)
                                 }
                                 trace!("already written");
                                 return Err(InsertErr::AlreadyWritten)
@@ -128,7 +129,7 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
         trace!("at {:?}", self.socket.local_addr());
         'send: loop {
             {
-                trace!("sending");
+                trace!("sending get");
                 self.socket.send_to(self.send_buffer.bytes(), &self.server_addr)
                     .expect("cannot send get"); //TODO
             }
@@ -147,6 +148,7 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
                         //TODO base on loc instead?
                         if unsafe { self.receive_buffer.as_data_entry_mut().flex.loc } == key {
                             trace!("correct response");
+                            trace!("packet {:#?}", self.receive_buffer);
                             return Ok(*self.receive_buffer.clone())
                         }
                         trace!("wrong loc {:?}, expected {:?}",
@@ -240,7 +242,7 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
                                 let diff = sample_rtt - self.rtt;
                                 self.dev = self.dev + (diff.abs() - self.dev) / 4;
                                 self.rtt = self.rtt + (diff * 4 / 5);
-                                return Ok(())
+                                return Ok((0.into(), 0.into())) //TODO
                             }
                             else {
                                 trace!("?? packet {:?}", self.receive_buffer);

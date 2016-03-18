@@ -56,7 +56,7 @@ impl<V: Clone> Store<V> for LocalStore<V> {
             Vacant(v) => {
                 v.insert(val);
                 self.horizon.insert(key.0, key.1 + 1);
-                Ok(())
+                Ok(key)
             }
         }
     }
@@ -77,7 +77,7 @@ impl<V: Clone> Store<V> for LocalStore<V> {
             };
             self.insert((chain, horizon), entr.clone_entry());
         }
-        Ok(())
+        Ok((0.into(), 0.into()))
     }
 }
 

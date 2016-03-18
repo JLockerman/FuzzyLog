@@ -271,6 +271,7 @@ lcore_chain(__attribute__((unused)) void *arg) {
 	const unsigned lcore_id = rte_lcore_id();
 	//int err = sched_setscheduler(0, SCHED_FIFO, &schedp);
 	//assert(err != -1 && "Could not set scheduler priority.");
+	int packet_id = 0;
 
 	const uint32_t score_id = core_id[lcore_id];
 	printf("Starting chain-server on core %u id %u log %p.\n", lcore_id, score_id, log);
@@ -316,6 +317,51 @@ lcore_chain(__attribute__((unused)) void *arg) {
 				udp->dst_port = udp->src_port;
 				udp->src_port = udp_temp;
 				mbuf->ol_flags |= PKT_TX_UDP_CKSUM;
+			}
+			//printf("%d\n", score_id);
+			if(score_id == 1) {
+				uint8_t *bytes = rte_pktmbuf_mtod(mbuf, uint8_t *);
+				printf("packet id: %d.", packet_id);
+				for(int i = 0; i < 48; i += 2) {
+					if (i % 16 == 0) printf("\n");
+					printf("%02" PRIx8 "%02" PRIx8 " ", bytes[i], bytes[i + 1]);
+				}
+				printf("\n");
+				struct ether_hdr *eth = rte_pktmbuf_mtod(mbuf, struct ether_hdr *);
+				struct ipv4_hdr *ip = rte_pktmbuf_mtod_offset(mbuf, struct ipv4_hdr *,
+						sizeof(struct ether_hdr));
+				//struct udp_hdr *udp = rte_pktmbuf_mtod_offset(mbuf, struct udp_hdr *,
+				//		sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr));
+
+				printf("ether header {\n");
+				printf("\tdest: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+						" %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
+						eth->d_addr.addr_bytes[0], eth->d_addr.addr_bytes[1],
+						eth->d_addr.addr_bytes[2], eth->d_addr.addr_bytes[3],
+						eth->d_addr.addr_bytes[4], eth->d_addr.addr_bytes[5]);
+				printf("\t src: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+						" %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
+						eth->s_addr.addr_bytes[0], eth->s_addr.addr_bytes[1],
+						eth->s_addr.addr_bytes[2], eth->s_addr.addr_bytes[3],
+						eth->s_addr.addr_bytes[4], eth->s_addr.addr_bytes[5]);
+				printf("}\n");
+				printf("ip header {\n");
+				printf("\tversion_ihl: %02" PRIx8 "\n", ip->version_ihl);
+				printf("\ttype_of_service: %02" PRIx8 "\n", ip->type_of_service);
+				printf("\ttotal_length: %04" PRIx16 "\n", ip->total_length);
+				printf("\tpacket_id: %04" PRIx16 "\n", ip->packet_id);
+				printf("\tfragment_offset: %04" PRIx16 "\n", ip->fragment_offset);
+				printf("\ttime_to_live: %02" PRIx8 "\n", ip->time_to_live);
+				printf("\tnext_proto_id: %02" PRIx8 "\n", ip->next_proto_id);
+				printf("\thdr_checksum: %02" PRIx8 "\n", ip->hdr_checksum);
+				printf("\tsrc_addr: %08x\n", ip->src_addr);
+				printf("\tdst_addr: %08x\n", ip->dst_addr);
+				printf("}\n");
+
+				printf("mbuf {\n");
+				printf("}\n");
+
+				packet_id += 1;
 			}
 
 			handle_packet(log, data);
