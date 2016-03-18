@@ -1,6 +1,8 @@
 #![feature(unique)]
 #![feature(std_panic)]
 #![feature(panic_handler)]
+#![feature(core_intrinsics)]
+#![feature(asm)]
 
 #![feature(test)]
 //#![cfg_attr(test, feature(test))]
@@ -15,12 +17,12 @@ extern crate fuzzy_log;
 
 use std::collections::HashMap;
 //use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::{mem, ptr, panic};
+use std::{mem, ptr, panic, intrinsics};
 
 //use trie::Trie;
 //use trie::Entry::{Occupied, Vacant};
-use mempool_trie::Trie;
-use mempool_trie::Entry::{Occupied, Vacant};
+use mempool_trie2::Trie;
+use mempool_trie2::Entry::{Occupied, Vacant};
 
 //use std::collections::BTreeMap;
 //use std::collections::btree_map::Entry::{Occupied, Vacant};
@@ -31,27 +33,113 @@ use std::sync::Mutex;
 use fuzzy_log::prelude::*;
 //use fuzzy_log::udp_store::*;
 
-pub mod trie;
-pub mod mempool_trie;
+//mod trie;
+//mod mempool_trie;
+mod mempool_trie2;
 
+#[repr(C)]
 pub struct Log<F=[u8; MAX_DATA_LEN2]> {
-    horizon: HashMap<order, entry>,
+    log: Trie<Trie<Entry<(), F>>>,//TODO
+//    horizon: HashMap<order, entry>,
     //log: HashMap<OrderIndex, Box<Entry<(), F>>>,
-    log: Trie<Entry<(), F>>,
+}
+
+extern "C" {
+    fn ualloc_seg() -> *mut u8;
+    fn cmemcpy(dst: *mut u8, src: *const u8, count: usize);
+    fn cappend_size(log: &mut Trie<Entry<(), DataFlex>>, val: &Entry<(), DataFlex>, count: isize) -> (u32, &mut Entry<(), DataFlex>);
 }
 
 #[no_mangle]
 pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), DataFlex>)
 {
     trace!("{:#?}", packet.kind);
+    //TODO
     let (kind, loc) = {
         (packet.kind, packet.flex.loc)
     };
 
-    if kind & EntryKind::Layout == EntryKind::Multiput {
-        trace!("bad packet");
-        return
+    if kind & EntryKind::Layout == EntryKind::Data {
+        packet.kind = kind | EntryKind::ReadSuccess;
+        //let (ent, ptr) = log.log.entry(loc.0.into()).or_insert(Trie::new()).append(packet.clone());
+        let (ent, ptr) = log.log.entry(loc.0.into())
+            .or_insert_with(|| { let mut t =  Trie::new(); t.append_size(packet, 0); t } )
+            .append_size(packet, data_entry_size(packet));
+        //let chain = log.log.entry(loc.0.into()).or_insert(Trie::new());
+        //let (ent, ptr) = unsafe { cappend_size(chain, packet, entry_size(packet) as isize) };
+        ptr.flex.loc.1 = ent.into(); //TODO
+        packet.flex.loc.1 = ent.into(); 
     }
+    else {
+        match log.log.entry(loc.0.into()).or_insert(Trie::new()).entry(loc.1.into()) {
+            Occupied(e) => {
+                trace!("Occupied entry {:?}", loc);
+                unsafe {
+                    let val = e.get();
+                    //ptr::copy_nonoverlapping((&*val) as *const _ as *const u8,
+                    //    packet as *mut _ as *mut u8, entry_size(packet));
+                    cmemcpy(packet as *mut _ as *mut u8, (&*val) as *const _ as *const u8, data_entry_size(&*val));
+                    packet.kind = packet.kind | EntryKind::ReadSuccess;
+                }
+            }
+            _ => {
+                trace!("?@ {:?}", loc)
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn data_entry_size<V>(e: &Entry<V, DataFlex>) -> usize {
+    mem::size_of::<Entry<(), DataFlex<()>>>() + e.data_bytes as usize
+        + e.dependency_bytes as usize
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn handle_multiappend(core_id: u32, ring_mask: u32,
+    log: &mut Log<MultiFlex>, packet: *mut Entry<(), MultiFlex>)
+{
+    let num_cols = (*packet).flex.cols; //TODO len
+    let mut cols = &mut (*packet).flex.data as *mut _ as *mut OrderIndex;
+    //packet.kind = kind | EntryKind::ReadSuccess;
+    for _ in 0..num_cols {
+        trace!("append? {:?} & {:?} == {:?} ?= {:?}, {:?}", (*cols).0, ring_mask, (*cols).0 & ring_mask, core_id, (*cols).0 & ring_mask == core_id.into());
+        if (*cols).0 & ring_mask == core_id.into() {
+            unsafe {
+                //use std::intrinsics::atomic_store_rel;
+                let (ent, ptr) = unsafe { log.log.entry((*cols).0.into())
+                    .or_insert_with(|| { let mut t =  Trie::new(); t.append_size(&*packet, 0); t } )
+                    .append_size(&*packet, multi_entry_size(&*packet)) };
+                ptr::write(&mut(*cols).1, ent.into()); //TODO
+                trace!("appended at {:?}", *cols);
+                //atomic_store_rel(&mut(*cols).1, ent.into());
+                ptr.kind = ptr.kind | EntryKind::ReadSuccess;
+            }
+        }
+        cols = cols.offset(1)
+    }
+}
+
+#[inline(always)]
+fn multi_entry_size<V>(e: &Entry<V, MultiFlex>) -> usize {
+    mem::size_of::<Entry<(), MultiFlex<()>>>() + e.data_bytes as usize
+        + e.dependency_bytes as usize + (e.flex.cols as usize * mem::size_of::<OrderIndex>())
+}
+
+#[cfg(False)]
+#[no_mangle]
+pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), DataFlex>)
+{
+    trace!("{:#?}", packet.kind);
+    //TODO
+    let (kind, loc) = {
+        (packet.kind, packet.flex.loc)
+    };
+
+    //if kind & EntryKind::Layout == EntryKind::Multiput {
+    //    trace!("bad packet");
+    //    return
+    //}
 
     //match log.log.entry(loc) {
     match log.log.entry(order_index_to_u64(loc)) {
@@ -59,23 +147,20 @@ pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), 
             trace!("Vacant entry {:?}", loc);
             match kind & EntryKind::Layout {
                 EntryKind::Data => {
-                    trace!("writing");
-                    //t.set_kind(Kind::Written);
-                    //let data: Box<Entry<_, DataFlex>> = unsafe {
-                        //let mut ptr = Box::new(mem::uninitialized());
-                        //ptr::copy_nonoverlapping(packet, &mut *ptr, 1);
-                        //ptr.kind = kind | EntryKind::ReadSuccess;
-                        //ptr
-                    //};
+                    let seg = unsafe { ualloc_seg() };
+                    //trace!("writing");
                     unsafe {
-                        let mut ptr = e.insert_with(|| packet.clone());
-                        //ptr::copy_nonoverlapping(packet, ptr, 1);
-                        ptr.kind = kind | EntryKind::ReadSuccess
+                        packet.kind = kind | EntryKind::ReadSuccess;
+                        //let mut ptr = e.insert_with(|| packet.clone(), seg);
+                        let mut ptr = e.insert_with(|| mem::uninitialized(), seg);
+                        ptr::copy_nonoverlapping::<Entry<_, _>>(packet, ptr, 1)
                     }
                 }
                 _ => {
-                    trace!("not write");
-                    //packet.set_kind(unoccupied_response(kind));
+                    //if loc.0 == 0.into() {
+                    //   println!("not write @ {:?}", loc);
+                    //}
+                    trace!("not write @ {:?}", loc);
                 }
             }
         }
@@ -93,6 +178,7 @@ pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), 
 }
 
 #[no_mangle]
+#[cfg(False)]
 pub unsafe extern "C" fn handle_multiappend(core_id: u32, ring_mask: u32,
     log: &mut Log<MultiFlex>, packet: *mut Entry<(), MultiFlex>)
 {
@@ -133,13 +219,12 @@ pub unsafe extern "C" fn handle_multiappend(core_id: u32, ring_mask: u32,
 
 #[no_mangle]
 pub extern "C" fn init_log() -> Box<Log> {
-    use mempool_trie::test::from_hash_map;
     panic::set_handler(|p| {
             println!("{:?} at {:?}:{:?}", p.payload(), p.location().unwrap().file(), p.location().unwrap().line());
     });
 	assert_eq!(mem::size_of::<Box<Log>>(), mem::size_of::<*mut u8>());
 	let log = Box::new(Log{
-	        horizon: HashMap::new(),
+	        //horizon: HashMap::new(),
 	        //log: HashMap::new(),
 	        //log: HashMap::with_capacity(12000000),
 	        log: Trie::new(),

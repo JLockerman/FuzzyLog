@@ -287,7 +287,7 @@ impl<V, F> Entry<V, F> {
         transmute_ref_mut(self)
     }
 
-    fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
+    pub fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
         match self.contents() {
             Data(_, ref deps) => &deps,
             Multiput{ref deps, ..} => deps,

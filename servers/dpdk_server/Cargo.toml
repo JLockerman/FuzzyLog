@@ -12,3 +12,8 @@ fuzzy_log = {path = "../.."}
 
 [lib]
 crate-type = ["staticlib"]
+
+[profile.release]
+#lto = true
+opt-level = 3
+rustc-args= "-C target-cpu=native"

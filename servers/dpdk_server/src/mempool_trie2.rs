@@ -1,31 +1,92 @@
 // use std::borrow::Borrow;
 // use std::fmt;
 use std::{mem, ptr};
-use std::cell::UnsafeCell;
 // use std::ops::{Deref, DerefMut};
 use std::ptr::Unique;
+use std::ops::{Deref, DerefMut};
 
 pub struct Trie<V> {
-    array: RootEdge<V>, // is an array
+    root: RootEdge<V>, // is an array
 }
 
-type RootEdge<V> = Option<Unique<[L1Edge<V>; ARRAY_SIZE]>>;
-type L1Edge<V> = Option<Unique<[L2Edge<V>; ARRAY_SIZE]>>;
-type L2Edge<V> = Option<Unique<[L3Edge<V>; ARRAY_SIZE]>>;
-type L3Edge<V> = Option<Unique<[L4Edge<V>; ARRAY_SIZE]>>;
-type L4Edge<V> = Option<Unique<[L5Edge<V>; ARRAY_SIZE]>>;
-type L5Edge<V> = Option<Unique<[L6Edge<V>; ARRAY_SIZE]>>;
-type L6Edge<V> = Option<Unique<[ValEdge<V>; ARRAY_SIZE]>>;
-type ValEdge<V> = Option<Unique<V>>;
+// type RootEdge<V> = Option<Unique<[L1Edge<V>; ARRAY_SIZE]>>;
+type RootEdge<V> = Option<P<RootTable<V>>>;
+type L1Edge<V> = Option<P<[L2Edge<V>; ARRAY_SIZE]>>;
+type L2Edge<V> = Option<P<[L3Edge<V>; ARRAY_SIZE]>>;
+type L3Edge<V> = Option<P<[ValEdge<V>; ARRAY_SIZE]>>;
+type ValEdge<V> = Option<P<V>>;
+
+struct P<V>(Unique<V>);
+
+impl<V> P<V> {
+    unsafe fn new(ptr: *mut V) -> P<V> {
+        P(Unique::new(ptr))
+    }
+
+    unsafe fn increment(&mut self, count: isize) {
+        self.0 = Unique::new(self.0.offset(count));
+    }
+
+    unsafe fn increment_by(&mut self, count: isize) {
+        self.0 = Unique::new((*self.0 as *mut u8).offset(count) as *mut _);
+    }
+
+    //TODO
+    fn as_ptr(&mut self) -> *mut V {
+        unsafe { *(self.0) }
+    }
+}
+
+impl<V> Deref for P<V> {
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &**(self.0) }
+    }
+}
+impl<V> DerefMut for P<V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut **(self.0) }
+    }
+}
+
+impl<V> Clone for P<V> {
+    fn clone(&self) -> Self {
+        unsafe { P::new(*self.0) }
+    }
+}
+
+struct RootTable<V> {
+    l3: P<ValEdge<V>>,
+    l2: P<L3Edge<V>>,
+    l1: P<L2Edge<V>>,
+    array: [L1Edge<V>; 3],
+    next_entry: u32,
+    alloc: P<V>,
+    alloc_rem: isize, //should be ptrdiff_t?
+}
+
+impl<V> Deref for RootTable<V> {
+    type Target = [L1Edge<V>; 3];
+
+    fn deref(&self) -> &Self::Target {
+        let &RootTable {ref array, ..} = self;
+        array
+    }
+}
+impl<V> DerefMut for RootTable<V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let &mut RootTable {ref mut array, ..} = self;
+        array
+    }
+}
 
 const ARRAY_SIZE: usize = 8192 / 8;
-const MASK: u64 = ARRAY_SIZE as u64 - 1;
+const MASK: u32 = ARRAY_SIZE as u32 - 1;
 const SHIFT_LEN: u8 = 10;
-const MAX_DEPTH: u8 = 7;
-const ROOT_SHIFT: u8 = 60;
-//const MAX_SHIFT: u8 = 54;
-// 54, 44, 34, 24, 14, 4
-// 60, 50, 40, 30, 20, 10, 0
+// const MAX_DEPTH: u8 = 7;
+const ROOT_SHIFT: u8 = 30;
+// 30, 20, 10, 0
 //  R,  1,  2,  3,  4,  5, v
 // 1...7
 
@@ -36,7 +97,7 @@ macro_rules! index {
             assert!(index < ARRAY_SIZE, "index: {}", index);
             match *$array {
                 None => return None,
-                Some(ref ptr) => &(***ptr)[index],
+                Some(ref ptr) => &(**ptr)[index],
             }
         }
     };
@@ -48,11 +109,11 @@ macro_rules! insert {
             let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE);
             let l = &mut match *$array {
-                Some(ref mut ptr) => &mut ***ptr,
+                Some(ref mut ptr) => &mut **ptr,
                 ref mut slot => {
                     //*slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
-                    *slot = Some(Unique::new(alloc_seg() as *mut _));
-                    &mut ***slot.as_mut().unwrap()
+                    *slot = Some(P::new(alloc_seg() as *mut _));
+                    &mut **slot.as_mut().unwrap()
                 }
             }[index];
             l
@@ -72,7 +133,7 @@ macro_rules! entry {
             let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE);
             match *$array {
-                Some(ref mut ptr) => &mut (***ptr)[index],
+                Some(ref mut ptr) => &mut (**ptr)[index],
                 ref mut none => {
                     return Entry::Vacant(VacantEntry($k, Vacancy::$constructor(none)))
                 }
@@ -83,19 +144,141 @@ macro_rules! entry {
 
 impl<V> Trie<V> {
     pub fn new() -> Self {
-        Trie { array: None }
+        Trie { root: None }
     }
 
-    pub fn insert(&mut self, k: u64, v: V) -> Option<V> {
-        // 70
+    pub fn append(&mut self, v: V) -> (u32, &mut V) {
+        unsafe {
+            let root: &mut RootTable<_> = match self.root {
+                Some(ref mut root) => &mut *root,
+                ref mut none => {
+                    let ptr = alloc_seg() as *mut _;
+                    *ptr = mem::zeroed();
+                    *none = Some(P::new(ptr));
+                    &mut *ptr
+                }
+            };
+            let storage_size = mem::size_of::<V>() as isize; // FIXME
+            assert!(8192 >= storage_size);
+            let mut ptr = if root.alloc_rem >= storage_size {
+                let ptr = root.alloc.clone();
+                root.alloc.increment_by(storage_size);
+                root.alloc_rem = root.alloc_rem.saturating_sub(storage_size);
+                ptr
+            } else {
+                root.alloc = P::new(alloc_seg() as *mut _);
+                root.alloc_rem = 8192 - storage_size; //TODO
+                let ptr = root.alloc.clone();
+                root.alloc.increment_by(storage_size);
+                ptr
+            };
+            *ptr = v;
+            let next_entry = root.next_entry;
+            if next_entry & 0x3FFFFFFF == 0 {
+                // new l2
+                let l1_ptr: *mut [L2Edge<V>; ARRAY_SIZE] = alloc_seg() as *mut _;
+                root.l1 = P::new(&mut (*l1_ptr)[0]);
+                let index = (next_entry >> ROOT_SHIFT) & MASK;
+                assert!(index < 4);
+                (*root)[index as usize] = Some(P::new(l1_ptr));
+            }
+            if next_entry & 0xfffff == 0 {
+                // new l3
+                let l2_ptr: *mut [L3Edge<V>; ARRAY_SIZE] = alloc_seg() as *mut _;
+                root.l2 = P::new(&mut (*l2_ptr)[0]);
+                *root.l1 = Some(P::new(l2_ptr));
+                root.l1.increment(1);
+            }
+            if next_entry & 0x3ff == 0 {
+                // new val
+                let l3_ptr: *mut [ValEdge<V>; ARRAY_SIZE] = alloc_seg() as *mut _;
+                root.l3 = P::new(&mut (*l3_ptr)[0]);
+                *root.l2 = Some(P::new(l3_ptr));
+                root.l2.increment(1);
+            }
+            // fill val
+            *root.l3 = Some(ptr.clone());
+            root.l3.increment(1);
+            root.next_entry += 1;
+            unsafe fn extend_lifetime<'a, 'b, V>(src: &'a mut V) -> &'b mut V {
+                mem::transmute(src)
+            }
+            (next_entry, extend_lifetime(&mut *ptr))
+        }
+    }
+
+    pub fn append_size(&mut self, v: &V, size: usize) -> (u32, &mut V) {
+        unsafe {
+            let root: &mut RootTable<_> = match self.root {
+                Some(ref mut root) => &mut *root,
+                ref mut none => {
+                    let ptr = alloc_seg() as *mut _;
+                    //*ptr = mem::zeroed();
+                    *none = Some(P::new(ptr));
+                    &mut *ptr
+                }
+            };
+            let storage_size = size as isize; // FIXME
+            assert!(8192 >= storage_size);
+            let mut ptr = if root.alloc_rem >= storage_size {
+                let ptr = root.alloc.clone();
+                root.alloc.increment_by(storage_size);
+                root.alloc_rem = root.alloc_rem.saturating_sub(storage_size);
+                ptr
+            } else {
+                root.alloc = P::new(alloc_seg() as *mut _);
+                root.alloc_rem = 8192 - storage_size; //TODO
+                let ptr = root.alloc.clone();
+                root.alloc.increment_by(storage_size);
+                ptr
+            };
+            //ptr::copy_nonoverlapping(v as *const _ as *const u8, ptr.as_ptr() as *mut u8, size);
+            cmemcpy(ptr.as_ptr() as *mut u8, v as *const _ as *const u8, size);
+            let next_entry = root.next_entry;
+            if next_entry & 0x3FFFFFFF == 0 {
+                // new l2
+                let l1_ptr: *mut [L2Edge<V>; ARRAY_SIZE] = alloc_seg() as *mut _;
+                root.l1 = P::new(&mut (*l1_ptr)[0]);
+                let index = (next_entry >> ROOT_SHIFT) & MASK;
+                assert!(index < 4);
+                (*root)[index as usize] = Some(P::new(l1_ptr));
+            }
+            if next_entry & 0xfffff == 0 {
+                // new l3
+                let l2_ptr: *mut [L3Edge<V>; ARRAY_SIZE] = alloc_seg() as *mut _;
+                root.l2 = P::new(&mut (*l2_ptr)[0]);
+                *root.l1 = Some(P::new(l2_ptr));
+                root.l1.increment(1);
+            }
+            if next_entry & 0x3ff == 0 {
+                // new val
+                let l3_ptr: *mut [ValEdge<V>; ARRAY_SIZE] = alloc_seg() as *mut _;
+                root.l3 = P::new(&mut (*l3_ptr)[0]);
+                *root.l2 = Some(P::new(l3_ptr));
+                root.l2.increment(1);
+            }
+            // fill val
+            *root.l3 = None;
+            *root.l3 = Some(ptr.clone());
+            root.l3.increment(1);
+            root.next_entry += 1;
+            unsafe fn extend_lifetime<'a, 'b, V>(src: &'a mut V) -> &'b mut V {
+                mem::transmute(src)
+            }
+            (next_entry, extend_lifetime(&mut *ptr))
+        }
+    }
+
+    #[allow(dead_code)]
+    fn insert(&mut self, k: u32, v: V) -> Option<V> {
         unsafe {
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index < ARRAY_SIZE);
-            let l1 = &mut match self.array {
+            assert!(root_index < 3);
+            let l1 = &mut match self.root {
                 Some(ref mut ptr) => &mut ***ptr,
                 ref mut slot => {
-                    //*slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
-                    *slot = Some(Unique::new(alloc_seg() as *mut _));
+                    // *slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
+                    *slot = Some(P::new(alloc_seg() as *mut _));
                     &mut ***slot.as_mut().unwrap()
                 }
             }[root_index];
@@ -105,67 +288,58 @@ impl<V> Trie<V> {
             // let l1 = &mut (***self.array.as_mut().unwrap())[root_index];
             let l2 = insert!(l1, k, 1);
             let l3 = insert!(l2, k, 2);
-            let l4 = insert!(l3, k, 3);
-            let l5 = insert!(l4, k, 4);
-            let l6 = insert!(l5, k, 5);
-            let val_ptr = insert!(l6, k, 6);
+            let val_ptr = insert!(l3, k, 3);
             if (*val_ptr).is_none() {
-                //let ptr = Box::new(v);
+                // let ptr = Box::new(v);
                 let ptr = alloc_seg(); //TODO
                 ptr::copy_nonoverlapping(&v, ptr as *mut _, 1);
-                //*val_ptr = Some(Unique::new(Box::into_raw(ptr)));
-                *val_ptr = Some(Unique::new(ptr as *mut _));
+                // *val_ptr = Some(Unique::new(Box::into_raw(ptr)));
+                *val_ptr = Some(P::new(ptr as *mut _));
                 None
             } else if let Some(ref mut val) = *val_ptr {
-                Some(mem::replace(&mut ***val, v))
+                Some(mem::replace(&mut **val, v))
             } else {
                 unreachable!()
             }
         }
     }
 
-    pub fn get(&self, k: u64) -> Option<&V> {
+    pub fn get(&self, k: u32) -> Option<&V> {
         unsafe {
             // let root = self.array;
             // let l1_ptr = index!(root, k, 1);
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index < ARRAY_SIZE);
-            let l1 = match self.array {
+            assert!(root_index < 3);
+            let l1 = match self.root {
                 None => return None,
                 Some(ref ptr) => &(***ptr)[root_index],
             };
 
             let l2 = index!(l1, k, 1);
             let l3 = index!(l2, k, 2);
-            let l4 = index!(l3, k, 3);
-            let l5 = index!(l4, k, 4);
-            let l6 = index!(l5, k, 5);
-            let val_ptr = index!(l6, k, 6);
+            let val_ptr = index!(l3, k, 3);
             match &*val_ptr {
                 &None => None,
-                &Some(ref v) => Some(&***v),
+                &Some(ref v) => Some(&**v),
             }
         }
     }
 
     #[inline(always)]
-    pub fn entry(&mut self, k: u64) -> Entry<V> {
+    pub fn entry(&mut self, k: u32) -> Entry<V> {
         unsafe {
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index < ARRAY_SIZE);
-            let l1 = match self.array {
+            assert!(root_index < 3);
+            let l1 = match self.root {
                 Some(ref mut ptr) => &mut (***ptr)[root_index],
                 ref mut none => return Entry::Vacant(VacantEntry(k, Vacancy::L0(none))),
             };
 
             let l2 = entry!(l1, k, 1, L1);
             let l3 = entry!(l2, k, 2, L2);
-            let l4 = entry!(l3, k, 3, L3);
-            let l5 = entry!(l4, k, 4, L4);
-            let l6 = entry!(l5, k, 5, L5);
-            let val_ptr = entry!(l6, k, 6, L6);
+            let val_ptr = entry!(l3, k, 3, L3);
             match *val_ptr {
-                Some(ref mut ptr) => Entry::Occupied(OccupiedEntry(&mut ***ptr)),
+                Some(ref mut ptr) => Entry::Occupied(OccupiedEntry(&mut **ptr)),
                 ref mut none => Entry::Vacant(VacantEntry(k, Vacancy::Val(none))),
             }
         }
@@ -178,7 +352,7 @@ pub enum Entry<'a, V: 'a> {
 }
 
 pub struct OccupiedEntry<'a, V: 'a>(&'a mut V);
-pub struct VacantEntry<'a, V: 'a>(u64, Vacancy<'a, V>);
+pub struct VacantEntry<'a, V: 'a>(u32, Vacancy<'a, V>);
 
 impl<'a, V: 'a> Entry<'a, V> {
     pub fn or_insert(self, default: V) -> &'a mut V {
@@ -201,7 +375,7 @@ impl<'a, V: 'a> Entry<'a, V> {
         use self::Entry::*;
         match self {
             Occupied(e) => e.insert_with(default),
-            Vacant(e) => unsafe {e.insert_with(default, ualloc_seg()) },
+            Vacant(e) => unsafe { e.insert_with(default, ualloc_seg()) },
         }
     }
 }
@@ -222,7 +396,7 @@ impl<'a, V: 'a> OccupiedEntry<'a, V> {
     pub fn insert(&mut self, v: V) -> V {
         mem::replace(self.0, v)
     }
-    
+
     pub fn insert_with<F: FnOnce() -> V>(self, default: F) -> &'a mut V {
         *self.0 = default();
         self.into_mut()
@@ -234,9 +408,6 @@ enum Vacancy<'a, V: 'a> {
     L1(&'a mut L1Edge<V>),
     L2(&'a mut L2Edge<V>),
     L3(&'a mut L3Edge<V>),
-    L4(&'a mut L4Edge<V>),
-    L5(&'a mut L5Edge<V>),
-    L6(&'a mut L6Edge<V>),
     Val(&'a mut ValEdge<V>),
 }
 
@@ -244,14 +415,14 @@ macro_rules! fill_entry {
     ($array:ident, $k:expr, $depth:expr, body) => {
         {
             let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
-            //println!("{}: depth: {}, shift: {}, index: {}", $k, $depth, (ROOT_SHIFT - (SHIFT_LEN * $depth)), index);
+// println!("{}: depth: {}, shift: {}, index: {}", $k, $depth, (ROOT_SHIFT - (SHIFT_LEN * $depth)), index);
             assert!(index < ARRAY_SIZE);
             let l = &mut match *$array {
-                Some(ref mut ptr) => &mut ***ptr,
+                Some(ref mut ptr) => &mut **ptr,
                 ref mut slot => {
-                    //*slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
-                    *slot = Some(Unique::new(alloc_seg() as *mut _));
-                    &mut ***slot.as_mut().unwrap()
+// *slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
+                    *slot = Some(P::new(alloc_seg() as *mut _));
+                    &mut **slot.as_mut().unwrap()
                 }
             }[index];
             l
@@ -271,8 +442,10 @@ macro_rules! fill_entry {
     };
     ($array:ident, $k:expr, $v:expr, 3, $val_loc:ident) => {
         {
-            let l: &mut L4Edge<_> = fill_entry!($array, $k, 3, body);
-            fill_entry!(l, $k, $v, 4, $val_loc)
+            let slot: &mut ValEdge<_> = fill_entry!($array, $k, 3, body);
+            *$val_loc = $v();
+            *slot = Some(P::new($val_loc));
+            &mut **slot.as_mut().unwrap()
         }
     };
     ($array:ident, $k:expr, $v:expr, 4, $val_loc:ident) => {
@@ -290,11 +463,9 @@ macro_rules! fill_entry {
     ($array:ident, $k:expr, $v:expr, 6, $val_loc:ident) => {
         {
             let slot: &mut ValEdge<_> = fill_entry!($array, $k, 6, body);
-            //TODO
-            //*slot = Some(Unique::new(Box::into_raw(Box::new($v))));
-            *$val_loc = $v();
-            *slot = Some(Unique::new($val_loc));
-            &mut ***slot.as_mut().unwrap()
+// TODO
+// *slot = Some(Unique::new(Box::into_raw(Box::new($v))));
+
         }
     };
 }
@@ -311,20 +482,20 @@ impl<'a, V: 'a> VacantEntry<'a, V> {
             match entry {
                 Val(slot) => {
                     // TODO
-                    //*slot = Some(Unique::new(Box::into_raw(Box::new(v))));
-                    //let ptr = ualloc_seg() as *mut _;
+                    // *slot = Some(Unique::new(Box::into_raw(Box::new(v))));
+                    // let ptr = ualloc_seg() as *mut _;
                     *val_loc = v();
-                    *slot = Some(Unique::new(val_loc));
-                    return &mut ***slot.as_mut().unwrap();
+                    *slot = Some(P::new(val_loc));
+                    return &mut **slot.as_mut().unwrap();
                 }
                 L0(slot) => {
                     let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-                    assert!(root_index < ARRAY_SIZE);
+                    assert!(root_index < 3);
                     let l1 = &mut match *slot {
                         Some(ref mut ptr) => &mut ***ptr,
                         ref mut slot => {
-                            //*slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
-                            *slot = Some(Unique::new(alloc_seg() as *mut _));
+                            // *slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
+                            *slot = Some(P::new(alloc_seg() as *mut _));
                             &mut ***slot.as_mut().unwrap()
                         }
                     }[root_index];
@@ -333,16 +504,13 @@ impl<'a, V: 'a> VacantEntry<'a, V> {
                 L1(slot) => fill_entry!(slot, k, v, 1, val_loc),
                 L2(slot) => fill_entry!(slot, k, v, 2, val_loc),
                 L3(slot) => fill_entry!(slot, k, v, 3, val_loc),
-                L4(slot) => fill_entry!(slot, k, v, 4, val_loc),
-                L5(slot) => fill_entry!(slot, k, v, 5, val_loc),
-                L6(slot) => fill_entry!(slot, k, v, 6, val_loc),
             }
         }
     }
 
     pub fn insert(self, v: V) -> &'a mut V {
         unsafe { self.insert_with(|| v, ualloc_seg()) }
-    } 
+    }
 }
 
 #[test]
@@ -356,19 +524,33 @@ fn non_zero_opt() {
 #[test]
 pub fn size() {
     assert_eq!(mem::size_of::<[Trie<u8>; ARRAY_SIZE]>(), 8192);
+    assert!(mem::size_of::<RootTable<u8>>() < 8192);
 }
 
 extern "C" {
     fn alloc_seg() -> *mut u8;
     fn ualloc_seg() -> *mut u8;
+    fn cmemcpy(dst: *mut u8, src: *const u8, count: usize);
 }
 
-//#[cfg(test)]
+#[cfg(test)]
 pub mod test {
 
     use super::*;
 
     use std::mem;
+
+    #[no_mangle]
+    pub extern "C" fn alloc_seg() -> *mut u8 {
+        Box::into_raw(Box::new([0u8; super::ARRAY_SIZE * 8])) as *mut _ //TODO
+    }
+
+    #[no_mangle]
+    pub extern "C" fn ualloc_seg() -> *mut u8 {
+        unsafe {
+            Box::into_raw(Box::new([mem::uninitialized::<u8>(); super::ARRAY_SIZE * 8])) as *mut _ //TODO
+        }
+    }
 
     #[test]
     pub fn empty() {
@@ -423,7 +605,7 @@ pub mod test {
             assert_eq!(*m.get(2).unwrap(), 4);
         }
 
-        //#[test]
+        #[test]
         pub fn more_insert() {
             let mut m = Trie::new();
             for i in 1..1001 {
@@ -443,7 +625,47 @@ pub mod test {
             }
         }
 
-        //#[test]
+        #[test]
+        pub fn more_append() {
+            let mut m = Trie::new();
+            for i in 0..1001 {
+                assert_eq!(m.append(i).0, i);
+                // println!("{:#?}", m);
+                // assert_eq!(m.get(&i).unwrap(), &i);
+
+                for j in 0..i + 1 {
+                    let r = m.get(j);
+                    assert_eq!(r, Some(&j));
+                }
+
+                for j in i + 1..1001 {
+                    let r = m.get(j);
+                    assert_eq!(r, None);
+                }
+            }
+        }
+
+        #[test]
+        pub fn even_more_append() {
+            let mut m = Trie::new();
+            for i in 0..0x18000 {
+                assert_eq!(m.append(i).0, i);
+                // println!("{:#?}", m);
+                // assert_eq!(m.get(&i).unwrap(), &i);
+
+                for j in 0..i + 1 {
+                    let r = m.get(j);
+                    assert_eq!(r, Some(&j));
+                }
+
+                for j in i + 1..0x18000 {
+                    let r = m.get(j);
+                    assert_eq!(r, None);
+                }
+            }
+        }
+
+        // #[test]
         pub fn more_entry_insert() {
             let mut m = Trie::new();
             for i in 1..1001 {
@@ -467,13 +689,13 @@ pub mod test {
         fn grow_by_insertion(b: &mut Bencher) {
             let mut m = Trie::new();
 
-            let mut k = 1000001u64;
-            for i in 1..k {
-                m.insert(i, i);
+            let mut k = 1000001u32;
+            for i in 0..k {
+                m.append(i);
             }
 
             b.iter(|| {
-                m.insert(k, k);
+                m.append(k);
                 k += 1;
             });
         }
@@ -484,7 +706,7 @@ pub mod test {
 
             let mut m = HashMap::new();
 
-            let mut k = 1000001u64;
+            let mut k = 1000001u32;
             for i in 1..k {
                 m.insert(i, i);
             }
@@ -496,43 +718,11 @@ pub mod test {
         }
 
         #[bench]
-        fn grow_by_entry_insertion(b: &mut Bencher) {
-            let mut m = Trie::new();
-
-            let mut k = 1000001u64;
-            for i in 1..k {
-                m.entry(i).or_insert(i);
-            }
-
-            b.iter(|| {
-                m.entry(k).or_insert(k);
-                k += 1;
-            });
-        }
-
-        #[bench]
-        fn hash_map_grow_by_entry_insertion(b: &mut Bencher) {
-            use std::collections::HashMap;
-
-            let mut m = HashMap::new();
-
-            let mut k = 1000001u64;
-            for i in 1..k {
-                m.entry(i).or_insert(i);
-            }
-
-            b.iter(|| {
-                m.entry(k).or_insert(k);
-                k += 1;
-            });
-        }
-
-        #[bench]
         fn find_existing(b: &mut Bencher) {
             let mut m = Trie::new();
 
-            for i in 1..0x18000 {
-                m.insert(i, i);
+            for i in 0..0x1800 {
+                m.append(i);
             }
 
             let mut i = 0;
@@ -540,7 +730,7 @@ pub mod test {
             b.iter(|| {
                 a = a ^ m.get(i).is_some();
                 i += 1;
-                i &= 0x17fff;
+                i &= 0x17ff;
                 a
             });
         }
@@ -570,7 +760,7 @@ pub mod test {
 
         // let mut m = HashMap::new();
 
-        //    for i in 1..100001u64 {
+        //    for i in 1..100001u32 {
         //        m.insert(i, i);
         //    }
 

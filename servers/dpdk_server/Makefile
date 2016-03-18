@@ -55,4 +55,5 @@ PREBUILD += cargo_build
 include $(RTE_SDK)/mk/rte.extapp.mk
 
 cargo_build:
+	#cargo rustc --release -- -C target-cpu=native
 	cargo build --release

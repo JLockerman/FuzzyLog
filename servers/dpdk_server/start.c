@@ -45,6 +45,7 @@
 #include <rte_eal.h>
 #include <rte_memory.h>
 #include <rte_memzone.h>
+#include <rte_power.h>
 #include <rte_launch.h>
 #include <rte_errno.h>
 #include <rte_ethdev.h>
@@ -57,7 +58,7 @@
 #include <rte_ip.h>
 #include <rte_udp.h>
 
-//#define DELOS_BENCHMARK 1
+#define DELOS_BENCHMARK 1
 
 #ifdef DELOS_BENCHMARK
 #include <math.h>
@@ -121,12 +122,11 @@ extern uint32_t rss_log(uint32_t, uint16_t, void *);
 extern void *rss_log_init(void);
 
 //#define BURST_SIZE 10
-#define BURST_SIZE 16
+#define BURST_SIZE 15
 #define NUM_SAMPLES 100000
 
-static uint16_t core_id[RTE_MAX_LCORE];
 static struct rte_ring *distributor_rings[RTE_MAX_LCORE];
-static struct rte_ring *to_multiappend_ack;
+static uint16_t core_id[RTE_MAX_LCORE];
 static uint32_t ring_mask = 0;
 
 const uint8_t port = 1; //TODO
@@ -134,8 +134,8 @@ static const char *_DELOS_MBUF_POOL = "DELOS_MBUF_POOL";
 static const unsigned NUM_MBUFS = 2047;
 //static const unsigned NUM_MBUFS = 3000000;
 static const unsigned NUM_ALLOC = 0x37FFFF;
-static const unsigned NUM_ALLOC2 = 2000000;
-static const unsigned MBUF_CACHE_SIZE = 16;
+//static const unsigned NUM_ALLOC2 = 2000000;
+static const unsigned MBUF_CACHE_SIZE = 31;
 //static const uint16_t DELOS_MBUF_DATA_SIZE = RTE_MBUF_DEFAULT_BUF_SIZE
 //static const uint16_t DELOS_MBUF_DATA_SIZE = 4096 - 64 * 4; // 3968
 //static const uint16_t DELOS_MBUF_DATA_SIZE = 4096 + sizeof(struct ether_hdr) +
@@ -145,19 +145,27 @@ static struct rte_mempool *packet_pool;
 static struct rte_mempool *alloc_pool;
 static struct rte_mempool *alloc_pool2;
 
+//#include "trie.h"
 
 struct inout {
-	uint64_t in;
-	uint64_t out;
-	uint64_t mean;
-	uint64_t per_packet;
+	int64_t in;
+	int64_t out;
+	int64_t mean;
+	int64_t per_packet;
 	//double var;
 	int64_t samples;
-} __attribute__ ((aligned (64)));
+} __rte_cache_aligned;
 
 static struct inout stats[128];
 
 static struct rte_mempool *audit_pool;
+
+void cmemcpy(void *, const void*, size_t);
+
+void
+cmemcpy(void *dst, const void* src, size_t count) {
+	rte_memcpy(dst, src, count);
+}
 
 #ifdef UNDEF
 static void
@@ -192,36 +200,36 @@ print_stats(const unsigned lcore, const uint64_t *durations)
 //struct sched_param schedp = {.sched_priority = 99};
 static void
 print_inout_stats(__attribute__((unused)) void *arg) {
-	uint64_t in = 0, out = 0;
+#ifdef DELOS_BENCHMARK
+	uint64_t total_in = 0, total_out = 0;
 	printf("--------------------------------------------------------------------------------\n");
-	printf("dist\n\t  in: %12"PRIu64 ",    out: %12"PRIu64 "\n", stats[0].in, stats[0].out);
-#ifdef DELOS_BENCHMARK
-	uint64_t dmean = stats[0].mean, dvar = stats[0].var, diters = stats[0].samples;
-	printf("\tmean: %12"PRIi64 "ns,  sig: %12"PRIi64"ns, iters: %10"PRIu64"\n",
-		(int64_t)(dmean/ 2.5), (int64_t) sqrt(dvar / (double)(diters - 1)), diters);
-#endif
-	//uint64_t dmean = stats[0].mean, diters = stats[0].samples;
-	//printf("\tmean: %12"PRIi64 "ns,  iters: %10"PRIu64"\n",
-	//		(int64_t)((dmean / diters)/ 2.5), diters);
-	for(unsigned i = 1; i < rte_lcore_count(); i++) {
-		in += stats[i].in; out += stats[i].out;
-		uint64_t mean = stats[i].mean, samples = stats[i].samples;
-		if(samples > 0 && in > 0) {
-			printf("score %3d\n\t  in: %12"PRIu64 ",    out: %12"PRIu64 ", per_packet: %12"PRIu64 "\n",
-					i - 1, stats[i].in, stats[i].out, (int64_t)(stats[i].per_packet / 2.5));
-#ifdef DELOS_BENCHMARK
-			uint64_t mean = stats[i].mean, var = stats[i].var, iters = stats[i].samples;
-			printf("\tmean: %12"PRIi64 "ns,  sig: %12"PRIi64"ns, iters: %10"PRIu64"\n",
-					(int64_t)(mean/ 2.5), (int64_t) sqrt(var / (iters - 1)), iters);
-#else
-			printf("\tmean: %12"PRIi64 "ns,  iters: %10"PRIu64"\n",
-					(int64_t)((mean / 2.5) / samples), samples);
+	{
+		int64_t mean = stats[0].mean, samples = stats[0].samples, in = stats[0].in, out = stats[0].out;
+		if (in > 0) {
+			printf("distribute\n\t  in: %12"PRIi64 ",    out: %12"PRIi64"\n", in, out);
+			if(samples > 0) {
+				printf("\tmean: %12"PRIi64 "ns,  iters: %10"PRIi64"\n",
+						(int64_t)((mean / 2.5) / samples), samples);
+			}
 		}
-#endif
+	}
+	for(unsigned i = 1; i < rte_lcore_count(); i++) {
+		total_in += stats[i].in; total_out += stats[i].out;
+		int64_t mean = stats[i].mean, samples = stats[i].samples, in = stats[i].in, out = stats[i].out,
+				per_packet = stats[i].per_packet;
+		if (in > 0) {
+			printf("score %3d\n\t  in: %12"PRIi64 ",    out: %12"PRIi64 ", per_packet: %12"PRIi64 "\n",
+					i - 1, in, out, (int64_t)((per_packet / in) / 2.5));
+			if(samples > 0) {
+				printf("\tmean: %12"PRIi64 "ns,  iters: %10"PRIi64"\n",
+						(int64_t)((mean / 2.5) / samples), samples);
+			}
+		}
 	}
 
-	printf("totals\n\tin: %12"PRIu64 ",  out: %12"PRIu64 "\n", in, out);
-	rte_eal_alarm_set(15 * US_PER_S, print_inout_stats, NULL);
+	printf("totals\n\tin: %12"PRIu64 ",  out: %12"PRIu64 "\n", total_in, total_out);
+	rte_eal_alarm_set(10 * US_PER_S, print_inout_stats, NULL);
+#endif
 }
 
 static inline void
@@ -252,46 +260,42 @@ update_packet_addresses(struct rte_mbuf *mbuf) {
 }
 
 static __attribute__((noreturn)) int
+lcore_stats(__attribute__((unused)) void *arg) {
+	printf("Starting stats on lcore %u.\n", rte_lcore_id());
+	rte_eal_alarm_set(15 * US_PER_S, print_inout_stats, NULL);
+	while(1) rte_pause();
+}
+
+static __attribute__((noreturn)) int
 lcore_ack(__attribute__((unused)) void *arg) {
 	const unsigned lcore_id = rte_lcore_id();
 	const uint32_t score_id = core_id[lcore_id];
+#ifdef DELOS_BENCHMARK
+	int64_t samples = 0, per_packet = 0;
+	int64_t in = 0, out = 0;
+#endif
 
 	const char * ring_name = "to_ack";
-	struct rte_ring * const to_ack = rte_ring_create(ring_name,
+	struct rte_ring *restrict const to_ack = rte_ring_create(ring_name,
 			128, rte_socket_id(),
 			RING_F_SP_ENQ | RING_F_SC_DEQ); //TODO wha? size?
-	struct rte_ring * const ring = to_multiappend_ack;
+	assert(to_ack != NULL);
+	struct rte_ring *restrict const ring = distributor_rings[score_id];
 	unsigned entries = 0;
-	rte_eal_alarm_set(15 * US_PER_S, print_inout_stats, NULL);
-	printf("Starting ack on lcore %u.\n", lcore_id);
+	printf("Starting ack on lcore %u, id %u.\n", lcore_id, score_id);
 	while(1) {
 		struct rte_mbuf *bufs[BURST_SIZE * rte_lcore_count()];
-		const unsigned nb_rx = rte_ring_sc_dequeue_burst(ring, (void **)bufs, BURST_SIZE);
+		unsigned free_in_to_ack = rte_ring_free_count(to_ack);
+		unsigned nb_rx;
+		if(free_in_to_ack < BURST_SIZE) {
+			nb_rx = rte_ring_sc_dequeue_burst(ring, (void **)bufs, free_in_to_ack);
+		}
+		else {
+			nb_rx = rte_ring_sc_dequeue_burst(ring, (void **)bufs, BURST_SIZE);
+		}
 		for(unsigned i = 0; i < nb_rx; i++) {
 			struct rte_mbuf *mbuf = bufs[i];
-			{
-				struct ether_addr ether_temp;
-				struct ether_hdr *eth = rte_pktmbuf_mtod(mbuf, struct ether_hdr *);
-				ether_addr_copy(&eth->d_addr, &ether_temp);
-				ether_addr_copy(&eth->s_addr, &eth->d_addr);
-				ether_addr_copy(&ether_temp, &eth->s_addr);
-			}
-			{
-				struct ipv4_hdr *ip = rte_pktmbuf_mtod_offset(mbuf, struct ipv4_hdr *,
-						sizeof(struct ether_hdr));
-				uint32_t ip_temp = ip->dst_addr;
-				ip->dst_addr = ip->src_addr;
-				ip->src_addr = ip_temp;
-				//TODO checksum?
-			}
-			{
-				struct udp_hdr *udp = rte_pktmbuf_mtod_offset(mbuf, struct udp_hdr *,
-						sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)); //TODO IP IHL?
-				uint16_t udp_temp = udp->dst_port;
-				udp->dst_port = udp->src_port;
-				udp->src_port = udp_temp;
-				mbuf->ol_flags |= PKT_TX_UDP_CKSUM;
-			}
+			update_packet_addresses(mbuf);
 		}
 
 		int err = rte_ring_sp_enqueue_bulk(to_ack, (void * const*) bufs, nb_rx);
@@ -299,9 +303,15 @@ lcore_ack(__attribute__((unused)) void *arg) {
 			//TODO
 			assert(0 && "out of space in ack ring");
 		}
+#ifdef DELOS_BENCHMARK
+		in += nb_rx;
+#endif
 		entries += nb_rx;
 		unsigned to_tx = 0;
 		for(unsigned i = 0; i < entries; i++) { //TODO this is dumb
+#ifdef DELOS_BENCHMARK
+			uint64_t packet_start = rte_rdtsc();
+#endif
 			struct rte_mbuf *curr_buf;
 			err = rte_ring_sc_dequeue(to_ack, (void **)&curr_buf);
 			assert(err == 0);
@@ -309,11 +319,13 @@ lcore_ack(__attribute__((unused)) void *arg) {
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
 					+ sizeof(struct udp_hdr));
 			const uint16_t cols = header->cols;
-			struct OrderIndex *locations = (struct OrderIndex *)(char *)(&header->cols + 1); //how to top UB?
-			int append_finished = 1;
+			struct OrderIndex *locations = (struct OrderIndex *)(char *)(&header->cols + 1); //how to stop UB?
+			int append_finished = !0;
 			for(uint16_t j = 0; j < cols && append_finished; j++) {
 				append_finished = append_finished && (locations->index != 0);
+				//printf("ack (%u, %u)\n", locations->order, locations->index);
 			}
+			//printf("ack %u.\n", append_finished);
 			if(append_finished) {
 				//TODO send in bursts
 				bufs[to_tx] = curr_buf;
@@ -323,23 +335,38 @@ lcore_ack(__attribute__((unused)) void *arg) {
 			else {
 				rte_ring_sp_enqueue(to_ack, curr_buf);
 			}
+#ifdef DELOS_BENCHMARK
+			per_packet += rte_rdtsc() - packet_start;
+#endif
 		}
 		if(to_tx > 0) {
-			//printf("acking %u\n", to_tx);
-			const uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
-			//TODO handle nb_tx
-			assert(nb_tx);
+			printf("acking %u\n", to_tx);
+			unsigned to_tx = nb_rx;
+			uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
+			while (unlikely(nb_tx < nb_rx)) {
+				//for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
+				nb_tx += rte_eth_tx_burst(port, score_id, &bufs[nb_tx], nb_rx - nb_tx);
+			}
+#ifdef DELOS_BENCHMARK
+			out += nb_tx;
+#endif
 		}
+#ifdef DELOS_BENCHMARK
+		samples += 1;
+		stats[score_id + 1].in = in;
+		stats[score_id + 1].out = out;
+		stats[score_id + 1].samples = samples;
+		stats[score_id + 1].per_packet = per_packet;
+#endif
 	}
 }
 
-static __attribute__((noreturn)) int
+static __attribute__((noreturn, hot)) int
 lcore_chain(__attribute__((unused)) void *arg) {
 #ifdef DELOS_BENCHMARK
-	double samples = 0, mean = 0, var = 0;
+	int64_t samples = 0 , mean = 0, per_packet = 0;
+	int64_t in = 0, out = 0;
 #endif
-	uint64_t samples = 0 , mean = 0;
-	uint64_t in = 0, out = 0;
 	const uint32_t local_ring_mask = ring_mask;
 	if (rte_eth_dev_socket_id(port) > 0 &&
 			rte_eth_dev_socket_id(port) != (int)rte_socket_id()) {
@@ -355,40 +382,54 @@ lcore_chain(__attribute__((unused)) void *arg) {
 
 	const uint32_t score_id = core_id[lcore_id];
 	printf("Starting chain-server on core %u id %u log %p.\n", lcore_id, score_id, log);
-	struct rte_ring *ring = distributor_rings[score_id];
+	struct rte_ring *restrict ring = distributor_rings[score_id];
 	while(1) {
 		struct rte_mbuf *bufs[BURST_SIZE];
 #ifdef DELOS_BENCHMARK
 		uint64_t start_tsc = rte_rdtsc();
 #endif
-		uint64_t start_tsc = rte_rdtsc();
 		const unsigned nb_rx = rte_ring_sc_dequeue_burst(ring, (void **)bufs, BURST_SIZE);
 
 		if (unlikely(nb_rx == 0)) continue;
+#ifdef DELOS_BENCHMARK
 		in += nb_rx;
+#endif
+
 
 		for(unsigned i = 0; i < nb_rx; i++) {
-			struct rte_mbuf *mbuf = bufs[i];
-			struct write_header *data = rte_pktmbuf_mtod_offset(mbuf, struct write_header*,
+#ifdef DELOS_BENCHMARK
+			uint64_t packet_start = rte_rdtsc();
+#endif
+			struct rte_mbuf *restrict mbuf = bufs[i];
+			struct write_header *restrict data = rte_pktmbuf_mtod_offset(mbuf, struct write_header*,
 				sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr *));
 
 			if(unlikely(data->kind) == MULTIAPPEND_KIND) { //TODO unlikely?
+				//printf("chain multi.\n");
 				handle_multiappend(score_id, local_ring_mask, log, data);
 				break;
 			}
 
+			//printf("chain normal.\n");
 			update_packet_addresses(mbuf);
 
 			handle_packet(log, data);
+#ifdef DELOS_BENCHMARK
+			per_packet += rte_rdtsc() - packet_start;
+#endif
 		}
 
 		unsigned to_tx = nb_rx;
-		const uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
-		out += nb_tx;
-		if (unlikely(nb_tx < nb_rx)) {
-			for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
+		uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
+		while (unlikely(nb_tx < nb_rx)) {
+			//for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
+			nb_tx += rte_eth_tx_burst(port, score_id, &bufs[nb_tx], nb_rx - nb_tx);
 		}
+#ifdef DELOS_BENCHMARK
+		out += nb_tx;
+#endif
 
+#ifdef DELOS_BENCHMARK
 		uint64_t duration = rte_rdtsc() - start_tsc;
 		mean += duration;
 		samples += 1;
@@ -396,21 +437,7 @@ lcore_chain(__attribute__((unused)) void *arg) {
 		stats[score_id + 1].out = out;
 		stats[score_id + 1].mean = mean;
 		stats[score_id + 1].samples = samples;
-#ifdef DELOS_BENCHMARK
-		uint64_t duration = rte_rdtsc() - start_tsc;
-		samples += 1;
-		if(unlikely(samples == 1)) {
-			mean = duration;
-			var = 0;
-		}
-		else {
-			int64_t delta = duration - mean;
-			mean += (delta / samples);
-			var += delta * (duration - mean);
-			stats[score_id + 1].samples = samples;
-			stats[score_id + 1].mean = mean;
-			stats[score_id + 1].var = var;
-		}
+		stats[score_id + 1].per_packet = per_packet;
 #endif
 	}
 }
@@ -418,10 +445,9 @@ lcore_chain(__attribute__((unused)) void *arg) {
 static __attribute__((noreturn)) int
 chain(__attribute__((unused)) void *arg) {
 #ifdef DELOS_BENCHMARK
-	double samples = 0, mean = 0, var = 0;
+	int64_t samples = 0, mean = 0, per_packet = 0;
+	int64_t in = 0, out = 0;
 #endif
-	uint64_t samples = 0, mean = 0, per_packet = 0;
-	uint64_t in = 0, out = 0;
 	const uint32_t local_ring_mask = ring_mask;
 	if (rte_eth_dev_socket_id(port) > 0 &&
 			rte_eth_dev_socket_id(port) != (int)rte_socket_id()) {
@@ -442,12 +468,12 @@ chain(__attribute__((unused)) void *arg) {
 #ifdef DELOS_BENCHMARK
 		uint64_t start_tsc = rte_rdtsc();
 #endif
-		uint64_t start_tsc = rte_rdtsc();
 		const unsigned nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
 
 		if (unlikely(nb_rx == 0)) continue;
+#ifdef DELOS_BENCHMARK
 		in += nb_rx;
-		stats[score_id + 1].in = in;
+#endif
 
 		for(unsigned i = 0; i < nb_rx; i++) {
 			uint64_t packet_start = rte_rdtsc();
@@ -464,16 +490,18 @@ chain(__attribute__((unused)) void *arg) {
 
 			handle_packet(log, data);
 			//rte_prefetch0(bufs[i + 1]);
-			per_packet = rte_rdtsc() - packet_start;
+			per_packet += rte_rdtsc() - packet_start;
 		}
 
 		unsigned to_tx = nb_rx;
 		const uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
+#ifdef DELOS_BENCHMARK
 		out += nb_tx;
-		stats[score_id + 1].out = out;
+#endif
 		if (unlikely(nb_tx < nb_rx)) {
 			for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
 		}
+#ifdef DELOS_BENCHMARK
 		uint64_t duration = rte_rdtsc() - start_tsc;
 		mean += duration;
 		samples += 1;
@@ -482,26 +510,6 @@ chain(__attribute__((unused)) void *arg) {
 		stats[score_id + 1].mean = mean;
 		stats[score_id + 1].samples = samples;
 		stats[score_id + 1].per_packet = per_packet;
-#ifdef DELOS_BENCHMARK
-		uint64_t duration = rte_rdtsc() - start_tsc;
-		stats[score_id + 1].mean = mean + duration;
-		samples += 1;
-		stats[score_id + 1].samples = samples;
-
-		uint64_t duration = rte_rdtsc() - start_tsc;
-		samples += 1;
-		if(unlikely(samples == 1)) {
-			mean = duration;
-			var = 0;
-		}
-		else {
-			int64_t delta = duration - mean;
-			mean += (delta / samples);
-			var += delta * (duration - mean);
-			stats[score_id + 1].samples = samples;
-			stats[score_id + 1].mean = mean;
-			stats[score_id + 1].var = var;
-		}
 #endif
 	}
 }
@@ -509,9 +517,8 @@ chain(__attribute__((unused)) void *arg) {
 static __attribute__((noreturn)) int
 echo(__attribute__((unused)) void *arg) {
 #ifdef DELOS_BENCHMARK
-	double samples = 0, mean = 0, var = 0;
-#endif
 	uint64_t in = 0, out = 0;
+#endif
 	if (rte_eth_dev_socket_id(port) > 0 &&
 			rte_eth_dev_socket_id(port) != (int)rte_socket_id()) {
 		printf("WARNING, port %u is on remote NUMA node %u to "
@@ -529,13 +536,14 @@ echo(__attribute__((unused)) void *arg) {
 	while(1) {
 		struct rte_mbuf *bufs[BURST_SIZE];
 #ifdef DELOS_BENCHMARK
-		uint64_t start_tsc = rte_rdtsc();
+		//uint64_t start_tsc = rte_rdtsc();
 #endif
 		const unsigned nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
 
 		if (unlikely(nb_rx == 0)) continue;
+#ifdef DELOS_BENCHMARK
 		in += nb_rx;
-		stats[score_id + 1].in = in;
+#endif
 
 		for(unsigned i = 0; i < nb_rx; i++) {
 			struct rte_mbuf *mbuf = bufs[i];
@@ -544,31 +552,15 @@ echo(__attribute__((unused)) void *arg) {
 
 		unsigned to_tx = nb_rx;
 		const uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
+#ifdef DELOS_BENCHMARK
 		out += nb_tx;
-		stats[score_id + 1].out = out;
+#endif
 		if (unlikely(nb_tx < nb_rx)) {
 			for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
 		}
 #ifdef DELOS_BENCHMARK
-		uint64_t duration = rte_rdtsc() - start_tsc;
-		stats[score_id + 1].mean = mean + duration;
-		samples += 1;
-		stats[score_id + 1].samples = samples;
-
-		uint64_t duration = rte_rdtsc() - start_tsc;
-		samples += 1;
-		if(unlikely(samples == 1)) {
-			mean = duration;
-			var = 0;
-		}
-		else {
-			int64_t delta = duration - mean;
-			mean += (delta / samples);
-			var += delta * (duration - mean);
-			stats[score_id + 1].samples = samples;
-			stats[score_id + 1].mean = mean;
-			stats[score_id + 1].var = var;
-		}
+		stats[score_id + 1].in = in;
+		stats[score_id + 1].out = out;
 #endif
 	}
 }
@@ -589,12 +581,14 @@ print_buf(int packet_id, struct rte_mbuf *buf)
 }
 #endif
 
-static void
+static struct rte_mbuf *to_dst[128][BURST_SIZE];
+static uint8_t to_dst_counts[128];
+
+static __attribute__((hot)) void
 distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 #ifdef DELOS_BENCHMARK
-	double samples = 0, mean = 0, var = 0;
+	uint64_t in = 0, out = 0, mean = 0;
 #endif
-	uint64_t in = 0, out = 0;
 	const unsigned lcore = rte_lcore_id();
 	const uint16_t rx_queue_id = 0;
 	assert(num_slave_cores < 65);
@@ -615,14 +609,15 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 #endif
 		const uint16_t nb_rx = rte_eth_rx_burst(port, rx_queue_id, bufs, BURST_SIZE);
 		if (unlikely(nb_rx == 0)) continue;
+#ifdef DELOS_BENCHMARK
 		in += nb_rx;
-		stats[0].in = in;
+#endif
 
 		for(int i = 0; i < nb_rx; i++) {
-			struct rte_mbuf *mbuf = bufs[i];
+			struct rte_mbuf *restrict mbuf = bufs[i];
 
 			//TODO prefetch?
-			delos_header *header = rte_pktmbuf_mtod_offset(mbuf, delos_header*,
+			delos_header *restrict header = rte_pktmbuf_mtod_offset(mbuf, delos_header*,
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr)
 					+ sizeof(struct udp_hdr));
 			//printf("header\n\tchain %u\n\tentry %u\n\t kind %u\n", header->chain, header->entry, header->kind);
@@ -632,7 +627,7 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 				//printf("ERROR, trasaction.\n");
 				//rte_pktmbuf_refcnt_update(mbuf, num_slave_cores);
 				//printf("got multiappend\n");
-				struct multi_header* mheader = &header->multi;
+				struct multi_header *restrict mheader = &header->multi;
 				uint16_t chains = mheader->cols;
 				if (chains > MAX_MULTIAPPEND_CHAINS) {
 					//TODO skip
@@ -650,58 +645,90 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 					assert(0 && "too little append");
 				}
 				//printf("it's valid\n");
-				struct OrderIndex *locations = (struct OrderIndex *)(char *)(&mheader->cols + 1);
+				struct OrderIndex *restrict locations = (struct OrderIndex *restrict)(char *)(&mheader->cols + 1);
 				uint64_t remaining_mask = multi_mask; //TODO handle chain 0
 				//for(uint16_t j = 0; j < chains; j++) {
 				//	printf("(%u, %u)\n", locations[j].order, locations[j].index);
 				//}
+				//printf(".\n");
 				for(uint16_t j = 0; j < chains; j++) {
 					uint32_t dst = locations[j].order & ring_mask;
 					assert(locations[j].order != 0);
 					if((remaining_mask & (1 << dst)) != 0) {
 						//printf("multi sending %u to %u\n", locations[j].order, dst);
+						//struct rte_ring* dst_ring = distributor_rings[dst];
+						//rte_ring_sp_enqueue(dst_ring, mbuf);
+						//to_dst[dst][to_dst_counts[dst]] = mbuf;
+						//to_dst_counts[dst] += 1;
 						remaining_mask &= ~(1 << dst);
+						if(rte_ring_full(distributor_rings[dst])) {
+							rte_pktmbuf_free(mbuf);
+							goto next_packet;
+						}
+					}
+				}
+				if(rte_ring_full(distributor_rings[num_slave_cores])) {
+					rte_pktmbuf_free(mbuf);
+					goto next_packet;
+				}
+				uint32_t dst = 0;
+				while(remaining_mask != 0) {
+					if((remaining_mask & 1) != 0) {
 						struct rte_ring* dst_ring = distributor_rings[dst];
 						rte_ring_sp_enqueue(dst_ring, mbuf);
 					}
+					remaining_mask >>= 1;
+					dst++;
 				}
-				rte_ring_sp_enqueue(to_multiappend_ack, mbuf);
+				rte_ring_sp_enqueue(distributor_rings[num_slave_cores], mbuf);
+				//to_dst[num_slave_cores][to_dst_counts[num_slave_cores]] = mbuf;
+				//to_dst_counts[num_slave_cores] += 1;
 				//TODO ack immediately?
+next_packet: ;
 			}
 			else {
-				struct write_header* wheader = &header->write;
+				struct write_header *restrict wheader = &header->write;
 				uint32_t dst = wheader->loc[0] & ring_mask;
 				//printf("single sending %u to %u\n", wheader->loc[0], dst);
 				//if(rss_log(dst, header->chain, seen_set) != 0) rte_exit(EXIT_FAILURE, "chain dupe\n");
-				struct rte_ring* dst_ring = distributor_rings[dst];
-				int r = rte_ring_sp_enqueue(dst_ring, mbuf);
-				if(likely(r == 0)) {
-					out += 1;
-					stats[0].out = out;
-				}
-				else {
-					rte_pktmbuf_free(mbuf);
+				to_dst[dst][to_dst_counts[dst]] = mbuf;
+				to_dst_counts[dst] += 1;
+				//struct rte_ring *restrict dst_ring = distributor_rings[dst];
+				//int r = rte_ring_sp_enqueue(dst_ring, mbuf);
+				//if(likely(r == 0)) {
+#ifdef DELOS_BENCHMARK
+				//	out += 1;
+#endif
+				//}
+				//else {
+				//	rte_pktmbuf_free(mbuf);
+				//}
+			}
+		}
+		for(unsigned i = 0; i < num_slave_cores; i++) {
+			int r = rte_ring_sp_enqueue_bulk(distributor_rings[i], (void * const*)&to_dst[i][0],
+					to_dst_counts[i]);
+			if(unlikely(r == -ENOBUFS)) {//TODO kind based?
+				for(unsigned j = 0; j < to_dst_counts[i]; j++) {
+					rte_pktmbuf_free(to_dst[i][j]);
 				}
 			}
+			else {
+				out += to_dst_counts[i];
+			}
+		}
+		for(unsigned i = 0; i < num_slave_cores; i++) {
+			to_dst_counts[i] = 0;
+		}
+
 
 #ifdef DELOS_BENCHMARK
 		uint64_t duration = rte_rdtsc() - start_tsc;
-		samples += 1;
-		if(unlikely(samples == 1)) {
-			mean = duration;
-			var = 0;
-		}
-		else {
-			int64_t delta = duration - mean;
-			mean += (delta / samples);
-			var += delta * (duration - mean);
-			stats[0].samples = samples;
-			stats[0].mean = mean;
-			stats[0].var = var;
-		}
+		mean += duration;
+		stats[0].in = in;
+		stats[0].out = out;
+		stats[0].mean = mean;
 #endif
-		}
-
 	}
 }
 
@@ -763,7 +790,7 @@ int
 main(int argc, char **argv)
 {
 	int ret;
-	unsigned lcore_id, ack_core_id = 0;
+	unsigned lcore_id, ack_core_id = 0, stats_core_id = 0;
 	uint32_t num_rings = 0;
 
 	ret = rte_eal_init(argc, argv);
@@ -774,13 +801,13 @@ main(int argc, char **argv)
 	if (ret == 0) rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
 	assert(ret == 2);
 
-	alloc_pool = rte_mempool_create("DELOS_ALLOC_POOL", NUM_ALLOC, 8192, 128, 0, NULL, NULL, NULL, NULL,
+	alloc_pool = rte_mempool_create("DELOS_ALLOC_POOL", NUM_ALLOC, 8192, 256, 0, NULL, NULL, NULL, NULL,
 			SOCKET_ID_ANY, 0);
 	if (alloc_pool == NULL) {
 		rte_exit(EXIT_FAILURE, "Cannot get alloc pool due to %s\n", rte_strerror(rte_errno));
 	}
 
-	alloc_pool2 = rte_mempool_create("DELOS_ALLOC_POOL2", NUM_ALLOC2, 8192, 128, 0, NULL, NULL, NULL, NULL,
+	alloc_pool2 = rte_mempool_create("DELOS_ALLOC_POOL2", NUM_ALLOC, 8192, 256, 0, NULL, NULL, NULL, NULL,
 			SOCKET_ID_ANY, 0);
 	if (alloc_pool == NULL) {
 		rte_exit(EXIT_FAILURE, "Cannot get alloc pool due to %s\n", rte_strerror(rte_errno));
@@ -794,7 +821,8 @@ main(int argc, char **argv)
 	if (packet_pool == NULL) {
 		rte_exit(EXIT_FAILURE, "Cannot get memory pool for buffers due to %s\n", rte_strerror(rte_errno));
 	}
-	unsigned number_chain_cores = rte_lcore_count() - 2; //TODO
+	unsigned number_chain_cores = rte_lcore_count() - 3; //TODO
+	printf("Using %u chain cores.\n", number_chain_cores);
 	audit_pool = packet_pool;
 	{
 		uint32_t score_id = 0;
@@ -802,7 +830,10 @@ main(int argc, char **argv)
 		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
 			core_id[lcore_id] = score_id;
 			snprintf(ring_name, 10, "d%u", score_id);
+			//rte_power_init(lcore_id);
 			if(score_id < number_chain_cores) {
+				printf("chain core id %u.\n", lcore_id);
+				//rte_power_freq_max(lcore_id);
 				distributor_rings[score_id] = rte_ring_create(ring_name, 16, rte_socket_id(),
 					RING_F_SP_ENQ | RING_F_SC_DEQ); //TODO size
 				if(distributor_rings[score_id] == NULL) {
@@ -810,11 +841,23 @@ main(int argc, char **argv)
 						"pool due to:\n\t%s\n", score_id, rte_strerror(rte_errno));
 				}
 			}
-			else {
+			else if (score_id == number_chain_cores) {
 				//last core acks multiappend packets
+				//rte_power_freq_max(lcore_id);
+				printf("ack core id %u.\n", lcore_id);
 				ack_core_id = lcore_id;
-				to_multiappend_ack = rte_ring_create(ring_name, 16, rte_socket_id(),
-					RING_F_SP_ENQ | RING_F_SC_DEQ);
+				//to_multiappend_ack
+				distributor_rings[score_id]= rte_ring_create(ring_name, 16, rte_socket_id(),
+						RING_F_SP_ENQ | RING_F_SC_DEQ);
+				if(distributor_rings[score_id] == NULL) {
+					rte_exit(EXIT_FAILURE, "Cannot init to-ack ring memory "
+						"pool due to:\n\t%s\n", rte_strerror(rte_errno));
+				}
+			}
+			else if (score_id == number_chain_cores + 1) {
+				//rte_power_freq_min(lcore_id);
+				printf("stats core id %u.\n", lcore_id);
+				stats_core_id = lcore_id;
 			}
 			score_id += 1;
 		}
@@ -828,14 +871,14 @@ main(int argc, char **argv)
 	printf("ring mask  0x%x\n", ring_mask);
 
 	for(uint32_t i = number_chain_cores; i < num_rings; i++) {
-		distributor_rings[i] = distributor_rings[i % number_chain_cores];
+		//distributor_rings[i] = distributor_rings[i % number_chain_cores];
 		assert(!!0);
 	}
 	{
 		struct rte_eth_dev_info info;
 		int retval;
 		struct ether_addr addr;
-		const uint16_t rx_rings = 1, tx_rings = rte_lcore_count() - 1; //TODO
+		const uint16_t rx_rings = 1, tx_rings = rte_lcore_count() - 2; //TODO
 		struct rte_eth_conf port_conf = {
 						.rxmode = {
 							.mq_mode	= ETH_MQ_RX_RSS,
@@ -910,22 +953,26 @@ main(int argc, char **argv)
 	//printf("mempool full %d\n", rte_mempool_full(packet_pool));
 	//printf("mempool empty %d\n", rte_mempool_empty(packet_pool));
 
-	//seen_set = rss_log_init();
-	//{
-	//	assert(ack_core_id > 0);
-	//	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-	//		if(lcore_id != ack_core_id) {
-	//			rte_eal_remote_launch(lcore_chain, NULL, lcore_id);
-	//		}
-	//		else {
-	//			rte_eal_remote_launch(lcore_ack, NULL, lcore_id);
-	//		}
-	//	}
-	//}
-	rte_eal_remote_launch(lcore_ack, NULL, ack_core_id);
-	//TODO delay...
-	//distribute(ring_mask, number_chain_cores);
-	chain(distribute);
+	{
+		assert(ack_core_id > 0);
+		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+			if(lcore_id != ack_core_id && lcore_id != stats_core_id) {
+				printf("starting chain core.\n");
+				rte_eal_remote_launch(lcore_chain, NULL, lcore_id);
+			}
+			else if(lcore_id == ack_core_id)  {
+				printf("starting ack core.\n");
+				rte_eal_remote_launch(lcore_ack, NULL, lcore_id);
+			}
+			else if(lcore_id == stats_core_id) {
+				printf("starting stats core.\n");
+				rte_eal_remote_launch(lcore_stats, NULL, lcore_id);
+			}
+		}
+	}
+	distribute(ring_mask, number_chain_cores);
+	//rte_eal_remote_launch(lcore_ack, NULL, ack_core_id);
+	//chain(distribute);
 	//echo(distribute);
 
 	rte_eal_mp_wait_lcore();
