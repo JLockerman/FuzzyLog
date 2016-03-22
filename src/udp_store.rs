@@ -9,6 +9,7 @@ use std::net::{SocketAddr, UdpSocket};
 //use std::ops::CoerceUnsized;
 use std::slice;
 use std::thread;
+use std::time::Duration;
 
 //use mio::buf::{SliceBuf, MutSliceBuf};
 //use mio::udp::UdpSocket;
@@ -47,6 +48,7 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
 
         trace!("at {:?}", self.socket.local_addr());
         let start_time = precise_time_ns() as i64;
+        self.socket.set_read_timeout(None); //TODO
         'send: loop {
             {
                 trace!("sending append");
@@ -127,6 +129,7 @@ impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
         //self.send_buffer.id = request_id.clone();
 
         trace!("at {:?}", self.socket.local_addr());
+        self.socket.set_read_timeout(Some(Duration::new(0, RTT as u32))).expect("");
         'send: loop {
             {
                 trace!("sending get");
@@ -421,13 +424,14 @@ mod test {
         mem::transmute(t)
     }
 
+    #[cfg(False)]
     #[bench]
     fn many_writes(b: &mut Bencher) {
         let mut store = new_store(vec![]);
         let mut i = 0;
         let entr = EntryContents::Data(&48u64, &*vec![]).clone_entry();
         b.iter(|| {
-            store.insert((17.into(), i.into()), entr.clone());
+            store.insert((21.into(), i.into()), entr.clone());
             i.wrapping_add(1);
         });
     }

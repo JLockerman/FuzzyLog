@@ -33,7 +33,7 @@ macro_rules! general_tests {
             }
 
             #[test]
-            fn test_threaded() {
+            fn test_threaded_appends() {
                 let _ = env_logger::init();
                 let store = $new_store(
                     (0..22).map(|i| (1.into(), i.into()))
@@ -390,7 +390,7 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7, 3 => 8, 2 => 54]);
             }
 
-            #[cfg(FALSE)]
+            //#[cfg(FALSE)]
             #[test]
             fn test_threaded_multiput() {
                 let _ = env_logger::init();
