@@ -60,14 +60,14 @@ struct RootTable<V> {
     l3: P<ValEdge<V>>,
     l2: P<L3Edge<V>>,
     l1: P<L2Edge<V>>,
-    array: [L1Edge<V>; 3],
+    array: [L1Edge<V>; 4],
     next_entry: u32,
     alloc: P<V>,
     alloc_rem: isize, //should be ptrdiff_t?
 }
 
 impl<V> Deref for RootTable<V> {
-    type Target = [L1Edge<V>; 3];
+    type Target = [L1Edge<V>; 4];
 
     fn deref(&self) -> &Self::Target {
         let &RootTable {ref array, ..} = self;
@@ -328,8 +328,8 @@ impl<V> Trie<V> {
     #[inline(always)]
     pub fn entry(&mut self, k: u32) -> Entry<V> {
         unsafe {
-            let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index < 3);
+            let root_index = (((k & 0xffffffff) >> ROOT_SHIFT) & MASK) as usize;
+            assert!(root_index <= 3);
             let l1 = match self.root {
                 Some(ref mut ptr) => &mut (***ptr)[root_index],
                 ref mut none => return Entry::Vacant(VacantEntry(k, Vacancy::L0(none))),

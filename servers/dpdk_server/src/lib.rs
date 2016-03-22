@@ -53,55 +53,56 @@ extern "C" {
 #[no_mangle]
 pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), DataFlex>)
 {
-    trace!("{:#?}", packet.kind);
+    trace!("handle {:#?}", packet.kind);
     //TODO
     let (kind, loc) = {
         (packet.kind, packet.flex.loc)
     };
 
-    if kind & EntryKind::Layout == EntryKind::Data {
+    if kind & EntryKind::Layout == EntryKind::Data { // Write
         packet.kind = kind | EntryKind::ReadSuccess;
-        //let (ent, ptr) = log.log.entry(loc.0.into()).or_insert(Trie::new()).append(packet.clone());
         let (ent, ptr) = log.log.entry(loc.0.into())
             .or_insert_with(|| { let mut t =  Trie::new(); t.append_size(packet, 0); t } )
             .append_size(packet, data_entry_size(packet));
-        //let chain = log.log.entry(loc.0.into()).or_insert(Trie::new());
-        //let (ent, ptr) = unsafe { cappend_size(chain, packet, entry_size(packet) as isize) };
         ptr.flex.loc.1 = ent.into(); //TODO
-        packet.flex.loc.1 = ent.into(); 
+        packet.flex.loc.1 = ent.into();
+        trace!("Write at {:?}", packet.flex.loc);
     }
-    else {
+    else { // Read
         match log.log.entry(loc.0.into()).or_insert(Trie::new()).entry(loc.1.into()) {
             Occupied(e) => {
                 trace!("Occupied entry {:?}", loc);
                 unsafe {
                     let val = e.get();
+                    assert!(val.kind == (EntryKind::Data | EntryKind::ReadSuccess) ||
+                        val.kind == (EntryKind::Multiput | EntryKind::ReadSuccess));
+                    assert!(val.kind != EntryKind::Read);
                     //ptr::copy_nonoverlapping((&*val) as *const _ as *const u8,
                     //    packet as *mut _ as *mut u8, entry_size(packet));
-                    cmemcpy(packet as *mut _ as *mut u8, (&*val) as *const _ as *const u8, data_entry_size(&*val));
+                    cmemcpy(packet as *mut _ as *mut u8, (&*val) as *const _ as *const u8, entry_size(&*val));
                     packet.kind = packet.kind | EntryKind::ReadSuccess;
                 }
             }
             _ => {
-                trace!("?@ {:?}", loc)
+                trace!("?@ {:?}", loc);
+                unsafe { asm!("":::: "volatile"); } //otherwise test_get_none does not pass 
             }
         }
     }
-}
-
-#[inline(always)]
-fn data_entry_size<V>(e: &Entry<V, DataFlex>) -> usize {
-    mem::size_of::<Entry<(), DataFlex<()>>>() + e.data_bytes as usize
-        + e.dependency_bytes as usize
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn handle_multiappend(core_id: u32, ring_mask: u32,
     log: &mut Log<MultiFlex>, packet: *mut Entry<(), MultiFlex>)
 {
+    unsafe {
+        assert!((*packet).kind == EntryKind::Multiput ||
+            (*packet).kind == (EntryKind::Multiput | EntryKind::ReadSuccess))
+    };
     let num_cols = (*packet).flex.cols; //TODO len
     let mut cols = &mut (*packet).flex.data as *mut _ as *mut OrderIndex;
     //packet.kind = kind | EntryKind::ReadSuccess;
+    let mut offset = 0;
     for _ in 0..num_cols {
         trace!("append? {:?} & {:?} == {:?} ?= {:?}, {:?}", (*cols).0, ring_mask, (*cols).0 & ring_mask, core_id, (*cols).0 & ring_mask == core_id.into());
         if (*cols).0 & ring_mask == core_id.into() {
@@ -114,16 +115,48 @@ pub unsafe extern "C" fn handle_multiappend(core_id: u32, ring_mask: u32,
                 trace!("appended at {:?}", *cols);
                 //atomic_store_rel(&mut(*cols).1, ent.into());
                 ptr.kind = ptr.kind | EntryKind::ReadSuccess;
+                (*(&mut (*ptr).flex.data as *mut _ as *mut OrderIndex).offset(offset)).1 = ent.into();
             }
         }
+        offset += 1;
         cols = cols.offset(1)
     }
 }
 
 #[inline(always)]
+fn entry_size<V, F>(e: &Entry<V, F>) -> usize {
+    use fuzzy_log::prelude::EntryKind;
+    unsafe {
+        if e.kind & EntryKind::Layout == EntryKind::Data {
+            trace!("found data entry");
+            data_entry_size(mem::transmute::<&Entry<V, F>, &Entry<V, _>>(e))
+        }
+        else if e.kind & EntryKind::Layout == EntryKind::Multiput {
+            trace!("found multi entry");
+            multi_entry_size(mem::transmute::<&Entry<V, F>, &Entry<V, _>>(e))
+        }
+        else {
+            panic!("invalid layout {:?}", e.kind);
+        }
+    }
+}
+
+#[inline(always)]
+fn data_entry_size<V>(e: &Entry<V, DataFlex>) -> usize {
+    assert!(e.kind & EntryKind::Layout == EntryKind::Data);
+    let size = mem::size_of::<Entry<(), DataFlex<()>>>() + e.data_bytes as usize
+        + e.dependency_bytes as usize;
+    assert!(size <= 8192);
+    size
+}
+
+#[inline(always)]
 fn multi_entry_size<V>(e: &Entry<V, MultiFlex>) -> usize {
-    mem::size_of::<Entry<(), MultiFlex<()>>>() + e.data_bytes as usize
-        + e.dependency_bytes as usize + (e.flex.cols as usize * mem::size_of::<OrderIndex>())
+    assert!(e.kind & EntryKind::Layout == EntryKind::Multiput);
+    let size = mem::size_of::<Entry<(), MultiFlex<()>>>() + e.data_bytes as usize
+        + e.dependency_bytes as usize + (e.flex.cols as usize * mem::size_of::<OrderIndex>());
+    assert!(size <= 8192);
+    size
 }
 
 #[cfg(False)]
