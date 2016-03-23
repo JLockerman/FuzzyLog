@@ -612,7 +612,7 @@ lcore_rx_transaction(void *arg) {
 				//printf("(%u, %u)\n ", w->loc[0], w->loc[1]);
 				int64_t* ts = rte_pktmbuf_mtod_offset(mbuf[buf], int64_t *,
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr)
-					+ sizeof(struct multi_header) + sizeof(struct OrderIndex) * 2);
+					+ sizeof(struct multi_header) + sizeof(uint64_t) * 4);
 				struct OrderIndex* locs = (struct OrderIndex *)(char *)(&w->cols + 1);
 				int64_t end = rte_rdtsc();
 				double duration = ((double)(end - *ts)) / 2.5;
@@ -934,7 +934,7 @@ lcore_tx2(void *chain_num) {
 	while(rte_rdtsc() - start_time < NUM_SECS * SEC){//(not_out_of_time()) {
 		//printf("sending from %d.\n", chain);
 		struct rte_mbuf *mbuf[BURST_SIZE];
-		for(int i = 0; i < 1; i++) {
+		for(int i = 0; i < BURST_SIZE; i++) {
 			mbuf[i] = rte_pktmbuf_alloc(packet_pool);
 			//TODO prefetch
 		}
@@ -1113,13 +1113,6 @@ lcore_txrx(void *chain_num) {
 				//TODO
 				udp->dst_port = rte_cpu_to_be_16(8000);
 				udp->src_port = rte_cpu_to_be_16(8000);
-				//udp->dst_port = rte_cpu_to_be_16(chain + 0xf);
-				//udp->src_port = rte_cpu_to_be_16(chain ^ 0xf);
-				//udp->dst_port = rte_cpu_to_be_16(chain + j);
-				//udp->src_port = rte_cpu_to_be_16(chain + j);
-				//udp->dst_port = rte_cpu_to_be_16(chain + j);
-				//udp->src_port = rte_cpu_to_be_16(chain + j);
-				//udp->dgram_cksum = rte_ipv4_phdr_cksum(ip, mbuf[j]->ol_flags | tx_ol_flags);
 				udp->dgram_cksum = 0;
 				udp->dgram_len = rte_cpu_to_be_16(DATA_SIZE);
 
@@ -1230,6 +1223,7 @@ main(int argc, char **argv)
 {
 	int ret;
 
+	//rte_set_log_level (DEBUG);
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_panic("Cannot init EAL\n");
@@ -1367,13 +1361,19 @@ main(int argc, char **argv)
 		printf("%u: %u\n", i + 1, max_tx[i]);
 	}
 	rte_spinlock_unlock(&max_tx_lock);
+	//if(1) return 0;
 	{
 		int i = 0;
 		unsigned lcore_id = 0;
 		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
 			if(i < 8) {
 			//if(i < 1) {
-				rte_eal_remote_launch(lcore_rx, &chain_num[i], lcore_id);
+				if(TEST_TRANSACTION) {
+					rte_eal_remote_launch(lcore_rx_transaction, &chain_num[i], lcore_id);
+				}
+				else {
+					rte_eal_remote_launch(lcore_rx, &chain_num[i], lcore_id);
+				}
 				//rte_eal_remote_launch(lcore_tx, &chain_num[i], lcore_id);
 			}
 			else if (i < 16) {
