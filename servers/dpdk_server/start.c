@@ -126,9 +126,10 @@ extern void *rss_log_init(void);
 #define NUM_SAMPLES 100000
 
 static struct rte_ring *distributor_rings[RTE_MAX_LCORE];
-static uint16_t core_id[RTE_MAX_LCORE];
-static uint16_t multi_seq_number[RTE_MAX_LCORE] __rte_cache_aligned;
-static uint16_t dist_seq_number[RTE_MAX_LCORE];
+static uint32_t core_id[RTE_MAX_LCORE];
+static rte_atomic32_t multi_seq_number[RTE_MAX_LCORE] __rte_cache_aligned;
+static uint32_t dist_seq_number[RTE_MAX_LCORE];
+static uint32_t ack_seq_number[RTE_MAX_LCORE];
 static uint32_t ring_mask = 0;
 
 const uint8_t port = 1; //TODO
@@ -234,7 +235,7 @@ print_inout_stats(__attribute__((unused)) void *arg) {
 #endif
 }
 
-static inline uint16_t*
+static inline uint32_t*
 get_seq_numbers(struct rte_mbuf *mbuf)
 {
 	return (void *)(((char *)mbuf) + sizeof(*mbuf) + sizeof(uint64_t));
@@ -280,6 +281,7 @@ lcore_stats(__attribute__((unused)) void *arg) {
 	while(1) rte_pause();
 }
 
+//#define DELOS_DEBUG_ACK 0
 #if defined(DELOS_DEBUG_ACK) || defined(DELOS_DEBUG_ALL)
 #define debug_ack(...) printf(__VA_ARGS__)
 #else
@@ -292,7 +294,7 @@ lcore_ack(void *arg) {
 	const unsigned lcore_id = rte_lcore_id();
 	const uint32_t score_id = core_id[lcore_id];
 #ifdef DELOS_BENCHMARK
-	int64_t samples = 0, per_packet = 0;
+	int64_t mean = 0, samples = 0, per_packet = 0;
 	int64_t in = 0, out = 0;
 #endif
 
@@ -305,6 +307,9 @@ lcore_ack(void *arg) {
 	unsigned entries = 0;
 	printf("Starting ack on lcore %u, id %u.\n", lcore_id, score_id);
 	while(1) {
+#ifdef DELOS_BENCHMARK
+		uint64_t start_tsc = rte_rdtsc();
+#endif
 		struct rte_mbuf *bufs[BURST_SIZE * rte_lcore_count()];
 		unsigned free_in_to_ack = rte_ring_free_count(to_ack);
 		unsigned nb_rx;
@@ -331,8 +336,14 @@ lcore_ack(void *arg) {
 
 		if(unlikely(entries == 0)) continue;
 
+		for(uint16_t j = 0; j < num_slave_cores; j++) {
+			//ack_seq_number[j] = *(volatile uint16_t *)&multi_seq_number[j]; //TODO atomics
+			ack_seq_number[j] = rte_atomic32_read(&multi_seq_number[j]);
+			//ack_seq_number[j] = multi_seq_number[j].cnt;
+		}
+
 		unsigned to_tx = 0;
-		for(unsigned i = 0; i < entries; i++) { //TODO this is dumb
+		for(unsigned i = 0; i < entries; i++) {
 #ifdef DELOS_BENCHMARK
 			uint64_t packet_start = rte_rdtsc();
 #endif
@@ -340,32 +351,36 @@ lcore_ack(void *arg) {
 			err = rte_ring_sc_dequeue(to_ack, (void **)&curr_buf);
 			assert(err == 0);
 			uint64_t used = *get_used_mask(curr_buf);
-			debug_ack("ack mask %lx\n", used);
-			uint16_t *seq = get_seq_numbers(curr_buf);
+			debug_ack("ack mask 0x%lx\n", used);
+			uint32_t *seq = get_seq_numbers(curr_buf);
 			int append_finished = !0;
 			for(uint16_t j = 0; j < num_slave_cores && append_finished; j++) {
 				append_finished = append_finished && (
 						((used & (1 << j)) == 0) ||
-						(seq[j] < multi_seq_number[j]) || //TODO atomic or barrier?
-						(seq[j] < 128 && multi_seq_number[j] > (INT16_MAX - 128))
+						(seq[j] < ack_seq_number[j]) ||
+						(ack_seq_number[j] < 1024 && seq[j] > (INT16_MAX - 1024))
 						);
-				debug_ack("ack seq[%u] == %u < %u.\n", j, seq[j], multi_seq_number[j]);
+				//if((used & (1 << j)) != 0) {
+					debug_ack("ack seq[%u] == %u < %u.\n", j, seq[j], ack_seq_number[j]);
+				//}
 			}
 			debug_ack("ack %u.\n", append_finished);
+
 			if(append_finished) {
 				debug_ack("append finished.\n");
 				//TODO send in bursts
 				bufs[to_tx] = curr_buf;
 				to_tx += 1;
 				entries -= 1;
+#ifdef DELOS_BENCHMARK
+				per_packet += rte_rdtsc() - packet_start;
+#endif
+				if(to_tx == BURST_SIZE * rte_lcore_count()) break;
 			}
 			else {
 				debug_ack("append not finished.\n");
 				rte_ring_sp_enqueue(to_ack, curr_buf);
 			}
-#ifdef DELOS_BENCHMARK
-			per_packet += rte_rdtsc() - packet_start;
-#endif
 		}
 		if(to_tx > 0) {
 			debug_ack("sending %u.\n", to_tx);
@@ -373,16 +388,19 @@ lcore_ack(void *arg) {
 			uint16_t nb_tx = rte_eth_tx_burst(port, score_id, bufs, to_tx);
 			while (unlikely(nb_tx < to_tx)) {
 				//for (unsigned buf = nb_tx; buf < nb_rx; buf++) rte_pktmbuf_free(bufs[buf]);
-				nb_tx += rte_eth_tx_burst(port, score_id, &bufs[nb_tx], nb_rx - nb_tx);
+				nb_tx += rte_eth_tx_burst(port, score_id, &bufs[nb_tx], to_tx - nb_tx);
 			}
 #ifdef DELOS_BENCHMARK
 			out += nb_tx;
 #endif
 		}
 #ifdef DELOS_BENCHMARK
+		uint64_t duration = rte_rdtsc() - start_tsc;
 		samples += 1;
+		mean += duration;
 		stats[score_id + 1].in = in;
 		stats[score_id + 1].out = out;
+		stats[score_id + 1].mean = mean;
 		stats[score_id + 1].samples = samples;
 		stats[score_id + 1].per_packet = per_packet;
 #endif
@@ -425,9 +443,6 @@ lcore_chain(__attribute__((unused)) void *arg) {
 		const unsigned nb_rx = rte_ring_sc_dequeue_burst(ring, (void **)bufs, BURST_SIZE);
 
 		if (unlikely(nb_rx == 0)) continue;
-#ifdef DELOS_BENCHMARK
-		in += nb_rx;
-#endif
 
 		unsigned to_tx = nb_rx;
 		for(unsigned i = 0; i < to_tx; i++) {
@@ -442,7 +457,8 @@ lcore_chain(__attribute__((unused)) void *arg) {
 				debug_chain("%u: chain multi.\n", score_id);
 				handle_multiappend(score_id, local_ring_mask, log, data);
 				//TODO barrier or atomic
-				multi_seq_number[score_id] += 1;
+				//multi_seq_number[score_id] += 1;
+				rte_atomic32_inc(&multi_seq_number[score_id]);
 #ifdef DELOS_BENCHMARK
 				per_packet += rte_rdtsc() - packet_start;
 #endif
@@ -455,6 +471,9 @@ lcore_chain(__attribute__((unused)) void *arg) {
 				i -= 1;
 				continue;
 			}
+#ifdef DELOS_BENCHMARK
+		in += 1;
+#endif
 
 			debug_chain("%u: chain normal.\n", score_id);
 			update_packet_addresses(mbuf);
@@ -729,7 +748,7 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 				debug_dist("used %lx, rem %lx, mul %lx.\n", used_mask, remaining_mask, multi_mask);
 				for(uint16_t j = 0; j < num_slave_cores; j++) {
 					if((used_mask & (1 << j)) != 0) {
-						uint16_t seq = dist_seq_number[j];
+						uint32_t seq = dist_seq_number[j];
 						get_seq_numbers(mbuf)[j] = seq;
 						debug_dist("seq[%u]: %u ", j, seq);
 						dist_seq_number[j] = seq + 1; //TODO wraparound
@@ -744,6 +763,7 @@ distribute(const uint32_t ring_mask, uint32_t num_slave_cores) {
 						rte_ring_sp_enqueue(dst_ring, mbuf);
 					}
 				}
+				out += 1;
 				//uint32_t dst = 0;
 				//while(remaining_mask != 0) {
 				//	if((remaining_mask & 1) != 0) {
@@ -942,7 +962,7 @@ main(int argc, char **argv)
 
 	packet_pool = rte_pktmbuf_pool_create(_DELOS_MBUF_POOL, NUM_MBUFS,
 				MBUF_CACHE_SIZE,
-				RTE_ALIGN((number_chain_cores * sizeof(uint16_t)) + sizeof(uint64_t),
+				RTE_ALIGN((number_chain_cores * sizeof(uint32_t)) + sizeof(uint64_t),
 						RTE_MBUF_PRIV_ALIGN), //private data size
 				DELOS_MBUF_DATA_SIZE,
 				rte_eth_dev_socket_id(port));
