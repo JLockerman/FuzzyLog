@@ -1,3 +1,4 @@
+#![feature(type_ascription)]
 #![feature(unique)]
 #![feature(std_panic)]
 #![feature(panic_handler)]
@@ -51,7 +52,7 @@ extern "C" {
 }
 
 #[no_mangle]
-pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), DataFlex>)
+pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), DataFlex>, chain_shift: u8)
 {
     trace!("handle {:#?}", packet.kind);
     //TODO
@@ -61,7 +62,7 @@ pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), 
 
     if kind & EntryKind::Layout == EntryKind::Data { // Write
         packet.kind = kind | EntryKind::ReadSuccess;
-        let (ent, ptr) = log.log.entry(loc.0.into())
+        let (ent, ptr) = log.log.entry(loc.0.into(): u32 >> chain_shift)
             .or_insert_with(|| { let mut t =  Trie::new(); t.append_size(packet, 0); t } )
             .append_size(packet, data_entry_size(packet));
         ptr.flex.loc.1 = ent.into(); //TODO
@@ -69,7 +70,7 @@ pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), 
         trace!("Write at {:?}", packet.flex.loc);
     }
     else { // Read
-        match log.log.entry(loc.0.into()).or_insert(Trie::new()).entry(loc.1.into()) {
+        match log.log.entry(loc.0.into(): u32 >> chain_shift).or_insert(Trie::new()).entry(loc.1.into()) { //TODO shift
             Occupied(e) => {
                 trace!("Occupied entry {:?}", loc);
                 unsafe {
@@ -93,7 +94,7 @@ pub extern "C" fn handle_packet(log: &mut Log<DataFlex>, packet: &mut Entry<(), 
 
 #[no_mangle]
 pub unsafe extern "C" fn handle_multiappend(core_id: u32, ring_mask: u32,
-    log: &mut Log<MultiFlex>, packet: *mut Entry<(), MultiFlex>)
+    log: &mut Log<MultiFlex>, packet: *mut Entry<(), MultiFlex>, chain_shift: u8)
 {
     unsafe {
         assert!((*packet).kind == EntryKind::Multiput ||
@@ -108,7 +109,7 @@ pub unsafe extern "C" fn handle_multiappend(core_id: u32, ring_mask: u32,
         if (*cols).0 & ring_mask == core_id.into() {
             unsafe {
                 //use std::intrinsics::atomic_store_rel;
-                let (ent, ptr) = unsafe { log.log.entry((*cols).0.into())
+                let (ent, ptr) = unsafe { log.log.entry((*cols).0.into(): u32 >> chain_shift)
                     .or_insert_with(|| { let mut t =  Trie::new(); t.append_size(&*packet, 0); t } )
                     .append_size(&*packet, multi_entry_size(&*packet)) };
                 ptr::write(&mut(*cols).1, ent.into()); //TODO

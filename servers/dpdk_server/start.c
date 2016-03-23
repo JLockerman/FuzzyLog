@@ -116,8 +116,8 @@ typedef union delos_header {
 _Static_assert(sizeof(union delos_header) == sizeof(struct write_header), "bad header size");
 
 extern void *init_log(void);
-extern void handle_packet(void*, void*);
-extern void handle_multiappend(uint32_t, uint32_t, void*, void*);
+extern void handle_packet(void*, void*, uint8_t);
+extern void handle_multiappend(uint32_t, uint32_t, void*, void*, uint8_t);
 extern uint32_t rss_log(uint32_t, uint16_t, void *);
 extern void *rss_log_init(void);
 
@@ -420,6 +420,8 @@ lcore_chain(__attribute__((unused)) void *arg) {
 	int64_t in = 0, out = 0;
 #endif
 	const uint32_t local_ring_mask = ring_mask;
+	//TODO assert pow2
+	const uint8_t chain_shift = __builtin_popcount(ring_mask);
 	if (rte_eth_dev_socket_id(port) > 0 &&
 			rte_eth_dev_socket_id(port) != (int)rte_socket_id()) {
 		printf("WARNING, port %u is on remote NUMA node %u to "
@@ -455,7 +457,7 @@ lcore_chain(__attribute__((unused)) void *arg) {
 
 			if(unlikely(data->kind) == MULTIAPPEND_KIND) { //TODO unlikely?
 				debug_chain("%u: chain multi.\n", score_id);
-				handle_multiappend(score_id, local_ring_mask, log, data);
+				handle_multiappend(score_id, local_ring_mask, log, data, chain_shift);
 				//TODO barrier or atomic
 				//multi_seq_number[score_id] += 1;
 				rte_atomic32_inc(&multi_seq_number[score_id]);
@@ -478,7 +480,7 @@ lcore_chain(__attribute__((unused)) void *arg) {
 			debug_chain("%u: chain normal.\n", score_id);
 			update_packet_addresses(mbuf);
 
-			handle_packet(log, data);
+			handle_packet(log, data, chain_shift);
 #ifdef DELOS_BENCHMARK
 			per_packet += rte_rdtsc() - packet_start;
 #endif
@@ -548,13 +550,13 @@ chain(__attribute__((unused)) void *arg) {
 				sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr *));
 
 			if(unlikely(data->kind) == MULTIAPPEND_KIND) { //TODO unlikely?
-				handle_multiappend(score_id, local_ring_mask, log, data);
+				handle_multiappend(score_id, local_ring_mask, log, data, 0);
 				break;
 			}
 
 			update_packet_addresses(mbuf);
 
-			handle_packet(log, data);
+			handle_packet(log, data, 0);
 			//rte_prefetch0(bufs[i + 1]);
 			per_packet += rte_rdtsc() - packet_start;
 		}
