@@ -48,13 +48,15 @@ impl<V: Clone> LocalStore<V> {
     }
 }
 
-impl<V: Clone> Store<V> for LocalStore<V> {
-    fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
+impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
         use std::collections::hash_map::Entry::*;
         match self.data.entry(key) {
             Occupied(..) => Err(InsertErr::AlreadyWritten),
             Vacant(v) => {
-                v.insert(val);
+                let new_val = val.clone_entry();
+                trace!("new val {:?}", new_val);
+                v.insert(new_val);
                 self.horizon.insert(key.0, key.1 + 1);
                 Ok(key)
             }
@@ -65,8 +67,8 @@ impl<V: Clone> Store<V> for LocalStore<V> {
         HashMap::get(&self.data, &key).cloned().ok_or(GetErr::NoValue)
     }
 
-    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
-        let entr = EntryContents::Multiput{data: &data, uuid: &Uuid::new_v4(),
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        let entr = EntryContents::Multiput{data: data, uuid: &Uuid::new_v4(),
             columns: chains, deps: deps};
         for &(chain, _) in chains {
             let horizon = {
@@ -75,7 +77,7 @@ impl<V: Clone> Store<V> for LocalStore<V> {
                 *horizon_loc = horizon + 1;
                 horizon
             };
-            self.insert((chain, horizon), entr.clone_entry());
+            self.insert((chain, horizon), entr.clone());
         }
         Ok((0.into(), 0.into()))
     }
@@ -83,7 +85,7 @@ impl<V: Clone> Store<V> for LocalStore<V> {
 
 impl<V: Copy, S> Store<V> for Mutex<S>
 where S: Store<V> {
-    fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
         self.lock().unwrap().insert(key, val)
     }
 
@@ -91,14 +93,14 @@ where S: Store<V> {
         self.lock().unwrap().get(key)
     }
 
-    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
         self.lock().unwrap().multi_append(chains, data, deps)
     }
 }
 
 impl<V: Copy, S> Store<V> for RefCell<S>
 where S: Store<V> {
-    fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
         self.borrow_mut().insert(key, val)
     }
 
@@ -106,14 +108,14 @@ where S: Store<V> {
         self.borrow_mut().get(key)
     }
 
-    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
         self.borrow_mut().multi_append(chains, data, deps)
     }
 }
 
 impl<V: Copy, S> Store<V> for Arc<Mutex<S>>
 where S: Store<V> {
-    fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
         self.lock().expect("cannot acquire lock").insert(key, val)
     }
 
@@ -121,7 +123,7 @@ where S: Store<V> {
         self.lock().expect("cannot acquire lock").get(key)
     }
 
-    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
         self.lock().expect("cannot acquire lock").multi_append(chains, data, deps)
     }
 }

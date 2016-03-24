@@ -7,8 +7,6 @@ use std::marker::{PhantomData};
 use std::mem::{self, size_of};
 use std::net::{SocketAddr, UdpSocket};
 //use std::ops::CoerceUnsized;
-use std::slice;
-use std::thread;
 use std::time::Duration;
 
 //use mio::buf::{SliceBuf, MutSliceBuf};
@@ -20,7 +18,7 @@ use time::precise_time_ns;
 use uuid::Uuid;
 
 //#[derive(Debug)]
-pub struct UdpStore<V> {
+pub struct UdpStore<V: ?Sized> {
     socket: UdpSocket,
     server_addr: SocketAddr,
     receive_buffer: Box<Entry<V>>,
@@ -33,237 +31,296 @@ pub struct UdpStore<V> {
 const SLEEP_NANOS: u32 = 8000; //TODO user settable
 const RTT: i64 = 80000;
 
-impl<V: Copy + Debug + Eq> Store<V> for UdpStore<V> {
-
-    fn insert(&mut self, key: OrderIndex, val: Entry<V>) -> InsertResult {
-        let request_id = Uuid::new_v4();
-        *self.send_buffer = val;
-        assert_eq!(self.send_buffer.kind & EntryKind::Layout, EntryKind::Data);
-        {
-            let entr = unsafe { self.send_buffer.as_data_entry_mut() };
-            entr.flex.loc = key;
-            entr.id = request_id.clone();
-        }
-        trace!("packet {:#?}", self.send_buffer);
-
-        trace!("at {:?}", self.socket.local_addr());
-        let start_time = precise_time_ns() as i64;
-        self.socket.set_read_timeout(None); //TODO
-        'send: loop {
-            {
-                trace!("sending append");
-                self.socket.send_to(self.send_buffer.bytes(), &self.server_addr)
-                    .expect("cannot send insert"); //TODO
+impl<V: ?Sized> UdpStore<V> {
+    pub fn new(server_addr: SocketAddr) -> UdpStore<V> {
+        unsafe {
+            UdpStore {
+                socket: UdpSocket::bind("0.0.0.0:0").expect("unable to open store"),
+                server_addr: server_addr,
+                receive_buffer: Box::new(mem::zeroed()),
+                send_buffer: Box::new(mem::zeroed()),
+                _pd: Default::default(),
+                rtt: RTT,
+                dev: 0,
             }
+        }
+    }
+}
 
-            'receive: loop {
-                let (_, addr) = {
-                    self.socket.recv_from(self.receive_buffer.bytes_mut())
-                        .expect("unable to receive ack") //TODO
-                        //precise_time_ns() as i64 - start_time < self.rtt + 4 * self.dev
-                };
-                trace!("got packet");
-                if addr == self.server_addr {
-                    //if self.receive_buffer.kind & EntryKind::ReadSuccess == EntryKind::ReadSuccess {
-                    //    trace!("invalid response r ReadSuccess at insert");
-                    //    continue 'receive
-                    //}
-                    match self.receive_buffer.kind & EntryKind::Layout {
-                        EntryKind::Data => { //TODO types?
-                            trace!("correct response");
-                            let entr = unsafe { self.receive_buffer.as_data_entry() };
-                            if entr.id == request_id {
-                                //let rtt = precise_time_ns() as i64 - start_time;
-                                //self.rtt = ((self.rtt * 4) / 5) + (rtt / 5);
-                                let sample_rtt = precise_time_ns() as i64 - start_time;
-                                let diff = sample_rtt - self.rtt;
-                                self.dev = self.dev + (diff.abs() - self.dev) / 4;
-                                self.rtt = self.rtt + (diff * 4 / 5);
+macro_rules! handle_insert {
+    ($this: expr, $key: expr, $val: expr) => {
+        {
+            let this = $this;
+            let key = $key;
+            let val = $val;
+            let request_id = Uuid::new_v4();
+            *this.send_buffer = val.clone_entry();
+            assert_eq!(this.send_buffer.kind & EntryKind::Layout, EntryKind::Data);
+            {
+                let entr = unsafe { this.send_buffer.as_data_entry_mut() };
+                entr.flex.loc = key;
+                entr.id = request_id.clone();
+            }
+            //let request_id = $request_id;
+            trace!("packet {:#?}", this.send_buffer);
+            trace!("at {:?}", this.socket.local_addr());
+            let start_time = precise_time_ns() as i64;
+            while let Err(..) = this.socket.set_read_timeout(None) {} //TODO
+            'send: loop {
+                {
+                    trace!("sending append");
+                    this.socket.send_to(this.send_buffer.bytes(), &this.server_addr)
+                        .expect("cannot send insert"); //TODO
+                }
+
+                'receive: loop {
+                    let (_, addr) = {
+                        this.socket.recv_from(this.receive_buffer.bytes_mut())
+                            .expect("unable to receive ack") //TODO
+                            //precise_time_ns() as i64 - start_time < this.rtt + 4 * this.dev
+                    };
+                    trace!("got packet");
+                    if addr == this.server_addr {
+                        //if this.receive_buffer.kind & EntryKind::ReadSuccess == EntryKind::ReadSuccess {
+                        //    trace!("invalid response r ReadSuccess at insert");
+                        //    continue 'receive
+                        //}
+                        match this.receive_buffer.kind & EntryKind::Layout {
+                            EntryKind::Data => { //TODO types?
+                                trace!("correct response");
+                                let entr = unsafe { this.receive_buffer.as_data_entry() };
                                 if entr.id == request_id {
-                                    trace!("write success @ {:?}", entr.flex.loc);
-                                    trace!("packet {:#?}", self.receive_buffer);
-                                    return Ok(entr.flex.loc)
+                                    //let rtt = precise_time_ns() as i64 - start_time;
+                                    //this.rtt = ((this.rtt * 4) / 5) + (rtt / 5);
+                                    let sample_rtt = precise_time_ns() as i64 - start_time;
+                                    let diff = sample_rtt - this.rtt;
+                                    this.dev = this.dev + (diff.abs() - this.dev) / 4;
+                                    this.rtt = this.rtt + (diff * 4 / 5);
+                                    if entr.id == request_id {
+                                        trace!("write success @ {:?}", entr.flex.loc);
+                                        trace!("packet {:#?}", this.receive_buffer);
+                                        return Ok(entr.flex.loc)
+                                    }
+                                    trace!("already written");
+                                    return Err(InsertErr::AlreadyWritten)
                                 }
-                                trace!("already written");
-                                return Err(InsertErr::AlreadyWritten)
+                                else {
+                                    println!("packet {:?}", this.receive_buffer);
+                                    continue 'receive
+                                }
                             }
-                            else {
-                                println!("packet {:?}", self.receive_buffer);
+                            EntryKind::Multiput => {
+                                match this.receive_buffer.contents() {
+                                    EntryContents::Multiput{columns, ..} => {
+                                        if columns.contains(&key) {
+                                            return Err(InsertErr::AlreadyWritten)
+                                        }
+                                        continue 'receive
+                                    }
+                                    _ => unreachable!(),
+                                };
+                            }
+                            v => {
+                                trace!("invalid response {:?}", v);
                                 continue 'receive
                             }
                         }
-                        EntryKind::Multiput => {
-                            match self.receive_buffer.contents() {
-                                EntryContents::Multiput{columns, ..} => {
-                                    if columns.contains(&key) {
-                                        return Err(InsertErr::AlreadyWritten)
-                                    }
-                                    continue 'receive
-                                }
-                                _ => unreachable!(),
-                            };
+                    }
+                    else {
+                        trace!("unexpected addr {:?}, expected {:?}", addr, this.server_addr);
+                        continue 'receive
+                    }
+                }
+            }
+        }
+    }
+}
+
+macro_rules! handle_get {
+    ($this:expr, $key: expr) => {
+        {
+            let this = $this;
+            let key = $key;
+            assert!(size_of::<V>() <= MAX_DATA_LEN);
+
+            //let request_id = Uuid::new_v4();
+            this.send_buffer.kind = EntryKind::Read;
+            unsafe {
+                this.send_buffer.as_data_entry_mut().flex.loc = key;
+                this.send_buffer.id = mem::zeroed();
+            };
+            //this.send_buffer.id = request_id.clone();
+
+            trace!("at {:?}", this.socket.local_addr());
+            while let Err(..) = this.socket.set_read_timeout(Some(Duration::new(0, RTT as u32))) {} //TODO
+            'send: loop {
+                {
+                    trace!("sending get");
+                    this.socket.send_to(this.send_buffer.bytes(), &this.server_addr)
+                        .expect("cannot send get"); //TODO
+                }
+
+                //thread::sleep(Duration::new(0, SLEEP_NANOS)); //TODO
+
+                let (_, addr) = {
+                    this.socket.recv_from(this.receive_buffer.bytes_mut())
+                        .expect("unable to receive ack") //TODO
+                };
+                if addr == this.server_addr {
+                    trace!("correct addr");
+                    match this.receive_buffer.kind {
+                        EntryKind::ReadData => {
+                            //TODO validate...
+                            //TODO base on loc instead?
+                            if unsafe { this.receive_buffer.as_data_entry_mut().flex.loc } == key {
+                                trace!("correct response");
+                                trace!("packet {:#?}", this.receive_buffer);
+                                return Ok(*this.receive_buffer.clone())
+                            }
+                            trace!("wrong loc {:?}, expected {:?}",
+                                this.receive_buffer, key);
+                            continue 'send
                         }
-                        v => {
-                            trace!("invalid response {:?}", v);
-                            continue 'receive
+                        EntryKind::ReadMulti => {
+                            //TODO base on loc instead?
+                            if unsafe { this.receive_buffer.as_multi_entry_mut().multi_contents_mut()
+                                .columns.contains(&key) } {
+                                trace!("correct response");
+                                return Ok(*this.receive_buffer.clone())
+                            }
+                            trace!("wrong loc {:?}, expected {:?}",
+                                this.receive_buffer, key);
+                            continue 'send
+                        }
+                        EntryKind::NoValue => {
+                            if unsafe { this.receive_buffer.as_data_entry_mut().flex.loc } == key {
+                                trace!("correct response");
+                                return Err(GetErr::NoValue)
+                            }
+                            trace!("wrong loc {:?}, expected {:?}",
+                                this.receive_buffer, key);
+                            continue 'send
+                        }
+                        k => {
+                            trace!("invalid response, {:?}", k);
+                            continue 'send
                         }
                     }
                 }
                 else {
-                    trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
-                    continue 'receive
+                    trace!("unexpected addr {:?}, expected {:?}", addr, this.server_addr);
+                    continue 'send
                 }
             }
         }
+    }
+}
+
+macro_rules! handle_multi_append {
+    ($this: expr, $chains: expr, $data: expr, $deps: expr) => {
+        {
+            let this = $this;
+            let chains = $chains;
+            let data = $data;
+            let deps = $deps;
+
+            let request_id = Uuid::new_v4();
+
+            *this.send_buffer = EntryContents::Multiput {
+                data: data,
+                uuid: &request_id,
+                columns: chains,
+                deps: deps,
+            }.clone_entry();
+            //this.send_buffer.kind = EntryKind::Multiput;
+            this.send_buffer.id = request_id.clone();
+            trace!("Tpacket {:#?}", this.send_buffer);
+
+            {
+                //let fd = this.socket.as_raw_fd();
+            }
+
+            //TODO find server
+
+            trace!("multi_append from {:?}", this.socket.local_addr());
+            let start_time = precise_time_ns() as i64;
+            'send: loop {
+                {
+                    trace!("sending");
+                    this.socket.send_to(this.send_buffer.bytes(), &this.server_addr)
+                        .expect("cannot send insert"); //TODO
+                }
+
+                'receive: loop {
+                    let (_size, addr) = {
+                        this.socket.recv_from(this.receive_buffer.bytes_mut())
+                            .expect("unable to receive ack") //TODO
+                            //precise_time_ns() as i64 - start_time < this.rtt + 4 * this.dev
+                    };
+                    trace!("got packet");
+                    if addr == this.server_addr {
+                        match this.receive_buffer.kind & EntryKind::Layout {
+                            EntryKind::Multiput => { //TODO types?
+                                trace!("correct response");
+                                trace!("id {:?}", this.receive_buffer.id);
+                                if this.receive_buffer.id == request_id {
+                                    trace!("multiappend success");
+                                    let sample_rtt = precise_time_ns() as i64 - start_time;
+                                    let diff = sample_rtt - this.rtt;
+                                    this.dev = this.dev + (diff.abs() - this.dev) / 4;
+                                    this.rtt = this.rtt + (diff * 4 / 5);
+                                    return Ok((0.into(), 0.into())) //TODO
+                                }
+                                else {
+                                    trace!("?? packet {:?}", this.receive_buffer);
+                                    continue 'receive
+                                }
+                            }
+                            v => {
+                                trace!("invalid response {:?}", v);
+                                continue 'receive
+                            }
+                        }
+                    }
+                    else {
+                        trace!("unexpected addr {:?}, expected {:?}", addr, this.server_addr);
+                        continue 'receive
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<V: Clone + Debug + Eq> Store<V> for UdpStore<V> {
+
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
+        handle_insert!(self, key, val)
+        //handle_insert!(self, key, request_id)
     }
 
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-        assert!(size_of::<V>() <= MAX_DATA_LEN);
-
-        //let request_id = Uuid::new_v4();
-        self.send_buffer.kind = EntryKind::Read;
-        unsafe {
-            self.send_buffer.as_data_entry_mut().flex.loc = key;
-            self.send_buffer.id = mem::zeroed();
-        };
-        //self.send_buffer.id = request_id.clone();
-
-        trace!("at {:?}", self.socket.local_addr());
-        self.socket.set_read_timeout(Some(Duration::new(0, RTT as u32))).expect("");
-        'send: loop {
-            {
-                trace!("sending get");
-                self.socket.send_to(self.send_buffer.bytes(), &self.server_addr)
-                    .expect("cannot send get"); //TODO
-            }
-
-            //thread::sleep(Duration::new(0, SLEEP_NANOS)); //TODO
-
-            let (_, addr) = {
-                self.socket.recv_from(self.receive_buffer.bytes_mut())
-                    .expect("unable to receive ack") //TODO
-            };
-            if addr == self.server_addr {
-                trace!("correct addr");
-                match self.receive_buffer.kind {
-                    EntryKind::ReadData => {
-                        //TODO validate...
-                        //TODO base on loc instead?
-                        if unsafe { self.receive_buffer.as_data_entry_mut().flex.loc } == key {
-                            trace!("correct response");
-                            trace!("packet {:#?}", self.receive_buffer);
-                            return Ok(*self.receive_buffer.clone())
-                        }
-                        trace!("wrong loc {:?}, expected {:?}",
-                            self.receive_buffer, key);
-                        continue 'send
-                    }
-                    EntryKind::ReadMulti => {
-                        //TODO base on loc instead?
-                        if unsafe { self.receive_buffer.as_multi_entry_mut().multi_contents_mut()
-                            .columns.contains(&key) } {
-                            trace!("correct response");
-                            return Ok(*self.receive_buffer.clone())
-                        }
-                        trace!("wrong loc {:?}, expected {:?}",
-                            self.receive_buffer, key);
-                        continue 'send
-                    }
-                    EntryKind::NoValue => {
-                        if unsafe { self.receive_buffer.as_data_entry_mut().flex.loc } == key {
-                            trace!("correct response");
-                            return Err(GetErr::NoValue)
-                        }
-                        trace!("wrong loc {:?}, expected {:?}",
-                            self.receive_buffer, key);
-                        continue 'send
-                    }
-                    k => {
-                        trace!("invalid response, {:?}", k);
-                        continue 'send
-                    }
-                }
-            }
-            else {
-                trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
-                continue 'send
-            }
-        }
+        handle_get!(self, key)
     }
 
-    fn multi_append(&mut self, chains: &[OrderIndex], data: V, deps: &[OrderIndex]) -> InsertResult {
-        let request_id = Uuid::new_v4();
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        handle_multi_append!(self, chains, data, deps)
+    }
+}
 
-        let contents = EntryContents::Multiput {
-            data: &data,
-            uuid: &request_id,
-            columns: chains,
-            deps: deps,
-        };
+impl<V: Clone + Debug + Eq> Store<[V]> for UdpStore<[V]> {
 
-        *self.send_buffer = EntryContents::Multiput {
-            data: &data,
-            uuid: &request_id,
-            columns: chains,
-            deps: deps,
-        }.clone_entry();
-        //self.send_buffer.kind = EntryKind::Multiput;
-        self.send_buffer.id = request_id.clone();
-        trace!("Tpacket {:#?}", self.send_buffer);
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<[V]>) -> InsertResult {
+        handle_insert!(self, key, val)
+        //handle_insert!(self, key, request_id)
+    }
 
-        {
-            //let fd = self.socket.as_raw_fd();
+    fn get(&mut self, key: OrderIndex) -> GetResult<Entry<[V]>> {
+        handle_get!(self, key)
+    }
 
-        }
-
-        //TODO find server
-
-        trace!("multi_append from {:?}", self.socket.local_addr());
-        let start_time = precise_time_ns() as i64;
-        'send: loop {
-            {
-                trace!("sending");
-                self.socket.send_to(self.send_buffer.bytes(), &self.server_addr)
-                    .expect("cannot send insert"); //TODO
-            }
-
-            'receive: loop {
-                let (size, addr) = {
-                    self.socket.recv_from(self.receive_buffer.bytes_mut())
-                        .expect("unable to receive ack") //TODO
-                        //precise_time_ns() as i64 - start_time < self.rtt + 4 * self.dev
-                };
-                trace!("got packet");
-                if addr == self.server_addr {
-                    match self.receive_buffer.kind & EntryKind::Layout {
-                        EntryKind::Multiput => { //TODO types?
-                            trace!("correct response");
-                            trace!("id {:?}", self.receive_buffer.id);
-                            if self.receive_buffer.id == request_id {
-                                trace!("multiappend success");
-                                let sample_rtt = precise_time_ns() as i64 - start_time;
-                                let diff = sample_rtt - self.rtt;
-                                self.dev = self.dev + (diff.abs() - self.dev) / 4;
-                                self.rtt = self.rtt + (diff * 4 / 5);
-                                return Ok((0.into(), 0.into())) //TODO
-                            }
-                            else {
-                                trace!("?? packet {:?}", self.receive_buffer);
-                                continue 'receive
-                            }
-                        }
-                        v => {
-                            trace!("invalid response {:?}", v);
-                            continue 'receive
-                        }
-                    }
-                }
-                else {
-                    trace!("unexpected addr {:?}, expected {:?}", addr, self.server_addr);
-                    continue 'receive
-                }
-            }
-        }
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &[V], deps: &[OrderIndex]) -> InsertResult {
+        handle_multi_append!(self, chains, data, deps)
     }
 }
 
