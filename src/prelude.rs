@@ -36,6 +36,54 @@ pub enum EntryKind {
     Multiput = 2,
 }*/
 
+pub trait Storeable {
+    fn size(&self) -> usize;
+    unsafe fn ref_to_bytes(&self) -> &u8;
+    unsafe fn bytes_to_ref(&u8, usize) -> &Self;
+    unsafe fn bytes_to_mut(&mut u8, usize) -> &mut Self;
+}
+
+impl<V> Storeable for V {
+    fn size(&self) -> usize {
+        mem::size_of::<Self>()
+    }
+
+    unsafe fn ref_to_bytes(&self) -> &u8 {
+        mem::transmute(self)
+    }
+
+
+    unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
+        assert_eq!(size, mem::size_of::<Self>());
+        mem::transmute(val)
+    }
+
+    unsafe fn bytes_to_mut(val: &mut u8, size: usize) -> &mut Self {
+        assert_eq!(size, mem::size_of::<Self>());
+        mem::transmute(val)
+    }
+}
+
+impl<V> Storeable for [V] {
+    fn size(&self) -> usize {
+        mem::size_of::<V>() * self.len()
+    }
+
+    unsafe fn ref_to_bytes(&self) -> &u8 {
+        mem::transmute(&self[0])
+    }
+
+    unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
+        assert_eq!(size % mem::size_of::<V>(), 0);
+        slice::from_raw_parts(val as *const _ as *const _, size / mem::size_of::<V>())
+    }
+
+    unsafe fn bytes_to_mut(val: &mut u8, size: usize) -> &mut Self {
+        assert_eq!(size % mem::size_of::<V>(), 0);
+        slice::from_raw_parts_mut(val as *mut _ as *mut _, size / mem::size_of::<V>())
+    }
+}
+
 #[allow(non_snake_case)]
 pub mod EntryKind {
     #![allow(non_upper_case_globals)]
@@ -121,7 +169,7 @@ pub struct EntryU<V, D: ?Sized = [u8; MAX_DATA_LEN]> {
 }
 */
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum EntryContents<'e, V:'e + ?Sized> {
     Data(&'e V, &'e [OrderIndex]),
     // Data:
@@ -150,7 +198,7 @@ pub struct MultiputContentsMut<'e, V: 'e + ?Sized> {
     pub deps: &'e mut [OrderIndex],
 }
 
-impl<V> Entry<V, DataFlex> {
+impl<V: Storeable + ?Sized> Entry<V, DataFlex> {
     fn data_contents<'s>(&'s self, data_bytes: u16, _: u16) -> EntryContents<'s, V> { //TODO to DataContents<..>?
         let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
         let (data, deps) = self.data_and_deps(contents_ptr, data_bytes, 0);
@@ -158,15 +206,7 @@ impl<V> Entry<V, DataFlex> {
     }
 }
 
-impl<V> Entry<[V], DataFlex> {
-    fn data_contents<'s>(&'s self, data_bytes: u16, _: u16) -> EntryContents<'s, [V]> { //TODO to DataContents<..>?
-        let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
-        let (data, deps) = self.data_and_deps(contents_ptr, data_bytes, 0);
-        Data(data, deps)
-    }
-}
-
-impl<V> Entry<V, MultiFlex> {
+impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
     pub fn multi_contents_mut<'s>(&'s mut self) -> MultiputContentsMut<'s, V> {
         unsafe {
             //let data_bytes = self.data_bytes;
@@ -184,7 +224,7 @@ impl<V> Entry<V, MultiFlex> {
             let data_offset = (self.flex.cols as usize * size_of::<OrderIndex>()) as isize;
             let data_ptr = contents_ptr.offset(data_offset);
             let dep_ptr:*mut OrderIndex = data_ptr.offset(self.data_bytes as isize) as *mut _;
-            let data = (data_ptr as *mut _).as_mut().unwrap();
+            let data = Storeable::bytes_to_mut(data_ptr.as_mut().unwrap(), self.data_bytes as usize);
 
             let num_deps = (self.dependency_bytes as usize)
                 .checked_div(size_of::<OrderIndex>()).unwrap();
@@ -213,86 +253,7 @@ impl<V> Entry<V, MultiFlex> {
     }
 }
 
-impl<V> Entry<[V], MultiFlex> {
-    pub fn multi_contents_mut<'s>(&'s mut self) -> MultiputContentsMut<'s, [V]> {
-        unsafe {
-            //let data_bytes = self.data_bytes;
-            //let dependency_bytes = self.dependency_bytes;
-            let uuid = &mut self.id;
-            let contents_ptr: *mut u8 = &mut self.flex.data as *mut _ as *mut u8;
-            let cols_ptr = contents_ptr;
-
-
-            let cols_ptr = cols_ptr as *mut _;
-            let num_cols = self.flex.cols;
-            let cols = slice::from_raw_parts_mut(cols_ptr, num_cols as usize);
-            assert!(cols.len() > 0);
-
-            let data_offset = (self.flex.cols as usize * size_of::<OrderIndex>()) as isize;
-            let data_ptr = contents_ptr.offset(data_offset);
-            let dep_ptr:*mut OrderIndex = data_ptr.offset(self.data_bytes as isize) as *mut _;
-            let data = slice::from_raw_parts_mut(data_ptr as *mut _, self.data_bytes as usize / size_of::<V>());;
-
-            let num_deps = (self.dependency_bytes as usize)
-                .checked_div(size_of::<OrderIndex>()).unwrap();
-            let deps = slice::from_raw_parts_mut(dep_ptr, num_deps);
-            MultiputContentsMut{data: data, uuid: uuid, columns: cols, deps: deps}
-        }
-    }
-
-    fn multi_contents<'s>(&'s self, data_bytes: u16, _: u16, uuid: &'s Uuid)
-    -> EntryContents<'s, [V]> { //TODO to DataContents<..>?
-        unsafe {
-            let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
-            let cols_ptr = contents_ptr;
-
-
-            let cols_ptr = cols_ptr as *const _;
-            let num_cols = self.flex.cols;
-            assert!(num_cols > 0);
-            let cols = slice::from_raw_parts(cols_ptr, num_cols as usize);
-            assert!(cols.len() > 0);
-
-            let data_offset = (self.flex.cols as usize * size_of::<OrderIndex>()) as isize;
-            let (data, deps) = self.data_and_deps(contents_ptr, data_bytes, data_offset);
-            Multiput{data: data, uuid: uuid, columns: cols, deps: deps}
-        }
-    }
-}
-
-impl<V, F> Entry<[V], F> {
-    pub fn contents<'s>(&'s self) -> EntryContents<'s, [V]> {
-        unsafe {
-            let data_bytes = self.data_bytes;
-            let dependency_bytes = self.dependency_bytes;
-            let uuid = &self.id;
-            match self.kind & EntryKind::Layout {
-                EntryKind::Data =>
-                        mem::transmute::<_, &Entry<[V], DataFlex>>(self)
-                            .data_contents(data_bytes, dependency_bytes),
-                EntryKind::Multiput => mem::transmute::<_, &Entry<[V], MultiFlex>>(self)
-                    .multi_contents(data_bytes, dependency_bytes, uuid),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    fn data_and_deps<'s, D>(&'s self, contents_ptr: *const u8, data_bytes: u16, data_offset: isize)
-    -> (&'s [D], &'s [OrderIndex]) {
-        unsafe {
-            let data_ptr = contents_ptr.offset(data_offset);
-            let dep_ptr:*const OrderIndex = data_ptr.offset(self.data_bytes as isize) as *const _;
-            let data = slice::from_raw_parts(data_ptr as *const _, data_bytes as usize / size_of::<V>());
-
-            let num_deps = (self.dependency_bytes as usize)
-                .checked_div(size_of::<OrderIndex>()).unwrap();
-            let deps = slice::from_raw_parts(dep_ptr, num_deps);
-            (data, deps)
-        }
-    }
-}
-
-impl<V, F> Entry<V, F> {
+impl<V: Storeable + ?Sized, F> Entry<V, F> {
 
     pub fn contents<'s>(&'s self) -> EntryContents<'s, V> {
         unsafe {
@@ -310,13 +271,14 @@ impl<V, F> Entry<V, F> {
         }
     }
 
-    fn data_and_deps<'s, D>(&'s self, contents_ptr: *const u8, data_bytes: u16, data_offset: isize)
+    fn data_and_deps<'s, D: Storeable + ?Sized>(&'s self, contents_ptr: *const u8, data_bytes: u16, data_offset: isize)
     -> (&'s D, &'s [OrderIndex]) {
         unsafe {
-            assert_eq!(data_bytes as usize, mem::size_of::<V>());
+            //assert_eq!(data_bytes as usize, mem::size_of::<V>());
             let data_ptr = contents_ptr.offset(data_offset);
             let dep_ptr:*const OrderIndex = data_ptr.offset(self.data_bytes as isize) as *const _;
-            let data = (data_ptr as *const _).as_ref().unwrap();
+
+            let data = Storeable::bytes_to_ref(data_ptr.as_ref().unwrap(), data_bytes as usize);
 
             let num_deps = (self.dependency_bytes as usize)
                 .checked_div(size_of::<OrderIndex>()).unwrap();
@@ -400,7 +362,7 @@ impl<V: ?Sized, F> Entry<V, F> {
     pub unsafe fn as_multi_entry_mut(&mut self) -> &mut Entry<V, MultiFlex> {
         mem::transmute(self)
     }
-    
+
     pub fn bytes(&self) -> &[u8] {
         unsafe {
             let ptr: *const _ = self;
@@ -418,43 +380,16 @@ impl<V: ?Sized, F> Entry<V, F> {
     }
 }
 
-impl<V: PartialEq> PartialEq for Entry<V> {
+impl<V: PartialEq + Storeable + ?Sized> PartialEq for Entry<V> {
     fn eq(&self, other: &Self) -> bool {
         //TODO
         self.contents() == other.contents()
     }
 }
 
-impl<V: PartialEq> PartialEq for Entry<[V]> {
-    fn eq(&self, other: &Self) -> bool {
-        //TODO
-        self.contents() == other.contents()
-    }
-}
+impl<V: Eq + Storeable + ?Sized> Eq for Entry<V> {}
 
-impl<V: Eq> Eq for Entry<V> {}
-impl<V: Eq> Eq for Entry<[V]> {}
-
-impl<V: fmt::Debug> fmt::Debug for Entry<V> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        if self.kind == EntryKind::Invalid {
-            panic!("invalid entry")
-        }
-        else if self.kind == EntryKind::Read {
-            let s = unsafe { self.as_data_entry() };
-            f.debug_struct("Entry")
-                .field("kind", &"Read")
-                .field("id", &s.id)
-                .field("loc", &s.flex.loc)
-            .finish()
-        }
-        else {
-            write!(f, "{:?} with id: {:?}", self.contents(), self.id)
-        }
-    }
-}
-
-impl<V: fmt::Debug> fmt::Debug for Entry<[V]> {
+impl<V: fmt::Debug + Storeable + ?Sized> fmt::Debug for Entry<V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         if self.kind == EntryKind::Invalid {
             panic!("invalid entry")
@@ -485,7 +420,18 @@ impl<V: ?Sized> Clone for Entry<V> {
     }
 }
 
-impl<'e, V> EntryContents<'e, V> {
+impl<'e, V: Storeable + ?Sized> Clone for EntryContents<'e, V> {
+    fn clone(&self) -> Self {
+        match self {
+            &Data(ref data, ref deps) => Data(data.clone(), deps.clone()),
+            &Multiput{ref data, ref uuid, ref columns, ref deps} => {
+                Multiput{data: data.clone(), uuid: uuid.clone(), columns: columns.clone(), deps: deps.clone()}
+            }
+        }
+    }
+}
+
+impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
     pub fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
         match self {
             &Data(_, ref deps) => &deps,
@@ -503,63 +449,10 @@ impl <'e, V: ?Sized> EntryContents<'e, V> {
     }
 }
 
-impl<'e, V> EntryContents<'e, [V]> {
-
-    pub fn clone_entry(&self) -> Entry<[V]> {
-        use std::u16;
-        assert!(size_of::<V>() < u16::MAX as usize);
-        unsafe {
-            let mut entr = mem::uninitialized::<Entry<[V]>>();
-            {
-                let e = &mut entr;
-                //assert_eq!(e.data_bytes as usize, size_of::<V>());
-                e.kind = self.kind();
-                let (data_ptr, data, deps) = match self {
-                    &Data(data, deps) => {
-                        assert!(deps.len() < u16::MAX as usize);
-                        let e = transmute_ref_mut::<_, Entry<[V], DataFlex>>(e);
-                        let data_ptr: *mut u8 = &mut (&mut e.flex.data)[0];
-                        (data_ptr, data, deps)
-                    }
-                    &Multiput{data, uuid, columns, deps} => {
-                        assert!(deps.len() < u16::MAX as usize);
-                        assert!(columns.len() < u16::MAX as usize);
-                        assert!(columns.len() > 0);
-                        let e = transmute_ref_mut::<_, Entry<[V], MultiFlex>>(e);
-                        let cols_ptr: *mut OrderIndex = (&mut e.flex.data[0]) as *mut _ as *mut _;
-                        e.flex.cols = columns.len() as u16;
-                        assert!(e.flex.cols > 0);
-                        e.id = uuid.clone();
-
-                        ptr::copy(columns.as_ptr() as *mut _, cols_ptr, columns.len());
-
-                        let data_ptr = cols_ptr.offset(columns.len() as isize) as *mut u8;
-                        (data_ptr, data, deps)
-                    }
-                };
-                assert!(size_of::<V>() * data.len() < 8192);
-                e.data_bytes = (size_of::<V>() * data.len()) as u16;
-                e.dependency_bytes = (deps.len() * size_of::<OrderIndex>()) as u16;
-                let dep_ptr = data_ptr.offset(e.data_bytes as isize);
-
-                ptr::copy(&data[0], data_ptr as *mut _, e.data_bytes as usize);
-                //ptr::write(data_ptr as *mut _, data.clone());
-                ptr::copy(deps.as_ptr(), dep_ptr as *mut _, deps.len());
-                if e.kind == EntryKind::Multiput {
-                    let e = transmute_ref_mut::<_, Entry<[V], MultiFlex>>(e);
-                    assert!(e.flex.cols > 0);
-                }
-            }
-            entr
-        }
-    }
-}
-
-impl<'e, V> EntryContents<'e, V> {
+impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
 
     pub fn clone_entry(&self) -> Entry<V> {
         use std::u16;
-        assert!(size_of::<V>() < u16::MAX as usize);
         unsafe {
             let mut entr = mem::uninitialized::<Entry<V>>();
             {
@@ -588,19 +481,19 @@ impl<'e, V> EntryContents<'e, V> {
                         (data_ptr, data, deps)
                     }
                 };
-                e.data_bytes = size_of::<V>() as u16;
+                assert!(Storeable::size(data) < u16::MAX as usize);
+                e.data_bytes = Storeable::size(data) as u16;
                 e.dependency_bytes = (deps.len() * size_of::<OrderIndex>()) as u16;
                 let dep_ptr = data_ptr.offset(e.data_bytes as isize);
 
                 //ptr::write(data_ptr as *mut _, data.clone()); //TODO why did this fail?
-                ptr::copy(data, data_ptr as *mut _, 1);
+                ptr::copy(Storeable::ref_to_bytes(data), data_ptr as *mut _, e.data_bytes as usize);
                 ptr::copy(deps.as_ptr(), dep_ptr as *mut _, deps.len());
                 if e.kind == EntryKind::Multiput {
                     let e = transmute_ref_mut::<_, Entry<V, MultiFlex>>(e);
                     assert!(e.flex.cols > 0);
                 }
             }
-            assert_eq!(entr.data_bytes as usize, size_of::<V>());
             entr
         }
     }
@@ -656,19 +549,19 @@ pub trait Horizon {
 pub type LogResult = Result<(), ()>;
 pub type ApplyResult = Result<(), ()>;
 
-pub struct FuzzyLog<V, S, H>
-where V: Copy, S: Store<V>, H: Horizon {
+pub struct FuzzyLog<V: ?Sized, S, H>
+where V: Storeable, S: Store<V>, H: Horizon {
     pub store: S,
     pub horizon: H,
     local_horizon: HashMap<order, entry>,
-    upcalls: HashMap<order, Box<Fn(V) -> bool>>,
+    upcalls: HashMap<order, Box<for<'r> Fn(&'r V) -> bool>>,
 }
 
 //TODO should impl some trait FuzzyLog instead of providing methods directly to allow for better sharing?
 //TODO allow dynamic register of new upcalls?
-impl<V, S, H> FuzzyLog<V, S, H>
-where V: Copy, S: Store<V>, H: Horizon{
-    pub fn new(store: S, horizon: H, upcalls: HashMap<order, Box<Fn(V) -> bool>>) -> Self {
+impl<V: ?Sized, S, H> FuzzyLog<V, S, H>
+where V: Storeable, S: Store<V>, H: Horizon{
+    pub fn new(store: S, horizon: H, upcalls: HashMap<order, Box<Fn(&V) -> bool>>) -> Self {
         FuzzyLog {
             store: store,
             horizon: horizon,
@@ -677,14 +570,14 @@ where V: Copy, S: Store<V>, H: Horizon{
         }
     }
 
-    pub fn append(&mut self, column: order, data: V, deps: Vec<OrderIndex>) -> OrderIndex {
-        self.append_entry(column, Data(&data, &*deps))
+    pub fn append(&mut self, column: order, data: &V, deps: Vec<OrderIndex>) -> OrderIndex {
+        self.append_entry(column, Data(data, &*deps))
     }
 
-    pub fn try_append(&mut self, column: order, data: V, deps: Vec<OrderIndex>) -> Option<OrderIndex> {
+    pub fn try_append(&mut self, column: order, data: &V, deps: Vec<OrderIndex>) -> Option<OrderIndex> {
         let next_entry = self.horizon.get_horizon(column);
         let insert_loc = (column, next_entry);
-        self.store.insert(insert_loc, Data(&data, &*deps)).ok().map(|loc| {
+        self.store.insert(insert_loc, Data(data, &*deps)).ok().map(|loc| {
             self.horizon.update_horizon(column, loc.1);
             loc
         })
@@ -709,9 +602,9 @@ where V: Copy, S: Store<V>, H: Horizon{
         insert_loc
     }
 
-    pub fn multiappend(&mut self, columns: Vec<order>, data: V, deps: Vec<OrderIndex>) {
+    pub fn multiappend(&mut self, columns: Vec<order>, data: &V, deps: Vec<OrderIndex>) {
         let columns: Vec<OrderIndex> = columns.into_iter().map(|i| (i, 0.into())).collect();
-        self.store.multi_append(&columns[..], &data, &deps[..]); //TODO error handling
+        self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
         for &(column, _) in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO
             self.horizon.update_horizon(column, next_entry); //TODO
@@ -743,12 +636,12 @@ where V: Copy, S: Store<V>, H: Horizon{
         columns: &[OrderIndex]) {
 
         //XXX note multiserver validation happens at the store layer
-        self.upcalls.get(&first_seen_column).map(|f| f(data.clone())); //TODO clone
+        self.upcalls.get(&first_seen_column).map(|f| f(data)); //TODO clone
 
         for &(column, _) in columns { //TODO only relevent cols
             trace!("play multiput for col {:?}", column);
             self.play_until_multiput(column, put_id);
-            self.upcalls.get(&column).map(|f| f(data.clone())); //TODO clone
+            self.upcalls.get(&column).map(|f| f(data)); //TODO clone
         }
     }
 
@@ -774,7 +667,7 @@ where V: Copy, S: Store<V>, H: Horizon{
                 }
                 Data(data, _) => {
                     trace!("Data");
-                    self.upcalls.get(&column).map(|f| f(data.clone())); //TODO clone
+                    self.upcalls.get(&column).map(|f| f(data)); //TODO clone
                 }
             }
         }
