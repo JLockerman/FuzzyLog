@@ -47,31 +47,7 @@ impl<V: Storeable + ?Sized> UdpStore<V> {
     }
 }
 
-macro_rules! handle_insert {
-    ($this: expr, $key: expr, $val: expr) => {
-        {
-            
-        }
-    }
-}
-
-macro_rules! handle_get {
-    ($this:expr, $key: expr) => {
-        {
-            
-        }
-    }
-}
-
-macro_rules! handle_multi_append {
-    ($this: expr, $chains: expr, $data: expr, $deps: expr) => {
-        {
-            
-        }
-    }
-}
-
-impl<V: Storeable + ?Sized + Debug + Eq> Store<V> for UdpStore<V> {
+impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
 
     fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
         let (this, key, val) = (self, key, val);
