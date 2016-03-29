@@ -7,7 +7,6 @@ authors = ["J <joshua.lockerman@yale.edu>"]
 bitflags = "0.4"
 custom_derive = "0.1"
 grabbag_macros = "0.1"
-mio = "0.4"
 newtype_derive = "0.1"
 uuid = "0.1"
 log = "0.3"

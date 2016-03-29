@@ -17,7 +17,6 @@ extern crate test;
 
 extern crate rustc_serialize;
 extern crate uuid;
-extern crate mio;
 extern crate time;
 
 #[macro_use]

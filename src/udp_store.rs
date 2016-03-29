@@ -306,13 +306,13 @@ mod test {
 
     use test::Bencher;
 
-    use mio::buf::{MutSliceBuf, SliceBuf};
+    //use mio::buf::{MutSliceBuf, SliceBuf};
     //use mio::udp::UdpSocket;
 
     #[allow(non_upper_case_globals)]
     fn new_store<V: ::std::fmt::Debug>(_: Vec<OrderIndex>) -> UdpStore<V>
     where V: Clone {
-        let handle = spawn(move || {
+        /*let handle = spawn(move || {
             use mio::udp::UdpSocket;
             const addr_str: &'static str = "0.0.0.0:13265";
             let addr = addr_str.parse().expect("invalid inet address");
@@ -409,7 +409,7 @@ mod test {
                 }
             }
         });
-        forget(handle);
+        forget(handle);*/
 
         //const addr_str: &'static str = "172.28.229.152:13265";
         const addr_str: &'static str = "10.21.7.4:13265";
