@@ -6,8 +6,6 @@ use std::collections::HashMap;
 use std::collections::hash_map;
 use std::sync::{Arc, Mutex};
 
-use uuid::Uuid;
-
 pub type LocalHorizon = HashMap<order, entry>;
 
 impl Horizon for LocalHorizon {

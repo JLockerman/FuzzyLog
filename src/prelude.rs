@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::mem::{self, size_of};
 use std::ptr;
 use std::slice;
-use uuid::Uuid;
+pub use uuid::Uuid;
 
 use self::EntryContents::*;
 
@@ -41,9 +41,10 @@ pub trait Storeable {
     unsafe fn ref_to_bytes(&self) -> &u8;
     unsafe fn bytes_to_ref(&u8, usize) -> &Self;
     unsafe fn bytes_to_mut(&mut u8, usize) -> &mut Self;
+    unsafe fn clone_box(&self) -> Box<Self>;
 }
 
-impl<V> Storeable for V {
+impl<V> Storeable for V { //TODO should V be Copy/Clone?
     fn size(&self) -> usize {
         mem::size_of::<Self>()
     }
@@ -61,6 +62,12 @@ impl<V> Storeable for V {
     unsafe fn bytes_to_mut(val: &mut u8, size: usize) -> &mut Self {
         assert_eq!(size, mem::size_of::<Self>());
         mem::transmute(val)
+    }
+
+    unsafe fn clone_box(&self) -> Box<Self> {
+        let mut b = Box::new(mem::uninitialized());
+        ptr::copy_nonoverlapping(self, &mut *b, 1);
+        b
     }
 }
 
@@ -81,6 +88,14 @@ impl<V> Storeable for [V] {
     unsafe fn bytes_to_mut(val: &mut u8, size: usize) -> &mut Self {
         assert_eq!(size % mem::size_of::<V>(), 0);
         slice::from_raw_parts_mut(val as *mut _ as *mut _, size / mem::size_of::<V>())
+    }
+
+    unsafe fn clone_box(&self) -> Box<Self> {
+        let mut v = Vec::with_capacity(self.len());
+        v.set_len(self.len());
+        let mut b = v.into_boxed_slice();
+        ptr::copy_nonoverlapping(&self[0], &mut b[0], self.len());
+        b
     }
 }
 
@@ -233,6 +248,16 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
         }
     }
 
+    fn mlocs(&self) -> &[OrderIndex] {
+        unsafe {
+            let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
+            let cols_ptr = contents_ptr;
+            let cols_ptr = cols_ptr as *const _;
+            let num_cols = self.flex.cols;
+            slice::from_raw_parts(cols_ptr, num_cols as usize)
+        }
+    }
+
     fn multi_contents<'s>(&'s self, data_bytes: u16, _: u16, uuid: &'s Uuid)
     -> EntryContents<'s, V> { //TODO to DataContents<..>?
         unsafe {
@@ -346,7 +371,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
     }
 }
 
-impl<V: ?Sized, F> Entry<V, F> {
+impl<V: ?Sized + Storeable, F> Entry<V, F> {
     pub unsafe fn as_data_entry(&self) -> &Entry<V, DataFlex> {
         mem::transmute(self)
     }
@@ -376,6 +401,28 @@ impl<V: ?Sized, F> Entry<V, F> {
             let ptr: *mut _ = self;
             let ptr: *mut u8 = ptr as *mut _;
             slice::from_raw_parts_mut(ptr, size_of::<Self>())
+        }
+    }
+
+    pub fn locs(&self) -> &[OrderIndex] {
+        unsafe {
+            match self.kind & EntryKind::Layout {
+                EntryKind::Read | EntryKind::Data => 
+                    slice::from_raw_parts(&self.as_data_entry().flex.loc, 1),
+                EntryKind::Multiput => self.as_multi_entry().mlocs(),
+                _ => unreachable!()
+            }
+        }
+    }
+
+    pub fn val_locs_and_deps(&self) -> (&V, &[OrderIndex], &[OrderIndex]) {
+        unsafe {
+            match self.contents() {
+                Data(ref data, ref deps) => (data, self.locs(), deps),
+                Multiput{ref data, ref columns, ref deps, ..} => {
+                    (data, columns, deps)
+                }
+            }
         }
     }
 }
@@ -570,11 +617,11 @@ where V: Storeable, S: Store<V>, H: Horizon{
         }
     }
 
-    pub fn append(&mut self, column: order, data: &V, deps: Vec<OrderIndex>) -> OrderIndex {
+    pub fn append(&mut self, column: order, data: &V, deps: &[OrderIndex]) -> OrderIndex {
         self.append_entry(column, Data(data, &*deps))
     }
 
-    pub fn try_append(&mut self, column: order, data: &V, deps: Vec<OrderIndex>) -> Option<OrderIndex> {
+    pub fn try_append(&mut self, column: order, data: &V, deps: &[OrderIndex]) -> Option<OrderIndex> {
         let next_entry = self.horizon.get_horizon(column);
         let insert_loc = (column, next_entry);
         self.store.insert(insert_loc, Data(data, &*deps)).ok().map(|loc| {
@@ -602,8 +649,8 @@ where V: Storeable, S: Store<V>, H: Horizon{
         insert_loc
     }
 
-    pub fn multiappend(&mut self, columns: Vec<order>, data: &V, deps: Vec<OrderIndex>) {
-        let columns: Vec<OrderIndex> = columns.into_iter().map(|i| (i, 0.into())).collect();
+    pub fn multiappend(&mut self, columns: &[order], data: &V, deps: &[OrderIndex]) {
+        let columns: Vec<OrderIndex> = columns.into_iter().map(|i| (*i, 0.into())).collect();
         self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
         for &(column, _) in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO

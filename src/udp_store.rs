@@ -15,8 +15,6 @@ use std::time::Duration;
 
 use time::precise_time_ns;
 
-use uuid::Uuid;
-
 //#[derive(Debug)]
 pub struct UdpStore<V: ?Sized> {
     socket: UdpSocket,
