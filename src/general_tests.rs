@@ -62,20 +62,20 @@ macro_rules! general_tests {
                     let mut log = FuzzyLog::new(s, h, HashMap::new());
                     let mut last_index = (1.into(), 0.into());
                     for i in 0..10 {
-                        last_index = log.append(1.into(), &MapEntry(i * 2, i * 2), vec![]);
+                        last_index = log.append(1.into(), &MapEntry(i * 2, i * 2), &*vec![]);
                         trace!("T1 inserted {:?} at {:?}", (i * 2, i * 2), last_index);
                     }
-                    let index2 = log.append(2.into(), &MapEntry(5, 17), vec![last_index]);
+                    let index2 = log.append(2.into(), &MapEntry(5, 17), &*vec![last_index]);
                     trace!("T1 inserted {:?} at {:?}", last_index, index2);
                 });
                 let join1 = thread::spawn(|| {
                     let mut log = FuzzyLog::new(s1, h1, HashMap::new());
                     let mut last_index = (1.into(), 0.into());
                     for i in 0..10 {
-                        last_index = log.append(1.into(), &MapEntry(i * 2 + 1, i * 2 + 1), vec![]);
+                        last_index = log.append(1.into(), &MapEntry(i * 2 + 1, i * 2 + 1), &*vec![]);
                         trace!("T2 inserted {:?} at {:?}", (i * 2 + 1, i * 2 + 1), last_index);
                     }
-                    let index2 = log.append(2.into(), &MapEntry(9, 20), vec![last_index]);
+                    let index2 = log.append(2.into(), &MapEntry(9, 20), &*vec![last_index]);
                     trace!("T2 inserted {:?} at {:?}", last_index, index2);
                 });
                 trace!("started threads");
@@ -138,13 +138,13 @@ macro_rules! general_tests {
                 upcalls.insert(5.into(), Box::new(|_| false));
 
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
-                let e1 = log.append(4.into(), &MapEntry(0, 1), vec![]);
+                let e1 = log.append(4.into(), &MapEntry(0, 1), &*vec![]);
                 assert_eq!(e1, (4.into(), 1.into()));
-                let e2 = log.append(4.into(), &MapEntry(1, 17), vec![]);
+                let e2 = log.append(4.into(), &MapEntry(1, 17), &*vec![]);
                 assert_eq!(e2, (4.into(), 2.into()));
-                let last_index = log.append(4.into(), &MapEntry(32, 5), vec![]);
+                let last_index = log.append(4.into(), &MapEntry(32, 5), &*vec![]);
                 assert_eq!(last_index, (4.into(), 3.into()));
-                let en = log.append(5.into(), &MapEntry(0, 0), vec![last_index]);
+                let en = log.append(5.into(), &MapEntry(0, 0), &*vec![last_index]);
                 assert_eq!(en, (5.into(), 1.into()));
                 log.play_foward(4.into());
                 assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
@@ -167,13 +167,13 @@ macro_rules! general_tests {
                 }));
                 upcalls.insert(7.into(), Box::new(|_| false));
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
-                let e1 = log.append(6.into(), &MapEntry(0, 1), vec![]);
+                let e1 = log.append(6.into(), &MapEntry(0, 1), &*vec![]);
                 assert_eq!(e1, (6.into(), 1.into()));
-                let e2 = log.append(6.into(), &MapEntry(1, 17), vec![]);
+                let e2 = log.append(6.into(), &MapEntry(1, 17), &*vec![]);
                 assert_eq!(e2, (6.into(), 2.into()));
-                let last_index = log.append(6.into(), &MapEntry(32, 5), vec![]);
+                let last_index = log.append(6.into(), &MapEntry(32, 5), &*vec![]);
                 assert_eq!(last_index, (6.into(), 3.into()));
-                let en = log.append(7.into(), &MapEntry(0, 0), vec![last_index]);
+                let en = log.append(7.into(), &MapEntry(0, 0), &*vec![last_index]);
                 assert_eq!(en, (7.into(), 1.into()));
                 log.play_foward(7.into());
                 assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
@@ -371,16 +371,16 @@ macro_rules! general_tests {
 
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
                 //try_multiput(&mut self, offset: u32, mut columns: Vec<(order, V)>, deps: Vec<OrderIndex>)
-                let columns = vec![(15.into(), &MapEntry(13, 5)),
+                let columns = &*vec![(15.into(), &MapEntry(13, 5)),
                     (16.into(), &MapEntry(92, 7))];
-                let v = log.try_multiput(0u32.into(), columns, vec![]);
-                assert_eq!(v, Some(vec![(15.into(), 1.into()),
+                let v = log.try_multiput(0u32.into(), columns, &*vec![]);
+                assert_eq!(v, Some(&*vec![(15.into(), 1.into()),
                     (16.into(), 1.into())]));
 
-                let columns = vec![(15.into(), &MapEntry(3, 8)),
+                let columns = &*vec![(15.into(), &MapEntry(3, 8)),
                     (16.into(), &MapEntry(2, 54))];
-                let v = log.try_multiput(0u32.into(), columns, vec![]);
-                assert_eq!(v, Some(vec![(15.into(), 2.into()),
+                let v = log.try_multiput(0u32.into(), columns, &*vec![]);
+                assert_eq!(v, Some(&*vec![(15.into(), 2.into()),
                     (16.into(), 2.into())]));
 
                 log.play_until((15.into(), 1.into()));
@@ -425,17 +425,17 @@ macro_rules! general_tests {
                 let join = thread::spawn(move || {
                     let mut log = FuzzyLog::new(s, h, HashMap::new());
                     for i in 0..10 {
-                        let change = vec![17.into(), 18.into()];
+                        let change = &*vec![17.into(), 18.into()];
                         let data = &MapEntry(i * 2, i * 2);
-                        log.multiappend(change.clone(), data, vec![])
+                        log.multiappend(change.clone(), data, &*vec![])
                     }
                 });
                 let join1 = thread::spawn(|| {
                     let mut log = FuzzyLog::new(s1, h1, HashMap::new());
                     for i in 0..10 {
-                        let change = vec![17.into(), 18.into()];
+                        let change = &*vec![17.into(), 18.into()];
                         let data = &MapEntry(i * 2 + 1, i * 2 + 1);
-                        log.multiappend(change, data, vec![])
+                        log.multiappend(change, data, &*vec![])
                     }
                 });
                 join1.join().unwrap();

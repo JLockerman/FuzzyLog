@@ -759,7 +759,6 @@ mod test {
 
     use super::*;
     use super::EntryContents::*;
-    use uuid::Uuid;
 
     use std::marker::PhantomData;
 

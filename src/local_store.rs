@@ -196,7 +196,7 @@ pub mod test {
 	    }
 
 	    pub fn put(&mut self, key: K, val: V) {
-	        self.log.append(self.order, &MapEntry(key, val), vec![]);
+	        self.log.append(self.order, &MapEntry(key, val), &*vec![]);
 	        //TODO deps
 	    }
 
