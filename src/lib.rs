@@ -1,4 +1,4 @@
-#![cfg_attr(test, feature(test))]
+//#![cfg_attr(test, feature(test))]
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
@@ -11,8 +11,8 @@ extern crate hyper;
 #[cfg(feature = "dynamodb_tests")]
 extern crate rusoto;
 
-#[cfg(test)]
-extern crate test;
+//#[cfg(test)]
+//extern crate test;
 
 extern crate rustc_serialize;
 extern crate uuid;

@@ -302,7 +302,7 @@ mod test {
     use std::net::UdpSocket;
     use std::thread::spawn;
 
-    use test::Bencher;
+    //use test::Bencher;
 
     //use mio::buf::{MutSliceBuf, SliceBuf};
     //use mio::udp::UdpSocket;
