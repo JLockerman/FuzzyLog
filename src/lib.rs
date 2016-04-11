@@ -1,4 +1,3 @@
-#![feature(ptr_as_ref)]
 #![cfg_attr(test, feature(test))]
 
 #[macro_use] extern crate bitflags;

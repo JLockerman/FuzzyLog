@@ -239,7 +239,8 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let data_offset = (self.flex.cols as usize * size_of::<OrderIndex>()) as isize;
             let data_ptr = contents_ptr.offset(data_offset);
             let dep_ptr:*mut OrderIndex = data_ptr.offset(self.data_bytes as isize) as *mut _;
-            let data = Storeable::bytes_to_mut(data_ptr.as_mut().unwrap(), self.data_bytes as usize);
+            //let data = Storeable::bytes_to_mut(data_ptr.as_mut().unwrap(), self.data_bytes as usize);
+            let data = Storeable::bytes_to_mut(mem::transmute(data_ptr), self.data_bytes as usize);
 
             let num_deps = (self.dependency_bytes as usize)
                 .checked_div(size_of::<OrderIndex>()).unwrap();
@@ -303,7 +304,8 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
             let data_ptr = contents_ptr.offset(data_offset);
             let dep_ptr:*const OrderIndex = data_ptr.offset(self.data_bytes as isize) as *const _;
 
-            let data = Storeable::bytes_to_ref(data_ptr.as_ref().unwrap(), data_bytes as usize);
+            //let data = Storeable::bytes_to_ref(data_ptr.as_ref().unwrap(), data_bytes as usize);
+            let data = Storeable::bytes_to_ref(mem::transmute(data_ptr), data_bytes as usize);
 
             let num_deps = (self.dependency_bytes as usize)
                 .checked_div(size_of::<OrderIndex>()).unwrap();
