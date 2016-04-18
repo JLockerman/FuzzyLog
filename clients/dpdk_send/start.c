@@ -468,8 +468,9 @@ lcore_recv(__attribute__((unused)) void *arg)
 					sizeof(struct ether_hdr));
 			uint8_t dst = rte_be_to_cpu_32(ip->dst_addr) & 0xff;
 			printf("routing packet to %u.\n", dst);
-			assert(dst < num_client_cores);
-			send_to(recv_rings[dst], &bufs[i], 1);
+
+			if(dst < num_client_cores) send_to(recv_rings[dst], &bufs[i], 1); //assert(dst < num_client_cores);
+			else rte_pktmbuf_free(bufs[i]);
 		}
 	}
 	return 0;
