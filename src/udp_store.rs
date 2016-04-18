@@ -144,7 +144,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
         //this.send_buffer.id = request_id.clone();
 
         trace!("at {:?}", this.socket.local_addr());
-        while let Err(..) = this.socket.set_read_timeout(Some(Duration::new(0, RTT as u32))) {} //TODO
+        //while let Err(..) = this.socket.set_read_timeout(Some(Duration::new(0, RTT as u32))) {} //TODO
         'send: loop {
             {
                 trace!("sending get");

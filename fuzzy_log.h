@@ -23,6 +23,6 @@ void fuzzy_log_multiappend(FuzzyLog *log, uint32_t *chain, uint16_t num_chains,
 		const uint8_t *val, uint16_t len,
 		const ChainAndEntry* deps, uint16_t num_deps);
 
-ChainAndEntry fuzzy_log_play_forward(FuzzyLog *log, uint32_t *chain);
+ChainAndEntry fuzzy_log_play_forward(FuzzyLog *log, uint32_t chain);
 
 #endif

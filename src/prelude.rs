@@ -149,6 +149,7 @@ pub struct Entry<V: ?Sized, F: ?Sized = [u8; MAX_DATA_LEN2]> {
 
 pub const MAX_DATA_DATA_LEN: usize = MAX_DATA_LEN2 - 12; //TODO
 
+#[repr(C)]
 pub struct DataFlex<D: ?Sized = [u8; MAX_DATA_DATA_LEN]> {
     pub loc: OrderIndex,
     pub data: D,
@@ -156,6 +157,7 @@ pub struct DataFlex<D: ?Sized = [u8; MAX_DATA_DATA_LEN]> {
 
 pub const MAX_MULTI_DATA_LEN: usize = MAX_DATA_LEN2 - 2; //TODO
 
+#[repr(C)]
 pub struct MultiFlex<D: ?Sized = [u8; MAX_MULTI_DATA_LEN]> {
     pub cols: u16,
     pub data: D,

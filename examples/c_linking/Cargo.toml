@@ -1,0 +1,10 @@
+[package]
+name = "c_link"
+version = "0.1.0"
+authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
+
+[dependencies]
+fuzzy_log = {path = "../.."}
+
+[lib]
+crate-type = ["staticlib"]
