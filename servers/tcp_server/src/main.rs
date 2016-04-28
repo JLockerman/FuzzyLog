@@ -57,7 +57,7 @@ impl Server {
         try!(event_loop.register(&acceptor,
                                  mio::Token(0),
                                  mio::EventSet::readable(),
-                                 mio::PollOpt::edge()));
+                                 mio::PollOpt::level()));
         Ok(Server {
             log: ServerLog::new(),
             acceptor: acceptor,
@@ -204,7 +204,9 @@ impl PerClient {
                 trace!("wrote {} bytes", s);
                 self.sent_bytes += s;
                 if self.sent_bytes >= self.buffer.entry_size() {
+                    trace!("finished write");
                     self.sent_bytes = 0;
+                    let _ = self.stream.flush();
                     return true;
                 }
                 self.sent_bytes >= self.buffer.entry_size()
