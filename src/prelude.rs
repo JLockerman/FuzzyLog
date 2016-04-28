@@ -261,6 +261,16 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
         }
     }
 
+    fn mlocs_mut(&mut self) -> &mut [OrderIndex] {
+        unsafe {
+            let contents_ptr: *mut u8 = &mut self.flex.data as *mut _ as *mut u8;
+            let cols_ptr = contents_ptr;
+            let cols_ptr = cols_ptr as *mut _;
+            let num_cols = self.flex.cols;
+            slice::from_raw_parts_mut(cols_ptr, num_cols as usize)
+        }
+    }
+
     fn multi_contents<'s>(&'s self, data_bytes: u16, _: u16, uuid: &'s Uuid)
     -> EntryContents<'s, V> { //TODO to DataContents<..>?
         unsafe {
@@ -411,7 +421,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
     pub fn locs(&self) -> &[OrderIndex] {
         unsafe {
             match self.kind & EntryKind::Layout {
-                EntryKind::Read | EntryKind::Data => 
+                EntryKind::Read | EntryKind::Data =>
                     slice::from_raw_parts(&self.as_data_entry().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry().mlocs(),
                 _ => unreachable!()
@@ -419,16 +429,91 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
         }
     }
 
-    pub fn val_locs_and_deps(&self) -> (&V, &[OrderIndex], &[OrderIndex]) {
+    pub fn locs_mut(&mut self) -> &mut [OrderIndex] {
         unsafe {
-            match self.contents() {
-                Data(ref data, ref deps) => (data, self.locs(), deps),
-                Multiput{ref data, ref columns, ref deps, ..} => {
-                    (data, columns, deps)
-                }
+            match self.kind & EntryKind::Layout {
+                EntryKind::Read | EntryKind::Data =>
+                    slice::from_raw_parts_mut(&mut self.as_data_entry_mut().flex.loc, 1),
+                EntryKind::Multiput => self.as_multi_entry_mut().mlocs_mut(),
+                _ => unreachable!()
             }
         }
     }
+
+    pub fn val_locs_and_deps(&self) -> (&V, &[OrderIndex], &[OrderIndex]) {
+        match self.contents() {
+            Data(ref data, ref deps) => (data, self.locs(), deps),
+            Multiput{ref data, ref columns, ref deps, ..} => {
+                (data, columns, deps)
+            }
+        }
+    }
+
+    pub fn header_size(&self) -> usize {
+        match self.kind & EntryKind::Layout {
+            EntryKind::Data | EntryKind::Read => mem::size_of::<Entry<(), DataFlex<()>>>(),
+            EntryKind::Multiput => mem::size_of::<Entry<(), MultiFlex<()>>>(),
+            _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
+        }
+    }
+
+    pub fn payload_size(&self) -> usize {
+        let mut size = self.data_bytes as usize + self.dependency_bytes as usize;
+        if self.is_multi() {
+            let header = unsafe { mem::transmute::<_, &Entry<V, MultiFlex<()>>>(self) };
+            size += header.flex.cols as usize * mem::size_of::<OrderIndex>();
+        }
+        assert!(size + mem::size_of::<Entry<(), ()>>() <= 8192);
+        size
+    }
+
+    pub fn entry_size(&self) -> usize {
+        match self.kind & EntryKind::Layout {
+            EntryKind::Data => self.data_entry_size(),
+            EntryKind::Multiput => self.multi_entry_size(),
+            EntryKind::Read => {
+                //trace!("read size {}", mem::size_of::<Entry<(), ()>>());
+                mem::size_of::<Entry<(), DataFlex<()>>>()
+            }
+            _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
+        }
+    }
+
+    fn data_entry_size(&self) -> usize {
+        assert!(self.kind & EntryKind::Layout == EntryKind::Data);
+        let size = mem::size_of::<Entry<(), DataFlex<()>>>()
+            + self.data_bytes as usize
+            + self.dependency_bytes as usize;
+        //trace!("data size {}", size);
+        assert!(size <= 8192);
+        size
+    }
+
+    fn multi_entry_size(&self) -> usize {
+        assert!(self.kind & EntryKind::Layout == EntryKind::Multiput);
+        unsafe {
+            let header = mem::transmute::<_, &Entry<V, MultiFlex>>(self);
+            let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + header.data_bytes as usize
+                + header.dependency_bytes as usize
+                + (header.flex.cols as usize * mem::size_of::<OrderIndex>());
+            //trace!("multi size {}", size);
+            assert!(size <= 8192);
+            size
+        }
+    }
+
+    pub fn is_multi(&self) -> bool {
+        self.kind & EntryKind::Layout == EntryKind::Multiput
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.kind & EntryKind::Layout == EntryKind::Data
+    }
+}
+
+pub fn base_header_size() -> usize {
+    mem::size_of::<Entry<(), ()>>()
 }
 
 impl<V: PartialEq + Storeable + ?Sized> PartialEq for Entry<V> {
@@ -464,7 +549,7 @@ impl<V: ?Sized> Clone for Entry<V> {
         //TODO
         unsafe {
             let mut entr: Entry<V> = mem::uninitialized();
-            ptr::copy(self as *const _, &mut entr as *mut _, 1);
+            ptr::copy(self as *const _ as *const u8, &mut entr as *mut _ as *mut u8, self.size());
             entr
         }
         //self.contents().clone_entry()
