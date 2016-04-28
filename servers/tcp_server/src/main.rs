@@ -103,8 +103,13 @@ impl mio::Handler for Server {
             client_token => {
                 // trace!("got client event");
                 if events.is_error() {
-                    trace!("dropping client {:?}", client_token);
-                    self.clients.remove(&client_token);
+                    let err = self.clients.get_mut(&client_token)
+                        .ok_or(std::io::Error::new(std::io::ErrorKind::Other, "socket does not exist"))
+                        .map(|s| s.stream.take_socket_error());
+                    if err.is_err() {
+                        trace!("dropping client {:?} due to", client_token);
+                        self.clients.remove(&client_token);
+                    }
                     return;
                 }
                 let client = self.clients.get_mut(&client_token).unwrap();
