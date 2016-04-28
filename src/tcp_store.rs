@@ -43,21 +43,28 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
     }
 
     fn read_packet(&mut self) {
+        let mut bytes_read = 0;
         trace!("client read start base header");
-        self.socket
-            .read_exact(&mut self.receive_buffer.bytes_mut()[..base_header_size()])
-            .expect("cannot read");
+        while bytes_read < base_header_size() {
+            bytes_read += self.socket
+                .read(&mut self.receive_buffer.bytes_mut()[bytes_read..])
+                .expect("cannot read");
+        }
         trace!("client read base header");
         let header_size = self.receive_buffer.header_size();
         trace!("header size {}", header_size);
-        self.socket.read_exact(&mut self.receive_buffer
-            .bytes_mut()[base_header_size()..header_size])
-            .expect("cannot read");
+        while bytes_read < header_size {
+            bytes_read += self.socket.read(&mut self.receive_buffer
+                .bytes_mut()[bytes_read..])
+                .expect("cannot read");
+        }
         let end = self.receive_buffer.entry_size();
         trace!("client read more header, entry size {}", end);
-        self.socket.read_exact(&mut self.receive_buffer
-            .bytes_mut()[header_size..end])
-            .expect("cannot read");
+        while bytes_read < header_size {
+            bytes_read += self.socket.read(&mut self.receive_buffer
+                .bytes_mut()[bytes_read..])
+                .expect("cannot read");
+        }
     }
 
     fn send_packet(&mut self) {

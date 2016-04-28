@@ -468,7 +468,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
     }
 
     pub fn entry_size(&self) -> usize {
-        match self.kind & EntryKind::Layout {
+        let size = match self.kind & EntryKind::Layout {
             EntryKind::Data => self.data_entry_size(),
             EntryKind::Multiput => self.multi_entry_size(),
             EntryKind::Read => {
@@ -476,7 +476,9 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
                 mem::size_of::<Entry<(), DataFlex<()>>>()
             }
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
-        }
+        };
+        assert!(size >= base_header_size());
+        size
     }
 
     fn data_entry_size(&self) -> usize {
