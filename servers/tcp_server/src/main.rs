@@ -10,6 +10,7 @@ extern crate nix;
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::env;
 use std::hash::BuildHasherDefault;
 use std::io::{self, Read, Write};
 use std::mem;
@@ -30,9 +31,13 @@ use nix::sys::socket::sockopt::TcpNoDelay;
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
 
 pub fn main() {
-    const ADDR_STR: &'static str = "0.0.0.0:13265";
     let _ = env_logger::init();
-    let addr = ADDR_STR.parse().expect("invalid inet address");
+    let addr = if let Some(s) = env::args().next() {
+        ("0.0.0.0".to_owned() + &*s).parse().expect("invalid inet address")
+    } else {
+        const ADDR_STR: &'static str = "0.0.0.0:13265";
+        ADDR_STR.parse().expect("invalid inet address")
+    };
     let mut event_loop = EventLoop::new().unwrap();
     let mut server = Server::new(&addr, &mut event_loop).unwrap();
     trace!("starting server");

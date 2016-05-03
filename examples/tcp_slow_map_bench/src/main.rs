@@ -13,26 +13,32 @@ extern crate env_logger;
 extern crate thread_scoped;
 
 use map::{Map, MapEntry};
-use std::fmt::Debug;
+
+use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 //use std::thread;
 
-use fuzzy_log::udp_store::UdpStore;
-
 use rand::Rng;
+
+const SERVER_ADDR_STR: &'static str = "10.21.7.4:13265";
 
 fn main() {
     let start: AtomicBool = AtomicBool::new(false);
+    let addr = if let Some(s) = env::args().next() {
+        s.parse().expect("invalid inet address")
+    } else {
+        SERVER_ADDR_STR.parse().expect("invalid inet address")
+    };
     let _ = env_logger::init();
     println!("threads, iters/s");
     unsafe {
         for j in 1..50 {
             start.store(false, Ordering::Relaxed);
             let mut handles = Vec::new();
-            for i in 0..j {
+            for _ in 0..j {
                 let handle = thread_scoped::scoped(|| {
                     let mut iters = 0u64;
-                    let mut map = Map::non_shared(vec![(23 + j).into()], 23 + j);
+                    let mut map = Map::non_shared(addr, vec![(23 + j).into()], 23 + j);
                     while !start.load(Ordering::Relaxed) {}
                     let start_time = time::precise_time_ns();
                     while time::precise_time_ns() - start_time < 1000000000 {
@@ -58,18 +64,17 @@ fn main() {
     }
 }
 
-mod map {
+pub mod map {
     use std::rc::Rc;
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::fmt::{Debug, Formatter, Result as FmtResult};
+    use std::fmt::Debug;
     use std::hash::Hash;
+    use std::net::SocketAddr;
 
     use fuzzy_log::prelude::*;
     use fuzzy_log::local_store::LocalHorizon;
     use fuzzy_log::tcp_store::TcpStore;
-
-    const SERVER_ADDR_STR: &'static str = "10.21.7.4:13265";
 
     #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
     pub struct MapEntry<K, V>(pub K, pub V);
@@ -88,9 +93,9 @@ mod map {
     where K: Hash + Eq + Copy + Debug,
           V: Copy + Debug, {
 
-        pub fn non_shared(interesting_columns: Vec<order>, column: u32)
+        pub fn non_shared(addr: SocketAddr, interesting_columns: Vec<order>, column: u32)
             -> Self {
-            Self::new(TcpStore::new(SERVER_ADDR_STR.parse().expect("invalid inet address")),
+            Self::new(TcpStore::new(addr),
                 HashMap::new(), interesting_columns, column)
         }
 
