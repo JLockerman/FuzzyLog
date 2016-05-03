@@ -30,13 +30,14 @@ use nix::sys::socket::sockopt::TcpNoDelay;
 
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
 
+const ADDR_STR: &'static str = "0.0.0.0:13265";
+
 pub fn main() {
     let _ = env_logger::init();
-    let addr = if let Some(s) = env::args().next() {
-        ("0.0.0.0".to_owned() + &*s).parse().expect("invalid inet address")
-    } else {
-        const ADDR_STR: &'static str = "0.0.0.0:13265";
-        ADDR_STR.parse().expect("invalid inet address")
+    let args_len = env::args().len();
+    let addr = match (args_len, env::args().next()) {
+        (i, Some(ref s)) if i > 1 => ("0.0.0.0".to_owned() + &*s).parse().expect("invalid inet address"),
+        _ => ADDR_STR.parse().expect("invalid inet address"),
     };
     let mut event_loop = EventLoop::new().unwrap();
     let mut server = Server::new(&addr, &mut event_loop).unwrap();
