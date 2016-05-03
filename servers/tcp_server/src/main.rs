@@ -6,6 +6,7 @@ extern crate env_logger;
 extern crate fnv;
 extern crate fuzzy_log;
 extern crate mio;
+extern crate nix;
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
@@ -13,6 +14,7 @@ use std::hash::BuildHasherDefault;
 use std::io::{self, Read, Write};
 use std::mem;
 use std::net::SocketAddr;
+use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
 
 use fnv::FnvHasher;
@@ -21,6 +23,9 @@ use fuzzy_log::prelude::*;
 
 use mio::prelude::*;
 use mio::tcp::*;
+
+use nix::sys::socket::setsockopt;
+use nix::sys::socket::sockopt::TcpNoDelay;
 
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
 
@@ -83,6 +88,8 @@ impl mio::Handler for Server {
                     Err(e) => panic!("error {}", e),
                     Ok(Some((socket, addr))) => {
                         let _ = socket.set_keepalive(Some(1));
+                        let _ = setsockopt(socket.as_raw_fd(), TcpNoDelay, &true);
+                        //let _ = socket.set_tcp_nodelay(true);
                         let next_client_id = self.clients.len() + 1;
                         let client_token = mio::Token(next_client_id);
                         trace!("new client {:?}, {:?}", next_client_id, addr);

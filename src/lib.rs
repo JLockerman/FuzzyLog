@@ -16,6 +16,8 @@ extern crate test;
 
 extern crate rustc_serialize;
 extern crate mio;
+extern crate nix;
+extern crate net2;
 extern crate time;
 extern crate uuid;
 

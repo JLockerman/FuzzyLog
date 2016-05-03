@@ -9,6 +9,8 @@ use std::mem::{self};
 use std::net::{SocketAddr, TcpStream};
 // use std::ops::CoerceUnsized;
 
+use net2::TcpStreamExt;
+
 // use mio::buf::{SliceBuf, MutSliceBuf};
 // use mio::udp::UdpSocket;
 // use mio::unix;
