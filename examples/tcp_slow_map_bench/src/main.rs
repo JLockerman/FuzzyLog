@@ -24,9 +24,8 @@ const SERVER_ADDR_STR: &'static str = "10.21.7.4:13265";
 
 fn main() {
     let start: AtomicBool = AtomicBool::new(false);
-    let args_len = env::args().len();
-    let addr = match (args_len, env::args().next()) {
-        (i, Some(ref s)) if i > 1 => ("0.0.0.0".to_owned() + &*s).parse().expect("invalid inet address"),
+    let addr = match env::args().skip(1).next() {
+        Some(ref s) => ("0.0.0.0:".to_owned() + &*s).parse().expect("invalid inet address"),
         _ => SERVER_ADDR_STR.parse().expect("invalid inet address"),
     };
     let _ = env_logger::init();

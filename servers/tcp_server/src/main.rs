@@ -34,10 +34,9 @@ const ADDR_STR: &'static str = "0.0.0.0:13265";
 
 pub fn main() {
     let _ = env_logger::init();
-    let args_len = env::args().len();
-    let addr = match (args_len, env::args().next()) {
-        (i, Some(ref s)) if i > 1 => ("0.0.0.0".to_owned() + &*s).parse().expect("invalid inet address"),
-        _ => ADDR_STR.parse().expect("invalid inet address"),
+    let addr = match env::args().skip(1).next() {
+        Some(ref s) => ("0.0.0.0:".to_owned() + &*s).parse().expect("invalid inet address"),
+        _ => ADDR_STR.parse().expect("invalid default inet address"),
     };
     let mut event_loop = EventLoop::new().unwrap();
     let mut server = Server::new(&addr, &mut event_loop).unwrap();
