@@ -3,7 +3,7 @@ use prelude::*;
 
 use std::fmt::Debug;
 //use std::marker::{Unsize, PhantomData};
-use std::marker::{PhantomData};
+use std::marker::PhantomData;
 use std::mem::{self, size_of};
 use std::net::{SocketAddr, UdpSocket};
 //use std::ops::CoerceUnsized;
@@ -32,12 +32,13 @@ const RTT: i64 = 80000;
 impl<V: Storeable + ?Sized> UdpStore<V> {
     pub fn new(server_addr: SocketAddr) -> UdpStore<V> {
         unsafe {
+            use std::marker::PhantomData;
             UdpStore {
                 socket: UdpSocket::bind("0.0.0.0:0").expect("unable to open store"),
                 server_addr: server_addr,
                 receive_buffer: Box::new(mem::zeroed()),
                 send_buffer: Box::new(mem::zeroed()),
-                _pd: Default::default(),
+                _pd: PhantomData,
                 rtt: RTT,
                 dev: 0,
             }
@@ -414,12 +415,13 @@ mod test {
         //const addr_str: &'static str = "127.0.0.1:13265";
 
         unsafe {
+            use std::marker::PhantomData;
             UdpStore {
                 socket: UdpSocket::bind("0.0.0.0:0").expect("unable to open store"),
                 server_addr: addr_str.parse().expect("invalid inet address"),
                 receive_buffer: Box::new(mem::zeroed()),
                 send_buffer: Box::new(mem::zeroed()),
-                _pd: Default::default(),
+                _pd: PhantomData,
                 rtt: super::RTT,
                 dev: 0,
             }
