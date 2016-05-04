@@ -457,26 +457,36 @@ static int64_t deltas[50];
 static uint64_t SEC = 0;
 
 rte_spinlock_t max_tx_lock;
-uint32_t max_tx[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+static uint32_t max_tx[128];
+
+static RTE_DEFINE_PER_LCORE(uint32_t, max_rx)[128];
 
 //__attribute__((unused))
 //static __attribute__((noreturn)) int
 static int
 lcore_rx(void *arg) {
-	//printf("recv on core %d\n", rte_lcore_id());
-	const int id = (*(int *)arg) - 1;
-	assert(id < 8);
-	uint32_t max_rx[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+	const int id = (*(int *)arg)- 1;
+	printf("rx on core %d, id %d\n", rte_lcore_id(), id);
+	//assert(id < 8);
+	//uint32_t max_rx[128];
+	uint32_t *max_rx = per_lcore_max_rx;
+	//memset(max_rx, 0, 128 * sizeof(*max_rx));
 	while(rte_atomic16_read(&start) == 0);
 	int64_t received_packets = 0;
 	//int64_t delta = 0;
 	double mean = 0.0;
 	double var = 0.0;
+	uint64_t start_start = rte_rdtsc();
 	uint64_t start_time = 0;
 	while(start_time == 0) {
 		struct rte_mbuf *mbuf[BURST_SIZE];
 		const uint16_t nb_rx = rte_eth_rx_burst(port, id, mbuf, BURST_SIZE);
-		if (unlikely(nb_rx == 0)) continue;
+		if (unlikely(nb_rx == 0)) {
+			if(rte_rdtsc() - start_start > NUM_SECS * SEC) {
+				return 0;
+			}
+			continue;
+		}
 		start_time = rte_rdtsc();
 		for (unsigned buf = 0; buf < nb_rx; buf++) {
 			struct write_header* w = rte_pktmbuf_mtod_offset(mbuf[buf], struct write_header *,
@@ -502,6 +512,7 @@ lcore_rx(void *arg) {
 			}
 			rte_pktmbuf_free(mbuf[buf]);
 		}
+
 	}
 
 	while(rte_rdtsc() - start_time < NUM_SECS * SEC) { //TODO
@@ -523,7 +534,7 @@ lcore_rx(void *arg) {
 				int64_t end = rte_rdtsc();
 				double duration = ((double)(end - *ts)) / 2.5;
 				uint32_t chain = w->loc[0], entry = w->loc[1];
-				assert(chain > 0 && chain < 9);
+				//assert(chain > 0 && chain < 9);
 				if(entry > max_rx[chain - 1]) max_rx[chain - 1] = entry;
 				if(unlikely(received_packets == 1)) {
 					mean = duration;
@@ -543,7 +554,7 @@ lcore_rx(void *arg) {
 	//delta = ((double)delta / (double)received_packets);
 	deltas[id] = mean;
 	rte_spinlock_lock(&max_tx_lock);
-	for(int i = 0; i < 8; i++) {
+	for(int i = 0; i < 128; i++) {
 		if(max_rx[i] > max_tx[i]) max_tx[i] = max_rx[i];
 	}
 	rte_spinlock_unlock(&max_tx_lock);
@@ -653,8 +664,10 @@ lcore_rx_transaction(void *arg) {
 
 static const uint64_t tx_ol_flags =  PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
 #define HEADERS_SIZE (sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr) + sizeof(struct ether_hdr))
-#define DATA_SIZE 1000
-//#define DATA_SIZE (sizeof(struct write_header) + sizeof(uint64_t))
+//#define DATA_SIZE 2000
+#define DATA_SIZE (sizeof(struct write_header) + sizeof(uint64_t))
+//#define DATA_SIZE 1000
+//static unsigned int DATA_SIZE = sizeof(struct write_header);
 
 
 static int
@@ -786,8 +799,10 @@ lcore_tx_transaction(void *chain_num) {
 //__attribute__((unused))
 static int
 lcore_tx(void *chain_num) {
+	//const int chain = *(int *)chain_num;
 	const int chain = *(int *)chain_num;
-	assert(0 < chain && chain < 9);
+	printf("tx on core %d, id %d\n", rte_lcore_id(), chain - 1);
+	//assert(0 < chain && chain < 9);
 	uint16_t packet_id = chain * 1000 + 1;
 	uint64_t sent_packets = 0, packets = 1;
 
@@ -872,7 +887,7 @@ lcore_tx(void *chain_num) {
 			//write->loc[1] = packets;
 			write->id[1] = sent_packets;
 			write->loc[1] = sent_packets + 1;
-			//write->loc[0] = chain;
+			write->loc[0] = ((chain + packets) % 16) + 1;
 			uint64_t* ts = rte_pktmbuf_mtod_offset(mbuf[j], uint64_t*,
 					sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr) + sizeof(struct write_header));
 			*ts = rte_rdtsc();
@@ -912,7 +927,7 @@ lcore_tx(void *chain_num) {
 static int
 lcore_tx2(void *chain_num) {
 	const int chain = *(int *)chain_num;
-	assert(0 < chain && chain < 9);
+	//assert(0 < chain && chain < 9);
 	uint16_t packet_id = chain * 1000 + 1;
 	uint64_t sent_packets = 0, packets = 1;
 	const uint32_t max_loc = max_tx[chain-1];
@@ -1191,7 +1206,9 @@ lcore_txrx(void *chain_num) {
 	return 0;
 }
 
-int chain_num[] = {1, 2, 3, 4, 5, 6, 7, 8};
+int chain_num[] = {1, 2, 3, 4, 5, 6, 7, 8,
+		9, 10, 11, 12, 13, 14, 15, 16,
+		17, 18, 19, 20, 21, 22, 23, 24};
 
 static void
 print_packets(void)
@@ -1216,7 +1233,7 @@ print_packets(void)
 	printf("recv %12"PRIi64" bytes/s.\n", (recv_packets * (DATA_SIZE + HEADERS_SIZE)) / NUM_SECS);
 }
 
-#define TEST_TRANSACTION (!0)
+#define TEST_TRANSACTION (!!0)
 
 int
 main(int argc, char **argv)
@@ -1244,6 +1261,7 @@ main(int argc, char **argv)
 	}
 
 	printf("%d lcores\n", rte_lcore_count());
+	const int rx_cores = (rte_lcore_count() - 1) / 2;
 	//assert(rte_lcore_count() == 17);
 	//audit_pool = packet_pool;
 
@@ -1251,7 +1269,7 @@ main(int argc, char **argv)
 		struct rte_eth_dev_info info;
 		int retval;
 		//const uint16_t rx_rings = rte_lcore_count() - 1, tx_rings = rte_lcore_count() - 1;
-		const uint16_t rx_rings = 8, tx_rings = 8;
+		const uint16_t rx_rings = rx_cores, tx_rings = rx_cores;
 		//const uint16_t rx_rings = 1, tx_rings = 1;
 		struct rte_eth_conf port_conf = {
 						.rxmode = {
@@ -1319,32 +1337,32 @@ main(int argc, char **argv)
 		unsigned lcore_id = 0;
 		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
 			if(TEST_TRANSACTION) {
-				if(i < 8) {
+				if(i < rx_cores) {
 					rte_eal_remote_launch(lcore_rx_transaction, &chain_num[i], lcore_id);
 				}
-				else if (i < 16) {
+				else {
 					//else if (i < 2) {
-					rte_eal_remote_launch(lcore_tx_transaction, &chain_num[i - 8], lcore_id);
+					rte_eal_remote_launch(lcore_tx_transaction, &chain_num[i - rx_cores], lcore_id);
 					//rte_eal_remote_launch(lcore_tx, &chain_num[0], lcore_id);
 				}
 			}
 			else {
-				if(i < 8) {
+				if(i < rx_cores) {
 				//if(i < 1) {
 					rte_eal_remote_launch(lcore_rx, &chain_num[i], lcore_id);
 					//rte_eal_remote_launch(lcore_tx, &chain_num[i], lcore_id);
 				}
 
-				else if (i < 16) {
+				else {
 				//else if (i < 2) {
-					rte_eal_remote_launch(lcore_tx, &chain_num[i - 8], lcore_id);
+					rte_eal_remote_launch(lcore_tx, &chain_num[i - rx_cores], lcore_id);
 					//rte_eal_remote_launch(lcore_tx, &chain_num[0], lcore_id);
 				}
 			}
 			i++;
 		}
 		printf("i = %d.\n", i);
-		assert(i == 16);
+		assert(i == (rx_cores * 2));
 	}
 	rte_atomic16_set(&start, !0);
 	//TODO delay...
@@ -1357,7 +1375,7 @@ main(int argc, char **argv)
 
 	print_packets();
 	rte_spinlock_lock(&max_tx_lock);
-	for(int i = 0; i < 8; i++) {
+	for(int i = 0; i < rx_cores; i++) {
 		printf("%u: %u\n", i + 1, max_tx[i]);
 	}
 	rte_spinlock_unlock(&max_tx_lock);
@@ -1366,7 +1384,7 @@ main(int argc, char **argv)
 		int i = 0;
 		unsigned lcore_id = 0;
 		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-			if(i < 8) {
+			if(i < rx_cores) {
 			//if(i < 1) {
 				if(TEST_TRANSACTION) {
 					rte_eal_remote_launch(lcore_rx_transaction, &chain_num[i], lcore_id);
@@ -1376,15 +1394,15 @@ main(int argc, char **argv)
 				}
 				//rte_eal_remote_launch(lcore_tx, &chain_num[i], lcore_id);
 			}
-			else if (i < 16) {
+			else {
 			//else if (i < 2) {
-				rte_eal_remote_launch(lcore_tx2, &chain_num[i - 8], lcore_id);
+				rte_eal_remote_launch(lcore_tx2, &chain_num[i - rx_cores], lcore_id);
 				//rte_eal_remote_launch(lcore_tx, &chain_num[0], lcore_id);
 			}
 			i++;
 		}
 		printf("i = %d.\n", i);
-		assert(i == 16);
+		assert(i == (rx_cores * 2));
 		}
 	rte_atomic16_set(&start, !0);
 	//TODO delay...

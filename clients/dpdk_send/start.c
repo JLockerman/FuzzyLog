@@ -102,7 +102,7 @@ _Static_assert(sizeof(union delos_header) == sizeof(struct write_header), "bad h
 
 struct clients;
 
-struct clients *alloc_clients(uint16_t num_clients);
+struct clients *alloc_clients(uint32_t iteration, uint16_t core_id, uint16_t num_clients);
 uint16_t get_packets_to_send(struct clients *clients, struct rte_mbuf** bufs, uint16_t len);
 void handle_received_packets(struct clients *clients, uint64_t recv_time, struct rte_mbuf* const* bufs, uint16_t len);
 void clients_finished(struct clients *clients);
@@ -159,7 +159,7 @@ struct rte_ring *recv_rings[RTE_MAX_LCORE];
 struct rte_ring *send_rings[RTE_MAX_LCORE];
 //static rte_atomic16_t start = {.cnt = 0};
 static uint64_t tsc_hz = 0;
-static uint64_t start_time;
+static uint64_t start_time = 0;
 static rte_atomic32_t cores_ready = {.cnt = 0};
 
 static RTE_DEFINE_PER_LCORE(uint16_t, packet_id) = 0;
@@ -395,33 +395,65 @@ try_rx_mbuf(struct rte_ring *recv_ring) { //TODO burst? (probably not, will need
 	return mbuf;
 }
 
+static void
+flush_ring(struct rte_ring *ring)
+{
+	uint16_t nb_rx = 0;
+	struct rte_mbuf *bufs[BURST_SIZE];
+	do {
+		nb_rx = recv_from(ring, bufs, BURST_SIZE);
+		for(unsigned i = 0; i < nb_rx; i++) rte_pktmbuf_free(bufs[i]);
+	} while(nb_rx != 0);
+}
+
+static void
+flush_rx_queue(uint16_t rx_q)
+{
+	uint16_t nb_rx = 0;
+	struct rte_mbuf *bufs[BURST_SIZE];
+	do {
+		nb_rx = rte_eth_rx_burst(port, rx_q, bufs, BURST_SIZE);
+		for(unsigned i = 0; i < nb_rx; i++) rte_pktmbuf_free(bufs[i]);
+	} while(nb_rx != 0);
+}
+
 
 int lcore_client(void *);
 int lcore_recv(void *);
 int lcore_send(void *);
 
-#define ROUND_SECONDS 5 //TODO
+#define ROUND_SECONDS 2 //TODO
 
 static inline int
 round_finished(uint64_t start_time)
 {
-	return start_time - rte_rdtsc() < ROUND_SECONDS * tsc_hz;
+	return (rte_rdtsc() - start_time) >= (ROUND_SECONDS * tsc_hz);
 }
+
+#if defined(DELOS_DEBUG_ALL) || defined(DELOS_DEBUG_CLIENT)
+#define debug_client(fmt, ...) printf("%4u: " fmt, ## __VA_ARGS__)
+#else
+#define debug_client(...) do { } while (0)
+#endif
 
 int
 lcore_client(__attribute__((unused)) void *arg)
 {
+	assert(tsc_hz);
+
 	const uint32_t score_id = core_id[rte_lcore_id()];
-	struct rte_ring *const restrict recv_ring = recv_rings[score_id]; //TODO
-	struct rte_ring *const restrict send_ring = send_rings[score_id];
-	assert(recv_ring);
-	assert(send_ring);
 	assert(score_id < 255 && "score_id to large to use as part of ip addr");
 	RTE_PER_LCORE(source_ip) = IPv4(10, 21, 7, (uint8_t)score_id);
+
+	struct rte_ring *const restrict recv_ring = recv_rings[score_id]; //TODO
+	struct rte_ring *const restrict send_ring = send_rings[score_id];
+	assert(recv_ring); assert(send_ring);
+
 	uint32_t num_clients = 0;
+	/*
 	if(iteration < num_client_cores) {
 		if(iteration <= score_id) {
-			printf("no clients on %2u:%2u.\n", rte_lcore_id(), score_id);
+			debug_client("starting 0 clients on %2u:%2u.\n", rte_lcore_id(), score_id);
 			rte_atomic32_inc(&cores_ready);
 			return 0;
 		}
@@ -431,12 +463,24 @@ lcore_client(__attribute__((unused)) void *arg)
 		num_clients = iteration / num_client_cores;
 		if(score_id < iteration % num_client_cores) num_clients += 1;
 	}
+	*/
+	if (score_id == 0 || score_id == 1) {
+		num_clients = 1;
+	}
+	else {
+		debug_client("starting 0 clients on %2u:%2u.\n", rte_lcore_id(), score_id);
+		rte_atomic32_inc(&cores_ready);
+		return 0;
+	}
 
-	printf("starting %u clients on %2u:%2u.\n", num_clients, rte_lcore_id(), score_id);
+	debug_client("starting %u clients on %2u:%2u.\n", num_clients, rte_lcore_id(), score_id);
 
-	struct clients *clients = alloc_clients(num_clients);
+	flush_ring(recv_ring);
+
+	struct clients *clients = alloc_clients(iteration, score_id, num_clients);
 
 	rte_atomic32_inc(&cores_ready);
+
 	while(*(volatile uint64_t *)&start_time == 0); //while not started
 
 	while(!round_finished(start_time)) {
@@ -453,44 +497,78 @@ lcore_client(__attribute__((unused)) void *arg)
 	return 0;
 }
 
+#if defined(DELOS_DEBUG_ALL) || defined(DELOS_DEBUG_RECV)
+#define debug_recv(fmt, ...) printf("SEND: " fmt, ## __VA_ARGS__)
+#else
+#define debug_recv(...) do { } while (0)
+#endif
+
 int
 lcore_recv(__attribute__((unused)) void *arg)
 {
-	printf("starting recv on %u.\n", rte_lcore_id());
+	uint16_t lcore_id = rte_lcore_id();
+	int64_t packets_recv = 0;
+	debug_recv("starting recv on %u.\n", lcore_id);
 	rte_atomic32_inc(&cores_ready);
-	while(1) {
+
+	flush_rx_queue(0);
+
+	while(*(volatile uint64_t *)&start_time == 0); //while not started
+
+	while(!round_finished(start_time)) {
 		struct rte_mbuf *bufs[BURST_SIZE];
 		uint16_t nb_rx = 0;
 		nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
-		if(nb_rx > 0) printf("received %u packets.\n", nb_rx);
+		if(nb_rx > 0) debug_recv("received %u packets.\n", nb_rx);
 		for(uint16_t i = 0; i < nb_rx; i++) {
 			struct ipv4_hdr *ip = rte_pktmbuf_mtod_offset(bufs[i], struct ipv4_hdr *,
 					sizeof(struct ether_hdr));
 			uint8_t dst = rte_be_to_cpu_32(ip->dst_addr) & 0xff;
-			printf("routing packet to %u.\n", dst);
+			debug_recv("routing packet to %u.\n", dst);
 
 			if(dst < num_client_cores) send_to(recv_rings[dst], &bufs[i], 1); //assert(dst < num_client_cores);
-			else rte_pktmbuf_free(bufs[i]);
+			else {
+				debug_recv("invalid packet ip %03u.\n", dst);
+				rte_pktmbuf_free(bufs[i]);
+			}
 		}
+		packets_recv += nb_rx;
+		recvs[lcore_id] = packets_recv;
 	}
 	return 0;
 }
 
+#if defined(DELOS_DEBUG_ALL) || defined(DELOS_DEBUG_SEND)
+#define debug_send(fmt, ...) printf("SEND: " fmt, score_id, ## __VA_ARGS__)
+#else
+#define debug_send(...) do { } while (0)
+#endif
+
 int
 lcore_send(__attribute__((unused)) void *arg)
 {
-	printf("starting send on %u.\n", rte_lcore_id());
+	uint16_t lcore_id = rte_lcore_id();
+	int64_t packets_sent = 0;
+	debug_send("starting send on %u.\n", lcore_id);
+
+	for(unsigned i = 0; i < num_client_cores; i++) flush_ring(send_rings[i]);
+
 	rte_atomic32_inc(&cores_ready);
-	while(1) {
+
+	while(*(volatile uint64_t *)&start_time == 0); //while not started
+
+	while(!round_finished(start_time)) {
 		for(unsigned i = 0; i < num_client_cores; i++) {
 			struct rte_mbuf *bufs[BURST_SIZE];
 
 			uint16_t nb_rx = recv_from(send_rings[i], bufs, BURST_SIZE);
-			if(nb_rx > 0) printf("sending %u packets.\n", nb_rx);
+			if(nb_rx > 0) debug_send("sending %u packets.\n", nb_rx);
 			uint16_t nb_tx = rte_eth_tx_burst(port, 0, bufs, nb_rx);
 			while (unlikely(nb_tx < nb_rx)) {
 				nb_tx += rte_eth_tx_burst(port, 0, &bufs[nb_tx], nb_rx - nb_tx);
 			}
+			packets_sent += nb_tx;
+			sends[lcore_id] = packets_sent;
 		}
 	}
 	return 0;
@@ -512,19 +590,27 @@ print_packets(void)
 		sent_bytes[i] = 0;
 		recv_bytes[i] = 0;
 	}
-	printf("sent %12"PRIi64" packets.\n", sent_packets);
-	printf("recv %12"PRIi64" packets.\n", recv_packets);
+	//printf("sent %12"PRIi64" packets.\n", sent_packets);
+	//printf("recv %12"PRIi64" packets.\n", recv_packets);
 
-	printf("sent %12"PRIi64" bytes.\n", total_sent_bytes);
-	printf("recv %12"PRIi64" bytes.\n", total_recv_bytes);
+	//printf("sent %12"PRIi64" bytes.\n", total_sent_bytes);
+	//printf("recv %12"PRIi64" bytes.\n", total_recv_bytes);
 
-	printf("sent %12"PRIi64" packets/s.\n", sent_packets / ROUND_SECONDS);
-	printf("recv %12"PRIi64" packets/s.\n", recv_packets / ROUND_SECONDS);
-	printf("sent %12"PRIi64" bytes/s.\n", total_sent_bytes / ROUND_SECONDS);
-	printf("recv %12"PRIi64" bytes/s.\n", total_recv_bytes / ROUND_SECONDS);
+	//printf("sent %12"PRIi64" packets/s.\n", sent_packets / ROUND_SECONDS);
+	//printf("recv %12"PRIi64" packets/s.\n", recv_packets / ROUND_SECONDS);
+	//printf("sent %12"PRIi64" bytes/s.\n", total_sent_bytes / ROUND_SECONDS);
+	//printf("recv %12"PRIi64" bytes/s.\n", total_recv_bytes / ROUND_SECONDS);
+	//printf("%u, %lu\n", iteration, sent_packets / ROUND_SECONDS);
+	printf("%u, %lu\n", iteration, recv_packets / ROUND_SECONDS);
 }
 
 #define TEST_TRANSACTION (!0)
+
+#if defined(DELOS_DEBUG_ALL) || defined(DELOS_DEBUG_MAIN)
+#define debug_main(fmt, ...) printf("MAIN: " fmt, ## __VA_ARGS__)
+#else
+#define debug_main(...) do { } while (0)
+#endif
 
 static inline void
 start_other_cores(void)
@@ -564,7 +650,7 @@ start_other_cores(void)
 		}
 		assert(num_client_cores == i);
 		while(rte_atomic32_read(&cores_ready) < num_lcores);
-		printf("All cores ready.\n");
+		debug_main("All cores ready.\n");
     }
 }
 
@@ -668,7 +754,7 @@ main(int argc, char **argv)
 	rte_spinlock_init(&max_tx_lock);
 	//rte_atomic16_init(&start);
 	//rte_atomic16_set(&start, 0);
-#define MAX_ITERS 1 //TODO
+#define MAX_ITERS 30 //TODO
 	printf("starting %u client cores.\n", num_client_cores);
 	for(iteration = 1; iteration <= MAX_ITERS; iteration++) {
 		//TODO set metadata
@@ -678,6 +764,8 @@ main(int argc, char **argv)
 		*(volatile uint64_t *) &start_time = rte_rdtsc();
 		rte_smp_wmb();
 		rte_eal_mp_wait_lcore();
+		//TODO alnly wait for client cores
+		debug_main("finished round %3u.\n", iteration);
 		//rte_atomic16_set(&start, 0);
 		*(volatile uint64_t *) &start_time = 0;
 		rte_smp_wmb();

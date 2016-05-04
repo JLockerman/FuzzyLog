@@ -1,5 +1,6 @@
 
 use std::collections::HashMap;
+use std::mem;
 
 use fuzzy_log::prelude::*;
 use types::*;
@@ -22,7 +23,7 @@ pub trait AsyncLogClient {
 
 pub struct AsyncLog<C: AsyncLogClient> {
     local_horizon: HashMap<order, entry>,
-    client: C,
+    pub client: C,
     port: u16,
     last_send: MessageBuffer,
     nd_last_send: MessageBuffer,
@@ -48,31 +49,31 @@ where C: AsyncLogClient {
     fn handle_event(&mut self, event: ReceiveEvent) -> NextActivity { //TODO handle wait
         let next_buffer = match (self.state, event) {
             (NoState, event)  => {
-                println!("not expecting event");
+                trace!("not expecting event");
                 return self.gen_event(event.into_message_buffer())
             }
 
             (AfterWrite, Message(buffer)) => {
-                println!("expecting write ack");
+                trace!("expecting write ack");
                 self.try_finishing_write(buffer)
             }
             (AfterRead(oi, chain), Message(buffer)) =>  {
-                println!("expecting read ack");
+                trace!("expecting read ack");
                 self.try_finishing_read(buffer, oi, chain)
             }
-            (AfterWriteSearch(loc, _, id), Message(buffer)) => {
-                println!("expecting wtimeout read ack");
-                self.try_finishing_write_search(buffer)
+            (AfterWriteSearch(oi, chain, id), Message(buffer)) => {
+                trace!("expecting wtimeout read ack");
+                self.try_finishing_write_search(buffer, oi, chain, id)
             }
 
             (AfterWrite, Timeout(buffer, port)) => {
                 assert_eq!(self.port, port);
-                println!("timeout during write");
+                trace!("timeout during write");
                 self.retry_write(buffer)
             }
 
-            (AfterRead(loc, chain), Timeout(buffer, port)) | (AfterWriteSearch(loc, chain, _), Timeout(buffer, port)) => {
-                println!("timeout during read");
+            (AfterRead(..), Timeout(buffer, port)) | (AfterWriteSearch(..), Timeout(buffer, port)) => {
+                trace!("timeout during read");
                 assert_eq!(self.port, port);
                 self.retry_read(buffer)
             }
@@ -108,7 +109,11 @@ where C: AsyncLogClient {
                 buffer.set_read_entry(next_entry);
                 assert_eq!((chain, next_entry), buffer.locs()[0]);
                 assert!(next_entry > 0.into());
-                AfterRead((chain, next_entry), chain)
+                match self.state {
+                    AfterWriteSearch(_, _, id) => AfterWriteSearch((chain, next_entry), chain, id),
+                    _ => AfterRead((chain, next_entry), chain),
+                }
+                
             }
             _ => {
                 self.state = NoState;
@@ -117,13 +122,13 @@ where C: AsyncLogClient {
                 return Ready
             }
         };
-        println!("now in state {:?}", self.state);
+        trace!("now in state {:?}", self.state);
         Send(self.prepare_mbuf(buffer), self.port, 250000) //TODO RTT stuff
     }
 
     fn try_finishing_write(&mut self, buffer: MessageBuffer) -> NextActivity {
         if buffer.get_id() != self.last_send.get_id() {
-            println!("wrong id got: {:?}, expected: {:?}", buffer.get_id(), self.last_send.get_id());
+            trace!("wrong id got: {:?}, expected: {:?}", buffer.get_id(), self.last_send.get_id());
             return KeepWaiting
         }
         assert!(buffer.layout() == self.last_send.layout());
@@ -133,35 +138,35 @@ where C: AsyncLogClient {
             //    *old_horizon = e;
             //}
         //}
-        println!("finished write");
+        trace!("finished write");
         return Send(self.client.after_op(buffer), 0, 0)
     }
 
     fn try_finishing_read(&mut self, mut buffer: MessageBuffer, (o, _): OrderIndex, chain: order) -> NextActivity {
         if !buffer.locs().contains(&self.last_send.locs()[0]) { //reads only contain one val
             if buffer.kind() != EntryKind::NoValue {
-                println!("finished a chain!"); 
+                trace!("finished a chain!"); 
                 return Ready //TODO gen-event? 
             }
             else if buffer.locs().iter().fold(true, |b, &(c, _)| b && o != c) {
-                println!("invalid ack!");
+                trace!("invalid ack!");
                 return KeepWaiting
             }
         }
         match buffer.kind() {
             EntryKind::NoValue => {
                 assert!(self.play_stack.is_empty());
-                println!("finished chain");
+                trace!("finished chain");
                 Send(self.client.after_op(buffer), 0, 0)
             }
-            EntryKind::ReadData /*| EntryKind::ReadMulti */ => {
+            EntryKind::ReadData | EntryKind::ReadMulti => {
                 //TODO do we need to validate against the expected (o,i)?
                 let finished_deps = {
                     let (_, _, deps) = buffer.val_locs_and_deps::<C::V>();
                     //self.local_horizon.entry(panic!());
                     self.finished_deps(deps)
                 };
-                //println!("finished deps? {}", finished_deps);
+                //trace!("finished deps? {}", finished_deps);
                 if finished_deps {
                     {
                         let (val, locs, deps) = buffer.val_locs_and_deps();
@@ -173,7 +178,7 @@ where C: AsyncLogClient {
                     }
                     self.flush_finished_reads();
                     //if self.play_stack.is_empty() {
-                    //    println!("finished reads");
+                    //    trace!("finished reads");
                     //    return Some(self.client.after_op(buffer))
                     //} this only works if we have a know horizon to read to
                 }
@@ -193,7 +198,7 @@ where C: AsyncLogClient {
                 }
                 //TODO take snapshot of horizon first?
             }
-            EntryKind::ReadMulti => panic!("unimplemendted"),
+            //EntryKind::ReadMulti => panic!("unimplemendted"),
             _ => return KeepWaiting,
         }
     }
@@ -205,16 +210,37 @@ where C: AsyncLogClient {
         return buffer
     }
 
-    fn try_finishing_write_search(&mut self, buffer: MessageBuffer) -> NextActivity {
-        panic!("unimplemented")
+    fn try_finishing_write_search(&mut self, buffer: MessageBuffer, oi: OrderIndex, chain: order, id: Uuid) -> NextActivity {
+        let finished = buffer.get_id() == id;
+
+        let next = self.try_finishing_read(buffer, oi, chain);
+        match next {
+            Ready => if finished {
+                Ready
+            } else {
+                let new_buffer = MessageBuffer { buffer: unsafe { alloc_mbuf() } };
+                let buffer = mem::replace(&mut self.nd_last_send, new_buffer);
+                Send(buffer, 0, 0)
+            },
+            Send(b, l, c) => {
+                self.state = unsafe { AfterWriteSearch(mem::zeroed(), mem::zeroed(), id) };
+                Send(b, l, c)
+            }
+            KeepWaiting => KeepWaiting,
+            Done => unreachable!(),
+        }
     }
 
-    fn retry_write(&mut self, buffer: MessageBuffer) -> NextActivity {
-        panic!("unimplemented")
+    fn retry_write(&mut self, mut buffer: MessageBuffer) -> NextActivity {
+        mem::swap(&mut self.last_send, &mut self.nd_last_send);
+        buffer.as_read((self.nd_last_send.locs()[0]));
+        self.state = AfterWriteSearch((0.into(), 0.into()), 0.into(), self.nd_last_send.get_id());
+        Send(buffer, 0, 0)
     }
 
     fn retry_read(&mut self, buffer: MessageBuffer) -> NextActivity {
-        panic!("unimplemented")
+        let buffer = mem::replace(&mut self.last_send, buffer);
+        Send(buffer, 0, 0)
     }
 
     fn flush_finished_reads(&mut self) {
@@ -366,6 +392,152 @@ impl () {
         &self.local_horizon
     }
 }
+
+///////////////////////////////////////
+
+mod async_log_impls {
+    use std::ops::{Deref, DerefMut};
+
+    use fuzzy_log::prelude::*;
+
+    use types::*;
+    use async_log::*;
+    use scheduler::*;
+
+    use std::cell::{RefCell, RefMut};
+    use std::rc::Rc;
+
+    impl<'a, C, V: ?Sized + Storeable> AsyncLogClient for &'a mut C
+    where C: AsyncLogClient<V=V> {
+        type V = V;
+
+        fn on_new_entry(&mut self, val: &Self::V, locs: &[OrderIndex], deps: &[OrderIndex]) -> bool {
+            <C as AsyncLogClient>::on_new_entry(&mut *self, val, locs, deps)
+        }
+
+        fn on_start(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            <C as AsyncLogClient>::on_start(&mut *self, buf)
+        }
+
+        fn after_op(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            <C as AsyncLogClient>::after_op(&mut *self, buf)
+        }
+    }
+
+    impl<C, V: ?Sized + Storeable> AsyncLogClient for RefCell<C>
+    where C: AsyncLogClient<V=V> {
+        type V = V;
+
+        fn on_new_entry(&mut self, val: &Self::V, locs: &[OrderIndex], deps: &[OrderIndex]) -> bool {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncLogClient>::on_new_entry(c, val, locs, deps)
+        }
+
+        fn on_start(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncLogClient>::on_start(c, buf)
+        }
+
+        fn after_op(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncLogClient>::after_op(c, buf)
+        }
+    }
+
+    impl<'a, C, V: ?Sized + Storeable> AsyncLogClient for &'a RefCell<C>
+    where C: AsyncLogClient<V=V> {
+        type V = V;
+
+        fn on_new_entry(&mut self, val: &Self::V, locs: &[OrderIndex], deps: &[OrderIndex]) -> bool {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncLogClient>::on_new_entry(c, val, locs, deps)
+        }
+
+        fn on_start(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncLogClient>::on_start(c, buf)
+        }
+
+        fn after_op(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncLogClient>::after_op(c, buf)
+        }
+    }
+
+    impl<C, V: ?Sized + Storeable> AsyncLogClient for Rc<C>
+    where for<'a> &'a C: AsyncLogClient<V=V> {
+        type V = V;
+
+        fn on_new_entry(&mut self, val: &Self::V, locs: &[OrderIndex], deps: &[OrderIndex]) -> bool {
+            let c: &mut &C = &mut <Self as Deref>::deref(self);
+            <&C as AsyncLogClient>::on_new_entry(c, val, locs, deps)
+        }
+
+        fn on_start(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            let c: &mut &C = &mut <Self as Deref>::deref(self);
+            <&C as AsyncLogClient>::on_start(c, buf)
+        }
+
+        fn after_op(&mut self, buf: MessageBuffer) -> MessageBuffer {
+            let c: &mut &C = &mut <Self as Deref>::deref(self);
+            <&C as AsyncLogClient>::after_op(c, buf)
+        }
+    }
+
+    impl<C> AsyncClient for RefCell<C>
+    where C: AsyncClient {
+
+        fn gen_event(&mut self, buf: MessageBuffer) -> NextActivity {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncClient>::gen_event(c, buf)
+        }
+
+        fn handle_event(&mut self, ev: ReceiveEvent) -> NextActivity {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncClient>::handle_event(c, ev)
+        }
+    }
+
+    impl<'a, C> AsyncClient for &'a RefCell<C>
+    where C: AsyncClient {
+
+        fn gen_event(&mut self, buf: MessageBuffer) -> NextActivity {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncClient>::gen_event(c, buf)
+        }
+
+        fn handle_event(&mut self, ev: ReceiveEvent) -> NextActivity {
+            let re = &mut self.borrow_mut();
+            let c: &mut C = &mut <RefMut<C> as DerefMut>::deref_mut(re);
+            <C as AsyncClient>::handle_event(c, ev)
+        }
+    }
+
+    impl<C> AsyncClient for Rc<C>
+    where for<'a> &'a C: AsyncClient {
+
+        fn gen_event(&mut self, buf: MessageBuffer) -> NextActivity {
+            let c: &mut &C = &mut <Self as Deref>::deref(self);
+            <&C as AsyncClient>::gen_event(c, buf)
+        }
+
+        fn handle_event(&mut self, ev: ReceiveEvent) -> NextActivity {
+            let c: &mut &C = &mut <Self as Deref>::deref(self);
+            <&C as AsyncClient>::handle_event(c, ev)
+        }
+    }
+}
+
+///////////////////////////////////////
 
 extern "C" {
     fn alloc_mbuf() -> *mut Mbuf;

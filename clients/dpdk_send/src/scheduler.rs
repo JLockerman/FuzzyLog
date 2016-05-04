@@ -74,14 +74,14 @@ where C: AsyncClient {
         while self.to_send.len() < burst_size as usize && !self.ready.is_empty() {
             self.gen_event();
         }
-        if self.to_send.len() > 0 { println!("to send {} packets", self.to_send.len()) }
+        if self.to_send.len() > 0 { trace!("to send {} packets", self.to_send.len()) }
         &mut self.to_send
     }
 
     pub fn handle_received_packets(&mut self, received: &mut [*mut Mbuf], recv_time: u64) {
-        println!("got {} packets @ {}", received.len(), recv_time);
+        trace!("got {} packets @ {}", received.len(), recv_time);
         for &mut msg in received {//TODO
-            println!("delivering packet");
+            trace!("delivering packet");
             self.send_event_to_client(Message(MessageBuffer{ buffer: msg }));
         }
         'timeout: loop {
@@ -93,6 +93,7 @@ where C: AsyncClient {
                 _ => break 'timeout,
             }
         }
+        trace!("done handling packets"); //TODO why does this stop segfaults?
     }
 
     //pub fn event_loop(&mut self, runtime: u64, burst_size: u16) {
@@ -133,7 +134,7 @@ where C: AsyncClient {
 
     fn prep_message(&mut self, client: C, (buf, key, timeout): (MessageBuffer, WaitKey, ns)) {
         let deadline = curr_time() + timeout;
-        println!("next deadline {}", deadline);
+        trace!("next deadline {}", deadline);
         self.to_send.push(buf);
         let old = self.waiting.insert(key, (deadline, client));
         assert!(old.is_none());
@@ -141,42 +142,43 @@ where C: AsyncClient {
     }
 
     fn send_event_to_client(&mut self, event: ReceiveEvent) {
-        println!("wait key: {}", event.wait_key());
+        trace!("wait key: {}", event.wait_key());
         let waiter = self.waiting.remove(event.wait_key());
-        println!("waiting for key {}? {}", event.wait_key(), waiter.is_some());
+        trace!("waiting for key {}? {}", event.wait_key(), waiter.is_some());
         if let Some((d, mut client)) = waiter {
             let key = event.wait_key().clone();
             match client.handle_event(event) {
                 Send(b, w, d) => {
-                    println!("got next event");
+                    trace!("got next event");
                     self.prep_message(client, (b, w, d))
                 }
                 Ready => self.ready.push_back(client),
                 KeepWaiting => {
-                    println!("still waiting");
+                    trace!("still waiting");
                     self.waiting.insert(key, (d, client));
                 }
                 Done => mem::drop(client), //TODO add to finished queue?
             }
         }
+        trace!("sent event to client");
     }
 
     fn send_timeout_to_client(&mut self, deadline: u64, wait_key: WaitKey) {
         if self.waiting.get(&wait_key).map_or(false, |&(d, _)| {
-            //println!("timeout {}, deadline {}", d, deadline);
+            //trace!("timeout {}, deadline {}", d, deadline);
             d == deadline
         }) {
-            println!("Timeout {} @ {}", deadline, wait_key);
+            trace!("Timeout {} @ {}", deadline, wait_key);
             let (_, mut client) = self.waiting.remove(&wait_key).unwrap();
             let buffer = MessageBuffer { buffer: unsafe { alloc_mbuf() } };
             match client.handle_event(Timeout(buffer, wait_key)) {
                 Send(b, w, d) => {
-                    println!("got next event");
+                    trace!("got next event");
                     self.prep_message(client, (b, w, d))
                 }
                 Ready => self.ready.push_back(client),
                 KeepWaiting => {
-                    println!("still waiting");
+                    trace!("still waiting");
                     self.waiting.insert(wait_key, (deadline, client));
                 }
                 Done => mem::drop(client), //TODO add to finished queue?
@@ -214,16 +216,3 @@ extern "C" {
 //        to_send.set_len(0);
 //    }
 //}
-
-
-
-#[inline(always)]
-pub fn curr_time() -> ns {
-    //unsafe { rdtsc() }
-    unsafe {
-        let (low, high): (u32, u32);
-        asm!("rdtsc\n\tmovl %edx, $0\n\tmovl %eax, $1\n\t"
-            : "=r"(high), "=r"(low) :: "{rax}", "{rdx}" : "volatile" );
-        ((high as u64) << 32) | (low as u64)
-    }
-}

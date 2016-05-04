@@ -127,7 +127,7 @@ mod map {
         }
 
         pub fn put(&mut self, entries: &[MapEntry<K, V>]) {
-            self.log.append(self.column, entries, vec![]);
+            self.log.append(self.column, entries, &[]);
         }
 
         pub fn get(&mut self, key: K) -> Option<V> {

@@ -77,7 +77,7 @@ impl MessageBuffer {
             packet.id = Uuid::new_v4();
             entry_size(packet)
         };
-        println!("entry size: {}, min size {}", size, mem::size_of::<Entry<(), DataFlex<()>>>());
+        trace!("entry size: {}, min size {}", size, mem::size_of::<Entry<(), DataFlex<()>>>());
         assert!(size as usize >= mem::size_of::<Entry<(), DataFlex<()>>>());
         unsafe { prep_mbuf(buffer, size, 0) };
     }
@@ -213,6 +213,17 @@ extern "C" {
     fn mbuf_into_read_packet(_ :*mut Mbuf) -> *mut Entry<(), DataFlex>;
     fn mbuf_into_multi_packet(_ :*mut Mbuf) -> *mut Entry<(), MultiFlex>;
     fn mbuf_as_packet(_ :*mut Mbuf) -> *mut Entry<()>;
+}
+
+#[inline(always)]
+pub fn curr_time() -> ns {
+    //unsafe { rdtsc() }
+    unsafe {
+        let (low, high): (u32, u32);
+        asm!("rdtsc\n\tmovl %edx, $0\n\tmovl %eax, $1\n\t"
+            : "=r"(high), "=r"(low) :: "{rax}", "{rdx}" : "volatile" );
+        ((high as u64) << 32) | (low as u64)
+    }
 }
 
 #[cfg(test)]
