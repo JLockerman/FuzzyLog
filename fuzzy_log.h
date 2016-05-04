@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-extern struct FuzzyLog;
+typedef struct FuzzyLog {} FuzzyLog;
 
 typedef struct ChainAndEntry {
 	uint32_t chain;
