@@ -68,14 +68,14 @@ pub mod c_binidings {
 
     #[no_mangle]
     pub extern "C" fn fuzzy_log_multiappend(log: &mut Log,
-        chains: *const order, num_chains: u16,
+        chains: *mut OrderIndex, num_chains: u16,
         val: *const u8, len: u16, deps: *const OrderIndex, num_deps: u16) {
         assert!(num_chains > 1);
         unsafe {
             let val = slice::from_raw_parts(val, len as usize);
             let deps = slice::from_raw_parts(deps, num_deps as usize);
-            let chains = slice::from_raw_parts(chains, num_chains as usize);
-            log.multiappend(chains, val, deps);
+            let chains = slice::from_raw_parts_mut(chains, num_chains as usize);
+            log.multiappend2(chains, val, deps);
         }
     }
 

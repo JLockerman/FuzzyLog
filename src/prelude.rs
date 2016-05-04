@@ -411,7 +411,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
     pub fn locs(&self) -> &[OrderIndex] {
         unsafe {
             match self.kind & EntryKind::Layout {
-                EntryKind::Read | EntryKind::Data => 
+                EntryKind::Read | EntryKind::Data =>
                     slice::from_raw_parts(&self.as_data_entry().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry().mlocs(),
                 _ => unreachable!()
@@ -655,6 +655,14 @@ where V: Storeable, S: Store<V>, H: Horizon{
 
     pub fn multiappend(&mut self, columns: &[order], data: &V, deps: &[OrderIndex]) {
         let columns: Vec<OrderIndex> = columns.into_iter().map(|i| (*i, 0.into())).collect();
+        self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
+        for &(column, _) in &*columns {
+            let next_entry = self.horizon.get_horizon(column) + 1; //TODO
+            self.horizon.update_horizon(column, next_entry); //TODO
+        }
+    }
+
+    pub fn multiappend2(&mut self, columns: &mut [OrderIndex], data: &V, deps: &[OrderIndex]) {
         self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
         for &(column, _) in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO
