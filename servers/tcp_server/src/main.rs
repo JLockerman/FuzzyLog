@@ -43,11 +43,10 @@ pub fn main() {
     trace!("starting server");
     let _ = event_loop.run(&mut server);
 }
-
 pub struct Server {
     log: ServerLog,
     acceptor: TcpListener,
-    clients: HashMap<mio::Token, PerClient, BuildHasherDefault<FnvHasher>>,
+    clients: HashMap<mio::Token, PerClient>,
 }
 
 struct PerClient {
@@ -58,7 +57,8 @@ struct PerClient {
 
 struct ServerLog {
     log: HashMap<OrderIndex, Rc<Entry<()>>>,
-    horizon: HashMap<order, entry, BuildHasherDefault<FnvHasher>>,
+    horizon: HashMap<order, entry>,
+    last_lock: u64,
 }
 
 impl Server {
@@ -71,7 +71,7 @@ impl Server {
         Ok(Server {
             log: ServerLog::new(),
             acceptor: acceptor,
-            clients: HashMap::with_hasher(Default::default()),
+            clients: HashMap::new(),
         })
     }
 }
@@ -94,14 +94,17 @@ impl mio::Handler for Server {
                     Ok(Some((socket, addr))) => {
                         let _ = socket.set_keepalive(Some(1));
                         let _ = setsockopt(socket.as_raw_fd(), TcpNoDelay, &true);
-                        //let _ = socket.set_tcp_nodelay(true);
+                        // let _ = socket.set_tcp_nodelay(true);
                         let next_client_id = self.clients.len() + 1;
                         let client_token = mio::Token(next_client_id);
                         trace!("new client {:?}, {:?}", next_client_id, addr);
                         let client = PerClient::new(socket);
                         let client_socket = &match self.clients.entry(client_token) {
                                                  Vacant(v) => v.insert(client),
-                                                 _ => panic!("re-accept client {:?}", client_token),
+                                                 _ => {
+                                                     panic!("re-accept client {:?}",
+                                                            client_token)
+                                                 }
                                              }
                                              .stream;
                         event_loop.register(client_socket,
@@ -115,9 +118,11 @@ impl mio::Handler for Server {
             client_token => {
                 // trace!("got client event");
                 if events.is_error() {
-                    let err = self.clients.get_mut(&client_token)
-                        .ok_or(std::io::Error::new(std::io::ErrorKind::Other, "socket does not exist"))
-                        .map(|s| s.stream.take_socket_error());
+                    let err = self.clients
+                                  .get_mut(&client_token)
+                                  .ok_or(::std::io::Error::new(::std::io::ErrorKind::Other,
+                                                               "socket does not exist"))
+                                  .map(|s| s.stream.take_socket_error());
                     if err.is_err() {
                         trace!("dropping client {:?} due to", client_token);
                         self.clients.remove(&client_token);
@@ -137,13 +142,13 @@ impl mio::Handler for Server {
                         mio::EventSet::readable()
                     }
                 } else if events.is_writable() {
-                    trace!("gonna write from client {:?}", client_token);
+                    //trace!("gonna write from client {:?}", client_token);
                     let finished_write = client.write_packet();
                     if finished_write {
                         trace!("finished write from client {:?}", client_token);
                         mio::EventSet::readable()
                     } else {
-                        trace!("keep writing from client {:?}", client_token);
+                        //trace!("keep writing from client {:?}", client_token);
                         mio::EventSet::writable()
                     }
                 } else {
@@ -213,7 +218,7 @@ impl PerClient {
     fn write_packet(&mut self) -> bool {
         match self.try_send_packet() {
             Ok(s) => {
-                trace!("wrote {} bytes", s);
+                //trace!("wrote {} bytes", s);
                 self.sent_bytes += s;
                 if self.sent_bytes >= self.buffer.entry_size() {
                     trace!("finished write");
@@ -242,34 +247,41 @@ impl ServerLog {
     fn new() -> Self {
         ServerLog {
             log: HashMap::new(),
-            horizon: HashMap::with_hasher(Default::default()),
+            horizon: HashMap::new(),
+            last_lock: 0,
         }
     }
 
     fn handle_op(&mut self, val: &mut Entry<()>) {
         let kind = val.kind;
         if let EntryKind::Multiput = kind & EntryKind::Layout {
-            //trace!("multiput {:?}", val);
+            // trace!("multiput {:?}", val);
             trace!("multiput");
-            {
-                val.kind = kind | EntryKind::ReadSuccess;
-                let locs = val.locs_mut();
-                for i in 0..locs.len() {
-                    let hor: entry = self.horizon
-                                         .get(&locs[i].0)
-                                         .cloned()
-                                         .unwrap_or(0.into()) +
-                                     1;
-                    locs[i].1 = hor;
-                    self.horizon.insert(locs[i].0, hor);
+            if val.lock_num() == 0 || val.lock_num() == self.last_lock + 1 {
+                {
+                    if val.lock_num() == self.last_lock + 1 {
+                        trace!("right lock {}", val.lock_num());
+                        self.last_lock += 1;
+                    }
+                    val.kind = kind | EntryKind::ReadSuccess;
+                    let locs = val.locs_mut();
+                    for i in 0..locs.len() {
+                        let hor: entry = self.horizon
+                                             .get(&locs[i].0)
+                                             .cloned()
+                                             .unwrap_or(0.into()) +
+                                         1;
+                        locs[i].1 = hor;
+                        self.horizon.insert(locs[i].0, hor);
+                    }
                 }
-            }
-            trace!("appending at {:?}", val.locs());
-            let contents = Rc::new(val.clone());
-            for &loc in val.locs() {
-                self.log.insert(loc, contents.clone());
-                //trace!("appended at {:?}", loc);
-            }
+                trace!("appending at {:?}", val.locs());
+                let contents = Rc::new(val.clone());
+                for &loc in val.locs() {
+                    self.log.insert(loc, contents.clone());
+                    // trace!("appended at {:?}", loc);
+                }
+            } else { trace!("wrong lock {} expected {}", val.lock_num(), self.last_lock + 1); }
         } else {
             // trace!("single {:?}", val);
             let loc = {
