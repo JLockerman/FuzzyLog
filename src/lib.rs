@@ -1,5 +1,7 @@
 #![cfg_attr(test, feature(test))]
 
+#![feature(const_fn)]
+
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
 #[cfg(test)] #[macro_use] extern crate grabbag_macros;
@@ -28,6 +30,7 @@ pub mod prelude;
 pub mod local_store;
 pub mod udp_store;
 pub mod tcp_store;
+pub mod multitcp_store;
 
 #[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;

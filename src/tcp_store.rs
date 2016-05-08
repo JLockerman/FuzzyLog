@@ -62,7 +62,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         }
         let end = self.receive_buffer.entry_size();
         trace!("client read more header, entry size {}", end);
-        while bytes_read < header_size {
+        while bytes_read < end {
             bytes_read += self.socket.read(&mut self.receive_buffer
                 .bytes_mut()[bytes_read..])
                 .expect("cannot read");
@@ -299,11 +299,14 @@ pub mod test {
     use super::*;
     use prelude::*;
 
+    use std::sync::atomic::{AtomicIsize, Ordering};
     use std::collections::HashMap;
     use std::collections::hash_map::Entry::{Occupied, Vacant};
     use std::io::{self, Read, Write};
     use std::mem;
     use std::net::SocketAddr;
+    use std::os::unix::io::AsRawFd;
+    use std::thread;
     use std::rc::Rc;
 
     use test::Bencher;
@@ -311,6 +314,9 @@ pub mod test {
     use mio;
     use mio::prelude::*;
     use mio::tcp::*;
+
+    use nix::sys::socket::setsockopt;
+    use nix::sys::socket::sockopt::TcpNoDelay;
 
     const LISTENER_TOKEN: mio::Token = mio::Token(0);
 
@@ -338,7 +344,7 @@ pub mod test {
             try!(event_loop.register(&acceptor,
                                      mio::Token(0),
                                      mio::EventSet::readable(),
-                                     mio::PollOpt::edge()));
+                                     mio::PollOpt::level()));
             Ok(Server {
                 log: ServerLog::new(),
                 acceptor: acceptor,
@@ -363,7 +369,9 @@ pub mod test {
                         Ok(None) => trace!("false accept"),
                         Err(e) => panic!("error {}", e),
                         Ok(Some((socket, addr))) => {
-                            let _ = socket.set_keepalive(Some(5));
+                            let _ = socket.set_keepalive(Some(1));
+                            let _ = setsockopt(socket.as_raw_fd(), TcpNoDelay, &true);
+                            //let _ = socket.set_tcp_nodelay(true);
                             let next_client_id = self.clients.len() + 1;
                             let client_token = mio::Token(next_client_id);
                             trace!("new client {:?}, {:?}", next_client_id, addr);
@@ -375,7 +383,7 @@ pub mod test {
                                                  .stream;
                             event_loop.register(client_socket,
                                                 client_token,
-                                                mio::EventSet::readable(),
+                                                mio::EventSet::readable() | mio::EventSet::error(),
                                                 mio::PollOpt::edge() | mio::PollOpt::oneshot())
                                       .expect("could not register client socket")
                         }
@@ -383,6 +391,16 @@ pub mod test {
                 }
                 client_token => {
                     // trace!("got client event");
+                    if events.is_error() {
+                        let err = self.clients.get_mut(&client_token)
+                            .ok_or(::std::io::Error::new(::std::io::ErrorKind::Other, "socket does not exist"))
+                            .map(|s| s.stream.take_socket_error());
+                        if err.is_err() {
+                            trace!("dropping client {:?} due to", client_token);
+                            self.clients.remove(&client_token);
+                        }
+                        return;
+                    }
                     let client = self.clients.get_mut(&client_token).unwrap();
                     let next_interest = if events.is_readable() {
                         // trace!("gonna read from client");
@@ -406,12 +424,11 @@ pub mod test {
                             mio::EventSet::writable()
                         }
                     } else {
-                        trace!("dropping client {:?}", client_token);
-                        return;
+                        panic!("invalid event {:?}", events);
                     };
                     event_loop.reregister(&client.stream,
                                           client_token,
-                                          next_interest,
+                                          next_interest | mio::EventSet::error(),
                                           mio::PollOpt::edge() | mio::PollOpt::oneshot())
                               .expect("could not reregister client socket")
                 }
@@ -476,7 +493,9 @@ pub mod test {
                     trace!("wrote {} bytes", s);
                     self.sent_bytes += s;
                     if self.sent_bytes >= self.buffer.entry_size() {
+                        trace!("finished write");
                         self.sent_bytes = 0;
+                        let _ = self.stream.flush();
                         return true;
                     }
                     self.sent_bytes >= self.buffer.entry_size()
@@ -575,29 +594,25 @@ pub mod test {
     fn new_store<V: ::std::fmt::Debug>(_: Vec<OrderIndex>) -> TcpStore<V>
         where V: Clone
     {
-        //use std::thread;
-        //use std::time::Duration;
+        static SERVERS_READY: AtomicIsize = AtomicIsize::new(0);
 
-        //let handle = thread::spawn(move || {
-            //const addr_str: &'static str = "0.0.0.0:13265";
-            //let addr = addr_str.parse().expect("invalid inet address");
-            //let mut event_loop = EventLoop::new().unwrap();
-            //let server = Server::new(&addr, &mut event_loop);
-            //return
-            //if let Ok(mut server) = server {
-                //trace!("starting server");
-                //event_loop.run(&mut server);
-            //}
-            //trace!("server already started");
-            //return;
-        //});
-        //forget(handle);
+        const addr_str: &'static str = "0.0.0.0:13265";
+        let handle = thread::spawn(move || {
+            let addr = addr_str.parse().expect("invalid inet address");
+            let mut event_loop = EventLoop::new().unwrap();
+            let server = Server::new(&addr, &mut event_loop);
+            if let Ok(mut server) = server {
+                SERVERS_READY.fetch_add(1, Ordering::Release);
+                trace!("starting server");
+                event_loop.run(&mut server);
+            }
+            trace!("server already started");
+            return;
+        });
+        mem::forget(handle);
 
-        //thread::sleep(Duration::from_secs(1));
+        while SERVERS_READY.load(Ordering::Acquire) < 1 {}
 
-        // const addr_str: &'static str = "172.28.229.152:13265";
-        // const addr_str: &'static str = "10.21.7.4:13265";
-        const addr_str: &'static str = "127.0.0.1:13265";
         let addr = addr_str.parse().expect("invalid inet address");
         let store = TcpStore::new(addr);
         trace!("store @ {:?} connected to {:?}", store.socket.local_addr(), store.socket.peer_addr());
