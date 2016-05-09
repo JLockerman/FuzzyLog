@@ -59,6 +59,7 @@ macro_rules! general_tests {
                     true
                 }));
                 let join = thread::spawn(move || {
+                    trace!("T1 start");
                     let mut log = FuzzyLog::new(s, h, HashMap::new());
                     let mut last_index = (1.into(), 0.into());
                     for i in 0..10 {
@@ -69,6 +70,7 @@ macro_rules! general_tests {
                     trace!("T1 inserted {:?} at {:?}", last_index, index2);
                 });
                 let join1 = thread::spawn(|| {
+                    trace!("T2 start");
                     let mut log = FuzzyLog::new(s1, h1, HashMap::new());
                     let mut last_index = (1.into(), 0.into());
                     for i in 0..10 {
