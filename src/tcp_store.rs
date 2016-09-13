@@ -299,7 +299,7 @@ pub mod test {
     use super::*;
     use prelude::*;
 
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT, Ordering};
     use std::collections::HashMap;
     use std::collections::hash_map::Entry::{Occupied, Vacant};
     use std::io::{self, Read, Write};
@@ -308,8 +308,6 @@ pub mod test {
     use std::os::unix::io::AsRawFd;
     use std::thread;
     use std::rc::Rc;
-
-    use test::Bencher;
 
     use mio;
     use mio::prelude::*;
@@ -594,7 +592,7 @@ pub mod test {
     fn new_store<V: ::std::fmt::Debug>(_: Vec<OrderIndex>) -> TcpStore<V>
         where V: Clone
     {
-        static SERVERS_READY: AtomicIsize = AtomicIsize::new(0);
+        static SERVERS_READY: AtomicIsize = ATOMIC_ISIZE_INIT;
 
         const addr_str: &'static str = "0.0.0.0:13265";
         let handle = thread::spawn(move || {
@@ -621,18 +619,18 @@ pub mod test {
 
     general_tests!(super::new_store);
 
-    #[bench]
-    fn many_writes(b: &mut Bencher) {
-        let deps = &[];
-        let data = &48u64;
-        let entr = EntryContents::Data(data, deps);
-        let mut store = new_store(vec![]);
-        let mut i = 0;
-        b.iter(|| {
-            store.insert((21.into(), i.into()), entr.clone());
-            i.wrapping_add(1);
-        });
-    }
+    // #[bench]
+    // fn many_writes(b: &mut Bencher) {
+        // let deps = &[];
+        // let data = &48u64;
+        // let entr = EntryContents::Data(data, deps);
+        // let mut store = new_store(vec![]);
+        // let mut i = 0;
+        // b.iter(|| {
+            // store.insert((21.into(), i.into()), entr.clone());
+            // i.wrapping_add(1);
+        // });
+    // }
 
     // #[test]
     // fn test_external_write() {

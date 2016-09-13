@@ -315,7 +315,7 @@ mod test {
     use std::collections::hash_map::Entry::{Occupied, Vacant};
     use std::mem::{self, forget, transmute};
     use std::net::UdpSocket;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::thread::spawn;
 
     // use test::Bencher;
@@ -327,7 +327,7 @@ mod test {
     fn new_store<V: ::std::fmt::Debug>(_: Vec<OrderIndex>) -> UdpStore<V>
         where V: Clone
     {
-        static SERVERS_READY: AtomicUsize = AtomicUsize::new(0);
+        static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
         let handle = spawn(move || {
             use mio::udp::UdpSocket;

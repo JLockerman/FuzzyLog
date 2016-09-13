@@ -479,7 +479,7 @@ pub mod test {
     use prelude::*;
 
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::collections::HashMap;
     use std::collections::hash_map::Entry::{Occupied, Vacant};
     use std::io::{self, Read, Write};
@@ -488,8 +488,6 @@ pub mod test {
     use std::os::unix::io::AsRawFd;
     use std::thread;
     use std::rc::Rc;
-
-    use test::Bencher;
 
     use mio;
     use mio::prelude::*;
@@ -787,7 +785,7 @@ pub mod test {
     fn new_store<V: ::std::fmt::Debug + Storeable>(_: Vec<OrderIndex>) -> TcpStore<V>
         where V: Clone
     {
-        static SERVERS_READY: AtomicUsize = AtomicUsize::new(0);
+        static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
         let handle = thread::spawn(move || {
             const addr_str: &'static str = "0.0.0.0:13266";
@@ -920,7 +918,7 @@ pub mod test {
     }
 
     fn init_multi_servers<V: ?Sized + ::std::fmt::Debug + Storeable>() -> TcpStore<V> {
-        static SERVERS_READY: AtomicUsize = AtomicUsize::new(0);
+        static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
         const lock_addr_str: &'static str = "0.0.0.0:13271";
         let handle = thread::spawn(move || {
@@ -964,16 +962,4 @@ pub mod test {
             .expect("cannot create store")
     }
 
-    #[bench]
-    fn many_writes(b: &mut Bencher) {
-        let deps = &[];
-        let data = &48u64;
-        let entr = EntryContents::Data(data, deps);
-        let mut store = new_store(vec![]);
-        let mut i = 0;
-        b.iter(|| {
-            store.insert((21.into(), i.into()), entr.clone());
-            i.wrapping_add(1);
-        });
-    }
 }
