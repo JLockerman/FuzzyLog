@@ -15,8 +15,11 @@ extern crate rusoto;
 //extern crate test;
 
 extern crate rustc_serialize;
-extern crate uuid;
+extern crate mio;
+extern crate nix;
+extern crate net2;
 extern crate time;
+extern crate uuid;
 
 #[macro_use]
 mod general_tests;
@@ -24,6 +27,8 @@ mod general_tests;
 pub mod prelude;
 pub mod local_store;
 pub mod udp_store;
+pub mod tcp_store;
+pub mod multitcp_store;
 
 #[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;
@@ -37,7 +42,6 @@ pub mod c_binidings {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::collections::HashMap;
     use std::slice;
-    use std::ptr;
 
     pub type Log = FuzzyLog<[u8], UdpStore<[u8]>, LocalHorizon>;
 

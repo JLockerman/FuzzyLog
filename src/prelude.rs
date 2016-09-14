@@ -134,20 +134,20 @@ pub struct OLD<V, D: ?Sized = [u8; MAX_DATA_LEN]> {
     // layout Optional uuid, [u8; data_bytes] [OrderIndex; dependency_bytes/size<OrderIndex>]
 }
 
-pub const MAX_DATA_LEN2: usize = 4096 - 22; //TODO
+pub const MAX_DATA_LEN2: usize = 4096 - 24; //TODO
 
 #[repr(C)] //TODO
 pub struct Entry<V: ?Sized, F: ?Sized = [u8; MAX_DATA_LEN2]> {
-    _pd: PhantomData<V>,
+    pub _pd: PhantomData<V>,
     pub id: Uuid,
     pub kind: EntryKind::Kind,
-    pub _padding: [u8; 1],
+    pub _padding: [u8; 3],
     pub data_bytes: u16,
     pub dependency_bytes: u16,
     pub flex: F,
 }
 
-pub const MAX_DATA_DATA_LEN: usize = MAX_DATA_LEN2 - 12; //TODO
+pub const MAX_DATA_DATA_LEN: usize = MAX_DATA_LEN2 - 8; //TODO
 
 #[repr(C)]
 pub struct DataFlex<D: ?Sized = [u8; MAX_DATA_DATA_LEN]> {
@@ -155,10 +155,12 @@ pub struct DataFlex<D: ?Sized = [u8; MAX_DATA_DATA_LEN]> {
     pub data: D,
 }
 
-pub const MAX_MULTI_DATA_LEN: usize = MAX_DATA_LEN2 - 2; //TODO
+pub const MAX_MULTI_DATA_LEN: usize = MAX_DATA_LEN2 - 8 - 6 - 2; //TODO
 
 #[repr(C)]
 pub struct MultiFlex<D: ?Sized = [u8; MAX_MULTI_DATA_LEN]> {
+    pub lock: u64, //TODO should be in multiflex but padding
+    pub _padding: [u8; 6],
     pub cols: u16,
     pub data: D,
 }
@@ -258,6 +260,16 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let cols_ptr = cols_ptr as *const _;
             let num_cols = self.flex.cols;
             slice::from_raw_parts(cols_ptr, num_cols as usize)
+        }
+    }
+
+    fn mlocs_mut(&mut self) -> &mut [OrderIndex] {
+        unsafe {
+            let contents_ptr: *mut u8 = &mut self.flex.data as *mut _ as *mut u8;
+            let cols_ptr = contents_ptr;
+            let cols_ptr = cols_ptr as *mut _;
+            let num_cols = self.flex.cols;
+            slice::from_raw_parts_mut(cols_ptr, num_cols as usize)
         }
     }
 
@@ -408,6 +420,15 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
         }
     }
 
+    pub fn lock_num(&self) -> u64 {
+        match self.kind & EntryKind::Layout {
+            EntryKind::Multiput => unsafe {
+                self.as_multi_entry().flex.lock
+            },
+            _ => unreachable!(),
+        }
+    }
+
     pub fn locs(&self) -> &[OrderIndex] {
         unsafe {
             match self.kind & EntryKind::Layout {
@@ -419,16 +440,93 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
         }
     }
 
-    pub fn val_locs_and_deps(&self) -> (&V, &[OrderIndex], &[OrderIndex]) {
+    pub fn locs_mut(&mut self) -> &mut [OrderIndex] {
         unsafe {
-            match self.contents() {
-                Data(ref data, ref deps) => (data, self.locs(), deps),
-                Multiput{ref data, ref columns, ref deps, ..} => {
-                    (data, columns, deps)
-                }
+            match self.kind & EntryKind::Layout {
+                EntryKind::Read | EntryKind::Data =>
+                    slice::from_raw_parts_mut(&mut self.as_data_entry_mut().flex.loc, 1),
+                EntryKind::Multiput => self.as_multi_entry_mut().mlocs_mut(),
+                _ => unreachable!()
             }
         }
     }
+
+    pub fn val_locs_and_deps(&self) -> (&V, &[OrderIndex], &[OrderIndex]) {
+        match self.contents() {
+            Data(ref data, ref deps) => (data, self.locs(), deps),
+            Multiput{ref data, ref columns, ref deps, ..} => {
+                (data, columns, deps)
+            }
+        }
+    }
+
+    pub fn header_size(&self) -> usize {
+        match self.kind & EntryKind::Layout {
+            EntryKind::Data | EntryKind::Read => mem::size_of::<Entry<(), DataFlex<()>>>(),
+            EntryKind::Multiput => mem::size_of::<Entry<(), MultiFlex<()>>>(),
+            _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
+        }
+    }
+
+    pub fn payload_size(&self) -> usize {
+        let mut size = self.data_bytes as usize + self.dependency_bytes as usize;
+        if self.is_multi() {
+            let header = unsafe { mem::transmute::<_, &Entry<V, MultiFlex<()>>>(self) };
+            size += header.flex.cols as usize * mem::size_of::<OrderIndex>();
+        }
+        assert!(size + mem::size_of::<Entry<(), ()>>() <= 8192);
+        size
+    }
+
+    pub fn entry_size(&self) -> usize {
+        let size = match self.kind & EntryKind::Layout {
+            EntryKind::Data => self.data_entry_size(),
+            EntryKind::Multiput => self.multi_entry_size(),
+            EntryKind::Read => {
+                //trace!("read size {}", mem::size_of::<Entry<(), ()>>());
+                mem::size_of::<Entry<(), DataFlex<()>>>()
+            }
+            _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
+        };
+        assert!(size >= base_header_size());
+        size
+    }
+
+    fn data_entry_size(&self) -> usize {
+        assert!(self.kind & EntryKind::Layout == EntryKind::Data);
+        let size = mem::size_of::<Entry<(), DataFlex<()>>>()
+            + self.data_bytes as usize
+            + self.dependency_bytes as usize;
+        //trace!("data size {}", size);
+        assert!(size <= 8192);
+        size
+    }
+
+    fn multi_entry_size(&self) -> usize {
+        assert!(self.kind & EntryKind::Layout == EntryKind::Multiput);
+        unsafe {
+            let header = mem::transmute::<_, &Entry<V, MultiFlex>>(self);
+            let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + header.data_bytes as usize
+                + header.dependency_bytes as usize
+                + (header.flex.cols as usize * mem::size_of::<OrderIndex>());
+            //trace!("multi size {}", size);
+            assert!(size <= 8192);
+            size
+        }
+    }
+
+    pub fn is_multi(&self) -> bool {
+        self.kind & EntryKind::Layout == EntryKind::Multiput
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.kind & EntryKind::Layout == EntryKind::Data
+    }
+}
+
+pub fn base_header_size() -> usize {
+    mem::size_of::<Entry<(), ()>>()
 }
 
 impl<V: PartialEq + Storeable + ?Sized> PartialEq for Entry<V> {
@@ -464,7 +562,7 @@ impl<V: ?Sized> Clone for Entry<V> {
         //TODO
         unsafe {
             let mut entr: Entry<V> = mem::uninitialized();
-            ptr::copy(self as *const _, &mut entr as *mut _, 1);
+            ptr::copy(self as *const _ as *const u8, &mut entr as *mut _ as *mut u8, self.size());
             entr
         }
         //self.contents().clone_entry()
@@ -503,50 +601,71 @@ impl <'e, V: ?Sized> EntryContents<'e, V> {
 impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
 
     pub fn clone_entry(&self) -> Entry<V> {
-        use std::u16;
         unsafe {
             let mut entr = mem::uninitialized::<Entry<V>>();
-            {
-                let e = &mut entr;
-                e.kind = self.kind();
-                let (data_ptr, data, deps) = match self {
-                    &Data(data, deps) => {
-                        assert!(deps.len() < u16::MAX as usize);
-                        let e = transmute_ref_mut::<_, Entry<V, DataFlex>>(e);
-                        let data_ptr: *mut u8 = &mut (&mut e.flex.data)[0];
-                        (data_ptr, data, deps)
-                    }
-                    &Multiput{data, uuid, columns, deps} => {
-                        assert!(deps.len() < u16::MAX as usize);
-                        assert!(columns.len() < u16::MAX as usize);
-                        assert!(columns.len() > 0);
-                        let e = transmute_ref_mut::<_, Entry<V, MultiFlex>>(e);
-                        let cols_ptr: *mut OrderIndex = (&mut e.flex.data[0]) as *mut _ as *mut _;
-                        e.flex.cols = columns.len() as u16;
-                        assert!(e.flex.cols > 0);
-                        e.id = uuid.clone();
-
-                        ptr::copy(columns.as_ptr() as *mut _, cols_ptr, columns.len());
-
-                        let data_ptr = cols_ptr.offset(columns.len() as isize) as *mut u8;
-                        (data_ptr, data, deps)
-                    }
-                };
-                assert!(Storeable::size(data) < u16::MAX as usize);
-                e.data_bytes = Storeable::size(data) as u16;
-                e.dependency_bytes = (deps.len() * size_of::<OrderIndex>()) as u16;
-                let dep_ptr = data_ptr.offset(e.data_bytes as isize);
-
-                //ptr::write(data_ptr as *mut _, data.clone()); //TODO why did this fail?
-                ptr::copy(Storeable::ref_to_bytes(data), data_ptr as *mut _, e.data_bytes as usize);
-                ptr::copy(deps.as_ptr(), dep_ptr as *mut _, deps.len());
-                if e.kind == EntryKind::Multiput {
-                    let e = transmute_ref_mut::<_, Entry<V, MultiFlex>>(e);
-                    assert!(e.flex.cols > 0);
-                }
-            }
+            self.fill_entry(&mut entr);
             entr
         }
+    }
+
+    unsafe fn fill_entry(&self, e: &mut Entry<V>) {
+        use std::u16;
+        e.kind = self.kind();
+        let (data_ptr, data, deps) = match self {
+            &Data(data, deps) => {
+                assert!(deps.len() < u16::MAX as usize);
+                let e = transmute_ref_mut::<_, Entry<V, DataFlex>>(e);
+                let data_ptr: *mut u8 = &mut (&mut e.flex.data)[0];
+                (data_ptr, data, deps)
+            }
+            &Multiput{data, uuid, columns, deps} => {
+                assert!(deps.len() < u16::MAX as usize);
+                assert!(columns.len() < u16::MAX as usize);
+                assert!(columns.len() > 0);
+                let e = transmute_ref_mut::<_, Entry<V, MultiFlex>>(e);
+                let cols_ptr: *mut OrderIndex = (&mut e.flex.data[0]) as *mut _ as *mut _;
+                e.flex.cols = columns.len() as u16;
+                assert!(e.flex.cols > 0);
+                e.id = uuid.clone();
+
+                ptr::copy(columns.as_ptr() as *mut _, cols_ptr, columns.len());
+
+                let data_ptr = cols_ptr.offset(columns.len() as isize) as *mut u8;
+                e.flex.lock = 0;
+                (data_ptr, data, deps)
+            }
+        };
+        assert!(Storeable::size(data) < u16::MAX as usize);
+        e.data_bytes = Storeable::size(data) as u16;
+        e.dependency_bytes = (deps.len() * size_of::<OrderIndex>()) as u16;
+        let dep_ptr = data_ptr.offset(e.data_bytes as isize);
+
+        //ptr::write(data_ptr as *mut _, data.clone()); //TODO why did this fail?
+        ptr::copy(Storeable::ref_to_bytes(data), data_ptr as *mut _, e.data_bytes as usize);
+        ptr::copy(deps.as_ptr(), dep_ptr as *mut _, deps.len());
+        if e.kind == EntryKind::Multiput {
+            let e = transmute_ref_mut::<_, Entry<V, MultiFlex>>(e);
+            assert!(e.flex.cols > 0);
+        }
+    }
+
+    pub fn clone_bytes(&self) -> Vec<u8> {
+        let size = match self {
+            &Data(data, deps) =>
+                mem::size_of::<Entry<(), DataFlex<()>>>()
+                 + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>()),
+            &Multiput{ data, columns, deps, ..} =>
+                mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>())
+                + (columns.len()  * size_of::<OrderIndex>()),
+        };
+        assert!(size <= 4096);
+        let mut buffer = Vec::with_capacity(size);
+        unsafe {
+            buffer.set_len(size);
+            self.fill_entry(transmute_ref_mut(&mut buffer[0]));
+        }
+        buffer
     }
 }
 
@@ -694,22 +813,22 @@ where V: Storeable, S: Store<V>, H: Horizon{
     fn read_multiput(&mut self, first_seen_column: order, data: &V, put_id: &Uuid,
         columns: &[OrderIndex]) {
 
-        //XXX note multiserver validation happens at the store layer
-        self.upcalls.get(&first_seen_column).map(|f| f(data)); //TODO clone
-
         for &(column, _) in columns { //TODO only relevent cols
             trace!("play multiput for col {:?}", column);
             self.play_until_multiput(column, put_id);
-            self.upcalls.get(&column).map(|f| f(data)); //TODO clone
+            self.upcalls.get(&column).map(|f| f(data));
         }
+
+        //XXX TODO note multiserver validation happens at the store layer?
+        self.upcalls.get(&first_seen_column).map(|f| f(data));
     }
 
     fn play_until_multiput(&mut self, column: order, put_id: &Uuid) {
         //TODO instead, just mark all interesting columns not in the
         //     transaction as stale, and only read the interesting
         //     columns of the transaction
-        let index = self.local_horizon.get(&column).cloned().unwrap_or(0.into()) + 1;
         'search: loop {
+            let index = self.local_horizon.get(&column).cloned().unwrap_or(0.into()) + 1;
             trace!("seatching for multiput {:?}\n\tat: {:?}", put_id, (column, index));
             let ent = self.store.get((column, index)).clone();
             let ent = match ent {
@@ -718,20 +837,24 @@ where V: Storeable, S: Store<V>, H: Horizon{
             };
             self.play_deps(ent.dependencies());
             match ent.contents() {
-                Multiput{uuid, ..} if uuid == put_id => break 'search,
+                Multiput{uuid, ..} if uuid == put_id => {
+                    trace!("found multiput {:?} for {:?} at: {:?}", put_id, column, index);
+                    self.local_horizon.insert(column, index);
+                    break 'search
+                }
                 Multiput{data, uuid, columns, ..} => {
                     //TODO
                     trace!("Multiput");
                     self.read_multiput(column, data, uuid, columns);
+                    self.local_horizon.insert(column, index);
                 }
                 Data(data, _) => {
                     trace!("Data");
                     self.upcalls.get(&column).map(|f| f(data)); //TODO clone
+                    self.local_horizon.insert(column, index);
                 }
             }
         }
-        trace!("found multiput {:?} for {:?} at: {:?}", put_id, column, index);
-        self.local_horizon.insert(column, index);
 	}
 
     fn play_deps(&mut self, deps: &[OrderIndex]) {
@@ -776,9 +899,21 @@ mod test {
 
 
     #[test]
-    fn test_entry2_header() {
+    fn test_entry2_header_size() {
         use std::mem::size_of;
-        assert_eq!(size_of::<Entry<(), ()>>(), 22);
+        assert_eq!(size_of::<Entry<(), ()>>(), 24);
+    }
+
+    #[test]
+    fn test_entry2_data_header_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<DataFlex<()>>(), 8);
+    }
+
+    #[test]
+    fn test_entry2_multi_header_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<MultiFlex<()>>(), 16);
     }
 
     #[repr(C)] //TODO
@@ -802,7 +937,7 @@ mod test {
     fn test_entry2_data_header() {
         use std::mem::size_of;
         assert_eq!(size_of::<Entry<(), DataFlex<()>>>(),
-            size_of::<Entry<(), ()>>() + size_of::<DataFlex<()>>() + 2);
+            size_of::<Entry<(), ()>>() + size_of::<DataFlex<()>>());
     }
 
     #[test]
