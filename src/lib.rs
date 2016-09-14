@@ -37,16 +37,19 @@ pub mod c_binidings {
 
     use prelude::*;
     use local_store::LocalHorizon;
-    use udp_store::UdpStore;
+    use tcp_store::TcpStore;
 
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::collections::HashMap;
     use std::slice;
 
-    pub type Log = FuzzyLog<[u8], UdpStore<[u8]>, LocalHorizon>;
+    use std::ffi::CStr;
+    use std::os::raw::c_char;
+
+    pub type Log = FuzzyLog<[u8], TcpStore<[u8]>, LocalHorizon>;
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_new(server_ip_addr: u32, server_port: u16, relevent_chains: *const u32,
+    pub extern "C" fn fuzzy_log_new(server_addr: *const c_char, relevent_chains: *const u32,
         num_relevent_chains: u16, callback: extern fn(*const u8, u16) -> u8) -> Box<Log> {
         let mut callbacks = HashMap::new();
         let relevent_chains = unsafe { slice::from_raw_parts(relevent_chains, num_relevent_chains as usize) };
@@ -54,9 +57,9 @@ pub mod c_binidings {
             let callback: Box<Fn(&[u8]) -> bool> = Box::new(move |val| { callback(&val[0], val.len() as u16) != 0 });
             callbacks.insert(chain.into(), callback);
         }
-        let ip_addr: Ipv4Addr = server_ip_addr.into();
-        let server_addr = SocketAddr::new(IpAddr::V4(ip_addr), server_port);
-        let log = FuzzyLog::new(UdpStore::new(server_addr), LocalHorizon::new(), callbacks);
+        let server_addr_str = unsafe { CStr::from_ptr(server_addr).to_str().expect("invalid IP string") };
+        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+        let log = FuzzyLog::new(TcpStore::new(ip_addr), LocalHorizon::new(), callbacks);
         Box::new(log)
     }
 
