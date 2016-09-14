@@ -2,6 +2,6 @@
 A naive TCP based fuzzy log server.
 To run use
 
-    cargo run --release <server addr>:<server port>
+    cargo run --release <server port>
 
-yes, you need to specify the port.
+it will accept requests for any IP address at that port.
