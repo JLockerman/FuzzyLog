@@ -1,3 +1,4 @@
+#![allow(unused_must_use)]
 
 use std::collections::HashMap;
 use std::convert::Into;

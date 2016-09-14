@@ -1,3 +1,4 @@
+#![allow(unused_must_use)]
 
 use prelude::*;
 
@@ -188,7 +189,7 @@ pub mod test {
 	                        }
 	                    );
 	                    b
-	                } 
+	                }
 	            )),
 	            order: ord,
 	            local_view: local_view,

@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 
 use prelude::*;
 
@@ -28,7 +29,7 @@ pub struct TcpStore<V: ?Sized> {
     _pd: PhantomData<V>,
 }
 
-const SLEEP_NANOS: u32 = 8000; //TODO user settable
+//const SLEEP_NANOS: u32 = 8000; //TODO user settable
 const RTT: i64 = 80000;
 
 impl<V: Storeable + ?Sized> TcpStore<V> {

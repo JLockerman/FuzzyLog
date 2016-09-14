@@ -1,4 +1,4 @@
-//#![cfg_attr(test, feature(test))]
+#![allow(unused_imports)]
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
