@@ -1,20 +1,18 @@
 # delos-rust
 ##To Build
-Download [Rust 1.4](https://www.rust-lang.org/downloads.html)  
+Download this repository.
+Download [Rust](https://www.rust-lang.org).
 To run local tests
 
     cargo test --release
 
-To also run dynamodb tests (This requires credidentials in either an enviroment variable or file as in
-[the java sdk](http://docs.aws.amazon.com/AWSSdkDocsJava/latest/DeveloperGuide/credentials.html))
+**NOTE:** The first build will be much slower than subsequent ones
+as it needs to download dependencies.
 
-    cargo test --release --features dynamodb_tests
-
-(note that the first compilation will be slow)  
-
-in mac os you need to add
-
-    [credential]
-	helper = osxkeychain
-
-to you `.gitconfig`
+##Directory Outline
+`src` fuzzy log client library  
+`examples` sample code which uses the client library to perform vaious tasks of note is  
+`examples/c_linking` shows how to use the C API to interface with the fuzzy log client library  
+`servers` various servers which the client library can run against including  
+`servers/tcp_server` a TCP based sever  
+`clients` varous DPDK based clients for use in testing  
