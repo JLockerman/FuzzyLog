@@ -12,3 +12,7 @@ with the relevent links updated. (in the examples folder a simple
 copy-paste will suffice).
 
 See `fuzzy_log.h` for the fuzzy log functions currently available.
+
+The Makefile currently creates a a binary `out/start` which, when
+run will attempt to connect to a fuzzy log server at `127.0.0.1:13229`
+and, if successful, exit.

@@ -9,7 +9,7 @@ uint8_t callback(const uint8_t * _arg1, uint16_t _arg2)
 
 int main(int argc, char *argv[])
 {
-	struct FuzzyLog* log = fuzzy_log_new(0, 3666, 0, 0, callback);
+	struct FuzzyLog* log = fuzzy_log_new("127.0.0.1:13229", 0, 0, callback);
 	printf("fuzzy log client at %p\n", log);
 	return 0;
 }

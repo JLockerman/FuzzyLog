@@ -12,7 +12,7 @@ typedef struct ChainAndEntry {
 
 typedef uint8_t (*fuzzy_log_callback)(const uint8_t *, uint16_t);
 
-struct FuzzyLog *fuzzy_log_new(uint32_t server_ip_addr, uint16_t server_port,
+struct FuzzyLog *fuzzy_log_new(const char * server_addr,
 		const uint32_t *relevent_chains, uint16_t num_relevent_chains, fuzzy_log_callback callback);
 
 ChainAndEntry fuzzy_log_append(struct FuzzyLog *log, uint32_t chain,
