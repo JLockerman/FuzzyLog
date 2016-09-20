@@ -594,24 +594,29 @@ pub mod test {
     {
         static SERVERS_READY: AtomicIsize = ATOMIC_ISIZE_INIT;
 
-        const addr_str: &'static str = "0.0.0.0:13265";
-        let handle = thread::spawn(move || {
-            let addr = addr_str.parse().expect("invalid inet address");
-            let mut event_loop = EventLoop::new().unwrap();
-            let server = Server::new(&addr, &mut event_loop);
-            if let Ok(mut server) = server {
-                SERVERS_READY.fetch_add(1, Ordering::Release);
-                trace!("starting server");
-                event_loop.run(&mut server);
-            }
-            trace!("server already started");
-            return;
-        });
-        mem::forget(handle);
+        let addr = if let Ok(addr_str) = ::std::env::var("DELOS_TCP_TEST_ADDR") {
+            SERVERS_READY.fetch_add(1, Ordering::Release);
+            addr_str.parse().expect("invalid inet address")
+        } else {
+            const addr_str: &'static str = "0.0.0.0:13265";
+            let handle = thread::spawn(move || {
+                let addr = addr_str.parse().expect("invalid inet address");
+                let mut event_loop = EventLoop::new().unwrap();
+                let server = Server::new(&addr, &mut event_loop);
+                if let Ok(mut server) = server {
+                    SERVERS_READY.fetch_add(1, Ordering::Release);
+                    trace!("starting server");
+                    event_loop.run(&mut server);
+                }
+                trace!("server already started");
+                return;
+            });
+            mem::forget(handle);
+            addr_str.parse().expect("invalid inet address")
+        };
 
         while SERVERS_READY.load(Ordering::Acquire) < 1 {}
 
-        let addr = addr_str.parse().expect("invalid inet address");
         let store = TcpStore::new(addr);
         trace!("store @ {:?} connected to {:?}", store.socket.local_addr(), store.socket.peer_addr());
         store
