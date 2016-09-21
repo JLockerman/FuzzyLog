@@ -1,1 +1,6 @@
 language: rust
+notifications:
+	email:
+		recipients:
+			- joshua.lockerman@yale.edu
+			- mahesh@cs.yale.edu
