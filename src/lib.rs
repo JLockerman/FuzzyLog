@@ -19,6 +19,7 @@ extern crate mio;
 extern crate nix;
 extern crate net2;
 extern crate time;
+extern crate rand;
 extern crate uuid;
 
 #[macro_use]
@@ -29,7 +30,7 @@ pub mod local_store;
 pub mod udp_store;
 pub mod tcp_store;
 pub mod multitcp_store;
-//pub mod color_api;
+pub mod color_api;
 
 #[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;
@@ -55,7 +56,7 @@ pub mod c_binidings {
         let mut callbacks = HashMap::new();
         let relevent_chains = unsafe { slice::from_raw_parts(relevent_chains, num_relevent_chains as usize) };
         for &chain in relevent_chains {
-            let callback: Box<Fn(&OrderIndex, &[u8]) -> bool> = Box::new(move |_, val| { callback(&val[0], val.len() as u16) != 0 });
+            let callback: Box<Fn(&Uuid, &OrderIndex, &[u8]) -> bool> = Box::new(move |_, _, val| { callback(&val[0], val.len() as u16) != 0 });
             callbacks.insert(chain.into(), callback);
         }
         let server_addr_str = unsafe { CStr::from_ptr(server_addr).to_str().expect("invalid IP string") };

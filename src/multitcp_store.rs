@@ -821,14 +821,14 @@ pub mod test {
         let store = init_multi_servers();
         let horizon = HashMap::new();
         let map = Rc::new(RefCell::new(HashMap::new()));
-        let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o _, &'r _) -> bool>> = HashMap::new();
+        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u _, &'o _, &'r _) -> bool>> = HashMap::new();
         let re = map.clone();
         upcalls.insert(6.into(),
-                       Box::new(move |_, &(k, v)| {
+                       Box::new(move |_, _, &(k, v)| {
                            re.borrow_mut().insert(k, v);
                            true
                        }));
-        upcalls.insert(7.into(), Box::new(|_, _| false));
+        upcalls.insert(7.into(), Box::new(|_, _, _| false));
         let mut log = FuzzyLog::new(store, horizon, upcalls);
         let e1 = log.append(6.into(), &(0, 1), &*vec![]);
         assert_eq!(e1, (6.into(), 1.into()));
@@ -855,18 +855,18 @@ pub mod test {
         let horizon2 = HashMap::new();
         let h = horizon.clone();
         let h1 = horizon.clone();
-        let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o _, &'r _) -> bool>> = HashMap::new();
-        let mut upcalls2: HashMap<_, Box<for<'o, 'r> Fn(&'o _, &'r _) -> bool>> = HashMap::new();
-        let populate_upcalls = |up: &mut HashMap<_, Box<for<'o, 'r> Fn(&'o _, &'r _) -> bool>>| {
+        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u _, &'o _, &'r _) -> bool>> = HashMap::new();
+        let mut upcalls2: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u _, &'o _, &'r _) -> bool>> = HashMap::new();
+        let populate_upcalls = |up: &mut HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u _, &'o _, &'r _) -> bool>>| {
             let map = Rc::new(RefCell::new(HashMap::new()));
             let re1 = map.clone();
             let re2 = map.clone();
-            up.insert(17.into(), Box::new(move |_, &(k, v)| {
+            up.insert(17.into(), Box::new(move |_, _, &(k, v)| {
                 trace!("MapEntry({:?}, {:?})", k, v);
                 re1.borrow_mut().insert(k, v);
                 true
             }));
-            up.insert(18.into(), Box::new(move |_, &(k, v)| {
+            up.insert(18.into(), Box::new(move |_, _, &(k, v)| {
                 trace!("MapEntry({:?}, {:?})", k, v);
                 re2.borrow_mut().insert(k, v);
                 true

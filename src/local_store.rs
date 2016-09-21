@@ -181,8 +181,8 @@ pub mod test {
 	        Map {
 	            log: FuzzyLog::new(store, horizon, collect!(
 	                ord => {
-	                    let b: Box<Fn(&OrderIndex, &MapEntry<K, V>) -> bool> = Box::new(
-	                        move |_, &MapEntry(k, v)| {
+	                    let b: Box<Fn(&Uuid, &OrderIndex, &MapEntry<K, V>) -> bool> = Box::new(
+	                        move |_, _, &MapEntry(k, v)| {
 	                            re.borrow_mut().insert(k, v);
 	                            true
 	                        }
