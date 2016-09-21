@@ -49,12 +49,12 @@ macro_rules! general_tests {
                 let map1 = Rc::new(RefCell::new(HashMap::new()));
                 let re0 = map0.clone();
                 let re1 = map1.clone();
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
-                upcalls.insert(1.into(), Box::new(move |&MapEntry(k, v)| {
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
+                upcalls.insert(1.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re0.borrow_mut().insert(k, v);
                     true
                 }));
-                upcalls.insert(2.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(2.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re1.borrow_mut().insert(k, v);
                     true
                 }));
@@ -131,13 +131,13 @@ macro_rules! general_tests {
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
                 let re = map.clone();
-                upcalls.insert(4.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(4.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re.borrow_mut().insert(k, v);
                     true
                 }));
-                upcalls.insert(5.into(), Box::new(|_| false));
+                upcalls.insert(5.into(), Box::new(|_, _| false));
 
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
                 let e1 = log.append(4.into(), &MapEntry(0, 1), &*vec![]);
@@ -161,13 +161,13 @@ macro_rules! general_tests {
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
                 let re = map.clone();
-                upcalls.insert(6.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(6.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re.borrow_mut().insert(k, v);
                     true
                 }));
-                upcalls.insert(7.into(), Box::new(|_| false));
+                upcalls.insert(7.into(), Box::new(|_, _| false));
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
                 let e1 = log.append(6.into(), &MapEntry(0, 1), &*vec![]);
                 assert_eq!(e1, (6.into(), 1.into()));
@@ -195,17 +195,17 @@ macro_rules! general_tests {
                 let map0 = Rc::new(RefCell::new(HashMap::new()));
                 let map1 = Rc::new(RefCell::new(HashMap::new()));
                 let map01 = Rc::new(RefCell::new(HashMap::new()));
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
                 let re0 = map0.clone();
                 let re1 = map1.clone();
                 let re01 = map01.clone();
-                upcalls.insert(8.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(8.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re0.borrow_mut().insert(k, v);
                     re01.borrow_mut().insert(k, v);
                     true
                 }));
                 let re01 = map01.clone();
-                upcalls.insert(9.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(9.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re1.borrow_mut().insert(k, v);
                     re01.borrow_mut().insert(k, v);
                     true
@@ -247,12 +247,12 @@ macro_rules! general_tests {
                 let map1 = Rc::new(RefCell::new(HashMap::new()));
                 let re0 = map0.clone();
                 let re1 = map1.clone();
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
-                upcalls.insert(11.into(), Box::new(move |&MapEntry(k, v)| {
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
+                upcalls.insert(11.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re0.borrow_mut().insert(k, v);
                     true
                 }));
-                upcalls.insert(12.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(12.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re1.borrow_mut().insert(k, v);
                     true
                 }));
@@ -300,9 +300,9 @@ macro_rules! general_tests {
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
                 let re = map.clone();
-                upcalls.insert(13.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(13.into(), Box::new(move |_, &MapEntry(k, v)| {
                     re.borrow_mut().insert(k, v);
                     true
                 }));
@@ -327,9 +327,9 @@ macro_rules! general_tests {
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
                 let re = map.clone();
-                upcalls.insert(14.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(14.into(), Box::new(move |_, &MapEntry(k, v)| {
                     trace!("MapEntry({:?}, {:?})", k, v);
                     re.borrow_mut().insert(k, v);
                     true
@@ -357,15 +357,15 @@ macro_rules! general_tests {
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
                 let re1 = map.clone();
                 let re2 = map.clone();
-                upcalls.insert(15.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(15.into(), Box::new(move |_, &MapEntry(k, v)| {
                     trace!("MapEntry({:?}, {:?})", k, v);
                     re1.borrow_mut().insert(k, v);
                     true
                 }));
-                upcalls.insert(16.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(16.into(), Box::new(move |_, &MapEntry(k, v)| {
                     trace!("MapEntry({:?}, {:?})", k, v);
                     re2.borrow_mut().insert(k, v);
                     true
@@ -406,15 +406,15 @@ macro_rules! general_tests {
                 let h = horizon.clone();
                 let h1 = horizon.clone();
                 let map = Rc::new(RefCell::new(HashMap::new()));
-                let mut upcalls: HashMap<_, Box<for<'r> Fn(&'r _) -> bool>> = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'o, 'r> Fn(&'o OrderIndex, &'r _) -> bool>> = HashMap::new();
                 let re1 = map.clone();
                 let re2 = map.clone();
-                upcalls.insert(17.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(17.into(), Box::new(move |_, &MapEntry(k, v)| {
                     trace!("MapEntry({:?}, {:?})", k, v);
                     re1.borrow_mut().insert(k, v);
                     true
                 }));
-                upcalls.insert(18.into(), Box::new(move |&MapEntry(k, v)| {
+                upcalls.insert(18.into(), Box::new(move |_, &MapEntry(k, v)| {
                     trace!("MapEntry({:?}, {:?})", k, v);
                     re2.borrow_mut().insert(k, v);
                     true

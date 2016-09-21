@@ -181,14 +181,14 @@ pub mod test {
 	        Map {
 	            log: FuzzyLog::new(store, horizon, collect!(
 	                ord => {
-	                    let b: Box<Fn(&MapEntry<K, V>) -> bool> = Box::new(
-	                        move |&MapEntry(k, v)| {
+	                    let b: Box<Fn(&OrderIndex, &MapEntry<K, V>) -> bool> = Box::new(
+	                        move |_, &MapEntry(k, v)| {
 	                            re.borrow_mut().insert(k, v);
 	                            true
 	                        }
 	                    );
 	                    b
-	                } 
+	                }
 	            )),
 	            order: ord,
 	            local_view: local_view,
