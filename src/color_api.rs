@@ -45,17 +45,14 @@ where V: Storeable, S: Store<V>, H: Horizon {
                         //      fix this a layer down...
                         let mut l = b.borrow_mut();
                         if i != &Uuid::nil() {
-                            println!("{:?}", l.contains_key(i));
                             //FIXME figure out why some chains get repeated
                             if let Some(&mut (ref mut cs, _)) = l.get_refresh(i) {
                                 if !cs.contains(&c.into()) {
                                     cs.push(c.into())
                                 }
-                                println!("coalsece {:?} into {:?}\tid {:?}", (c, e), cs, i);
                                 return true
                             }
                         }
-                        println!("new val at {:?} id {:?}", (c, e), i);
                         //FIXME we need to ensure non-multiputs have unique ids
                         //      so we generate them I guess...
                         let id = if i == &Uuid::nil() {
@@ -79,8 +76,6 @@ where V: Storeable, S: Store<V>, H: Horizon {
         assert!(inhabits.len() > 0);
         let mut inhabits = inhabits.to_vec();
         let mut depends_on = depends_on.to_vec();
-        println!("inhabits   {:?}", inhabits);
-        println!("depends_on {:?}", depends_on);
         inhabits.sort();
         depends_on.sort();
         let no_snapshot = inhabits == depends_on || depends_on.len() == 0;
@@ -95,11 +90,9 @@ where V: Storeable, S: Store<V>, H: Horizon {
         };
 
         if inhabits.len() == 1 {
-            println!("A");
             self.log.append(inhabits[0].into(), data, &*happens_after);
         }
         else {
-            println!("M");
             let inhabited_chains: Vec<_> = inhabits.into_iter().map(|c| c.into()).collect();
             self.log.multiappend(&*inhabited_chains, data, &*happens_after);
         }
