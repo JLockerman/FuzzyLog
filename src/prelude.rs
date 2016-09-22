@@ -37,12 +37,14 @@ pub enum EntryKind {
     Multiput = 2,
 }*/
 
+//TODO reequire !Drop?
 pub trait Storeable {
     fn size(&self) -> usize;
     unsafe fn ref_to_bytes(&self) -> &u8;
     unsafe fn bytes_to_ref(&u8, usize) -> &Self;
     unsafe fn bytes_to_mut(&mut u8, usize) -> &mut Self;
     unsafe fn clone_box(&self) -> Box<Self>;
+    unsafe fn copy_to_mut(&self, &mut Self) -> usize;
 }
 
 impl<V> Storeable for V { //TODO should V be Copy/Clone?
@@ -69,6 +71,11 @@ impl<V> Storeable for V { //TODO should V be Copy/Clone?
         let mut b = Box::new(mem::uninitialized());
         ptr::copy_nonoverlapping(self, &mut *b, 1);
         b
+    }
+
+    unsafe fn copy_to_mut(&self, out: &mut Self) -> usize {
+        ptr::copy(self, out, 1);
+        mem::size_of::<Self>()
     }
 }
 
@@ -97,6 +104,12 @@ impl<V> Storeable for [V] {
         let mut b = v.into_boxed_slice();
         ptr::copy_nonoverlapping(&self[0], &mut b[0], self.len());
         b
+    }
+
+    unsafe fn copy_to_mut(&self, out: &mut Self) -> usize {
+        let to_copy = ::std::cmp::min(self.len(), out.len());
+        ptr::copy(&self[0], &mut out[0], to_copy);
+        to_copy * mem::size_of::<V>()
     }
 }
 
@@ -725,14 +738,15 @@ where V: Storeable, S: Store<V>, H: Horizon {
     pub store: S,
     pub horizon: H,
     local_horizon: HashMap<order, entry>,
-    upcalls: HashMap<order, Box<for<'r> Fn(&'r V) -> bool>>,
+    upcalls: HashMap<order, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r V) -> bool>>,
 }
 
 //TODO should impl some trait FuzzyLog instead of providing methods directly to allow for better sharing?
 //TODO allow dynamic register of new upcalls?
 impl<V: ?Sized, S, H> FuzzyLog<V, S, H>
 where V: Storeable, S: Store<V>, H: Horizon{
-    pub fn new(store: S, horizon: H, upcalls: HashMap<order, Box<Fn(&V) -> bool>>) -> Self {
+    pub fn new(store: S, horizon: H,
+        upcalls: HashMap<order, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r V) -> bool>>) -> Self {
         FuzzyLog {
             store: store,
             horizon: horizon,
@@ -800,28 +814,28 @@ where V: Storeable, S: Store<V>, H: Horizon{
             Multiput{data, uuid, columns, deps} => {
                 //TODO
                 trace!("Multiput {:?}", deps);
-                self.read_multiput(column, data, uuid, columns);
+                self.read_multiput(column, index, data, uuid, columns);
             }
             Data(data, deps) => {
                 trace!("Data {:?}", deps);
-                self.upcalls.get(&column).map(|f| f(data.clone())); //TODO clone
+                self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &(column, index), data.clone())); //TODO clone
             }
         }
         self.local_horizon.insert(column, index);
         Some((column, index))
     }
 
-    fn read_multiput(&mut self, first_seen_column: order, data: &V, put_id: &Uuid,
+    fn read_multiput(&mut self, first_seen_column: order, fsi: entry, data: &V, put_id: &Uuid,
         columns: &[OrderIndex]) {
 
-        for &(column, _) in columns { //TODO only relevent cols
+        for &(column, index) in columns { //TODO only relevent cols
             trace!("play multiput for col {:?}", column);
             self.play_until_multiput(column, put_id);
-            self.upcalls.get(&column).map(|f| f(data));
+            self.upcalls.get(&column).map(|f| f(put_id, &(column, index), data));
         }
 
         //XXX TODO note multiserver validation happens at the store layer?
-        self.upcalls.get(&first_seen_column).map(|f| f(data));
+        self.upcalls.get(&first_seen_column).map(|f| f(put_id, &(first_seen_column, fsi), data));
     }
 
     fn play_until_multiput(&mut self, column: order, put_id: &Uuid) {
@@ -846,12 +860,12 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 Multiput{data, uuid, columns, ..} => {
                     //TODO
                     trace!("Multiput");
-                    self.read_multiput(column, data, uuid, columns);
+                    self.read_multiput(column, index, data, uuid, columns);
                     self.local_horizon.insert(column, index);
                 }
                 Data(data, _) => {
                     trace!("Data");
-                    self.upcalls.get(&column).map(|f| f(data)); //TODO clone
+                    self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &(column, index), data)); //TODO clone
                     self.local_horizon.insert(column, index);
                 }
             }

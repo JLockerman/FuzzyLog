@@ -3,6 +3,39 @@
 
 #include <stdint.h>
 
+
+//// Colour API sketch
+//TODO where does the best effort flag go?
+#define DELOS_MAX_DATA_SIZE 8000
+typedef uint32_t ColorID;
+
+struct colors
+{
+	size_t numcolors;
+	ColorID *mycolors;
+};
+
+typedef struct DAGHandle DAGHandle;
+
+DAGHandle *new_dag_handle(size_t num_ips, const char * const* server_ips,
+	struct colors *interesting_colors);
+
+//NOTE currently can only use 31bits of return value
+uint32_t append(DAGHandle *handle, char *data, size_t data_size,
+	struct colors* inhabits, struct colors* depends_on);
+
+//NOTE we need either a way to specify data size, or to pass out a pointer
+// this version simple assumes that no data+metadat passed in or out will be
+// greater than DELOS_MAX_DATA_SIZE
+uint32_t get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
+
+//NOTE also frees the *handle
+void close_dag_handle(DAGHandle *handle);
+
+////////////////////////////////////
+//    Old fuzzy log C bindings    //
+////////////////////////////////////
+
 struct FuzzyLog;
 
 typedef struct ChainAndEntry {

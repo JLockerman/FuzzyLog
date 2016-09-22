@@ -590,7 +590,7 @@ pub mod test {
 
 
     #[allow(non_upper_case_globals)]
-    fn new_store<V: ::std::fmt::Debug>(_: Vec<OrderIndex>) -> TcpStore<V>
+    pub fn new_store<V: ::std::fmt::Debug>(_: Vec<OrderIndex>) -> TcpStore<V>
         where V: Clone
     {
         static SERVERS_READY: AtomicIsize = ATOMIC_ISIZE_INIT;

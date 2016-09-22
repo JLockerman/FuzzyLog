@@ -5,7 +5,7 @@ C_SRC := start.c
 LINK_FLAGS += -L./target/release -lc_link -pthread
 
 CFLAGS += -O2 -std=gnu11
-WFLAGS += -Wall -Wextra -Wpointer-arith -Wundef -Wcast-align -Wformat=2 -Wnested-externs
+WFLAGS += -Wall -Wextra -Wpointer-arith -Wundef -Wformat=2 -Wnested-externs
 
 .PHONY: all rust_code clean mostlyclean rust_clean new_dir
 
