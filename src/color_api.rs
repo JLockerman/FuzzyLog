@@ -3,10 +3,11 @@ use prelude::*;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, LinkedList};
-use std::{ptr, slice};
 use std::rc::Rc;
 
 use rand::{Rng, thread_rng};
+
+use linked_hash_map::LinkedHashMap;
 
 //TODO there is exactly one chain per colour.
 pub type color = u32;
@@ -22,14 +23,16 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //     to be ergonomic
     //TODO If we wish for a read(color) method we'll need to break this up by
     //     color
-    read_buffer: Rc<RefCell<LinkedList<(Uuid, Vec<color>, Box<V>)>>>,
+    //read_buffer: Rc<RefCell<LinkedList<(Uuid, Vec<color>, Box<V>)>>>,
+    //FIXME using a hashmap for de-duplication until that bug is fixed
+    read_buffer: Rc<RefCell<LinkedHashMap<Uuid, (Vec<color>, Box<V>)>>>,
     interesting_colors: HashSet<color>
 }
 
 impl<V: ?Sized, S, H> DAGHandle<V, S, H>
 where V: Storeable, S: Store<V>, H: Horizon {
-    pub fn new<'c, I: IntoIterator<Item=&'c color>>(store: S, horizon: H, interesting_colors:  I) -> Self {
-        let read_buffer: Rc<RefCell<LinkedList<(Uuid, Vec<color>, Box<V>)>>> = Default::default();
+    pub fn new<'c, I: IntoIterator<Item=&'c color>>(store: S, horizon: H, interesting_colors: I) -> Self {
+        let read_buffer: Rc<RefCell<LinkedHashMap<Uuid, (Vec<color>, Box<V>)>>> = Default::default();
         let interesting_colors: HashSet<_> = interesting_colors.into_iter().cloned().collect();
         let mut upcalls: HashMap<order, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r V) -> bool + 'static>> = HashMap::new();
 
@@ -37,22 +40,29 @@ where V: Storeable, S: Store<V>, H: Horizon {
             upcalls.entry(chain.into()).or_insert_with(|| { let b = read_buffer.clone();
                 Box::new(move |i, &(c, e), v| {
                     unsafe {
-                        //TODO multiappends return multiple times (once per chain +1)
-                        //     currently I'm deduplicating here, but really I should
-                        //     fix this a layer down...
+                        //FIXME multiappends return multiple times (once per chain +1)
+                        //      currently I'm deduplicating here, but really I should
+                        //      fix this a layer down...
                         let mut l = b.borrow_mut();
-                        if let Some(&mut (ref id, ref mut cs, _)) = l.back_mut() {
+                        if i != &Uuid::nil() {
+                            println!("{:?}", l.contains_key(i));
                             //FIXME figure out why some chains get repeated
-                            if id == i && i != &Uuid::nil() {
+                            if let Some(&mut (ref mut cs, _)) = l.get_refresh(i) {
                                 if !cs.contains(&c.into()) {
                                     cs.push(c.into())
                                 }
+                                println!("coalsece {:?} into {:?}\tid {:?}", (c, e), cs, i);
                                 return true
                             }
                         }
-                        println!("new val  @ {:?}", (c, e));
+                        println!("new val at {:?} id {:?}", (c, e), i);
+                        //FIXME we need to ensure non-multiputs have unique ids
+                        //      so we generate them I guess...
+                        let id = if i == &Uuid::nil() {
+                            Uuid::new_v4()
+                        } else { *i };
 
-                        l.push_back((i.clone(), [c.into()].to_vec(), v.clone_box()));
+                        let ol = l.insert(id, ([c.into()].to_vec(), v.clone_box()));
                     }
                     true
                 }) });
@@ -69,6 +79,8 @@ where V: Storeable, S: Store<V>, H: Horizon {
         assert!(inhabits.len() > 0);
         let mut inhabits = inhabits.to_vec();
         let mut depends_on = depends_on.to_vec();
+        println!("inhabits   {:?}", inhabits);
+        println!("depends_on {:?}", depends_on);
         inhabits.sort();
         depends_on.sort();
         let no_snapshot = inhabits == depends_on || depends_on.len() == 0;
@@ -83,9 +95,11 @@ where V: Storeable, S: Store<V>, H: Horizon {
         };
 
         if inhabits.len() == 1 {
+            println!("A");
             self.log.append(inhabits[0].into(), data, &*happens_after);
         }
         else {
+            println!("M");
             let inhabited_chains: Vec<_> = inhabits.into_iter().map(|c| c.into()).collect();
             self.log.multiappend(&*inhabited_chains, data, &*happens_after);
         }
@@ -111,7 +125,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
             let to_read = self.get_next_read_chain();
             self.log.play_foward(to_read);
         }
-        let (_, color, data) = self.read_buffer.borrow_mut().pop_front().expect("read buffer must be full by now");
+        let (_, (color, data)) = self.read_buffer.borrow_mut().pop_front().expect("read buffer must be full by now");
         unsafe {
             //TODO we have no way to finish a read if incomplete...
             //TODO this assumes the size info is statically known or stored in the pointer
@@ -219,7 +233,7 @@ mod tests {
         while !(sum1 == 49 && sum2 == 49) {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(data_read, 4);
-            assert_eq!(read, vec![102, 103]);
+            assert_eq!(read, vec![102, 103], "at {:?}", out);
             assert_eq!(sum1, out);
             assert_eq!(sum2, out);
             sum1 += 1;
