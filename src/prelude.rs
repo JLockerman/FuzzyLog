@@ -813,7 +813,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
             Multiput{data, uuid, columns, deps} => {
                 //TODO
                 trace!("Multiput {:?}", deps);
-                self.read_multiput(column, index, data, uuid, columns);
+                self.read_multiput(data, uuid, columns);
             }
             Data(data, deps) => {
                 trace!("Data {:?}", deps);
@@ -824,17 +824,18 @@ where V: Storeable, S: Store<V>, H: Horizon{
         Some((column, index))
     }
 
-    fn read_multiput(&mut self, first_seen_column: order, fsi: entry, data: &V, put_id: &Uuid,
-        columns: &[OrderIndex]) {
+    fn read_multiput(&mut self, data: &V, put_id: &Uuid, columns: &[OrderIndex]) {
 
-        for &(column, index) in columns { //TODO only relevent cols
+        for &(column, _) in columns { //TODO only relevent cols
             trace!("play multiput for col {:?}", column);
             self.play_until_multiput(column, put_id);
-            self.upcalls.get(&column).map(|f| f(put_id, &(column, index), data));
         }
 
+        //TODO multiple multiput returns here
         //XXX TODO note multiserver validation happens at the store layer?
-        self.upcalls.get(&first_seen_column).map(|f| f(put_id, &(first_seen_column, fsi), data));
+        for &(column, index) in columns {
+            self.upcalls.get(&column).map(|f| f(put_id, &(column, index), data));
+        }
     }
 
     fn play_until_multiput(&mut self, column: order, put_id: &Uuid) {
@@ -859,7 +860,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 Multiput{data, uuid, columns, ..} => {
                     //TODO
                     trace!("Multiput");
-                    self.read_multiput(column, index, data, uuid, columns);
+                    self.read_multiput(data, uuid, columns);
                     self.local_horizon.insert(column, index);
                 }
                 Data(data, _) => {

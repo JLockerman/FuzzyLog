@@ -125,15 +125,10 @@ pub mod c_binidings {
         let data_out = unsafe { slice::from_raw_parts_mut(data_out, 8000)};
         let data_read = unsafe {data_read.as_mut().expect("must provide valid data_out")};
         let inhabited_colors = dag.get_next(data_out, data_read);
-        println!("done reading");
         unsafe {
             let numcolors = inhabited_colors.len();
-            println!("alloc mycolors");
             let mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
-            println!("copy mycolors");
             ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
-            println!("write numcolors");
-            println!("write mycolors");
             ptr::write(inhabits_out, colors{ numcolors: numcolors, mycolors: mycolors});
         };
         0

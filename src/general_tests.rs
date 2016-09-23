@@ -454,6 +454,31 @@ macro_rules! general_tests {
                 assert_eq!(*map.borrow(), cannonical_map);
             }
 
+            #[test]
+            fn test_order() {
+                let store = $new_store(
+                    (0..5).map(|i| (20.into(), i.into()))
+                        .chain((0..21).map(|i| (21.into(), i.into())))
+                        .chain((0..22).map(|i| (22.into(), i.into())))
+                        .collect());
+                let horizon = HashMap::new();
+                let list: Rc<RefCell<Vec<i32>>> = Default::default();
+                let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
+                for i in 20..23 {
+                    let l = list.clone();
+                    upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
+                        true
+                    }));
+                }
+                let mut log = FuzzyLog::new(store, horizon, upcalls);
+                log.append(22.into(), &4, &[]);
+                log.append(20.into(), &2, &[]);
+                log.append(21.into(), &3, &[]);
+                log.multiappend(&[20.into(),21.into(),22.into()], &-1, &[]);
+                log.play_foward(20.into());
+                assert_eq!(&**list.borrow(), &[2,3,4,-1,-1,-1][..]);
+            }
+
         }//End mod test
 
     };
