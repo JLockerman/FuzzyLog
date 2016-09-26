@@ -127,11 +127,20 @@ pub mod c_binidings {
         let inhabited_colors = dag.get_next(data_out, data_read);
         unsafe {
             let numcolors = inhabited_colors.len();
-            let mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
-            ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
+            let mut mycolors = ptr::null_mut();
+            if numcolors != 0 {
+                mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
+                ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
+            }
             ptr::write(inhabits_out, colors{ numcolors: numcolors, mycolors: mycolors});
         };
         0
+    }
+
+    #[no_mangle]
+    pub extern "C" fn snapshot(dag: *mut DAG) -> i8 {
+        let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
+        if dag.take_snapshot() { 1 } else { 0 }
     }
 
     #[no_mangle]

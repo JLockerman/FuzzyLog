@@ -144,13 +144,32 @@ where V: Storeable, S: Store<V>, H: Horizon {
         color
     }
 
-    pub fn take_snapshot(&mut self) {
-        while let None = self.snapshot {
+    pub fn take_snapshot(&mut self) -> bool {
+        let get_next_read_chain = |colors: &HashSet<_>| {
+            let next_chain = thread_rng().gen_range(0, colors.len());
+            colors.iter()
+                .cloned()
+                .skip(next_chain)
+                .next()
+                .expect("no chains to read")
+        };
+        if let None = self.snapshot {
             //TODO once asynchrony is setup it probably pays to snapshot
             //     all interesting chains in parallel
-            let next_to_snapshot = self.get_next_read_chain();
-            self.take_snapshot_of(next_to_snapshot)
+            //let next_to_snapshot = self.get_next_read_chain();
+            let next_to_snapshot = get_next_read_chain(&self.interesting_colors);
+            self.take_snapshot_of(next_to_snapshot);
+            if self.snapshot.is_some() { return true }
+        } else {
+            return true
         }
+        let mut unchecked = self.interesting_colors.clone();
+        while !unchecked.is_empty() && self.snapshot.is_none() {
+            let next_to_snapshot = get_next_read_chain(&unchecked);
+            self.take_snapshot_of(next_to_snapshot);
+            unchecked.remove(&next_to_snapshot);
+        }
+        return self.snapshot.is_some()
     }
 
     pub fn take_snapshot_of(&mut self, color: color) {
@@ -311,5 +330,24 @@ mod tests {
             assert_eq!(read, vec![]);
             assert_eq!(data_read, 0);
         }
+    }
+
+    #[test]
+    fn empty_snapshot() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let horizon = HashMap::new();
+        let mut dag = DAGHandle::new(store, horizon, &[104, 105]);
+        assert_eq!(dag.take_snapshot(), false);
+        dag.append(&247, &[105], &[]);
+        assert_eq!(dag.take_snapshot(), true);
+        assert_eq!(dag.take_snapshot(), true);
+        let mut out = -1;
+        let mut data_read = 0;
+        let read = dag.get_next(&mut out, &mut data_read);
+        assert_eq!(&*read, &[105]);
+        assert_eq!(data_read, 4);
+        assert_eq!(out, 247);
+        assert_eq!(dag.take_snapshot(), false);
     }
 }
