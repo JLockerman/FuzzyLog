@@ -179,16 +179,6 @@ where V: Storeable, S: Store<V>, H: Horizon {
             //TODO should start prefetching here
         }
     }
-
-    fn get_next_read_chain(&self) -> color {
-        let next_chain = thread_rng().gen_range(0, self.interesting_colors.len());
-        self.interesting_colors
-            .iter()
-            .cloned()
-            .skip(next_chain)
-            .next()
-            .expect("no chains to read")
-    }
 }
 
 #[cfg(test)]
