@@ -1,4 +1,9 @@
 #![allow(unused_imports)]
+#![allow(non_camel_case_types)]
+#![allow(unused_variables)]
+#![allow(unused_must_use)]
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;

@@ -11,14 +11,11 @@ extern crate nix;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::env;
-use std::hash::BuildHasherDefault;
 use std::io::{self, Read, Write};
 use std::mem;
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
-
-use fnv::FnvHasher;
 
 use fuzzy_log::prelude::*;
 
