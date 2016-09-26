@@ -925,6 +925,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
         let end = ::std::u32::MAX.into();
         let err = self.store.get((chain, end)).err().unwrap_or(GetErr::NoValue(end));
         let GetErr::NoValue(last_valid_entry) = err;
+        //Zero is not a valid entry so if the store returns that the chain is empty
         if self.local_horizon.get(&chain)
             .map(|&e| e < last_valid_entry && last_valid_entry != 0.into())
             .unwrap_or(last_valid_entry != 0.into()) {

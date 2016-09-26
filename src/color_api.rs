@@ -124,9 +124,13 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //TODO need some way to do timeout if no update...
     pub fn get_next(&mut self, data_out: &mut V, data_read: &mut usize) -> Vec<color> {
         if let Some(to_read_until) = self.snapshot {
+            trace!("reading until {:?}", to_read_until);
             self.log.play_until(to_read_until);
+            //TODO only if finished
+            self.snapshot = None;
         }
-        else {
+        else if self.read_buffer.borrow().is_empty() {
+            trace!("no current snapshot");
             *data_read = 0;
             return Vec::new();
         }
@@ -170,6 +174,8 @@ where V: Storeable, S: Store<V>, H: Horizon {
 
 #[cfg(test)]
 mod tests {
+    extern crate env_logger;
+
     use super::*;
 
     use std::collections::HashMap;
@@ -180,10 +186,10 @@ mod tests {
 
     #[test]
     fn single_color() {
-        //FIXME
+        let _ = env_logger::init();
         let store = new_store(vec![]);
         let horizon = HashMap::new();
-        let mut  dag = DAGHandle::new(store, horizon, &[100]);
+        let mut dag = DAGHandle::new(store, horizon, &[100]);
         {
             dag.append(&32i32, &[100], &[]);
             dag.append(&47i32, &[100], &[]);
@@ -191,6 +197,12 @@ mod tests {
         }
         let mut out = -1;
         let mut data_read = 0;
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+        dag.take_snapshot();
         {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(read, vec!(100));
@@ -207,11 +219,16 @@ mod tests {
             assert_eq!(read, vec!(100));
             assert_eq!(data_read, 4);
         }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
     }
 
     #[test]
-    fn single_color_more() {
-        //FIXME
+    fn more_single_color() {
+        let _ = env_logger::init();
         let store = new_store(vec![]);
         let horizon = HashMap::new();
         let mut  dag = DAGHandle::new(store, horizon, &[101]);
@@ -221,6 +238,13 @@ mod tests {
         let mut out = -1;
         let mut data_read = 0;
         let mut sum = 1;
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+
+        dag.take_snapshot();
         while out != 49 {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(read, vec!(101));
@@ -231,6 +255,13 @@ mod tests {
         for i in 50..100 {
             dag.append(&i, &[101], &[]);
         }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+
+        dag.take_snapshot();
         while out != 99 {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(read, vec!(101));
@@ -238,11 +269,16 @@ mod tests {
             assert_eq!(sum, out);
             sum += 1;
         }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
     }
 
     #[test]
-    fn multi_color_more() {
-        //FIXME
+    fn more_multi_color() {
+        let _ = env_logger::init();
         let store = new_store(vec![]);
         let horizon = HashMap::new();
         let mut  dag = DAGHandle::new(store, horizon, &[102, 103]);
@@ -254,7 +290,14 @@ mod tests {
         let mut data_read = 0;
         let mut sum1 = 1;
         let mut sum2 = 1;
-        while !(sum1 == 49 && sum2 == 49) {
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+
+        dag.take_snapshot();
+        while !(sum1 == 50 && sum2 == 50) {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(data_read, 4);
             assert_eq!(read, vec![102, 103], "at {:?}", out);
@@ -262,6 +305,11 @@ mod tests {
             assert_eq!(sum2, out);
             sum1 += 1;
             sum2 += 1;
+        }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
         }
     }
 }

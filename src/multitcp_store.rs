@@ -784,7 +784,6 @@ pub mod test {
                                         val.as_data_entry_mut().flex.loc = old_loc;
                                     }
                                 }
-                                trace!("{:?}", val);
                                 trace!("empty read {:?}", loc)
                             }
                         }
