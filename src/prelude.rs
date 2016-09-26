@@ -19,6 +19,9 @@ pub trait Store<V: ?Sized> {
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>>;
 
     fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult; //TODO -> MultiAppebdResult
+
+    //fn snapshot(&mut self, chains: &mut [OrderIndex]);
+    //fn get_horizon(&mut self, chains: &mut [OrderIndex]);
 }
 
 pub trait IsEntry<V> {
@@ -320,7 +323,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                             .data_contents(data_bytes, dependency_bytes),
                 EntryKind::Multiput => mem::transmute::<_, &Entry<V, MultiFlex>>(self)
                     .multi_contents(data_bytes, dependency_bytes, uuid),
-                _ => unreachable!(),
+                _ => unreachable!()
             }
         }
     }
@@ -377,7 +380,21 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         panic!()
     }*/
 
-    fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
+    unsafe fn read_deps(&self) -> &[OrderIndex] {
+        assert_eq!(self.kind, EntryKind::NoValue);
+        let s = mem::transmute::<_, &Entry<(), DataFlex>>(self);
+        let contents_ptr: *const u8 = &s.flex.data as *const _ as *const u8;
+        let dep_ptr:*const OrderIndex = contents_ptr as *const _;
+
+        let num_deps = (self.dependency_bytes as usize)
+            .checked_div(size_of::<OrderIndex>()).unwrap();
+        slice::from_raw_parts(dep_ptr, num_deps)
+    }
+
+    pub fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
+        if self.kind == EntryKind::NoValue {
+            return unsafe { self.read_deps() };
+        }
         match self.contents() {
             Data(_, ref deps) => &deps,
             Multiput{ref deps, ..} => deps,
@@ -494,12 +511,8 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
 
     pub fn entry_size(&self) -> usize {
         let size = match self.kind & EntryKind::Layout {
-            EntryKind::Data => self.data_entry_size(),
+            EntryKind::Data | EntryKind::Read => self.data_entry_size(),
             EntryKind::Multiput => self.multi_entry_size(),
-            EntryKind::Read => {
-                //trace!("read size {}", mem::size_of::<Entry<(), ()>>());
-                mem::size_of::<Entry<(), DataFlex<()>>>()
-            }
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
         };
         assert!(size >= base_header_size());
@@ -507,7 +520,8 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
     }
 
     fn data_entry_size(&self) -> usize {
-        assert!(self.kind & EntryKind::Layout == EntryKind::Data);
+        assert!(self.kind & EntryKind::Layout == EntryKind::Data
+            || self.kind & EntryKind::Layout == EntryKind::Read);
         let size = mem::size_of::<Entry<(), DataFlex<()>>>()
             + self.data_bytes as usize
             + self.dependency_bytes as usize;
@@ -694,7 +708,7 @@ pub enum InsertErr {
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum GetErr {
-    NoValue
+    NoValue(entry)
 }
 
 custom_derive! {
@@ -736,7 +750,9 @@ pub type ApplyResult = Result<(), ()>;
 pub struct FuzzyLog<V: ?Sized, S, H>
 where V: Storeable, S: Store<V>, H: Horizon {
     pub store: S,
+    //The horizon contains the nodes which must be read until
     pub horizon: H,
+    //The local_horizon contains the nodes which have already been read
     local_horizon: HashMap<order, entry>,
     upcalls: HashMap<order, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r V) -> bool>>,
 }
@@ -808,13 +824,13 @@ where V: Storeable, S: Store<V>, H: Horizon{
         let index = self.local_horizon.get(&column).cloned().unwrap_or(0.into()) + 1;
         trace!("next unseen: {:?}", (column, index));
         let ent = self.store.get((column, index)).clone();
-        let ent = match ent { Err(GetErr::NoValue) => return None, Ok(e) => e };
+        let ent = match ent { Err(GetErr::NoValue(..)) => return None, Ok(e) => e };
         self.play_deps(ent.dependencies());
         match ent.contents() {
             Multiput{data, uuid, columns, deps} => {
                 //TODO
                 trace!("Multiput {:?}", deps);
-                self.read_multiput(column, index, data, uuid, columns);
+                self.read_multiput(data, uuid, columns);
             }
             Data(data, deps) => {
                 trace!("Data {:?}", deps);
@@ -825,17 +841,18 @@ where V: Storeable, S: Store<V>, H: Horizon{
         Some((column, index))
     }
 
-    fn read_multiput(&mut self, first_seen_column: order, fsi: entry, data: &V, put_id: &Uuid,
-        columns: &[OrderIndex]) {
+    fn read_multiput(&mut self, data: &V, put_id: &Uuid, columns: &[OrderIndex]) {
 
-        for &(column, index) in columns { //TODO only relevent cols
+        for &(column, _) in columns { //TODO only relevent cols
             trace!("play multiput for col {:?}", column);
             self.play_until_multiput(column, put_id);
-            self.upcalls.get(&column).map(|f| f(put_id, &(column, index), data));
         }
 
+        //TODO multiple multiput returns here
         //XXX TODO note multiserver validation happens at the store layer?
-        self.upcalls.get(&first_seen_column).map(|f| f(put_id, &(first_seen_column, fsi), data));
+        for &(column, index) in columns {
+            self.upcalls.get(&column).map(|f| f(put_id, &(column, index), data));
+        }
     }
 
     fn play_until_multiput(&mut self, column: order, put_id: &Uuid) {
@@ -847,7 +864,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
             trace!("seatching for multiput {:?}\n\tat: {:?}", put_id, (column, index));
             let ent = self.store.get((column, index)).clone();
             let ent = match ent {
-                Err(GetErr::NoValue) => panic!("invalid multiput."),
+                Err(GetErr::NoValue(..)) => panic!("invalid multiput."),
                 Ok(e) => e
             };
             self.play_deps(ent.dependencies());
@@ -860,7 +877,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 Multiput{data, uuid, columns, ..} => {
                     //TODO
                     trace!("Multiput");
-                    self.read_multiput(column, index, data, uuid, columns);
+                    self.read_multiput(data, uuid, columns);
                     self.local_horizon.insert(column, index);
                 }
                 Data(data, _) => {
@@ -901,6 +918,23 @@ where V: Storeable, S: Store<V>, H: Horizon{
 
     pub fn local_horizon(&self) -> &HashMap<order, entry> {
         &self.local_horizon
+    }
+
+    pub fn snapshot(&mut self, chain: order) -> Option<entry> {
+        //TODO clean this a bit
+        //TODO buffer the value if it actually exists?
+        let end = ::std::u32::MAX.into();
+        let err = self.store.get((chain, end)).err().unwrap_or(GetErr::NoValue(end));
+        let GetErr::NoValue(last_valid_entry) = err;
+        //Zero is not a valid entry so if the store returns that the chain is empty
+        if self.local_horizon.get(&chain)
+            .map(|&e| e < last_valid_entry && last_valid_entry != 0.into())
+            .unwrap_or(last_valid_entry != 0.into()) {
+            Some(last_valid_entry)
+        }
+        else {
+            None
+        }
     }
 }
 

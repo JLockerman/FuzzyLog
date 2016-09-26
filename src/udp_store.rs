@@ -195,8 +195,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                     }
                     EntryKind::NoValue => {
                         if unsafe { this.receive_buffer.as_data_entry_mut().flex.loc } == key {
+                            let last_valid_loc = this.receive_buffer.dependencies()[0].1;
                             trace!("correct response");
-                            return Err(GetErr::NoValue);
+                            return Err(GetErr::NoValue(last_valid_loc));
                         }
                         trace!("wrong loc {:?}, expected {:?}", this.receive_buffer, key);
                         continue 'send;
@@ -414,6 +415,20 @@ mod test {
                                             horizon.insert(loc.0, loc.1);
                                             // packet.header.kind = Kind::Written;
                                             receive.send_to(packet.bytes(), &sa)
+                                                   .expect("unable to ack");
+                                        }
+                                        EntryKind::Read => {
+                                            let last_entry = horizon.get(&loc.0).cloned().unwrap_or(0.into());
+                                            let (old_id, old_loc) = unsafe {
+                                                (buff.id, buff.as_data_entry().flex.loc)
+                                            };
+                                            *buff = EntryContents::Data(&(), &[(loc.0, last_entry)]).clone_entry();
+                                            buff.id = old_id;
+                                            buff.kind = EntryKind::NoValue;
+                                            unsafe {
+                                                buff.as_data_entry_mut().flex.loc = old_loc;
+                                            }
+                                            receive.send_to(buff.bytes(), &sa)
                                                    .expect("unable to ack");
                                         }
                                         _ => {

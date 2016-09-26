@@ -27,7 +27,16 @@ uint32_t append(DAGHandle *handle, char *data, size_t data_size,
 //NOTE we need either a way to specify data size, or to pass out a pointer
 // this version simple assumes that no data+metadat passed in or out will be
 // greater than DELOS_MAX_DATA_SIZE
+// sets data_read to 0 and colors->numcolors to 0 when out of data for the
+// current snapshot
 uint32_t get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
+
+// If there is no unread updates attempts to take a snapshot of an arbitrary
+// color returning 0 if after checking all interesting colors it cannot find
+// one which has unread data
+// TODO is it better to just force the client to check get next after each
+// snapshot for now?
+int8_t snapshot(DAGHandle *handle);
 
 //NOTE also frees the *handle
 void close_dag_handle(DAGHandle *handle);

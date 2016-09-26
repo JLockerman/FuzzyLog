@@ -9,7 +9,7 @@ macro_rules! general_tests {
 
         #[cfg(test)]
         mod general_tests {
-            //last column used is 18
+            //last column used is 22
 
             extern crate env_logger;
 
@@ -29,7 +29,19 @@ macro_rules! general_tests {
                 let _ = env_logger::init();
                 let mut store = $new_store(Vec::new());
                 let r = <Store<MapEntry<i32, i32>>>::get(&mut store, (14.into(), 0.into()));
-                assert_eq!(r, Err(GetErr::NoValue))
+                assert_eq!(r, Err(GetErr::NoValue(0.into())))
+            }
+
+            #[test]
+            fn test_get_none2() {
+                let _ = env_logger::init();
+                let mut store = $new_store(vec![(19.into(), 1.into()), (19.into(), 2.into()), (19.into(), 3.into()), (19.into(), 4.into()), (19.into(), 5.into())]);
+                for i in 0..5 {
+                    let r = store.insert((19.into(), 0.into()), EntryContents::Data(&63, &[]));
+                    assert_eq!(r, Ok((19.into(), (i + 1).into())))
+                }
+                let r = store.get((19.into(), ::std::u32::MAX.into()));
+                assert_eq!(r, Err(GetErr::NoValue(5.into())))
             }
 
             #[test]
@@ -452,6 +464,32 @@ macro_rules! general_tests {
                     map
                 };
                 assert_eq!(*map.borrow(), cannonical_map);
+            }
+
+            #[test]
+            fn test_order() {
+                let _ = env_logger::init();
+                let store = $new_store(
+                    (0..5).map(|i| (20.into(), i.into()))
+                        .chain((0..21).map(|i| (21.into(), i.into())))
+                        .chain((0..22).map(|i| (22.into(), i.into())))
+                        .collect());
+                let horizon = HashMap::new();
+                let list: Rc<RefCell<Vec<i32>>> = Default::default();
+                let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
+                for i in 20..23 {
+                    let l = list.clone();
+                    upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
+                        true
+                    }));
+                }
+                let mut log = FuzzyLog::new(store, horizon, upcalls);
+                log.append(22.into(), &4, &[]);
+                log.append(20.into(), &2, &[]);
+                log.append(21.into(), &3, &[]);
+                log.multiappend(&[20.into(),21.into(),22.into()], &-1, &[]);
+                log.play_foward(20.into());
+                assert_eq!(&**list.borrow(), &[2,3,4,-1,-1,-1][..]);
             }
 
         }//End mod test

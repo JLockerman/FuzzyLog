@@ -394,9 +394,11 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                     continue 'send;
                 }
                 EntryKind::NoValue => {
-                    if unsafe { self.receive_buffer.as_data_entry_mut().flex.loc } == key {
-                        trace!("correct response");
-                        return Err(GetErr::NoValue);
+                    if unsafe { self.receive_buffer.as_data_entry().flex.loc } == key {
+                        let last_valid_loc = self.receive_buffer.dependencies()[0].1;
+                        trace!("{:?}", self.receive_buffer);
+                        trace!("correct response {:?}", self.receive_buffer.dependencies());
+                        return Err(GetErr::NoValue(last_valid_loc));
                     }
                     trace!("wrong loc {:?}, expected {:?}", self.receive_buffer, key);
                     continue 'send;
@@ -767,7 +769,24 @@ pub mod test {
                                 e.insert(packet);
                                 self.horizon.insert(loc.0, loc.1);
                             }
-                            _ => trace!("empty read {:?}", loc),
+                            _ => {
+                                trace!("kind {:?}", val.kind);
+                                if val.kind & EntryKind::Layout == EntryKind::Read {
+                                    trace!("was read");
+                                    let last_entry = self.horizon.get(&loc.0).cloned().unwrap_or(0.into());
+                                    let (old_id, old_loc) = unsafe {
+                                        (val.id, val.as_data_entry().flex.loc)
+                                    };
+                                    *val = EntryContents::Data(&(), &[(loc.0, last_entry)]).clone_entry();
+                                    //val.id = old_id;
+                                    val.id = Uuid::new_v4();
+                                    val.kind = EntryKind::NoValue;
+                                    unsafe {
+                                        val.as_data_entry_mut().flex.loc = old_loc;
+                                    }
+                                }
+                                trace!("empty read {:?}", loc)
+                            }
                         }
                     }
                     Occupied(mut e) => {

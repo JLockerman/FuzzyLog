@@ -310,7 +310,21 @@ impl ServerLog {
                             e.insert(packet);
                             self.horizon.insert(loc.0, loc.1);
                         }
-                        _ => trace!("empty read {:?}", loc),
+                        _ => {
+                            if val.kind == EntryKind::Read {
+                                let last_entry = self.horizon.get(&loc.0).cloned().unwrap_or(0.into());
+                                let (old_id, old_loc) = unsafe {
+                                    (val.id, val.as_data_entry().flex.loc)
+                                };
+                                *val = EntryContents::Data(&(), &[(loc.0, last_entry)]).clone_entry();
+                                val.id = old_id;
+                                val.kind = EntryKind::NoValue;
+                                unsafe {
+                                    val.as_data_entry_mut().flex.loc = old_loc;
+                                }
+                            }
+                            trace!("empty read {:?}", loc)
+                        }
                     }
                 }
                 Occupied(mut e) => {

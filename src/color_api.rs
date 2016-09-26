@@ -24,9 +24,10 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //TODO If we wish for a read(color) method we'll need to break this up by
     //     color
     //read_buffer: Rc<RefCell<LinkedList<(Uuid, Vec<color>, Box<V>)>>>,
-    //FIXME using a hashmap for de-duplication until that bug is fixed
+    //TODO switch back to linked list
     read_buffer: Rc<RefCell<LinkedHashMap<Uuid, (Vec<color>, Box<V>)>>>,
-    interesting_colors: HashSet<color>
+    interesting_colors: HashSet<color>,
+    snapshot: Option<OrderIndex>,
 }
 
 impl<V: ?Sized, S, H> DAGHandle<V, S, H>
@@ -50,9 +51,11 @@ where V: Storeable, S: Store<V>, H: Horizon {
                                 if !cs.contains(&c.into()) {
                                     cs.push(c.into())
                                 }
+                                trace!("coalesce {:?} into {:?}\tid {:?}", (c, e), cs, i);
                                 return true
                             }
                         }
+                        trace!("new val at {:?} id {:?}", (c, e), i);
                         //FIXME we need to ensure non-multiputs have unique ids
                         //      so we generate them I guess...
                         let id = if i == &Uuid::nil() {
@@ -68,6 +71,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
             log: FuzzyLog::new(store, horizon, upcalls),
             read_buffer: read_buffer,
             interesting_colors: interesting_colors,
+            snapshot: None,
         }
     }
 
@@ -76,6 +80,9 @@ where V: Storeable, S: Store<V>, H: Horizon {
         assert!(inhabits.len() > 0);
         let mut inhabits = inhabits.to_vec();
         let mut depends_on = depends_on.to_vec();
+        trace!("color append");
+        trace!("inhabits   {:?}", inhabits);
+        trace!("depends_on {:?}", depends_on);
         inhabits.sort();
         depends_on.sort();
         let no_snapshot = inhabits == depends_on || depends_on.len() == 0;
@@ -86,19 +93,21 @@ where V: Storeable, S: Store<V>, H: Horizon {
         } else {
             //TODO we should do this in a better way
             depends_on.retain(|c| !inhabits.contains(c));
-            self.snapshot(depends_on)
+            self.dependency_snapshot(depends_on)
         };
 
         if inhabits.len() == 1 {
+            trace!("single append");
             self.log.append(inhabits[0].into(), data, &*happens_after);
         }
         else {
+            trace!("multi  append");
             let inhabited_chains: Vec<_> = inhabits.into_iter().map(|c| c.into()).collect();
             self.log.multiappend(&*inhabited_chains, data, &*happens_after);
         }
     }
 
-    fn snapshot(&mut self, depends_on: Vec<color>) -> Vec<OrderIndex> {
+    fn dependency_snapshot(&mut self, depends_on: Vec<color>) -> Vec<OrderIndex> {
         //FIXME we really need read locks to do this correctly
         //      until I implement those, I'm just going to take
         //      a non-linearizeable snapshot and use that
@@ -114,9 +123,16 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //TODO kinda ugly, clean?
     //TODO need some way to do timeout if no update...
     pub fn get_next(&mut self, data_out: &mut V, data_read: &mut usize) -> Vec<color> {
-        while self.read_buffer.borrow().is_empty() {
-            let to_read = self.get_next_read_chain();
-            self.log.play_foward(to_read);
+        if let Some(to_read_until) = self.snapshot {
+            trace!("reading until {:?}", to_read_until);
+            self.log.play_until(to_read_until);
+            //TODO only if finished
+            self.snapshot = None;
+        }
+        else if self.read_buffer.borrow().is_empty() {
+            trace!("no current snapshot");
+            *data_read = 0;
+            return Vec::new();
         }
         let (_, (color, data)) = self.read_buffer.borrow_mut().pop_front().expect("read buffer must be full by now");
         unsafe {
@@ -128,7 +144,43 @@ where V: Storeable, S: Store<V>, H: Horizon {
         color
     }
 
-    fn get_next_read_chain(&self) -> order {
+    pub fn take_snapshot(&mut self) -> bool {
+        let get_next_read_chain = |colors: &HashSet<_>| {
+            let next_chain = thread_rng().gen_range(0, colors.len());
+            colors.iter()
+                .cloned()
+                .skip(next_chain)
+                .next()
+                .expect("no chains to read")
+        };
+        if let None = self.snapshot {
+            //TODO once asynchrony is setup it probably pays to snapshot
+            //     all interesting chains in parallel
+            //let next_to_snapshot = self.get_next_read_chain();
+            let next_to_snapshot = get_next_read_chain(&self.interesting_colors);
+            self.take_snapshot_of(next_to_snapshot);
+            if self.snapshot.is_some() { return true }
+        } else {
+            return true
+        }
+        let mut unchecked = self.interesting_colors.clone();
+        while !unchecked.is_empty() && self.snapshot.is_none() {
+            let next_to_snapshot = get_next_read_chain(&unchecked);
+            self.take_snapshot_of(next_to_snapshot);
+            unchecked.remove(&next_to_snapshot);
+        }
+        return self.snapshot.is_some()
+    }
+
+    pub fn take_snapshot_of(&mut self, color: color) {
+        let last_unread_entry = self.log.snapshot(color.into());
+        if let Some(e) = last_unread_entry {
+            self.snapshot = Some((color.into(), e));
+            //TODO should start prefetching here
+        }
+    }
+
+    fn get_next_read_chain(&self) -> color {
         let next_chain = thread_rng().gen_range(0, self.interesting_colors.len());
         self.interesting_colors
             .iter()
@@ -136,12 +188,13 @@ where V: Storeable, S: Store<V>, H: Horizon {
             .skip(next_chain)
             .next()
             .expect("no chains to read")
-            .into()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate env_logger;
+
     use super::*;
 
     use std::collections::HashMap;
@@ -152,9 +205,10 @@ mod tests {
 
     #[test]
     fn single_color() {
+        let _ = env_logger::init();
         let store = new_store(vec![]);
         let horizon = HashMap::new();
-        let mut  dag = DAGHandle::new(store, horizon, &[100]);
+        let mut dag = DAGHandle::new(store, horizon, &[100]);
         {
             dag.append(&32i32, &[100], &[]);
             dag.append(&47i32, &[100], &[]);
@@ -162,6 +216,12 @@ mod tests {
         }
         let mut out = -1;
         let mut data_read = 0;
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+        dag.take_snapshot();
         {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(read, vec!(100));
@@ -178,10 +238,16 @@ mod tests {
             assert_eq!(read, vec!(100));
             assert_eq!(data_read, 4);
         }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
     }
 
     #[test]
-    fn single_color_more() {
+    fn more_single_color() {
+        let _ = env_logger::init();
         let store = new_store(vec![]);
         let horizon = HashMap::new();
         let mut  dag = DAGHandle::new(store, horizon, &[101]);
@@ -191,6 +257,13 @@ mod tests {
         let mut out = -1;
         let mut data_read = 0;
         let mut sum = 1;
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+
+        dag.take_snapshot();
         while out != 49 {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(read, vec!(101));
@@ -201,6 +274,13 @@ mod tests {
         for i in 50..100 {
             dag.append(&i, &[101], &[]);
         }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+
+        dag.take_snapshot();
         while out != 99 {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(read, vec!(101));
@@ -208,10 +288,16 @@ mod tests {
             assert_eq!(sum, out);
             sum += 1;
         }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
     }
 
     #[test]
-    fn multi_color_more() {
+    fn more_multi_color() {
+        let _ = env_logger::init();
         let store = new_store(vec![]);
         let horizon = HashMap::new();
         let mut  dag = DAGHandle::new(store, horizon, &[102, 103]);
@@ -223,7 +309,14 @@ mod tests {
         let mut data_read = 0;
         let mut sum1 = 1;
         let mut sum2 = 1;
-        while !(sum1 == 49 && sum2 == 49) {
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+
+        dag.take_snapshot();
+        while !(sum1 == 50 && sum2 == 50) {
             let read = dag.get_next(&mut out, &mut data_read);
             assert_eq!(data_read, 4);
             assert_eq!(read, vec![102, 103], "at {:?}", out);
@@ -232,5 +325,29 @@ mod tests {
             sum1 += 1;
             sum2 += 1;
         }
+        {
+            let read = dag.get_next(&mut out, &mut data_read);
+            assert_eq!(read, vec![]);
+            assert_eq!(data_read, 0);
+        }
+    }
+
+    #[test]
+    fn empty_snapshot() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let horizon = HashMap::new();
+        let mut dag = DAGHandle::new(store, horizon, &[104, 105]);
+        assert_eq!(dag.take_snapshot(), false);
+        dag.append(&247, &[105], &[]);
+        assert_eq!(dag.take_snapshot(), true);
+        assert_eq!(dag.take_snapshot(), true);
+        let mut out = -1;
+        let mut data_read = 0;
+        let read = dag.get_next(&mut out, &mut data_read);
+        assert_eq!(&*read, &[105]);
+        assert_eq!(data_read, 4);
+        assert_eq!(out, 247);
+        assert_eq!(dag.take_snapshot(), false);
     }
 }
