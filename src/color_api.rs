@@ -24,9 +24,10 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //TODO If we wish for a read(color) method we'll need to break this up by
     //     color
     //read_buffer: Rc<RefCell<LinkedList<(Uuid, Vec<color>, Box<V>)>>>,
-    //FIXME using a hashmap for de-duplication until that bug is fixed
+    //TODO switch back to linked list
     read_buffer: Rc<RefCell<LinkedHashMap<Uuid, (Vec<color>, Box<V>)>>>,
-    interesting_colors: HashSet<color>
+    interesting_colors: HashSet<color>,
+    snapshot: Option<OrderIndex>,
 }
 
 impl<V: ?Sized, S, H> DAGHandle<V, S, H>
@@ -70,6 +71,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
             log: FuzzyLog::new(store, horizon, upcalls),
             read_buffer: read_buffer,
             interesting_colors: interesting_colors,
+            snapshot: None,
         }
     }
 
@@ -91,7 +93,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
         } else {
             //TODO we should do this in a better way
             depends_on.retain(|c| !inhabits.contains(c));
-            self.snapshot(depends_on)
+            self.dependency_snapshot(depends_on)
         };
 
         if inhabits.len() == 1 {
@@ -105,7 +107,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
         }
     }
 
-    fn snapshot(&mut self, depends_on: Vec<color>) -> Vec<OrderIndex> {
+    fn dependency_snapshot(&mut self, depends_on: Vec<color>) -> Vec<OrderIndex> {
         //FIXME we really need read locks to do this correctly
         //      until I implement those, I'm just going to take
         //      a non-linearizeable snapshot and use that
@@ -121,9 +123,12 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //TODO kinda ugly, clean?
     //TODO need some way to do timeout if no update...
     pub fn get_next(&mut self, data_out: &mut V, data_read: &mut usize) -> Vec<color> {
-        while self.read_buffer.borrow().is_empty() {
-            let to_read = self.get_next_read_chain();
-            self.log.play_foward(to_read);
+        if let Some(to_read_until) = self.snapshot {
+            self.log.play_until(to_read_until);
+        }
+        else {
+            *data_read = 0;
+            return Vec::new();
         }
         let (_, (color, data)) = self.read_buffer.borrow_mut().pop_front().expect("read buffer must be full by now");
         unsafe {
@@ -135,7 +140,24 @@ where V: Storeable, S: Store<V>, H: Horizon {
         color
     }
 
-    fn get_next_read_chain(&self) -> order {
+    pub fn take_snapshot(&mut self) {
+        while let None = self.snapshot {
+            //TODO once asynchrony is setup it probably pays to snapshot
+            //     all interesting chains in parallel
+            let next_to_snapshot = self.get_next_read_chain();
+            self.take_snapshot_of(next_to_snapshot)
+        }
+    }
+
+    pub fn take_snapshot_of(&mut self, color: color) {
+        let last_unread_entry = self.log.snapshot(color.into());
+        if let Some(e) = last_unread_entry {
+            self.snapshot = Some((color.into(), e));
+            //TODO should start prefetching here
+        }
+    }
+
+    fn get_next_read_chain(&self) -> color {
         let next_chain = thread_rng().gen_range(0, self.interesting_colors.len());
         self.interesting_colors
             .iter()
@@ -143,7 +165,6 @@ where V: Storeable, S: Store<V>, H: Horizon {
             .skip(next_chain)
             .next()
             .expect("no chains to read")
-            .into()
     }
 }
 
@@ -159,6 +180,7 @@ mod tests {
 
     #[test]
     fn single_color() {
+        //FIXME
         let store = new_store(vec![]);
         let horizon = HashMap::new();
         let mut  dag = DAGHandle::new(store, horizon, &[100]);
@@ -189,6 +211,7 @@ mod tests {
 
     #[test]
     fn single_color_more() {
+        //FIXME
         let store = new_store(vec![]);
         let horizon = HashMap::new();
         let mut  dag = DAGHandle::new(store, horizon, &[101]);
@@ -219,6 +242,7 @@ mod tests {
 
     #[test]
     fn multi_color_more() {
+        //FIXME
         let store = new_store(vec![]);
         let horizon = HashMap::new();
         let mut  dag = DAGHandle::new(store, horizon, &[102, 103]);

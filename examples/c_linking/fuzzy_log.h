@@ -29,6 +29,9 @@ uint32_t append(DAGHandle *handle, char *data, size_t data_size,
 // greater than DELOS_MAX_DATA_SIZE
 uint32_t get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
 
+//TODO
+//snapshot(DAGHandle *handle);
+
 //NOTE also frees the *handle
 void close_dag_handle(DAGHandle *handle);
 

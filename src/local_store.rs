@@ -49,23 +49,34 @@ impl<V: Clone> LocalStore<V> {
 impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
     fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
         use std::collections::hash_map::Entry::*;
-        match self.data.entry(key) {
-            Occupied(..) => Err(InsertErr::AlreadyWritten),
+        let next_loc = {
+            let horizon_loc = self.horizon.entry(key.0).or_insert(1.into());
+            let horizon = *horizon_loc;
+            *horizon_loc = horizon + 1;
+            horizon
+        };
+        trace!("insert @ {:?}", (key.0, next_loc));
+        match self.data.entry((key.0, next_loc)) {
+            Occupied(..) => {
+                trace!("trace Occupied");
+                Err(InsertErr::AlreadyWritten)
+            }
             Vacant(v) => {
                 let new_val = val.clone_entry();
                 trace!("new val {:?}", new_val);
                 v.insert(new_val);
-                self.horizon.insert(key.0, key.1 + 1);
-                Ok(key)
+                Ok((key.0, next_loc))
             }
         }
     }
 
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-        HashMap::get(&self.data, &key).cloned().ok_or(GetErr::NoValue)
+        let last_read = || GetErr::NoValue(self.horizon.get(&key.0).cloned().unwrap_or(1.into()) - 1);
+        HashMap::get(&self.data, &key).cloned().ok_or_else(last_read)
     }
 
     fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        use std::collections::hash_map::Entry::*;
         let entr = EntryContents::Multiput{data: data, uuid: &Uuid::new_v4(),
             columns: chains, deps: deps};
         for &(chain, _) in chains {
@@ -75,7 +86,17 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 *horizon_loc = horizon + 1;
                 horizon
             };
-            self.insert((chain, horizon), entr.clone());
+            trace!("mnsert @ {:?}", (chain, horizon));
+            match self.data.entry((chain, horizon)) {
+                Occupied(..) => {
+                    trace!("trace Occupied");
+                }
+                Vacant(v) => {
+                    let new_val = entr.clone_entry();
+                    trace!("new val {:?}", new_val);
+                    v.insert(new_val);
+                }
+            }
         }
         Ok((0.into(), 0.into()))
     }

@@ -9,7 +9,7 @@ macro_rules! general_tests {
 
         #[cfg(test)]
         mod general_tests {
-            //last column used is 18
+            //last column used is 22
 
             extern crate env_logger;
 
@@ -29,7 +29,19 @@ macro_rules! general_tests {
                 let _ = env_logger::init();
                 let mut store = $new_store(Vec::new());
                 let r = <Store<MapEntry<i32, i32>>>::get(&mut store, (14.into(), 0.into()));
-                assert_eq!(r, Err(GetErr::NoValue))
+                assert_eq!(r, Err(GetErr::NoValue(0.into())))
+            }
+
+            #[test]
+            fn test_get_none2() {
+                let _ = env_logger::init();
+                let mut store = $new_store(vec![(19.into(), 1.into()), (19.into(), 2.into()), (19.into(), 3.into()), (19.into(), 4.into()), (19.into(), 5.into())]);
+                for i in 0..5 {
+                    let r = store.insert((19.into(), 0.into()), EntryContents::Data(&63, &[]));
+                    assert_eq!(r, Ok((19.into(), (i + 1).into())))
+                }
+                let r = store.get((19.into(), ::std::u32::MAX.into()));
+                assert_eq!(r, Err(GetErr::NoValue(5.into())))
             }
 
             #[test]
@@ -456,6 +468,7 @@ macro_rules! general_tests {
 
             #[test]
             fn test_order() {
+                let _ = env_logger::init();
                 let store = $new_store(
                     (0..5).map(|i| (20.into(), i.into()))
                         .chain((0..21).map(|i| (21.into(), i.into())))
