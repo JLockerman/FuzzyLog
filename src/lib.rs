@@ -39,6 +39,7 @@ pub mod local_store;
 pub mod udp_store;
 pub mod tcp_store;
 pub mod multitcp_store;
+pub mod servers;
 pub mod color_api;
 
 #[cfg(feature = "dynamodb_tests")]
