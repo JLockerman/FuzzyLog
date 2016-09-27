@@ -5,8 +5,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, LinkedList};
 use std::rc::Rc;
 
-use rand::{Rng, thread_rng};
-
 use linked_hash_map::LinkedHashMap;
 
 //TODO there is exactly one chain per colour.
@@ -27,7 +25,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //TODO switch back to linked list
     read_buffer: Rc<RefCell<LinkedHashMap<Uuid, (Vec<color>, Box<V>)>>>,
     interesting_colors: HashSet<color>,
-    snapshot: Option<OrderIndex>,
+    snapshot: Vec<OrderIndex>,
 }
 
 impl<V: ?Sized, S, H> DAGHandle<V, S, H>
@@ -62,16 +60,17 @@ where V: Storeable, S: Store<V>, H: Horizon {
                             Uuid::new_v4()
                         } else { *i };
 
-                        let ol = l.insert(id, ([c.into()].to_vec(), v.clone_box()));
+                        l.insert(id, ([c.into()].to_vec(), v.clone_box()));
                     }
                     true
                 }) });
         }
+        let num_color = interesting_colors.len();
         DAGHandle {
             log: FuzzyLog::new(store, horizon, upcalls),
             read_buffer: read_buffer,
             interesting_colors: interesting_colors,
-            snapshot: None,
+            snapshot: Vec::with_capacity(num_color),
         }
     }
 
@@ -123,60 +122,56 @@ where V: Storeable, S: Store<V>, H: Horizon {
     //TODO kinda ugly, clean?
     //TODO need some way to do timeout if no update...
     pub fn get_next(&mut self, data_out: &mut V, data_read: &mut usize) -> Vec<color> {
-        if let Some(to_read_until) = self.snapshot {
-            trace!("reading until {:?}", to_read_until);
-            self.log.play_until(to_read_until);
-            //TODO only if finished
-            self.snapshot = None;
-        }
-        else if self.read_buffer.borrow().is_empty() {
-            trace!("no current snapshot");
-            *data_read = 0;
-            return Vec::new();
-        }
-        let (_, (color, data)) = self.read_buffer.borrow_mut().pop_front().expect("read buffer must be full by now");
-        unsafe {
+        let mut write_data = |out: &mut _, data: Box<V>| unsafe {
             //TODO we have no way to finish a read if incomplete...
             //TODO this assumes the size info is statically known or stored in the pointer
             //     while currenlty valid, it may not always be so...
-            *data_read = <V as Storeable>::copy_to_mut(&*data, data_out);
+            *out = <V as Storeable>::copy_to_mut(&*data, data_out);
+        };
+        let next_node = self.read_buffer.borrow_mut().pop_front();
+        if let Some((_, (color, data))) = next_node {
+            write_data(data_read, data);
+            return color
         }
-        color
+
+        //The buffer is empty we may need to read
+        if let Some(to_read_until) = self.snapshot.pop() {
+            trace!("reading until {:?}", to_read_until);
+            self.log.play_until(to_read_until);
+        }
+
+        let next_node = self.read_buffer.borrow_mut().pop_front();
+        if let Some((_, (color, data))) = next_node {
+            write_data(data_read, data);
+            return color
+        }
+        trace!("no current snapshot");
+        *data_read = 0;
+        return Vec::new();
     }
 
     pub fn take_snapshot(&mut self) -> bool {
-        let get_next_read_chain = |colors: &HashSet<_>| {
-            let next_chain = thread_rng().gen_range(0, colors.len());
-            colors.iter()
-                .cloned()
-                .skip(next_chain)
-                .next()
-                .expect("no chains to read")
-        };
-        if let None = self.snapshot {
+        if self.snapshot.is_empty() {
             //TODO once asynchrony is setup it probably pays to snapshot
             //     all interesting chains in parallel
-            //let next_to_snapshot = self.get_next_read_chain();
-            let next_to_snapshot = get_next_read_chain(&self.interesting_colors);
-            self.take_snapshot_of(next_to_snapshot);
-            if self.snapshot.is_some() { return true }
-        } else {
-            return true
+            let snap: Vec<_> = self.interesting_colors.iter().cloned().collect();
+            let tmp = snap.into_iter()
+                .map(|c| (c.into(), self.take_snapshot_of(c)))
+                .flat_map(|(c, oe)| oe.map(|e| (c,e)))
+                .collect::<Vec<_>>();
+            self.snapshot.extend(tmp);
         }
-        let mut unchecked = self.interesting_colors.clone();
-        while !unchecked.is_empty() && self.snapshot.is_none() {
-            let next_to_snapshot = get_next_read_chain(&unchecked);
-            self.take_snapshot_of(next_to_snapshot);
-            unchecked.remove(&next_to_snapshot);
-        }
-        return self.snapshot.is_some()
+        return !self.snapshot.is_empty()
     }
 
-    pub fn take_snapshot_of(&mut self, color: color) {
+    pub fn take_snapshot_of(&mut self, color: color) -> Option<entry> {
         let last_unread_entry = self.log.snapshot(color.into());
         if let Some(e) = last_unread_entry {
-            self.snapshot = Some((color.into(), e));
+            Some(e)
             //TODO should start prefetching here
+        }
+        else {
+            None
         }
     }
 }
