@@ -16,3 +16,5 @@ as it needs to download dependencies.
 `servers` various servers which the client library can run against including  
 `servers/tcp_server` a TCP based sever  
 `clients` varous DPDK based clients for use in testing  
+
+[![Build Status](https://travis-ci.com/ProjectDelos/delos-rust.svg?token=RaEyYb9eyzdWqhSpjYxi&branch=mahesh_look_at_this)](https://travis-ci.com/ProjectDelos/delos-rust)
