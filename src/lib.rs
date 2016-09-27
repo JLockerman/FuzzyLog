@@ -139,9 +139,9 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub extern "C" fn snapshot(dag: *mut DAG) -> i8 {
+    pub extern "C" fn snapshot(dag: *mut DAG) {
         let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
-        if dag.take_snapshot() { 1 } else { 0 }
+        dag.take_snapshot();
     }
 
     #[no_mangle]
