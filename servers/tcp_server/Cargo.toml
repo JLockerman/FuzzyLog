@@ -5,8 +5,6 @@ authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
 
 [dependencies]
 env_logger = "0.3"
-fnv = "1.0.2"
 log = "0.3.2"
 mio = "0.5"
-nix = "*"
 fuzzy_log = {path = "../.."}
