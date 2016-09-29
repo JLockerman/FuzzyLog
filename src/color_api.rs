@@ -110,10 +110,10 @@ where V: Storeable, S: Store<V>, H: Horizon {
         //FIXME we really need read locks to do this correctly
         //      until I implement those, I'm just going to take
         //      a non-linearizeable snapshot and use that
-        let mut snapshot: Vec<OrderIndex> = Vec::new();
-        for &color in &*depends_on {
-            let h = self.log.horizon.get_horizon(color.into());
-            snapshot.push((color.into(), h))
+        let mut snapshot = Vec::with_capacity(depends_on.len());
+        for &color in &depends_on[..] {
+            //TODO should be in parallel
+            snapshot.push((color.into(), self.take_snapshot_of(color).unwrap_or(0.into())));
         }
         snapshot
     }
