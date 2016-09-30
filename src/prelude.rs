@@ -17,7 +17,10 @@ pub trait Store<V: ?Sized> {
     fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult; //TODO nocopy
     fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>>;
 
-    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult; //TODO -> MultiAppebdResult
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult; //TODO -> MultiAppendResult
+
+    //A dependent multiappend happens-after on the current horizon of some chains
+    fn dependent_multi_append(&mut self, chains: &[order], depends_on: &[order], data: &V, deps: &[OrderIndex]) -> InsertResult;
 
     //fn snapshot(&mut self, chains: &mut [OrderIndex]);
     //fn get_horizon(&mut self, chains: &mut [OrderIndex]);
@@ -121,11 +124,15 @@ pub mod EntryKind {
     bitflags! {
         #[derive(RustcDecodable, RustcEncodable)]
         flags Kind: u8 {
-            const Invalid = 0,
-            const Data = 1,
-            const Multiput = 2,
-            const Layout = Data.bits | Multiput.bits,
+            const Invalid = 0x0,
+            const Data = 0x1,
+            const Multiput = 0x2,
+            const Sentinel = 0x4 | Multiput.bits,
+
+            const Layout = Data.bits | Multiput.bits | Sentinel.bits,
+
             const Read = Data.bits | Multiput.bits,
+
             const ReadSuccess = 0x80,
 
             const ReadData = Data.bits | ReadSuccess.bits,
@@ -212,6 +219,7 @@ pub enum EntryContents<'e, V:'e + ?Sized> {
     Multiput{data: &'e V, uuid: &'e Uuid, columns: &'e [OrderIndex], deps: &'e [OrderIndex]}, //TODO id? committed?
     // Multiput
     // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps
+    Sentinel(&'e Uuid),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -224,6 +232,7 @@ pub enum EntryContentsMut<'e, V:'e + ?Sized> {
     // Multiput
     // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps
     // Data section: [OrderIndex; cols] | data: data_bytes | dependencies: dependency_bytes
+    Sentinel(&'e mut Uuid),
 }
 
 pub struct MultiputContentsMut<'e, V: 'e + ?Sized> {
@@ -234,7 +243,8 @@ pub struct MultiputContentsMut<'e, V: 'e + ?Sized> {
 }
 
 impl<V: Storeable + ?Sized> Entry<V, DataFlex> {
-    fn data_contents<'s>(&'s self, data_bytes: u16, _: u16) -> EntryContents<'s, V> { //TODO to DataContents<..>?
+    fn data_contents<'s>(&'s self, data_bytes: u16) -> EntryContents<'s, V> { //TODO to DataContents<..>?
+        //TODO I _really_ should not need to do this...
         let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
         let (data, deps) = self.data_and_deps(contents_ptr, data_bytes, 0);
         Data(data, deps)
@@ -274,7 +284,12 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
             let cols_ptr = contents_ptr;
             let cols_ptr = cols_ptr as *const _;
-            let num_cols = self.flex.cols;
+            let num_cols = match self.kind & EntryKind::Layout {
+                EntryKind::Multiput => self.flex.cols,
+                EntryKind::Sentinel => 1,
+                _ => unreachable!()
+            };
+            assert!(num_cols > 0);
             slice::from_raw_parts(cols_ptr, num_cols as usize)
         }
     }
@@ -284,7 +299,12 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let contents_ptr: *mut u8 = &mut self.flex.data as *mut _ as *mut u8;
             let cols_ptr = contents_ptr;
             let cols_ptr = cols_ptr as *mut _;
-            let num_cols = self.flex.cols;
+            let num_cols = match self.kind & EntryKind::Layout {
+                EntryKind::Multiput => self.flex.cols,
+                EntryKind::Sentinel => 1,
+                _ => unreachable!()
+            };
+            assert!(num_cols > 0);
             slice::from_raw_parts_mut(cols_ptr, num_cols as usize)
         }
     }
@@ -312,16 +332,30 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
 impl<V: Storeable + ?Sized, F> Entry<V, F> {
 
     pub fn contents<'s>(&'s self) -> EntryContents<'s, V> {
+        //TODO I should really not need this
+        assert!(self as *const _ != ptr::null());
+        if self.kind & EntryKind::Layout == EntryKind::Sentinel {
+            return Sentinel(&self.id)
+        }
         unsafe {
             let data_bytes = self.data_bytes;
             let dependency_bytes = self.dependency_bytes;
             let uuid = &self.id;
             match self.kind & EntryKind::Layout {
-                EntryKind::Data =>
-                        mem::transmute::<_, &Entry<V, DataFlex>>(self)
-                            .data_contents(data_bytes, dependency_bytes),
-                EntryKind::Multiput => mem::transmute::<_, &Entry<V, MultiFlex>>(self)
-                    .multi_contents(data_bytes, dependency_bytes, uuid),
+                EntryKind::Data => {
+                    let r = self.as_data_entry();
+                    assert_eq!(r as *const _ as *const u8,
+                        self as *const _ as *const u8);
+                    r.data_contents(data_bytes)
+                }
+
+                EntryKind::Multiput => {
+                    let r = self.as_multi_entry();
+                    assert_eq!(r as *const _ as *const u8,
+                        self as *const _ as *const u8);
+                    assert!(r as *const _ != ptr::null());
+                    r.multi_contents(data_bytes, dependency_bytes, uuid)
+                }
                 _ => unreachable!()
             }
         }
@@ -394,9 +428,13 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         if self.kind == EntryKind::NoValue {
             return unsafe { self.read_deps() };
         }
+        if self.kind == EntryKind::Sentinel {
+            return &[]
+        }
         match self.contents() {
             Data(_, ref deps) => &deps,
             Multiput{ref deps, ..} => deps,
+            Sentinel(..) => unreachable!(),
         }
     }
 
@@ -455,6 +493,11 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
             EntryKind::Multiput => unsafe {
                 self.as_multi_entry().flex.lock
             },
+            EntryKind::Sentinel => {
+                //TODO currently we treat a Sentinel like a multiappend with no data
+                //     nor deps, and exactly one column
+                unsafe { self.as_multi_entry().flex.lock }
+            }
             _ => unreachable!(),
         }
     }
@@ -465,6 +508,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
                 EntryKind::Read | EntryKind::Data =>
                     slice::from_raw_parts(&self.as_data_entry().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry().mlocs(),
+                EntryKind::Sentinel => self.as_multi_entry().mlocs(),
                 _ => unreachable!()
             }
         }
@@ -476,6 +520,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
                 EntryKind::Read | EntryKind::Data =>
                     slice::from_raw_parts_mut(&mut self.as_data_entry_mut().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry_mut().mlocs_mut(),
+                EntryKind::Sentinel => self.as_multi_entry_mut().mlocs_mut(),
                 _ => unreachable!()
             }
         }
@@ -487,6 +532,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
             Multiput{ref data, ref columns, ref deps, ..} => {
                 (data, columns, deps)
             }
+            Sentinel(..) => panic!("a sentinel has no value"),
         }
     }
 
@@ -494,6 +540,11 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
         match self.kind & EntryKind::Layout {
             EntryKind::Data | EntryKind::Read => mem::size_of::<Entry<(), DataFlex<()>>>(),
             EntryKind::Multiput => mem::size_of::<Entry<(), MultiFlex<()>>>(),
+            EntryKind::Sentinel => {
+                //TODO currently we treat a Sentinel like a multiappend with no data
+                //     nor deps, and exactly one column
+                mem::size_of::<Entry<(), MultiFlex<()>>>()
+            }
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
         }
     }
@@ -504,6 +555,11 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
             let header = unsafe { mem::transmute::<_, &Entry<V, MultiFlex<()>>>(self) };
             size += header.flex.cols as usize * mem::size_of::<OrderIndex>();
         }
+        else if self.is_sentinel() {
+            //TODO currently we treat a Sentinel like a multiappend with no data
+            //     nor deps, and exactly one column
+            size += mem::size_of::<OrderIndex>()
+        }
         assert!(size + mem::size_of::<Entry<(), ()>>() <= 8192);
         size
     }
@@ -512,6 +568,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
         let size = match self.kind & EntryKind::Layout {
             EntryKind::Data | EntryKind::Read => self.data_entry_size(),
             EntryKind::Multiput => self.multi_entry_size(),
+            EntryKind::Sentinel => self.sentinel_entry_size(),
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
         };
         assert!(size >= base_header_size());
@@ -543,12 +600,27 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
         }
     }
 
+    fn sentinel_entry_size(&self) -> usize {
+        assert!(self.kind & EntryKind::Layout == EntryKind::Sentinel);
+        //TODO currently we treat a Sentinel like a multiappend with no data
+        //     nor deps, and exactly one column
+        let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
+            + mem::size_of::<OrderIndex>();
+        //trace!("multi size {}", size);
+        assert!(size <= 8192);
+        size
+    }
+
     pub fn is_multi(&self) -> bool {
         self.kind & EntryKind::Layout == EntryKind::Multiput
     }
 
     pub fn is_data(&self) -> bool {
         self.kind & EntryKind::Layout == EntryKind::Data
+    }
+
+    pub fn is_sentinel(&self) -> bool {
+        self.kind & EntryKind::Layout == EntryKind::Sentinel
     }
 }
 
@@ -603,6 +675,7 @@ impl<'e, V: Storeable + ?Sized> Clone for EntryContents<'e, V> {
             &Multiput{ref data, ref uuid, ref columns, ref deps} => {
                 Multiput{data: data.clone(), uuid: uuid.clone(), columns: columns.clone(), deps: deps.clone()}
             }
+            &Sentinel(ref id) => Sentinel(id.clone()),
         }
     }
 }
@@ -612,6 +685,7 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
         match self {
             &Data(_, ref deps) => &deps,
             &Multiput{ref deps, ..} => deps,
+            &Sentinel(..) => &[],
         }
     }
 }
@@ -621,6 +695,7 @@ impl <'e, V: ?Sized> EntryContents<'e, V> {
         match self {
             &Data(..) => EntryKind::Data,
             &Multiput{..} => EntryKind::Multiput,
+            &Sentinel(..) => EntryKind::Sentinel,
         }
     }
 }
@@ -635,7 +710,7 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
         }
     }
 
-    unsafe fn fill_entry(&self, e: &mut Entry<V>) {
+    pub unsafe fn fill_entry(&self, e: &mut Entry<V>) {
         use std::u16;
         e.kind = self.kind();
         let (data_ptr, data, deps) = match self {
@@ -661,11 +736,19 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
                 e.flex.lock = 0;
                 (data_ptr, data, deps)
             }
+            &Sentinel(id) => {
+                e.id = id.clone();
+                return
+            }
         };
         assert!(Storeable::size(data) < u16::MAX as usize);
+        assert!(deps.len() * size_of::<OrderIndex>() < u16::MAX as usize);
         e.data_bytes = Storeable::size(data) as u16;
         e.dependency_bytes = (deps.len() * size_of::<OrderIndex>()) as u16;
         let dep_ptr = data_ptr.offset(e.data_bytes as isize);
+
+        //trace!("assembing {:?} entry: base {:?}, data @ {:?} len {:?}, deps @ {:?} len {:?}",
+        //    self.kind(), e as *mut _, data_ptr, Storeable::size(data), dep_ptr, deps.len());
 
         //ptr::write(data_ptr as *mut _, data.clone()); //TODO why did this fail?
         ptr::copy(Storeable::ref_to_bytes(data), data_ptr as *mut _, e.data_bytes as usize);
@@ -684,7 +767,13 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
             &Multiput{ data, columns, deps, ..} =>
                 mem::size_of::<Entry<(), MultiFlex<()>>>()
                 + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>())
-                + (columns.len()  * size_of::<OrderIndex>()),
+                + (columns.len() * size_of::<OrderIndex>()),
+            &Sentinel(..) => {
+                //TODO currently we treat a Sentinel like a multiappend with no data
+                //     nor deps, and exactly one column
+                mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + size_of::<OrderIndex>()
+            }
         };
         assert!(size <= 4096);
         let mut buffer = Vec::with_capacity(size);
@@ -777,6 +866,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
     pub fn try_append(&mut self, column: order, data: &V, deps: &[OrderIndex]) -> Option<OrderIndex> {
         let next_entry = self.horizon.get_horizon(column);
         let insert_loc = (column, next_entry);
+        trace!("append num deps: {:?}", deps.len());
         self.store.insert(insert_loc, Data(data, &*deps)).ok().map(|loc| {
             self.horizon.update_horizon(column, loc.1);
             loc
@@ -811,6 +901,17 @@ where V: Storeable, S: Store<V>, H: Horizon{
         }
     }
 
+    pub fn dependent_multiappend(&mut self, columns: &[order],
+        depends_on: &[order], data: &V, deps: &[OrderIndex]) {
+        trace!("dappend: {:?}, {:?}, {:?}", columns, depends_on, deps);
+        self.store.dependent_multi_append(columns, depends_on, data, deps);
+        //TODO
+        for &column in &*columns {
+            let next_entry = self.horizon.get_horizon(column) + 1; //TODO
+            self.horizon.update_horizon(column, next_entry); //TODO
+        }
+    }
+
     pub fn multiappend2(&mut self, columns: &mut [OrderIndex], data: &V, deps: &[OrderIndex]) {
         self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
         for &(column, _) in &*columns {
@@ -835,6 +936,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 trace!("Data {:?}", deps);
                 self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &(column, index), data.clone())); //TODO clone
             }
+            Sentinel(..) => {}
         }
         self.local_horizon.insert(column, index);
         Some((column, index))
@@ -842,14 +944,18 @@ where V: Storeable, S: Store<V>, H: Horizon{
 
     fn read_multiput(&mut self, data: &V, put_id: &Uuid, columns: &[OrderIndex]) {
 
-        for &(column, _) in columns { //TODO only relevent cols
-            trace!("play multiput for col {:?}", column);
-            self.play_until_multiput(column, put_id);
+        for &(column, index) in columns { //TODO only relevent cols
+            if (column, index) != (0.into(), 0.into()) {
+                trace!("play multiput for col {:?}", column);
+                self.play_until_multiput(column, put_id);
+            }
         }
 
         //TODO multiple multiput returns here
         //XXX TODO note multiserver validation happens at the store layer?
-        for &(column, index) in columns {
+        //TODO don't return for sentinels
+        'ret: for &(column, index) in columns {
+            if (column, index) == (0.into(), 0.into()) { break 'ret }
             self.upcalls.get(&column).map(|f| f(put_id, &(column, index), data));
         }
     }
@@ -873,6 +979,12 @@ where V: Storeable, S: Store<V>, H: Horizon{
                     self.local_horizon.insert(column, index);
                     break 'search
                 }
+                Sentinel(uuid) if uuid == put_id => {
+                    trace!("found sentinel {:?} for {:?} at: {:?}", put_id, column, index);
+                    self.local_horizon.insert(column, index);
+                    break 'search
+                }
+                Sentinel(..) => continue 'search,
                 Multiput{data, uuid, columns, ..} => {
                     //TODO
                     trace!("Multiput");

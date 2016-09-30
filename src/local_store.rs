@@ -62,9 +62,12 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 Err(InsertErr::AlreadyWritten)
             }
             Vacant(v) => {
-                let new_val = val.clone_entry();
-                trace!("new val {:?}", new_val);
-                v.insert(new_val);
+                //TODO I think this is corrupting my stack, so I'll try to switch to a write to pointer version
+                unsafe {
+                    let new_val = v.insert(::std::mem::uninitialized());
+                    val.fill_entry(new_val);
+                    trace!("new val {:?}", new_val);
+                }
                 Ok((key.0, next_loc))
             }
         }
@@ -100,6 +103,63 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
         }
         Ok((0.into(), 0.into()))
     }
+
+    fn dependent_multi_append(&mut self, chains: &[order],
+        depends_on: &[order], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        use std::collections::hash_map::Entry::*;
+        trace!("dma @ {:?} -> {:?}", chains, depends_on);
+        let id = Uuid::new_v4();
+        let entr = EntryContents::Sentinel(&id);
+        for &chain in depends_on {
+            let next_loc = {
+                let horizon_loc = self.horizon.entry(chain).or_insert(1.into());
+                let horizon = *horizon_loc;
+                *horizon_loc = horizon + 1;
+                horizon
+            };
+            match self.data.entry((chain, next_loc)) {
+                Occupied(..) => {
+                    trace!("trace Occupied");
+                    panic!()
+                }
+                Vacant(v) => {
+                    let mut new_val = entr.clone_entry();
+                    new_val.locs_mut()[0] = (chain, next_loc);
+                    trace!("new val {:?}", new_val);
+                    v.insert(new_val);
+                }
+            }
+        }
+        let mchains: Vec<_> = chains.into_iter()
+            .map(|&c| (c, 0.into()))
+            .chain(::std::iter::once((0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .collect();
+        //TODO distinguish between inhabits and depends on
+        let entr = EntryContents::Multiput{data: data, uuid: &id,
+                columns: &mchains, deps: deps};
+
+        for &chain in chains {
+            let horizon = {
+                let horizon_loc = self.horizon.entry(chain).or_insert(1.into());
+                let horizon = *horizon_loc;
+                *horizon_loc = horizon + 1;
+                horizon
+            };
+            trace!("mnsert @ {:?}", (chain, horizon));
+            match self.data.entry((chain, horizon)) {
+                Occupied(..) => {
+                    trace!("trace Occupied");
+                }
+                Vacant(v) => {
+                    let new_val = entr.clone_entry();
+                    trace!("new val {:?}", new_val);
+                    v.insert(new_val);
+                }
+            }
+        }
+        Ok((0.into(), 0.into()))
+    }
 }
 
 impl<V: Copy, S> Store<V> for Mutex<S>
@@ -114,6 +174,12 @@ where S: Store<V> {
 
     fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
         self.lock().unwrap().multi_append(chains, data, deps)
+    }
+
+    fn dependent_multi_append(&mut self, chains: &[order],
+        depends_on: &[order], data: &V,
+        deps: &[OrderIndex]) -> InsertResult {
+        self.lock().unwrap().dependent_multi_append(chains, depends_on, data, deps)
     }
 }
 
@@ -130,6 +196,12 @@ where S: Store<V> {
     fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
         self.borrow_mut().multi_append(chains, data, deps)
     }
+
+    fn dependent_multi_append(&mut self, chains: &[order],
+        depends_on: &[order], data: &V,
+        deps: &[OrderIndex]) -> InsertResult {
+        self.borrow_mut().dependent_multi_append(chains, depends_on, data, deps)
+    }
 }
 
 impl<V: Copy, S> Store<V> for Arc<Mutex<S>>
@@ -144,6 +216,11 @@ where S: Store<V> {
 
     fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
         self.lock().expect("cannot acquire lock").multi_append(chains, data, deps)
+    }
+
+    fn dependent_multi_append(&mut self, chains: &[order],
+        depends_on: &[order], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        self.lock().expect("cannot acquire lock").dependent_multi_append(chains, depends_on, data, deps)
     }
 }
 

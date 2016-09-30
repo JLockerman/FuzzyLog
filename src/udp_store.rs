@@ -291,6 +291,12 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
             }
         }
     }
+
+    fn dependent_multi_append(&mut self, chains: &[order],
+        depends_on: &[order], data: &V,
+        deps: &[OrderIndex]) -> InsertResult {
+        panic!("unimplemented")
+    }
 }
 
 impl<V: Storeable + ?Sized> Clone for UdpStore<V> {
