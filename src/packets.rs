@@ -351,11 +351,11 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
             EntryKind::Multiput => unsafe {
                 self.as_multi_entry().flex.lock
             },
-            EntryKind::Sentinel => {
+            EntryKind::Sentinel => unsafe {
                 //TODO currently we treat a Sentinel like a multiappend with no data
-                //     nor deps, and exactly one column
-                unsafe { self.as_multi_entry().flex.lock }
-            }
+                //     nor deps
+                self.as_multi_entry().flex.lock
+            },
             EntryKind::Unlock => unsafe {
                 self.as_unlock_entry().lock
             },
@@ -405,7 +405,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
             EntryKind::Multiput => mem::size_of::<Entry<(), MultiFlex<()>>>(),
             EntryKind::Sentinel => {
                 //TODO currently we treat a Sentinel like a multiappend with no data
-                //     nor deps, and exactly one column
+                //     nor deps
                 mem::size_of::<Entry<(), MultiFlex<()>>>()
             }
             EntryKind::Unlock => mem::size_of::<Unlock>(),
@@ -418,14 +418,11 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
             return 0
         }
         let mut size = self.data_bytes as usize + self.dependency_bytes as usize;
-        if self.is_multi() {
+        if self.is_multi() || self.is_sentinel() {
+            //TODO currently we treat a Sentinel like a multiappend with no data
+            //     nor deps
             let header = unsafe { mem::transmute::<_, &Entry<V, MultiFlex<()>>>(self) };
             size += header.flex.cols as usize * mem::size_of::<OrderIndex>();
-        }
-        else if self.is_sentinel() {
-            //TODO currently we treat a Sentinel like a multiappend with no data
-            //     nor deps, and exactly one column
-            size += mem::size_of::<OrderIndex>()
         }
         assert!(size + mem::size_of::<Entry<(), ()>>() <= 8192);
         size
@@ -457,7 +454,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
     fn multi_entry_size(&self) -> usize {
         assert!(self.kind & EntryKind::Layout == EntryKind::Multiput);
         unsafe {
-            let header = mem::transmute::<_, &Entry<V, MultiFlex>>(self);
+            let header = self.as_multi_entry();
             let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
                 + header.data_bytes as usize
                 + header.dependency_bytes as usize
@@ -471,12 +468,15 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
     fn sentinel_entry_size(&self) -> usize {
         assert!(self.kind & EntryKind::Layout == EntryKind::Sentinel);
         //TODO currently we treat a Sentinel like a multiappend with no data
-        //     nor deps, and exactly one column
-        let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
-            + mem::size_of::<OrderIndex>();
-        //trace!("multi size {}", size);
-        assert!(size <= 8192);
-        size
+        //     nor deps
+        unsafe {
+            let header = self.as_multi_entry();
+            let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + (header.flex.cols as usize * mem::size_of::<OrderIndex>());
+            //trace!("multi size {}", size);
+            assert!(size <= 8192);
+            size
+        }
     }
 
     pub fn is_multi(&self) -> bool {
@@ -730,7 +730,7 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
                 + (columns.len() * size_of::<OrderIndex>()),
             &Sentinel(..) => {
                 //TODO currently we treat a Sentinel like a multiappend with no data
-                //     nor deps, and exactly one column
+                //     nor deps
                 mem::size_of::<Entry<(), MultiFlex<()>>>()
                 + size_of::<OrderIndex>()
             }
