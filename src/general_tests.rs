@@ -494,7 +494,7 @@ macro_rules! general_tests {
 
             #[test]
             fn test_dependent() {
-                let logger = env_logger::init().unwrap();
+                let _ = env_logger::init();
                 let store = $new_store(
                     (0..10).map(|i| (23.into(), i.into()))
                         .chain((0..24).map(|i| (21.into(), i.into())))

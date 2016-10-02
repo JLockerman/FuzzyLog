@@ -29,6 +29,7 @@ extern crate linked_hash_map;
 #[macro_use]
 mod general_tests;
 
+pub mod packets;
 pub mod prelude;
 pub mod local_store;
 pub mod udp_store;
