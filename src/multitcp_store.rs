@@ -60,7 +60,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         //trace!("client read start base header");
         while bytes_read < base_header_size() {
             bytes_read += self.sockets[socket_id]
-                              .read(&mut self.receive_buffer.bytes_mut()[bytes_read..])
+                              .read(&mut self.receive_buffer.sized_bytes_mut()[bytes_read..])
                               .expect("cannot read");
         }
         //trace!("client read base header");
@@ -70,7 +70,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             bytes_read +=
                 self.sockets[socket_id]
                     .read(&mut self.receive_buffer
-                                   .bytes_mut()[bytes_read..])
+                                   .sized_bytes_mut()[bytes_read..])
                     .expect("cannot read");
         }
         let end = self.receive_buffer.entry_size();
@@ -79,7 +79,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             bytes_read +=
                 self.sockets[socket_id]
                     .read(&mut self.receive_buffer
-                                   .bytes_mut()[bytes_read..])
+                                   .sized_bytes_mut()[bytes_read..])
                     .expect("cannot read");
         }
     }
@@ -242,7 +242,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         trace!("client read start base header");
         while bytes_read < base_header_size() {
             bytes_read += self.lock_socket
-                              .read(&mut self.receive_buffer.bytes_mut()[bytes_read..])
+                              .read(&mut self.receive_buffer.sized_bytes_mut()[bytes_read..])
                               .expect("cannot read");
         }
         //trace!("client read base header");
@@ -252,7 +252,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             bytes_read +=
                 self.lock_socket
                     .read(&mut self.receive_buffer
-                                   .bytes_mut()[bytes_read..])
+                                   .sized_bytes_mut()[bytes_read..])
                     .expect("cannot read");
         }
         let end = self.receive_buffer.entry_size();
@@ -261,7 +261,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             bytes_read +=
                 self.lock_socket
                     .read(&mut self.receive_buffer
-                                   .bytes_mut()[bytes_read..])
+                                   .sized_bytes_mut()[bytes_read..])
                     .expect("cannot read");
         }
     }

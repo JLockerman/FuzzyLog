@@ -159,7 +159,7 @@ impl PerClient {
 
     fn try_read_packet(&mut self) -> io::Result<usize> {
         if self.sent_bytes < base_header_size() {
-            let read = try!(self.stream.read(&mut self.buffer.bytes_mut()[self.sent_bytes..]));
+            let read = try!(self.stream.read(&mut self.buffer.sized_bytes_mut()[self.sent_bytes..]));
             self.sent_bytes += read;
             if self.sent_bytes < base_header_size() {
                 return Ok(1);
@@ -170,7 +170,7 @@ impl PerClient {
         assert!(header_size >= base_header_size());
         if self.sent_bytes < header_size {
             let read = try!(self.stream.read(&mut self.buffer
-                .bytes_mut()[self.sent_bytes..]));
+                .sized_bytes_mut()[self.sent_bytes..]));
             self.sent_bytes += read;
             if self.sent_bytes < header_size {
                 return Ok(1);
@@ -180,7 +180,7 @@ impl PerClient {
         let size = self.buffer.entry_size();
         if self.sent_bytes < size {
             try!(self.stream.read(&mut self.buffer
-                .bytes_mut()[self.sent_bytes..]));
+                .sized_bytes_mut()[self.sent_bytes..]));
             if self.sent_bytes < size {
                 return Ok(1);
             }

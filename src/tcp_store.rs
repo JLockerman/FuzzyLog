@@ -49,7 +49,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         trace!("client read start base header");
         while bytes_read < base_header_size() {
             bytes_read += self.socket
-                .read(&mut self.receive_buffer.bytes_mut()[bytes_read..])
+                .read(&mut self.receive_buffer.sized_bytes_mut()[bytes_read..])
                 .expect("cannot read");
         }
         trace!("client read base header");
@@ -57,14 +57,14 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         trace!("header size {}", header_size);
         while bytes_read < header_size {
             bytes_read += self.socket.read(&mut self.receive_buffer
-                .bytes_mut()[bytes_read..])
+                .sized_bytes_mut()[bytes_read..])
                 .expect("cannot read");
         }
         let end = self.receive_buffer.entry_size();
         trace!("client read more header, entry size {}", end);
         while bytes_read < end {
             bytes_read += self.socket.read(&mut self.receive_buffer
-                .bytes_mut()[bytes_read..])
+                .sized_bytes_mut()[bytes_read..])
                 .expect("cannot read");
         }
     }

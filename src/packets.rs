@@ -6,6 +6,8 @@ use std::slice;
 
 pub use uuid::Uuid;
 
+pub use storeables::Storeable;
+
 use self::EntryContents::*;
 
 custom_derive! {
@@ -43,6 +45,20 @@ pub type OrderIndex = (order, entry);
 ///////////////////////////////////////
 ///////////////////////////////////////
 
+// kinds of packets:
+// single chain append
+//   needs location, data, deps
+// multi chain append
+//   needs locations, data, deps, id?
+// multi server append
+//   needs locations, data, deps, id, lock number
+// multi server append
+//   needs above + dependent chains
+// sentinel
+//   needs id, locations?
+// unlock
+//   needs lock number
+
 #[allow(non_snake_case)]
 pub mod EntryKind {
     #![allow(non_upper_case_globals)]
@@ -52,7 +68,8 @@ pub mod EntryKind {
             const Invalid = 0x0,
             const Data = 0x1,
             const Multiput = 0x2,
-            const Sentinel = 0x4 | Multiput.bits,
+            const Sentinel = 0x4,
+            const Unlock = Sentinel.bits | Multiput.bits,
 
             const Layout = Data.bits | Multiput.bits | Sentinel.bits,
 
@@ -70,19 +87,11 @@ pub mod EntryKind {
 
 pub const MAX_DATA_LEN: usize = 4096 - 8 - (4 + 8 + 16); //TODO
 
-#[repr(C)] //TODO
-pub struct OLD<V, D: ?Sized = [u8; MAX_DATA_LEN]> {
-    _pd: PhantomData<V>,
-    pub kind: EntryKind::Kind,
-    pub _padding: [u8; 1],
-    pub cols: u16, //padding for non-multiputs
-    pub data_bytes: u16,
-    pub dependency_bytes: u16,
-    pub data: D
-    // layout Optional uuid, [u8; data_bytes] [OrderIndex; dependency_bytes/size<OrderIndex>]
-}
-
 pub const MAX_DATA_LEN2: usize = 4096 - 24; //TODO
+
+//TODO as much as possible we want fields in fixed locations to reduce
+//     branchieness and to allow to make it easier to FPGAify
+//     All writes need an ID, and num locations, and num bytes
 
 #[repr(C)] //TODO
 pub struct Entry<V: ?Sized, F: ?Sized = [u8; MAX_DATA_LEN2]> {
@@ -111,6 +120,14 @@ pub struct MultiFlex<D: ?Sized = [u8; MAX_MULTI_DATA_LEN]> {
     pub _padding: [u8; 6],
     pub cols: u16,
     pub data: D,
+}
+
+#[repr(C)]
+pub struct Unlock {
+    pub id: Uuid,
+    pub kind: EntryKind::Kind,
+    pub _padding: [u8; 3],
+    pub lock: u64,
 }
 
 
@@ -172,6 +189,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                     assert!(r as *const _ != ptr::null());
                     r.multi_contents(data_bytes, dependency_bytes, uuid)
                 }
+                EntryKind::Unlock => panic!("unimpl"),
                 _ => unreachable!()
             }
         }
@@ -276,9 +294,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
             mem::transmute(&mut bytes[0])
         }
     }
-}
 
-impl<V: ?Sized + Storeable, F> Entry<V, F> {
     pub unsafe fn as_data_entry(&self) -> &Entry<V, DataFlex> {
         mem::transmute(self)
     }
@@ -295,15 +311,34 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
         mem::transmute(self)
     }
 
+    pub unsafe fn as_unlock_entry(&self) -> &Unlock {
+        mem::transmute(self)
+    }
+
+    pub unsafe fn as_unlock_entry_mut(&mut self) -> &mut Unlock {
+        mem::transmute(self)
+    }
+
     pub fn bytes(&self) -> &[u8] {
         unsafe {
             let ptr: *const _ = self;
             let ptr: *const u8 = ptr as *const _;
-            slice::from_raw_parts(ptr, mem::size_of::<Self>())
+            let size = self.entry_size();
+            slice::from_raw_parts(ptr, size)
         }
     }
 
     pub fn bytes_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            let ptr: *mut _ = self;
+            let ptr: *mut u8 = ptr as *mut _;
+            let size = self.entry_size();
+            slice::from_raw_parts_mut(ptr, size)
+        }
+    }
+
+    //TODO remove after switching servers and clients to use [u8] as partial packets?
+    pub fn sized_bytes_mut(&mut self) -> &mut [u8] {
         unsafe {
             let ptr: *mut _ = self;
             let ptr: *mut u8 = ptr as *mut _;
@@ -321,6 +356,9 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
                 //     nor deps, and exactly one column
                 unsafe { self.as_multi_entry().flex.lock }
             }
+            EntryKind::Unlock => unsafe {
+                self.as_unlock_entry().lock
+            },
             _ => unreachable!(),
         }
     }
@@ -332,6 +370,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
                     slice::from_raw_parts(&self.as_data_entry().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry().mlocs(),
                 EntryKind::Sentinel => self.as_multi_entry().mlocs(),
+                EntryKind::Unlock => &[],
                 _ => unreachable!()
             }
         }
@@ -344,6 +383,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
                     slice::from_raw_parts_mut(&mut self.as_data_entry_mut().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry_mut().mlocs_mut(),
                 EntryKind::Sentinel => self.as_multi_entry_mut().mlocs_mut(),
+                EntryKind::Unlock => &mut [],
                 _ => unreachable!()
             }
         }
@@ -368,11 +408,15 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
                 //     nor deps, and exactly one column
                 mem::size_of::<Entry<(), MultiFlex<()>>>()
             }
+            EntryKind::Unlock => mem::size_of::<Unlock>(),
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
         }
     }
 
     pub fn payload_size(&self) -> usize {
+        if self.is_unlock() {
+            return 0
+        }
         let mut size = self.data_bytes as usize + self.dependency_bytes as usize;
         if self.is_multi() {
             let header = unsafe { mem::transmute::<_, &Entry<V, MultiFlex<()>>>(self) };
@@ -392,6 +436,7 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
             EntryKind::Data | EntryKind::Read => self.data_entry_size(),
             EntryKind::Multiput => self.multi_entry_size(),
             EntryKind::Sentinel => self.sentinel_entry_size(),
+            //EntryKind::Unlock => mem::size_of::<Unlock>(),
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
         };
         assert!(size >= base_header_size());
@@ -444,6 +489,10 @@ impl<V: ?Sized + Storeable, F> Entry<V, F> {
 
     pub fn is_sentinel(&self) -> bool {
         self.kind & EntryKind::Layout == EntryKind::Sentinel
+    }
+
+    pub fn is_unlock(&self) -> bool {
+        self.kind &EntryKind::Layout == EntryKind::Unlock
     }
 }
 
@@ -507,6 +556,7 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let num_cols = match self.kind & EntryKind::Layout {
                 EntryKind::Multiput => self.flex.cols,
                 EntryKind::Sentinel => 1,
+                EntryKind::Unlock => panic!("unimpl"), //TODO
                 _ => unreachable!()
             };
             assert!(num_cols > 0);
@@ -701,78 +751,132 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
 ///////////////////////////////////////
 ///////////////////////////////////////
 
-//TODO require !Drop?
-pub trait Storeable {
-    fn size(&self) -> usize;
-    unsafe fn ref_to_bytes(&self) -> &u8;
-    unsafe fn bytes_to_ref(&u8, usize) -> &Self;
-    unsafe fn bytes_to_mut(&mut u8, usize) -> &mut Self;
-    unsafe fn clone_box(&self) -> Box<Self>;
-    unsafe fn copy_to_mut(&self, &mut Self) -> usize;
-}
+#[cfg(test)]
+mod test {
 
-impl<V> Storeable for V { //TODO should V be Copy/Clone?
-    fn size(&self) -> usize {
-        mem::size_of::<Self>()
+    use super::*;
+    use super::EntryContents::*;
+
+    use std::marker::PhantomData;
+
+
+    #[test]
+    fn test_entry2_header_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<(), ()>>(), 24);
     }
 
-    unsafe fn ref_to_bytes(&self) -> &u8 {
-        mem::transmute(self)
+    #[test]
+    fn test_entry2_data_header_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<DataFlex<()>>(), 8);
     }
 
-
-    unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
-        assert_eq!(size, mem::size_of::<Self>());
-        mem::transmute(val)
+    #[test]
+    fn test_entry2_multi_header_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<MultiFlex<()>>(), 16);
     }
 
-    unsafe fn bytes_to_mut(val: &mut u8, size: usize) -> &mut Self {
-        assert_eq!(size, mem::size_of::<Self>());
-        mem::transmute(val)
+    #[repr(C)] //TODO
+    pub struct PrimEntry<V, F: ?Sized = [u8; MAX_DATA_LEN2]> {
+        _pd: PhantomData<V>,
+        pub id: [u64; 2],
+        pub kind: EntryKind::Kind,
+        pub _padding: [u8; 1],
+        pub data_bytes: u16,
+        pub dependency_bytes: u16,
+        pub flex: F,
     }
 
-    unsafe fn clone_box(&self) -> Box<Self> {
-        let mut b = Box::new(mem::uninitialized());
-        ptr::copy_nonoverlapping(self, &mut *b, 1);
-        b
+    #[test]
+    fn test_entry_primitive() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<()>>(), size_of::<PrimEntry<()>>());
     }
 
-    unsafe fn copy_to_mut(&self, out: &mut Self) -> usize {
-        ptr::copy(self, out, 1);
-        mem::size_of::<Self>()
-    }
-}
-
-impl<V> Storeable for [V] {
-    fn size(&self) -> usize {
-        mem::size_of::<V>() * self.len()
+    #[test]
+    fn test_entry2_data_header() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<(), DataFlex<()>>>(),
+            size_of::<Entry<(), ()>>() + size_of::<DataFlex<()>>());
     }
 
-    unsafe fn ref_to_bytes(&self) -> &u8 {
-        mem::transmute(&self[0])
+    #[test]
+    fn test_entry2_multi_header() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<(), MultiFlex<()>>>(), size_of::<Entry<(), ()>>() + size_of::<MultiFlex<()>>());
     }
 
-    unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
-        assert_eq!(size % mem::size_of::<V>(), 0);
-        slice::from_raw_parts(val as *const _ as *const _, size / mem::size_of::<V>())
+    #[test]
+    fn test_entry2_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<()>>(), 4096);
     }
 
-    unsafe fn bytes_to_mut(val: &mut u8, size: usize) -> &mut Self {
-        assert_eq!(size % mem::size_of::<V>(), 0);
-        slice::from_raw_parts_mut(val as *mut _ as *mut _, size / mem::size_of::<V>())
+    #[test]
+    fn test_entry2_data_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<(), DataFlex>>(), 4096);
     }
 
-    unsafe fn clone_box(&self) -> Box<Self> {
-        let mut v = Vec::with_capacity(self.len());
-        v.set_len(self.len());
-        let mut b = v.into_boxed_slice();
-        ptr::copy_nonoverlapping(&self[0], &mut b[0], self.len());
-        b
+    #[test]
+    fn test_entry2_multi_size() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Entry<(), MultiFlex>>(), 4096);
     }
 
-    unsafe fn copy_to_mut(&self, out: &mut Self) -> usize {
-        let to_copy = ::std::cmp::min(self.len(), out.len());
-        ptr::copy(&self[0], &mut out[0], to_copy);
-        to_copy * mem::size_of::<V>()
+    #[test]
+    fn multiput_entry_convert() {
+        use std::fmt::Debug;
+        //test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+        //test_(3334, &[], &[]);
+        //test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+        //test_(3334u64, &[], &[]);
+        //test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+        //test_((3334u64, 1231123), &[], &[]);
+        //test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+
+        test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+        test_(3334, &[], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+        test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+        test_(3334u64, &[], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+        test_(3334u64, &[(01.into(), 10.into())], &[(02.into(), 9.into()), (201.into(), 0.into()), (02.into(), 57.into()), (201.into(), 0xffffffff.into()), (02.into(), 0xdeadbeef.into()), (201.into(), 2.into()), (02.into(), 6.into()), (201.into(), 201.into())]);
+        test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+        test_((3334u64, 1231123), &[], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+        test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+
+        fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex], cols: &[OrderIndex]) {
+            let id = Uuid::new_v4();
+            let ent1 = Multiput{
+            	data: &data,
+                uuid: &id,
+                deps: &deps,
+                columns: cols,
+            };
+            let entr = Box::new(ent1.clone_entry());
+            let ent2 = entr.contents();
+            assert_eq!(ent1, ent2);
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn data_entry_convert() {
+        use std::fmt::Debug;
+        test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())]);
+        test_(3334, &[]);
+        test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())]);
+        test_(3334u64, &[]);
+        test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())]);
+        test_((3334u64, 1231123), &[]);
+        test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())]);
+
+        fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex]) {
+            let ent1 = Data(&data, &deps);
+            let entr = Box::new(ent1.clone_entry());
+            let ent2 = entr.contents();
+            assert_eq!(ent1, ent2);
+        }
     }
 }
