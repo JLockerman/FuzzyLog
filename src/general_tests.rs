@@ -9,7 +9,7 @@ macro_rules! general_tests {
 
         #[cfg(test)]
         mod general_tests {
-            //last column used is 22
+            //last column used is 25
 
             extern crate env_logger;
 
@@ -544,6 +544,8 @@ macro_rules! general_tests {
                     }
                 }
             }
+
+            //TODO add test which ensures that multiappeds are linearizeable with respect to single appends
 
         }//End mod test
 

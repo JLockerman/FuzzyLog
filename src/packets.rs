@@ -56,7 +56,7 @@ pub type OrderIndex = (order, entry);
 //   needs above + dependent chains
 // sentinel
 //   needs id, locations?
-// unlock
+// lock
 //   needs lock number
 
 #[allow(non_snake_case)]
@@ -68,12 +68,12 @@ pub mod EntryKind {
             const Invalid = 0x0,
             const Data = 0x1,
             const Multiput = 0x2,
-            const Sentinel = 0x4,
-            const Unlock = Sentinel.bits | Multiput.bits,
-
+            const Lock = 0x4,
+            const Sentinel = Lock.bits | Multiput.bits,
+            const Read = Data.bits | Multiput.bits,
             const Layout = Data.bits | Multiput.bits | Sentinel.bits,
 
-            const Read = Data.bits | Multiput.bits,
+            const TakeLock = 0x8,
 
             const ReadSuccess = 0x80,
 
@@ -81,6 +81,33 @@ pub mod EntryKind {
             const ReadMulti = Multiput.bits | ReadSuccess.bits,
             //const GotValue = Read.bits | Success.bits,
             const NoValue = Read.bits,
+        }
+    }
+
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    pub enum EntryLayout {
+        Data,
+        Multiput,
+        Lock,
+        Sentinel,
+        Read,
+    }
+
+    impl Kind {
+        pub fn layout(&self) -> EntryLayout {
+            match *self & Layout {
+                Data => EntryLayout::Data,
+                Multiput => EntryLayout::Multiput,
+                Lock => EntryLayout::Lock,
+                Sentinel => EntryLayout::Sentinel,
+                Read => EntryLayout::Read,
+                Invalid => panic!("Empty Layout"),
+                v => unreachable!("{:?}", v),
+            }
+        }
+
+        pub fn is_taking_lock(&self) -> bool {
+            self.contains(TakeLock)
         }
     }
 }
@@ -123,7 +150,7 @@ pub struct MultiFlex<D: ?Sized = [u8; MAX_MULTI_DATA_LEN]> {
 }
 
 #[repr(C)]
-pub struct Unlock {
+pub struct Lock {
     pub id: Uuid,
     pub kind: EntryKind::Kind,
     pub _padding: [u8; 3],
@@ -189,7 +216,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                     assert!(r as *const _ != ptr::null());
                     r.multi_contents(data_bytes, dependency_bytes, uuid)
                 }
-                EntryKind::Unlock => panic!("unimpl"),
+                EntryKind::Lock => panic!("unimpl"),
                 _ => unreachable!()
             }
         }
@@ -311,11 +338,19 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         mem::transmute(self)
     }
 
-    pub unsafe fn as_unlock_entry(&self) -> &Unlock {
+    pub unsafe fn as_sentinel_entry(&self) -> &Entry<V, MultiFlex> {
         mem::transmute(self)
     }
 
-    pub unsafe fn as_unlock_entry_mut(&mut self) -> &mut Unlock {
+    pub unsafe fn as_sentinel_entry_mut(&mut self) -> &mut Entry<V, MultiFlex> {
+        mem::transmute(self)
+    }
+
+    pub unsafe fn as_lock_entry(&self) -> &Lock {
+        mem::transmute(self)
+    }
+
+    pub unsafe fn as_lock_entry_mut(&mut self) -> &mut Lock {
         mem::transmute(self)
     }
 
@@ -356,8 +391,8 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                 //     nor deps
                 self.as_multi_entry().flex.lock
             },
-            EntryKind::Unlock => unsafe {
-                self.as_unlock_entry().lock
+            EntryKind::Lock => unsafe {
+                self.as_lock_entry().lock
             },
             _ => unreachable!(),
         }
@@ -370,7 +405,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                     slice::from_raw_parts(&self.as_data_entry().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry().mlocs(),
                 EntryKind::Sentinel => self.as_multi_entry().mlocs(),
-                EntryKind::Unlock => &[],
+                EntryKind::Lock => &[],
                 _ => unreachable!()
             }
         }
@@ -383,7 +418,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                     slice::from_raw_parts_mut(&mut self.as_data_entry_mut().flex.loc, 1),
                 EntryKind::Multiput => self.as_multi_entry_mut().mlocs_mut(),
                 EntryKind::Sentinel => self.as_multi_entry_mut().mlocs_mut(),
-                EntryKind::Unlock => &mut [],
+                EntryKind::Lock => &mut [],
                 _ => unreachable!()
             }
         }
@@ -408,13 +443,13 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                 //     nor deps
                 mem::size_of::<Entry<(), MultiFlex<()>>>()
             }
-            EntryKind::Unlock => mem::size_of::<Unlock>(),
+            EntryKind::Lock => mem::size_of::<Lock>(),
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
         }
     }
 
     pub fn payload_size(&self) -> usize {
-        if self.is_unlock() {
+        if self.is_lock() {
             return 0
         }
         let mut size = self.data_bytes as usize + self.dependency_bytes as usize;
@@ -433,7 +468,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
             EntryKind::Data | EntryKind::Read => self.data_entry_size(),
             EntryKind::Multiput => self.multi_entry_size(),
             EntryKind::Sentinel => self.sentinel_entry_size(),
-            //EntryKind::Unlock => mem::size_of::<Unlock>(),
+            EntryKind::Lock => mem::size_of::<Lock>(),
             _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
         };
         assert!(size >= base_header_size());
@@ -491,8 +526,8 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         self.kind & EntryKind::Layout == EntryKind::Sentinel
     }
 
-    pub fn is_unlock(&self) -> bool {
-        self.kind &EntryKind::Layout == EntryKind::Unlock
+    pub fn is_lock(&self) -> bool {
+        self.kind &EntryKind::Layout == EntryKind::Lock
     }
 }
 
@@ -556,7 +591,7 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let num_cols = match self.kind & EntryKind::Layout {
                 EntryKind::Multiput => self.flex.cols,
                 EntryKind::Sentinel => 1,
-                EntryKind::Unlock => panic!("unimpl"), //TODO
+                EntryKind::Lock => panic!("unimpl"), //TODO
                 _ => unreachable!()
             };
             assert!(num_cols > 0);
@@ -580,6 +615,14 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let data_offset = (self.flex.cols as usize * mem::size_of::<OrderIndex>()) as isize;
             let (data, deps) = self.data_and_deps(contents_ptr, data_bytes, data_offset);
             Multiput{data: data, uuid: uuid, columns: cols, deps: deps}
+        }
+    }
+}
+
+impl Lock {
+    pub fn bytes(&self) -> &[u8] {
+        unsafe {
+            slice::from_raw_parts(self as *const _ as *const u8, mem::size_of::<Self>())
         }
     }
 }

@@ -7,6 +7,7 @@ use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
 
 use prelude::*;
+use packets::EntryKind::EntryLayout;
 
 use mio;
 use mio::prelude::*;
@@ -34,6 +35,7 @@ struct ServerLog {
     log: HashMap<OrderIndex, Rc<Entry<()>>>,
     horizon: HashMap<order, entry>,
     last_lock: u64,
+    last_unlock: u64,
 }
 
 impl Server {
@@ -62,9 +64,9 @@ impl mio::Handler for Server {
         match token {
             LISTENER_TOKEN => {
                 assert!(events.is_readable());
-                trace!("got accept");
+                trace!("SERVER got accept");
                 match self.acceptor.accept() {
-                    Ok(None) => trace!("false accept"),
+                    Ok(None) => trace!("SERVER false accept"),
                     Err(e) => panic!("error {}", e),
                     Ok(Some((socket, addr))) => {
                         let _ = socket.set_keepalive(Some(1));
@@ -72,7 +74,7 @@ impl mio::Handler for Server {
                         // let _ = socket.set_tcp_nodelay(true);
                         let next_client_id = self.clients.len() + 1;
                         let client_token = mio::Token(next_client_id);
-                        trace!("new client {:?}, {:?}", next_client_id, addr);
+                        trace!("SERVER new client {:?}, {:?}", next_client_id, addr);
                         let client = PerClient::new(socket);
                         let client_socket = &match self.clients.entry(client_token) {
                                                  Vacant(v) => v.insert(client),
@@ -91,7 +93,7 @@ impl mio::Handler for Server {
                 }
             }
             client_token => {
-                // trace!("got client event");
+                // trace!("SERVER got client event");
                 if events.is_error() {
                     let err = self.clients
                                   .get_mut(&client_token)
@@ -99,31 +101,36 @@ impl mio::Handler for Server {
                                                                "socket does not exist"))
                                   .map(|s| s.stream.take_socket_error());
                     if err.is_err() {
-                        trace!("dropping client {:?} due to", client_token);
+                        trace!("SERVER dropping client {:?} due to", client_token);
                         self.clients.remove(&client_token);
                     }
                     return;
                 }
                 let client = self.clients.get_mut(&client_token).unwrap();
                 let next_interest = if events.is_readable() {
-                    // trace!("gonna read from client");
+                    // trace!("SERVER gonna read from client");
                     let finished_read = client.read_packet();
                     if finished_read {
-                        trace!("finished read from client {:?}", client_token);
-                        self.log.handle_op(&mut *client.buffer);
-                        mio::EventSet::writable()
+                        trace!("SERVER finished read from client {:?}", client_token);
+                        let need_to_respond = self.log.handle_op(&mut *client.buffer);
+                        if need_to_respond {
+                            mio::EventSet::writable()
+                        }
+                        else {
+                            mio::EventSet::readable()
+                        }
                     } else {
-                        // trace!("keep reading from client");
+                        // trace!("SERVER keep reading from client");
                         mio::EventSet::readable()
                     }
                 } else if events.is_writable() {
-                    //trace!("gonna write from client {:?}", client_token);
+                    //trace!("SERVER gonna write from client {:?}", client_token);
                     let finished_write = client.write_packet();
                     if finished_write {
-                        trace!("finished write from client {:?}", client_token);
+                        trace!("SERVER finished write from client {:?}", client_token);
                         mio::EventSet::readable()
                     } else {
-                        //trace!("keep writing from client {:?}", client_token);
+                        //trace!("SERVER keep writing from client {:?}", client_token);
                         mio::EventSet::writable()
                     }
                 } else {
@@ -193,10 +200,10 @@ impl PerClient {
     fn write_packet(&mut self) -> bool {
         match self.try_send_packet() {
             Ok(s) => {
-                //trace!("wrote {} bytes", s);
+                //trace!("SERVER wrote {} bytes", s);
                 self.sent_bytes += s;
                 if self.sent_bytes >= self.buffer.entry_size() {
-                    trace!("finished write");
+                    trace!("SERVER finished write");
                     self.sent_bytes = 0;
                     let _ = self.stream.flush();
                     return true;
@@ -204,7 +211,7 @@ impl PerClient {
                 self.sent_bytes >= self.buffer.entry_size()
             }
             Err(e) => {
-                trace!("write err {:?}", e);
+                trace!("SERVER write err {:?}", e);
                 false
             }
         }
@@ -212,7 +219,7 @@ impl PerClient {
 
     fn try_send_packet(&mut self) -> io::Result<usize> {
         let send_size = self.buffer.entry_size() - self.sent_bytes;
-        // trace!("server send size {}", send_size);
+        // trace!("SERVER server send size {}", send_size);
         self.stream
             .write(&self.buffer.bytes()[self.sent_bytes..send_size])
     }
@@ -224,91 +231,144 @@ impl ServerLog {
             log: HashMap::new(),
             horizon: HashMap::new(),
             last_lock: 0,
+            last_unlock: 0,
         }
     }
 
-    fn handle_op(&mut self, val: &mut Entry<()>) {
+    fn handle_op(&mut self, val: &mut Entry<()>) -> bool {
         let kind = val.kind;
-        if let EntryKind::Multiput = kind & EntryKind::Layout {
-            // trace!("multiput {:?}", val);
-            trace!("multiput");
-            if val.lock_num() == 0 || val.lock_num() == self.last_lock + 1 {
-                {
-                    if val.lock_num() == self.last_lock + 1 {
-                        trace!("right lock {}", val.lock_num());
-                        self.last_lock += 1;
-                    }
-                    val.kind = kind | EntryKind::ReadSuccess;
-                    let locs = val.locs_mut();
-                    for i in 0..locs.len() {
-                        let hor: entry = self.horizon
-                                             .get(&locs[i].0)
-                                             .cloned()
-                                             .unwrap_or(0.into()) +
-                                         1;
-                        locs[i].1 = hor;
-                        self.horizon.insert(locs[i].0, hor);
-                    }
-                }
-                trace!("appending at {:?}", val.locs());
-                let contents = Rc::new(val.clone());
-                for &loc in val.locs() {
-                    self.log.insert(loc, contents.clone());
-                    // trace!("appended at {:?}", loc);
-                }
-            } else { trace!("wrong lock {} expected {}", val.lock_num(), self.last_lock + 1); }
-        } else {
-            // trace!("single {:?}", val);
-            let loc = {
-                let loc = unsafe { &mut val.as_data_entry_mut().flex.loc };
-                trace!("loc {:?}", loc);
-                if kind & EntryKind::Layout == EntryKind::Data {
-                    trace!("is write");
-                    let hor = self.horizon.get(&loc.0).cloned().unwrap_or(0.into()) + 1;
-                    *loc = (loc.0, hor);
-                } else {
-                    trace!("is read");
-                }
-                trace!("loc {:?}", loc);
-                *loc
-            };
-
-            match self.log.entry(loc) {
-                Vacant(e) => {
-                    trace!("Vacant entry {:?}", loc);
-                    assert_eq!(unsafe { val.as_data_entry().flex.loc }, loc);
-                    match kind & EntryKind::Layout {
-                        EntryKind::Data => {
-                            trace!("writing");
-                            val.kind = kind | EntryKind::ReadSuccess;
-                            let packet = Rc::new(val.clone());
-                            e.insert(packet);
-                            self.horizon.insert(loc.0, loc.1);
-                        }
-                        _ => {
-                            if val.kind == EntryKind::Read {
-                                let last_entry = self.horizon.get(&loc.0).cloned().unwrap_or(0.into());
-                                let (old_id, old_loc) = unsafe {
-                                    (val.id, val.as_data_entry().flex.loc)
-                                };
-                                *val = EntryContents::Data(&(), &[(loc.0, last_entry)]).clone_entry();
-                                val.id = old_id;
-                                val.kind = EntryKind::NoValue;
-                                unsafe {
-                                    val.as_data_entry_mut().flex.loc = old_loc;
-                                }
+        match kind.layout() {
+            EntryLayout::Multiput | EntryLayout::Sentinel => {
+                trace!("SERVER multiput");
+                //TODO handle sentinels
+                if self.try_lock(val.lock_num()) {
+                    {
+                        val.kind = kind | EntryKind::ReadSuccess;
+                        let locs = val.locs_mut();
+                        trace!("SERVER locs {:?}", locs);
+                        'update_horizon: for i in 0..locs.len() {
+                            if locs[i] == (0.into(), 0.into()) {
+                                break 'update_horizon
                             }
-                            trace!("empty read {:?}", loc)
+                            let hor: entry = self.horizon
+                                                 .get(&locs[i].0)
+                                                 .cloned()
+                                                 .unwrap_or(0.into()) +
+                                             1;
+                            locs[i].1 = hor;
+                            self.horizon.insert(locs[i].0, hor);
                         }
                     }
+                    trace!("SERVER appending at {:?}", val.locs());
+                    let contents = Rc::new(val.clone());
+                    'emplace: for &loc in val.locs() {
+                        if loc == (0.into(), 0.into()) {
+                            break 'emplace
+                        }
+                        self.log.insert(loc, contents.clone());
+                        // trace!("SERVER appended at {:?}", loc);
+                    }
+                } else {
+                    trace!("SERVER wrong lock {} @ ({},{})",
+                        val.lock_num(), self.last_lock, self.last_unlock);
                 }
-                Occupied(mut e) => {
-                    trace!("Occupied entry {:?}", loc);
-                    let packet = e.get_mut();
-                    *val = (**packet).clone();
-                    // trace!("returning {:?}", packet);
+            }
+            EntryLayout::Read => {
+                trace!("SERVER Read");
+                let loc = unsafe { val.as_data_entry_mut().flex.loc };
+                match self.log.entry(loc) {
+                    Vacant(..) => {
+                        trace!("SERVER Read Vacant entry {:?}", loc);
+                        if val.kind == EntryKind::Read {
+                            //TODO validate lock
+                            let l = loc.0;
+                            let last_entry = self.horizon.get(&l).cloned().unwrap_or(0.into());
+                            let (old_id, old_loc) = unsafe {
+                                (val.id, val.as_data_entry().flex.loc)
+                            };
+                            *val = EntryContents::Data(&(), &[(l, last_entry)]).clone_entry();
+                            val.id = old_id;
+                            val.kind = EntryKind::NoValue;
+                            unsafe {
+                                val.as_data_entry_mut().flex.loc = old_loc;
+                            }
+                            trace!("SERVER empty read {:?}", loc)
+                        }
+                        else {
+                            trace!("SERVER nop {:?}", val.kind)
+                        }
+                    }
+                    Occupied(mut e) => {
+                        trace!("SERVER Read Occupied entry {:?}", loc);
+                        let packet = e.get_mut();
+                        *val = (**packet).clone();
+                        // trace!("SERVER returning {:?}", packet);
+                    }
+                }
+            }
+
+            EntryLayout::Data => {
+                trace!("SERVER Append");
+                let loc = {
+                    let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
+                    let hor = self.horizon.get(&l.0).cloned().unwrap_or(0.into()) + 1;
+                    l.1 = hor;
+                    *l
+                };
+
+                match self.log.entry(loc) {
+                    Vacant(e) => {
+                        trace!("SERVER Writing vacant entry {:?}", loc);
+                        assert_eq!(unsafe { val.as_data_entry().flex.loc }, loc);
+                        //TODO validate lock
+                        val.kind = kind | EntryKind::ReadSuccess;
+                        let packet = Rc::new(val.clone());
+                        e.insert(packet);
+                        self.horizon.insert(loc.0, loc.1);
+                    }
+                    _ => {
+                        unreachable!("SERVER Occupied entry {:?}", loc)
+                        //*val = (**packet).clone();
+                    }
+                }
+            }
+
+            EntryLayout::Lock => {
+                trace!("SERVER Lock");
+                let lock_num = unsafe { val.as_lock_entry().lock };
+                if kind.is_taking_lock() {
+                    let acquired_loc = self.try_lock(lock_num);
+                    if acquired_loc {
+                        val.kind = kind | EntryKind::ReadSuccess;
+                    }
+                    else {
+                        unsafe { val.as_lock_entry_mut().lock = self.last_lock };
+                    }
+                    return true
+                }
+                else {
+                    if lock_num == self.last_lock {
+                        self.last_unlock = self.last_lock;
+                    }
+                    return false
                 }
             }
         }
+        true
+    }
+
+    fn try_lock(&mut self, lock_num: u64) -> bool {
+        if self.is_unlocked()
+            && (lock_num == 0 || lock_num == self.last_lock + 1) {
+            self.last_lock = lock_num;
+            true
+        }
+        else {
+            false
+        }
+    }
+
+    fn is_unlocked(&self) -> bool {
+        self.last_lock == self.last_unlock
     }
 }
