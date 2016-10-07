@@ -371,7 +371,7 @@ mod test {
         }
     }
 
-    general_tests!(super::new_store);
+    //general_tests!(super::new_store);
 
     #[cfg(False)]
     #[bench]
