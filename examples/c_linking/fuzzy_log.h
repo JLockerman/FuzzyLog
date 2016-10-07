@@ -42,6 +42,17 @@ void snapshot(DAGHandle *handle);
 void close_dag_handle(DAGHandle *handle);
 
 ////////////////////////////////////
+//         Server Bindings        //
+////////////////////////////////////
+
+//Starts a fuzzy log server in the _current_ thread.
+//NOTE this function _never_ returns
+void start_fuzzy_log_server(const char * server_ip);
+
+//Starts a fuzzy log server in a new thread.
+void start_fuzzy_log_server_thread(const char * server_ip);
+
+////////////////////////////////////
 //    Old fuzzy log C bindings    //
 ////////////////////////////////////
 

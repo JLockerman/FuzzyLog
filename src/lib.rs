@@ -151,6 +151,54 @@ pub mod c_binidings {
         assert!(dag != ptr::null_mut());
         Box::from_raw(dag);
     }
+    ////////////////////////////////////
+    //         Server bindings        //
+    ////////////////////////////////////
+
+    #[no_mangle]
+    pub extern "C" fn start_fuzzy_log_server(server_ip: *const i8) -> ! {
+        let server_addr_str = unsafe { CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
+        };
+        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+        let mut event_loop = ::mio::EventLoop::new()
+            .expect("unable to start server loop");
+        let mut server = ::servers::tcp::Server::new(&ip_addr, 0, 1, &mut event_loop)
+            .expect("unable to start server");
+        let res = event_loop.run(&mut server);
+        panic!("server stopped with: {:?}", res)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn start_fuzzy_log_server_thread(server_ip: *const i8) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let server_started = AtomicBool::new(false);
+        let started = unsafe {
+            //This should be safe since the while loop at the of the function
+            //prevents it from exiting until the server is started and
+            //server_started is no longer used
+            extend_lifetime(&server_started)
+        };
+        let server_addr_str = unsafe { CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
+        };
+        let handle = ::std::thread::spawn(move || {
+            let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+            let mut event_loop = ::mio::EventLoop::new()
+                .expect("unable to start server loop");
+            let mut server = ::servers::tcp::Server::new(&ip_addr, 0, 1, &mut event_loop)
+                .expect("unable to start server");
+            started.store(true, Ordering::SeqCst);
+            mem::drop(started);
+            let res = event_loop.run(&mut server);
+            panic!("server stopped with: {:?}", res)
+        });
+        while !server_started.load(Ordering::SeqCst) {}
+        ::std::mem::forget(handle);
+
+        unsafe fn extend_lifetime<'a, 'b, T>(r: &'a T) -> &'b T {
+            ::std::mem::transmute(r)
+        }
+    }
 
     ////////////////////////////////////
     //    Old fuzzy log C bindings    //
