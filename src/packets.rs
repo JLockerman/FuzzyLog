@@ -79,6 +79,7 @@ pub mod EntryKind {
 
             const ReadData = Data.bits | ReadSuccess.bits,
             const ReadMulti = Multiput.bits | ReadSuccess.bits,
+            const ReadSenti = Sentinel.bits | ReadSuccess.bits,
             //const GotValue = Read.bits | Success.bits,
             const NoValue = Read.bits,
         }
@@ -289,7 +290,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         if self.kind == EntryKind::NoValue {
             return unsafe { self.read_deps() };
         }
-        if self.kind == EntryKind::Sentinel {
+        if self.is_sentinel() {
             return &[]
         }
         match self.contents() {
@@ -574,8 +575,7 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let cols_ptr = contents_ptr;
             let cols_ptr = cols_ptr as *const _;
             let num_cols = match self.kind & EntryKind::Layout {
-                EntryKind::Multiput => self.flex.cols,
-                EntryKind::Sentinel => 1,
+                EntryKind::Multiput | EntryKind::Sentinel => self.flex.cols,
                 _ => unreachable!()
             };
             assert!(num_cols > 0);
@@ -589,8 +589,7 @@ impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
             let cols_ptr = contents_ptr;
             let cols_ptr = cols_ptr as *mut _;
             let num_cols = match self.kind & EntryKind::Layout {
-                EntryKind::Multiput => self.flex.cols,
-                EntryKind::Sentinel => 1,
+                EntryKind::Multiput | EntryKind::Sentinel => self.flex.cols,
                 EntryKind::Lock => panic!("unimpl"), //TODO
                 _ => unreachable!()
             };

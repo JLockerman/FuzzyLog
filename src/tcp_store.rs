@@ -339,7 +339,7 @@ pub mod test {
             let handle = thread::spawn(move || {
                 let addr = addr_str.parse().expect("invalid inet address");
                 let mut event_loop = EventLoop::new().unwrap();
-                let server = Server::new(&addr, &mut event_loop);
+                let server = Server::new(&addr, 0, 1, &mut event_loop);
                 if let Ok(mut server) = server {
                     SERVERS_READY.fetch_add(1, Ordering::Release);
                     trace!("starting server");

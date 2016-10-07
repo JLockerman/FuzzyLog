@@ -135,27 +135,31 @@ where V: Storeable, S: Store<V>, H: Horizon{
         match ent.contents() {
             Multiput{data, uuid, columns, deps} => {
                 //TODO
-                trace!("Multiput {:?}", deps);
-                self.read_multiput(data, uuid, columns);
+                trace!("found Multiput {:?} {:?}", uuid, deps);
+                self.update_local_horizon(column, index);
+                self.read_multiput(data, uuid, column, columns);
             }
             Data(data, deps) => {
-                trace!("Data {:?}", deps);
+                trace!("found Data {:?}", deps);
                 self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &(column, index), data.clone())); //TODO clone
+                self.update_local_horizon(column, index);
             }
-            Sentinel(..) => {}
+            Sentinel(..) => {
+                self.update_local_horizon(column, index);
+            }
         }
-        self.local_horizon.insert(column, index);
         Some((column, index))
     }
 
-    fn read_multiput(&mut self, data: &V, put_id: &Uuid, columns: &[OrderIndex]) {
+    fn read_multiput(&mut self, data: &V, put_id: &Uuid, first_column: order, columns: &[OrderIndex]) {
 
         for &(column, index) in columns { //TODO only relevent cols
-            if (column, index) != (0.into(), 0.into()) {
-                trace!("play multiput for col {:?}", column);
+            if (column, index) != (0.into(), 0.into()) && column != first_column {
+                trace!("play multiput {:?} for col {:?}", put_id, column);
                 self.play_until_multiput(column, put_id);
             }
         }
+        trace!("finished multiput {:?}", put_id);
 
         //TODO multiple multiput returns here
         //XXX TODO note multiserver validation happens at the store layer?
@@ -172,7 +176,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
         //     columns of the transaction
         'search: loop {
             let index = self.local_horizon.get(&column).cloned().unwrap_or(0.into()) + 1;
-            trace!("seatching for multiput {:?}\n\tat: {:?}", put_id, (column, index));
+            trace!("searching for multiput {:?}\n\tat: {:?}", put_id, (column, index));
             let ent = self.store.get((column, index)).clone();
             let ent = match ent {
                 Err(GetErr::NoValue(..)) => panic!("invalid multiput."),
@@ -182,25 +186,25 @@ where V: Storeable, S: Store<V>, H: Horizon{
             match ent.contents() {
                 Multiput{uuid, ..} if uuid == put_id => {
                     trace!("found multiput {:?} for {:?} at: {:?}", put_id, column, index);
-                    self.local_horizon.insert(column, index);
+                    self.update_local_horizon(column, index);
                     break 'search
                 }
                 Sentinel(uuid) if uuid == put_id => {
                     trace!("found sentinel {:?} for {:?} at: {:?}", put_id, column, index);
-                    self.local_horizon.insert(column, index);
+                    self.update_local_horizon(column, index);
                     break 'search
                 }
                 Sentinel(..) => continue 'search,
                 Multiput{data, uuid, columns, ..} => {
                     //TODO
-                    trace!("Multiput");
-                    self.read_multiput(data, uuid, columns);
-                    self.local_horizon.insert(column, index);
+                    trace!("recursive Multiput {:?} @ {:?}", uuid, put_id);
+                    self.update_local_horizon(column, index);
+                    self.read_multiput(data, uuid, column, columns);
                 }
                 Data(data, _) => {
                     trace!("Data");
                     self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &(column, index), data)); //TODO clone
-                    self.local_horizon.insert(column, index);
+                    self.update_local_horizon(column, index);
                 }
             }
         }
@@ -235,6 +239,12 @@ where V: Storeable, S: Store<V>, H: Horizon{
 
     pub fn local_horizon(&self) -> &HashMap<order, entry> {
         &self.local_horizon
+    }
+
+    fn update_local_horizon(&mut self, column: order, index: entry) {
+        assert!(self.local_horizon.get(&column).map(|&e| e < index).unwrap_or(true),
+            "bad lhorzion update {:?} -> {:?}", self.local_horizon.get(&column), index);
+        self.local_horizon.insert(column, index);
     }
 
     pub fn snapshot(&mut self, chain: order) -> Option<entry> {
