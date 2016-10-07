@@ -243,20 +243,16 @@ impl ServerLog {
                 //TODO handle sentinels
                 if self.try_lock(val.lock_num()) {
                     {
-                        val.kind = kind | EntryKind::ReadSuccess;
+                        val.kind.insert(EntryKind::ReadSuccess);
                         let locs = val.locs_mut();
                         trace!("SERVER locs {:?}", locs);
+                        //TODO select only relevent chains
                         'update_horizon: for i in 0..locs.len() {
                             if locs[i] == (0.into(), 0.into()) {
                                 break 'update_horizon
                             }
-                            let hor: entry = self.horizon
-                                                 .get(&locs[i].0)
-                                                 .cloned()
-                                                 .unwrap_or(0.into()) +
-                                             1;
+                            let hor: entry = self.increment_horizon(locs[i].0);
                             locs[i].1 = hor;
-                            self.horizon.insert(locs[i].0, hor);
                         }
                     }
                     trace!("SERVER appending at {:?}", val.locs());
@@ -311,7 +307,7 @@ impl ServerLog {
                 trace!("SERVER Append");
                 let loc = {
                     let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
-                    let hor = self.horizon.get(&l.0).cloned().unwrap_or(0.into()) + 1;
+                    let hor = self.increment_horizon(l.0);
                     l.1 = hor;
                     *l
                 };
@@ -321,10 +317,9 @@ impl ServerLog {
                         trace!("SERVER Writing vacant entry {:?}", loc);
                         assert_eq!(unsafe { val.as_data_entry().flex.loc }, loc);
                         //TODO validate lock
-                        val.kind = kind | EntryKind::ReadSuccess;
+                        val.kind.insert(EntryKind::ReadSuccess);
                         let packet = Rc::new(val.clone());
                         e.insert(packet);
-                        self.horizon.insert(loc.0, loc.1);
                     }
                     _ => {
                         unreachable!("SERVER Occupied entry {:?}", loc)
@@ -339,7 +334,7 @@ impl ServerLog {
                 if kind.is_taking_lock() {
                     let acquired_loc = self.try_lock(lock_num);
                     if acquired_loc {
-                        val.kind = kind | EntryKind::ReadSuccess;
+                        val.kind.insert(EntryKind::ReadSuccess);
                     }
                     else {
                         unsafe { val.as_lock_entry_mut().lock = self.last_lock };
@@ -355,6 +350,12 @@ impl ServerLog {
             }
         }
         true
+    }
+
+    fn increment_horizon(&mut self, chain: order) -> entry {
+        let new_horizon = self.horizon.get(&chain).cloned().unwrap_or(0.into()) + 1;
+        self.horizon.insert(chain, new_horizon);
+        new_horizon
     }
 
     fn try_lock(&mut self, lock_num: u64) -> bool {
