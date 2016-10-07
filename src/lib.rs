@@ -34,6 +34,8 @@ extern crate linked_hash_map;
 #[macro_use]
 mod general_tests;
 
+pub mod storeables;
+pub mod packets;
 pub mod prelude;
 pub mod local_store;
 pub mod udp_store;
@@ -166,7 +168,7 @@ pub mod c_binidings {
         let ip_addr = server_addr_str.parse().expect("invalid IP addr");
         let mut event_loop = ::mio::EventLoop::new()
             .expect("unable to start server loop");
-        let mut server = ::servers::tcp::Server::new(&ip_addr, &mut event_loop)
+        let mut server = ::servers::tcp::Server::new(&ip_addr, 0, 1, &mut event_loop)
             .expect("unable to start server");
         let res = event_loop.run(&mut server);
         panic!("server stopped with: {:?}", res)
@@ -189,7 +191,7 @@ pub mod c_binidings {
             let ip_addr = server_addr_str.parse().expect("invalid IP addr");
             let mut event_loop = ::mio::EventLoop::new()
                 .expect("unable to start server loop");
-            let mut server = ::servers::tcp::Server::new(&ip_addr, &mut event_loop)
+            let mut server = ::servers::tcp::Server::new(&ip_addr, 0, 1, &mut event_loop)
                 .expect("unable to start server");
             started.store(true, Ordering::SeqCst);
             mem::drop(started);

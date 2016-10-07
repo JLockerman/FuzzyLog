@@ -186,7 +186,7 @@ mod tests {
 
     //TODO seperate out tcp server
     //TODO switch to multitcp server
-    use tcp_store::test::new_store;
+    use tcp_store::t_test::new_store;
 
     #[test]
     fn single_color() {

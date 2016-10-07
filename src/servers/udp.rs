@@ -30,7 +30,7 @@ impl Server {
         let &mut Server {ref mut receive, ref mut log, ref mut horizon, ref mut buff} = self;
         trace!("starting server");
         'server: loop {
-            let res = receive.recv_from(buff.bytes_mut());
+            let res = receive.recv_from(buff.sized_bytes_mut());
             match res {
                 Err(e) => panic!("{}", e),
                 Ok(Some((_, sa))) => {

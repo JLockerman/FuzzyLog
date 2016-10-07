@@ -9,7 +9,7 @@ macro_rules! general_tests {
 
         #[cfg(test)]
         mod general_tests {
-            //last column used is 22
+            //last column used is 25
 
             extern crate env_logger;
 
@@ -491,6 +491,61 @@ macro_rules! general_tests {
                 log.play_foward(20.into());
                 assert_eq!(&**list.borrow(), &[2,3,4,-1,-1,-1][..]);
             }
+
+            #[test]
+            fn test_dependent() {
+                let _ = env_logger::init();
+                let store = $new_store(
+                    (0..10).map(|i| (23.into(), i.into()))
+                        .chain((0..24).map(|i| (21.into(), i.into())))
+                        .chain((0..25).map(|i| (22.into(), i.into())))
+                        .collect());
+                let horizon = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
+                let list: Rc<RefCell<Vec<(u32, u32)>>> = Rc::new(RefCell::new(Vec::with_capacity(29)));
+                for i in 23..26 {
+                    let l = list.clone();
+                    upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
+                        true
+                    }));
+                }
+                let mut log = FuzzyLog::new(store, horizon, upcalls);
+                for i in 1..10 {
+                    for j in 23..25 {
+                        trace!("append {:?}", (j, i));
+                        log.append(j.into(), &(j, i), &[]);
+                    }
+                    trace!("dappend {:?}", (25, i));
+                    log.dependent_multiappend(&[25.into()], &[23.into(), 24.into()], &(25, i), &[]);
+                }
+                log.play_until((25.into(), 1.into()));
+                assert_eq!(list.borrow_mut().last(), Some(&(25, 1)));
+                assert!(list.borrow_mut().contains(&(23, 1)));
+                assert!(list.borrow_mut().contains(&(24, 1)));
+                log.play_until((25.into(), 2.into()));
+                assert_eq!(list.borrow_mut().last(), Some(&(25, 2)));
+                assert!(list.borrow_mut().contains(&(23, 2)));
+                assert!(list.borrow_mut().contains(&(24, 2)));
+                log.play_until((25.into(), 9.into()));
+                let mut last_multi_loc = None;
+                for i in 1..9 {
+                    use std::iter;
+                    let multi_loc = list.borrow().iter().position(|l| l == &(25, i));
+                    assert!(multi_loc.is_some(), "multi not found @ iter {:?}", i);
+                    let multi_loc = multi_loc.unwrap();
+                    assert!(last_multi_loc.map(|lml| lml < multi_loc).unwrap_or(true),
+                        "multi loc to early @ iter {:?}", i);
+                    last_multi_loc = Some(multi_loc);
+                    for j in 23..25 {
+                        let loc = list.borrow().iter().position(|l| l == &(j, i));
+                        assert!(loc.is_some(), "iter {:?} not found", (i, j));
+                        let loc = loc.unwrap();
+                        assert!(loc < multi_loc, "{:?} to early", (i, j));
+                    }
+                }
+            }
+
+            //TODO add test which ensures that multiappeds are linearizeable with respect to single appends
 
         }//End mod test
 

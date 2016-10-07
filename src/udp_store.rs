@@ -75,7 +75,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
             'receive: loop {
                 let (_, addr) = {
                     this.socket
-                        .recv_from(this.receive_buffer.bytes_mut())
+                        .recv_from(this.receive_buffer.sized_bytes_mut())
                         .expect("unable to receive ack") //TODO
                         //precise_time_ns() as i64 - start_time < this.rtt + 4 * this.dev
                 };
@@ -161,7 +161,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
 
             let (_, addr) = {
                 this.socket
-                    .recv_from(this.receive_buffer.bytes_mut())
+                    .recv_from(this.receive_buffer.sized_bytes_mut())
                     .expect("unable to receive ack") //TODO
             };
             if addr == this.server_addr {
@@ -255,7 +255,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
             'receive: loop {
                 let (_size, addr) = {
                     this.socket
-                        .recv_from(this.receive_buffer.bytes_mut())
+                        .recv_from(this.receive_buffer.sized_bytes_mut())
                         .expect("unable to receive ack") //TODO
                         //precise_time_ns() as i64 - start_time < this.rtt + 4 * this.dev
                 };
@@ -291,6 +291,12 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                 }
             }
         }
+    }
+
+    fn dependent_multi_append(&mut self, chains: &[order],
+        depends_on: &[order], data: &V,
+        deps: &[OrderIndex]) -> InsertResult {
+        panic!("unimplemented")
     }
 }
 

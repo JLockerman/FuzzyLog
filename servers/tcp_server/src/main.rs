@@ -21,7 +21,7 @@ pub fn main() {
         _ => ADDR_STR.parse().expect("invalid default inet address"),
     };
     let mut event_loop = EventLoop::new().unwrap();
-    let mut server = Server::new(&addr, &mut event_loop).unwrap();
+    let mut server = Server::new(&addr, 0, 1, &mut event_loop).unwrap();
     trace!("starting server");
     let _ = event_loop.run(&mut server);
 }
