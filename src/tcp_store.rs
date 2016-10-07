@@ -184,15 +184,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                     trace!("wrong loc {:?}, {:?} expected {:?}", self.receive_buffer, loc, key);
                     continue 'send;
                 }
-                EntryKind::ReadMulti => {
+                EntryKind::ReadMulti | EntryKind::ReadSenti=> {
                     // TODO base on loc instead?
-                    if unsafe {
-                        self.receive_buffer
-                            .as_multi_entry_mut()
-                            .multi_contents_mut()
-                            .columns
-                            .contains(&key)
-                    } {
+                    if self.receive_buffer.locs().contains(&key) {
                         trace!("correct response");
                         return Ok(*self.receive_buffer.clone());
                     }
@@ -274,7 +268,56 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
     fn dependent_multi_append(&mut self, chains: &[order],
         depends_on: &[order], data: &V,
         deps: &[OrderIndex]) -> InsertResult {
-        panic!("unimplemented")
+
+        let request_id = Uuid::new_v4();
+
+        let mchains: Vec<_> = chains.into_iter()
+            .map(|&c| (c, 0.into()))
+            .chain(::std::iter::once((0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .collect();
+
+        *self.send_buffer = EntryContents::Multiput {
+            data: data,
+            uuid: &request_id,
+            columns: &mchains,
+            deps: deps,
+        }.clone_entry();
+        self.send_buffer.id = request_id.clone();
+        trace!("Tpacket {:#?}", self.send_buffer);
+
+        let start_time = precise_time_ns() as i64;
+        'send: loop {
+            trace!("sending");
+            self.send_packet();
+
+            'receive: loop {
+                self.read_packet();
+                trace!("got packet");
+                match self.receive_buffer.kind & EntryKind::Layout {
+                    EntryKind::Multiput => {
+                        // TODO types?
+                        trace!("correct response");
+                        trace!("id {:?}", self.receive_buffer.id);
+                        if self.receive_buffer.id == request_id {
+                            trace!("multiappend success");
+                            let sample_rtt = precise_time_ns() as i64 - start_time;
+                            let diff = sample_rtt - self.rtt;
+                            self.dev = self.dev + (diff.abs() - self.dev) / 4;
+                            self.rtt = self.rtt + (diff * 4 / 5);
+                            return Ok((0.into(), 0.into())); //TODO
+                        } else {
+                            trace!("?? packet {:?}", self.receive_buffer);
+                            continue 'receive;
+                        }
+                    }
+                    v => {
+                        trace!("invalid response {:?}", v);
+                        continue 'receive;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -302,7 +345,7 @@ impl<V: ?Sized> Drop for TcpStore<V> {
 }
 
 #[cfg(test)]
-pub mod test {
+pub mod t_test {
     use super::*;
     use prelude::*;
 
