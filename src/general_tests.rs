@@ -493,7 +493,7 @@ macro_rules! general_tests {
             }
 
             #[test]
-            fn test_dependent() {
+            fn test_dependent() { //TODO multithreaded version
                 let _ = env_logger::init();
                 let store = $new_store(
                     (0..10).map(|i| (23.into(), i.into()))
@@ -517,6 +517,7 @@ macro_rules! general_tests {
                     }
                     trace!("dappend {:?}", (25, i));
                     log.dependent_multiappend(&[25.into()], &[23.into(), 24.into()], &(25, i), &[]);
+                    trace!("finished {:?}", i);
                 }
                 log.play_until((25.into(), 1.into()));
                 assert_eq!(list.borrow_mut().last(), Some(&(25, 1)));

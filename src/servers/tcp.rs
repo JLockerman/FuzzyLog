@@ -87,6 +87,7 @@ impl mio::Handler for Server {
                                                  }
                                              }
                                              .stream;
+                        //TODO edge or level?
                         event_loop.register(client_socket,
                                             client_token,
                                             mio::EventSet::readable() | mio::EventSet::error(),
@@ -116,12 +117,14 @@ impl mio::Handler for Server {
                     if finished_read {
                         trace!("SERVER finished read from client {:?}", client_token);
                         let need_to_respond = self.log.handle_op(&mut *client.buffer);
-                        if need_to_respond {
-                            mio::EventSet::writable()
-                        }
-                        else {
-                            mio::EventSet::readable()
-                        }
+                        //TODO
+                        //if need_to_respond {
+                        //    mio::EventSet::writable()
+                        //}
+                        //else {
+                        //    mio::EventSet::readable()
+                        //}
+                        mio::EventSet::writable()
                     } else {
                         // trace!("SERVER keep reading from client");
                         mio::EventSet::readable()
@@ -131,6 +134,17 @@ impl mio::Handler for Server {
                     let finished_write = client.write_packet();
                     if finished_write {
                         trace!("SERVER finished write from client {:?}", client_token);
+                        //TODO is this, or setting options to edge needed?
+                        //let finished_read = client.read_packet();
+                        //if finished_read {
+                        //    trace!("SERVER read after write");
+                        //    let need_to_respond = self.log.handle_op(&mut *client.buffer);
+                        //    mio::EventSet::writable()
+                        //}
+                        //else {
+                        //    trace!("SERVER wait for read");
+                        //    mio::EventSet::readable()
+                        //}
                         mio::EventSet::readable()
                     } else {
                         //trace!("SERVER keep writing from client {:?}", client_token);
@@ -169,7 +183,7 @@ impl PerClient {
 
     fn try_read_packet(&mut self) -> io::Result<usize> {
         if self.sent_bytes < base_header_size() {
-            let read = try!(self.stream.read(&mut self.buffer.sized_bytes_mut()[self.sent_bytes..]));
+            let read = try!(self.stream.read(&mut self.buffer.sized_bytes_mut()[self.sent_bytes..base_header_size()]));
             self.sent_bytes += read;
             if self.sent_bytes < base_header_size() {
                 return Ok(1);
@@ -180,7 +194,7 @@ impl PerClient {
         assert!(header_size >= base_header_size());
         if self.sent_bytes < header_size {
             let read = try!(self.stream.read(&mut self.buffer
-                .sized_bytes_mut()[self.sent_bytes..]));
+                .sized_bytes_mut()[self.sent_bytes..header_size]));
             self.sent_bytes += read;
             if self.sent_bytes < header_size {
                 return Ok(1);
@@ -189,14 +203,14 @@ impl PerClient {
 
         let size = self.buffer.entry_size();
         if self.sent_bytes < size {
-            try!(self.stream.read(&mut self.buffer
-                .sized_bytes_mut()[self.sent_bytes..]));
+            let read = try!(self.stream.read(&mut self.buffer
+                .sized_bytes_mut()[self.sent_bytes..size]));
+            self.sent_bytes += read;
             if self.sent_bytes < size {
                 return Ok(1);
             }
         }
         // assert!(payload_size >= header_size);
-
         Ok(0)
     }
 
@@ -351,6 +365,7 @@ impl ServerLog {
 
             EntryLayout::Data => {
                 trace!("SERVER Append");
+                //TODO locks
                 let loc = {
                     let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
                     debug_assert!(self.stores_chain(l.0),
@@ -381,6 +396,7 @@ impl ServerLog {
                 trace!("SERVER Lock");
                 let lock_num = unsafe { val.as_lock_entry().lock };
                 if kind.is_taking_lock() {
+                    trace!("SERVER TakeLock");
                     let acquired_loc = self.try_lock(lock_num);
                     if acquired_loc {
                         val.kind.insert(EntryKind::ReadSuccess);
@@ -391,7 +407,10 @@ impl ServerLog {
                     return true
                 }
                 else {
+                    trace!("SERVER UnLock");
                     if lock_num == self.last_lock {
+                        trace!("SERVER Success");
+                        val.kind.insert(EntryKind::ReadSuccess);
                         self.last_unlock = self.last_lock;
                     }
                     return false
