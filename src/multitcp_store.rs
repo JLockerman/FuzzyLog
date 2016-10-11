@@ -62,8 +62,9 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         //trace!("client read start base header");
         while bytes_read < base_header_size() {
             bytes_read += self.sockets[socket_id]
-                              .read(&mut self.receive_buffer.sized_bytes_mut()[bytes_read..])
-                              .expect("cannot read");
+                .read(&mut self.receive_buffer
+                    .sized_bytes_mut()[bytes_read..base_header_size()])
+                .expect("cannot read");
         }
         //trace!("client read base header");
         let header_size = self.receive_buffer.header_size();
@@ -72,7 +73,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             bytes_read +=
                 self.sockets[socket_id]
                     .read(&mut self.receive_buffer
-                                   .sized_bytes_mut()[bytes_read..])
+                                   .sized_bytes_mut()[bytes_read..header_size])
                     .expect("cannot read");
         }
         let end = self.receive_buffer.entry_size();
@@ -81,7 +82,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             bytes_read +=
                 self.sockets[socket_id]
                     .read(&mut self.receive_buffer
-                                   .sized_bytes_mut()[bytes_read..])
+                                   .sized_bytes_mut()[bytes_read..end])
                     .expect("cannot read");
         }
     }
@@ -212,7 +213,6 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
 
     fn lock_and_emplace_multi_node(&mut self, socket_id: order, lock_num: entry) {
         trace!("sending mnm actual {:?}", self.send_buffer.id);
-        assert_eq!(self.send_buffer.kind & EntryKind::Layout, EntryKind::Multiput);
         assert!(self.send_buffer.kind.layout() == EntryLayout::Multiput
             || self.send_buffer.kind.layout() == EntryLayout::Sentinel);
         unsafe {
@@ -314,7 +314,10 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
     fn is_single_node_append<I: IntoIterator<Item=order>>(&self, chains: I) -> bool {
         let mut single = true;
         let mut socket_id = None;
+        let chains = chains.into_iter().collect::<Vec<_>>();
+        trace!("loop start {:?}", chains);
         for c in chains {
+            trace!("{:?}, {:?}, {:?}, {:?}", single, c, socket_id, self.socket_id(c));
             if let Some(socket_id) = socket_id {
                 single &= self.socket_id(c) == socket_id
             }
@@ -379,11 +382,13 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                         }
                     }
                     EntryKind::Multiput => {
+                        trace!("got multi?");
                         match self.receive_buffer.contents() {
                             EntryContents::Multiput { columns, .. } => {
                                 if columns.contains(&key) {
                                     return Err(InsertErr::AlreadyWritten);
                                 }
+                                trace!("irrelevent multi");
                                 continue 'receive;
                             }
                             _ => unreachable!(),
@@ -518,14 +523,17 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
 
         trace!("D multi_append from {:?}", self.sockets[0].local_addr());
 
+        let locked_chains = chains.into_iter().chain(depends_on.iter());
         let indices =
-            if self.is_single_node_append(chains.iter().cloned()) {
+            if self.is_single_node_append(locked_chains.cloned()) {
+                trace!("D single s");
                 let mut h = HashMap::new();
                 let socket_id = self.socket_id(chains[0]);
                 h.insert((socket_id as u32).into(), 0.into());
                 h
             }
             else {
+                trace!("D multi s");
                 let to_lock: Vec<OrderIndex> = chains.iter()
                     .chain(depends_on.iter())
                     .map(|&c| (c, 0.into()))
@@ -612,6 +620,8 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             self.unlock(socket_id, lock_num)
         }
 
+        trace!("done unlock");
+
         return Ok((0.into(), 0.into()));
     }
 }
@@ -653,7 +663,7 @@ impl<V: ?Sized> Drop for TcpStore<V> {
 }
 
 #[cfg(test)]
-pub mod test {
+pub mod single_server_test {
     use super::*;
     use prelude::*;
 
@@ -709,8 +719,32 @@ pub mod test {
                store.sockets.iter().map(|s| s.peer_addr()).collect::<Vec<_>>());
         store
     }
+}
 
-    general_tests!(super::new_store);
+#[cfg(test)]
+pub mod multi_server_test {
+    use super::*;
+    use prelude::*;
+
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+    use std::collections::HashMap;
+    use std::collections::hash_map::Entry::{Occupied, Vacant};
+    use std::io::{self, Read, Write};
+    use std::mem;
+    use std::net::SocketAddr;
+    use std::os::unix::io::AsRawFd;
+    use std::thread;
+    use std::rc::Rc;
+
+    use mio;
+    use mio::prelude::*;
+    use mio::tcp::*;
+
+    use nix::sys::socket::setsockopt;
+    use nix::sys::socket::sockopt::TcpNoDelay;
+
+    use servers::tcp::Server;
 
     #[test]
     fn multi_server_dep() {
@@ -719,22 +753,22 @@ pub mod test {
         let map = Rc::new(RefCell::new(HashMap::new()));
         let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u _, &'o _, &'r _) -> bool>> = HashMap::new();
         let re = map.clone();
-        upcalls.insert(6.into(),
+        upcalls.insert(56.into(),
                        Box::new(move |_, _, &(k, v)| {
                            re.borrow_mut().insert(k, v);
                            true
                        }));
-        upcalls.insert(7.into(), Box::new(|_, _, _| false));
+        upcalls.insert(57.into(), Box::new(|_, _, _| false));
         let mut log = FuzzyLog::new(store, horizon, upcalls);
-        let e1 = log.append(6.into(), &(0, 1), &*vec![]);
-        assert_eq!(e1, (6.into(), 1.into()));
-        let e2 = log.append(6.into(), &(1, 17), &*vec![]);
-        assert_eq!(e2, (6.into(), 2.into()));
-        let last_index = log.append(6.into(), &(32, 5), &*vec![]);
-        assert_eq!(last_index, (6.into(), 3.into()));
-        let en = log.append(7.into(), &(0, 0), &*vec![last_index]);
-        assert_eq!(en, (7.into(), 1.into()));
-        log.play_foward(7.into());
+        let e1 = log.append(56.into(), &(0, 1), &*vec![]);
+        assert_eq!(e1, (56.into(), 1.into()));
+        let e2 = log.append(56.into(), &(1, 17), &*vec![]);
+        assert_eq!(e2, (56.into(), 2.into()));
+        let last_index = log.append(56.into(), &(32, 5), &*vec![]);
+        assert_eq!(last_index, (56.into(), 3.into()));
+        let en = log.append(57.into(), &(0, 0), &*vec![last_index]);
+        assert_eq!(en, (57.into(), 1.into()));
+        log.play_foward(57.into());
         assert_eq!(*map.borrow(),
                    [(0, 1), (1, 17), (32, 5)].into_iter().cloned().collect());
     }
@@ -757,12 +791,12 @@ pub mod test {
             let map = Rc::new(RefCell::new(HashMap::new()));
             let re1 = map.clone();
             let re2 = map.clone();
-            up.insert(17.into(), Box::new(move |_, _, &(k, v)| {
+            up.insert(67.into(), Box::new(move |_, _, &(k, v)| {
                 trace!("MapEntry({:?}, {:?})", k, v);
                 re1.borrow_mut().insert(k, v);
                 true
             }));
-            up.insert(18.into(), Box::new(move |_, _, &(k, v)| {
+            up.insert(68.into(), Box::new(move |_, _, &(k, v)| {
                 trace!("MapEntry({:?}, {:?})", k, v);
                 re2.borrow_mut().insert(k, v);
                 true
@@ -778,18 +812,18 @@ pub mod test {
 
         let join = thread::spawn(move || {
             let mut log = FuzzyLog::new(s, h, HashMap::new());
-            log.append(17.into(), &(31, 36), &[]);
+            log.append(67.into(), &(31, 36), &[]);
             for i in 0..10 {
-                let change = &*vec![17.into(), 18.into()];
+                let change = &*vec![67.into(), 68.into()];
                 let data = &(i * 2, i * 2);
                 log.multiappend(change.clone(), data, &[])
             }
         });
         let join1 = thread::spawn(|| {
             let mut log = FuzzyLog::new(s1, h1, HashMap::new());
-            log.append(17.into(), &(72, 21), &[]);
+            log.append(67.into(), &(72, 21), &[]);
             for i in 0..10 {
-                let change = &*vec![17.into(), 18.into()];
+                let change = &*vec![67.into(), 68.into()];
                 let data = &(i * 2 + 1, i * 2 + 1);
                 log.multiappend(change, data, &[]);
             }
@@ -797,8 +831,8 @@ pub mod test {
         join1.join().unwrap();
         join.join().unwrap();
 
-        log.play_foward(17.into());
-        log2.play_foward(18.into());
+        log.play_foward(67.into());
+        log2.play_foward(68.into());
 
         let cannonical_map = {
             let mut map = HashMap::new();
@@ -858,4 +892,11 @@ pub mod test {
             .expect("cannot create store")
     }
 
+    #[allow(non_upper_case_globals)]
+    fn new_store<V: ::std::fmt::Debug + Storeable>(_: Vec<OrderIndex>) -> TcpStore<V>
+        where V: Clone {
+        init_multi_servers::<V>()
+    }
+
+    general_tests!(super::new_store);
 }
