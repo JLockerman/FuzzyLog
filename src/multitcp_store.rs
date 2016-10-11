@@ -143,8 +143,10 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         let indices = self.get_lock_inidices(chains);
         trace!("M locks {:?}", indices);
 
+        self.send_buffer.kind.insert(EntryKind::TakeLock);
+
         for &(socket_id, lock_num) in &*indices {
-            self.lock_and_emplace_multi_node(socket_id, lock_num)
+            self.emplace_multi_node(socket_id, lock_num)
         }
 
         'validate: for &(socket_id, lock_num) in &*indices {
@@ -161,7 +163,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
                             //TODO recovery
                             if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
                                 trace!("M lock failed resending {:?}", self.receive_buffer.id);
-                                self.lock_and_emplace_multi_node(socket_id, lock_num);
+                                self.emplace_multi_node(socket_id, lock_num);
                                 continue 'receive
                             }
                             trace!("multiappend success");
@@ -212,7 +214,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             .expect("cannot send");
     }
 
-    fn lock_and_emplace_multi_node(&mut self, socket_id: order, lock_num: entry) {
+    fn emplace_multi_node(&mut self, socket_id: order, lock_num: entry) {
         trace!("sending mnm actual {:?}", self.send_buffer.id);
         assert!(self.send_buffer.kind.layout() == EntryLayout::Multiput
             || self.send_buffer.kind.layout() == EntryLayout::Sentinel);
@@ -361,9 +363,16 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                 match self.receive_buffer.kind & EntryKind::Layout {
                     EntryKind::Data => {
                         // TODO types?
-                        trace!("correct response");
+                        trace!("A correct response");
                         let entr = unsafe { self.receive_buffer.as_data_entry() };
                         if entr.id == request_id {
+                            //FIXME currently we assume servers don't fail
+                            //      so on finding the chain is locked we simply retry
+                            //TODO multiserver op finish code
+                            if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
+                                trace!("A server is locked");
+                                continue 'send
+                            }
                             // let rtt = precise_time_ns() as i64 - start_time;
                             // self.rtt = ((self.rtt * 4) / 5) + (rtt / 5);
                             let sample_rtt = precise_time_ns() as i64 - start_time;
@@ -371,11 +380,11 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             self.dev = self.dev + (diff.abs() - self.dev) / 4;
                             self.rtt = self.rtt + (diff * 4 / 5);
                             if entr.id == request_id {
-                                trace!("write success @ {:?}", entr.flex.loc);
-                                trace!("wrote packet {:#?}", self.receive_buffer);
+                                trace!("A write success @ {:?}", entr.flex.loc);
+                                trace!("A wrote packet {:#?}", self.receive_buffer);
                                 return Ok(entr.flex.loc);
                             }
-                            trace!("already written");
+                            trace!("A already written");
                             return Err(InsertErr::AlreadyWritten);
                         } else {
                             println!("packet {:?}", self.receive_buffer);
@@ -491,13 +500,86 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         trace!("Tpacket {:#?}", self.send_buffer);
 
         let single_node = self.is_single_node_append(chains.iter().map(|&(o, _)|  o));
+        let indices =
+            if single_node {
+                trace!("M single");
+                let mut h = HashMap::new();
+                let socket_id = self.socket_id(chains[0].0);
+                h.insert((socket_id as u32).into(), 0.into());
+                h
+            }
+            else {
+                self.send_buffer.kind.insert(EntryKind::TakeLock);
+                self.get_lock_inidices(&chains).into_iter().collect()
+            };
+        trace!("M locks {:?}", indices);
 
-        if single_node {
-            let socket_id = self.socket_id(chains[0].0);
-            self.single_node_multiappend(&request_id, socket_id)
-        } else {
-            self.multi_node_multiappend(&request_id, chains)
+        let mut to_lock =
+            if indices.len() > 1 {
+                indices.iter().map(|(&o, &e)| (o, e)).collect()
+            }
+            else {
+                HashSet::new()
+            };
+        let mut locked: HashSet<OrderIndex> = HashSet::with_capacity(to_lock.len());
+
+        for (&socket_id, &lock_num) in indices.iter() {
+            self.emplace_multi_node(socket_id, lock_num);
+            if to_lock.remove(&(socket_id, lock_num)) {
+                locked.insert((socket_id, lock_num));
+            }
         }
+        assert!(to_lock.is_empty());
+
+        'validate: for (&socket_id, &lock_num) in indices.iter() {
+            'receive: loop {
+                self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
+                trace!("M got packet");
+                match self.receive_buffer.kind & EntryKind::Layout {
+                    EntryKind::Multiput => {
+                        // TODO should also have lock-success
+                        // TODO types?
+                        trace!("M correct response");
+                        trace!("M id {:?}", self.receive_buffer.id);
+                        if self.receive_buffer.id == request_id {
+                            if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
+                                trace!("M lock fail, resend");
+                                self.emplace_multi_node(socket_id, lock_num);
+                                continue 'receive
+                            }
+                            trace!("M multiappend success");
+                            continue 'validate;
+                        } else {
+                            // trace!("?? packet {:?}", self.receive_buffer);
+                            continue 'receive;
+                        }
+                    }
+                    v => {
+                        trace!("M invalid response {:?}", v);
+                        continue 'receive;
+                    }
+                }
+            }
+        }
+
+        trace!("M unlock");
+
+        for (socket_id, lock_num) in locked {
+            self.unlock(socket_id, lock_num)
+        }
+
+        trace!("M done unlock");
+
+        return Ok((0.into(), 0.into()));
+
+        /////////////////
+
+        //if single_node {
+        //    let socket_id = self.socket_id(chains[0].0);
+        //    self.single_node_multiappend(&request_id, socket_id)
+        //} else {
+        //    self.multi_node_multiappend(&request_id, chains)
+        //}
     }
 
     fn dependent_multi_append(&mut self, chains: &[order],
@@ -556,12 +638,19 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
 
         trace!("in {:?}", indices);
 
-        for &chain in chains {
-            let socket_id: order = (self.socket_id(chain) as u32).into();
+        if to_lock.is_empty() {
+            let socket_id: order = (self.socket_id(chains[0]) as u32).into();
             let lock_num = indices[&socket_id];
-            self.lock_and_emplace_multi_node(socket_id, lock_num);
-            if to_lock.remove(&(socket_id, lock_num)) {
-                locked.insert((socket_id, lock_num));
+            self.emplace_multi_node(socket_id, lock_num);
+        }
+        else {
+            for &chain in chains {
+                let socket_id: order = (self.socket_id(chain) as u32).into();
+                let lock_num = indices[&socket_id];
+                if to_lock.remove(&(socket_id, lock_num)) {
+                    self.emplace_multi_node(socket_id, lock_num);
+                    locked.insert((socket_id, lock_num));
+                }
             }
         }
 
@@ -569,43 +658,32 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         self.send_buffer.kind = EntryKind::Sentinel | EntryKind::TakeLock;
 
         for (socket_id, lock_num) in to_lock {
-            self.lock_and_emplace_multi_node(socket_id, lock_num);
+            self.emplace_multi_node(socket_id, lock_num);
             locked.insert((socket_id, lock_num));
         }
 
         'validate: for (&socket_id, &lock_num) in indices.iter() {
             'receive: loop {
                 self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
-                trace!("got packet");
+                trace!("D got packet");
                 match self.receive_buffer.kind & EntryKind::Layout {
                     k @ EntryKind::Multiput | k @ EntryKind::Sentinel => {
                         // TODO should also have lock-success
                         // TODO types?
-                        trace!("correct response");
-                        trace!("id {:?}", self.receive_buffer.id);
+                        trace!("D correct response");
+                        trace!("D id {:?}", self.receive_buffer.id);
                         if self.receive_buffer.id == request_id {
                             if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
                                 self.send_buffer.kind = k | EntryKind::TakeLock;
-                                self.lock_and_emplace_multi_node(socket_id, lock_num);
+                                self.emplace_multi_node(socket_id, lock_num);
                                 continue 'receive
                             }
-                            trace!("multiappend success");
+                            trace!("D multiappend success");
                             continue 'validate;
                         } else {
                             // trace!("?? packet {:?}", self.receive_buffer);
                             continue 'receive;
                         }
-                    }
-                    EntryKind::Lock => {
-                        unsafe {
-                            if self.receive_buffer.as_lock_entry().lock < <u32 as From<_>>::from(lock_num) as u64 {
-                                //TODO handle failures
-                                self.lock(socket_id, lock_num);
-                                continue 'receive
-                            }
-                        }
-                        trace!("lock success");
-                        continue 'validate;
                     }
                     v => {
                         trace!("D invalid response {:?}", v);
@@ -720,6 +798,8 @@ pub mod single_server_test {
                store.sockets.iter().map(|s| s.peer_addr()).collect::<Vec<_>>());
         store
     }
+
+    general_tests!(super::new_store);
 }
 
 #[cfg(test)]

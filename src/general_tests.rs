@@ -9,7 +9,7 @@ macro_rules! general_tests {
 
         #[cfg(test)]
         mod general_tests {
-            //last column used is 25
+            //last column used is 28
 
             extern crate env_logger;
 
@@ -19,7 +19,7 @@ macro_rules! general_tests {
             $(use $import;)*
 
             use std::cell::RefCell;
-            use std::collections::HashMap;
+            use std::collections::{HashMap, BTreeMap};
             use std::rc::Rc;
             use std::sync::{Arc, Mutex};
             use std::thread;
@@ -493,7 +493,7 @@ macro_rules! general_tests {
             }
 
             #[test]
-            fn test_dependent() { //TODO multithreaded version
+            fn test_dependent_singlethreaded() {
                 let _ = env_logger::init();
                 let store = $new_store(
                     (0..10).map(|i| (23.into(), i.into()))
@@ -543,6 +543,70 @@ macro_rules! general_tests {
                         let loc = loc.unwrap();
                         assert!(loc < multi_loc, "{:?} to early", (i, j));
                     }
+                }
+            }
+
+            #[test]
+            fn test_dependent_multithreaded() { //TODO multithreaded version
+                let _ = env_logger::init();
+                let store = $new_store(
+                    (0..60).map(|i| (26.into(), i.into()))
+                        .chain((0..27).map(|i| (21.into(), i.into())))
+                        .chain((0..28).map(|i| (22.into(), i.into())))
+                        .collect());
+                let s1 = store.clone();
+                let s2 = store.clone();
+                const ROUNDS: u32 = 61;
+                let h1 = thread::spawn(move || {
+                    let mut log = FuzzyLog::new(s1, HashMap::new(), HashMap::new());
+                    for i in 1..ROUNDS {
+                        for j in 26..28 {
+                            trace!("append {:?}", (j, i));
+                            log.append(j.into(), &(j, i), &[]);
+                        }
+                    }
+                });
+                let h2 = thread::spawn(move || {
+                    let mut log = FuzzyLog::new(s2, HashMap::new(), HashMap::new());
+                    for i in 1..ROUNDS {
+                        trace!("dappend {:?}", (28, i));
+                        log.dependent_multiappend(&[28.into()], &[26.into(), 27.into()], &(28, i), &[]);
+                        trace!("finished {:?}", i);
+                    }
+                });
+                h2.join().unwrap();
+                h1.join().unwrap();
+                let horizon = HashMap::new();
+                let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
+                let list: Rc<RefCell<Vec<(u32, u32)>>> = Rc::new(RefCell::new(Vec::with_capacity(29)));
+                for i in 26..29 {
+                    let l = list.clone();
+                    upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
+                        true
+                    }));
+                }
+                let mut log = FuzzyLog::new(store, horizon, upcalls);
+                let le = log.snapshot(28.into()).unwrap();
+                log.play_until((28.into(), le));
+                let inverse_index: BTreeMap<_, _>  =
+                    list.borrow().iter().enumerate().map(|(i, &oe)| (oe, i)).collect();
+                let mut last_multi_loc = None;
+                trace!("ii {:?}", inverse_index);
+                for i in 1..ROUNDS {
+                    let multi_loc = inverse_index.get(&(28, i));
+                    assert!(multi_loc.is_some(), "multi not found @ iter {:?}", i);
+                    let multi_loc = multi_loc.cloned().unwrap();
+                    assert!(last_multi_loc.map(|lml| lml < multi_loc).unwrap_or(true),
+                        "multi loc to early @ iter {:?}", i);
+                    let last_loc = last_multi_loc.unwrap_or(0);
+                    for &(k, v) in &list.borrow()[last_loc..multi_loc] {
+                        if k == 27 {
+                            let i26 = inverse_index.get(&(26, v)).cloned().unwrap();
+                            assert!(i26 < multi_loc,
+                                "(26, {:?}) @ {:?} < {:?}", v, i26, multi_loc);
+                        }
+                    }
+                    last_multi_loc = Some(multi_loc);
                 }
             }
 

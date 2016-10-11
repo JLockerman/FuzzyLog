@@ -262,17 +262,23 @@ impl ServerLog {
         let kind = val.kind;
         match kind.layout() {
             EntryLayout::Multiput | EntryLayout::Sentinel => {
-                trace!("SERVER multiput");
+                trace!("SERVER {:?} multiput", self.this_server_num);
                 //TODO handle sentinels
                 //TODO check TakeLock flag?
                 if self.try_lock(val.lock_num()) {
                     assert!(self._seen_ids.insert(val.id));
+                    assert!(self.last_lock == self.last_unlock + 1 || self.last_lock == 0,
+                        "SERVER {:?} l {:?} == ul {:?} + 1",
+                        self.this_server_num, self.last_lock, self.last_unlock);
+                    assert!(self.last_lock == val.lock_num(),
+                        "SERVER {:?} l {:?} == vl {:?}",
+                        self.this_server_num, self.last_lock, val.lock_num());
                     let mut sentinel_start_index = None;
                     {
                         val.kind.insert(EntryKind::ReadSuccess);
                         let locs = val.locs_mut();
                         //TODO select only relevent chains
-                        //trace!("SERVER Horizon A {:?}", self.horizon);
+                        //trace!("SERVER {:?} Horizon A {:?}", self.horizon);
                         'update_append_horizon: for i in 0..locs.len() {
                             if locs[i] == (0.into(), 0.into()) {
                                 sentinel_start_index = Some(i + 1);
@@ -293,11 +299,11 @@ impl ServerLog {
                                 }
                             }
                         }
-                        //trace!("SERVER Horizon B {:?}", self.horizon);
-                        trace!("SERVER locs {:?}", locs);
-                        trace!("SERVER ssi {:?}", sentinel_start_index);
+                        //trace!("SERVER {:?} Horizon B {:?}", self.horizon);
+                        trace!("SERVER {:?} locs {:?}", self.this_server_num, locs);
+                        trace!("SERVER {:?} ssi {:?}", self.this_server_num, sentinel_start_index);
                     }
-                    trace!("SERVER appending at {:?}", val.locs());
+                    trace!("SERVER {:?} appending at {:?}", self.this_server_num, val.locs());
                     let contents = Rc::new(val.clone());
                     'emplace: for &loc in val.locs() {
                         if loc == (0.into(), 0.into()) {
@@ -306,35 +312,36 @@ impl ServerLog {
                         if self.stores_chain(loc.0) {
                             self.log.insert(loc, contents.clone());
                         }
-                        // trace!("SERVER appended at {:?}", loc);
+                        // trace!("SERVER {:?} appended at {:?}", loc);
                     }
                     if let Some(ssi) = sentinel_start_index {
                         val.kind.remove(EntryKind::Multiput);
                         val.kind.insert(EntryKind::Sentinel);
                         let contents = Rc::new(val.clone());
-                        trace!("SERVER sentinal locs {:?}", &val.locs()[ssi..]);
+                        trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.locs()[ssi..]);
                         for &loc in &val.locs()[ssi..] {
                             if self.stores_chain(loc.0) {
                                 self.log.insert(loc, contents.clone());
                             }
-                            // trace!("SERVER appended at {:?}", loc);
+                            // trace!("SERVER {:?} appended at {:?}", loc);
                         }
                         val.kind.remove(EntryKind::Sentinel);
                         val.kind.insert(EntryKind::Multiput);
                     }
                 } else {
-                    trace!("SERVER wrong lock {} @ ({},{})",
+                    trace!("SERVER {:?} wrong lock {} @ ({},{})", self.this_server_num,
                         val.lock_num(), self.last_lock, self.last_unlock);
                 }
             }
             EntryLayout::Read => {
-                trace!("SERVER Read");
+                trace!("SERVER {:?} Read", self.this_server_num);
                 let loc = unsafe { val.as_data_entry_mut().flex.loc };
                 match self.log.entry(loc) {
                     Vacant(..) => {
-                        trace!("SERVER Read Vacant entry {:?}", loc);
+                        trace!("SERVER {:?} Read Vacant entry {:?}", self.this_server_num, loc);
                         if val.kind == EntryKind::Read {
                             //TODO validate lock
+                            //     this will come after per-chain locks
                             let l = loc.0;
                             let last_entry = self.horizon.get(&l).cloned().unwrap_or(0.into());
                             assert!(last_entry == 0.into() || last_entry < loc.1,
@@ -348,24 +355,29 @@ impl ServerLog {
                             unsafe {
                                 val.as_data_entry_mut().flex.loc = old_loc;
                             }
-                            trace!("SERVER empty read {:?}", loc)
+                            trace!("SERVER {:?} empty read {:?}", self.this_server_num, loc)
                         }
                         else {
-                            trace!("SERVER nop {:?}", val.kind)
+                            trace!("SERVER {:?} nop {:?}", self.this_server_num, val.kind)
                         }
                     }
                     Occupied(mut e) => {
-                        trace!("SERVER Read Occupied entry {:?} {:?}", loc, e.get().id);
+                        trace!("SERVER {:?} Read Occupied entry {:?} {:?}", self.this_server_num, loc, e.get().id);
                         let packet = e.get_mut();
                         *val = (**packet).clone();
-                        // trace!("SERVER returning {:?}", packet);
+                        // trace!("SERVER {:?} returning {:?}", packet);
                     }
                 }
             }
 
             EntryLayout::Data => {
-                trace!("SERVER Append");
+                trace!("SERVER {:?} Append", self.this_server_num);
                 //TODO locks
+                if !self.is_unlocked() {
+                    trace!("SERVER {:?} {:?} > {:?}", self.this_server_num, self.last_lock, self.last_unlock);
+                    trace!("SERVER {:?} append during lock", self.this_server_num);
+                    return true
+                }
                 let loc = {
                     let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
                     debug_assert!(self.stores_chain(l.0),
@@ -378,7 +390,7 @@ impl ServerLog {
 
                 match self.log.entry(loc) {
                     Vacant(e) => {
-                        trace!("SERVER Writing vacant entry {:?}", loc);
+                        trace!("SERVER {:?} Writing vacant entry {:?}", self.this_server_num, loc);
                         assert_eq!(unsafe { val.as_data_entry().flex.loc }, loc);
                         //TODO validate lock
                         val.kind.insert(EntryKind::ReadSuccess);
@@ -393,10 +405,10 @@ impl ServerLog {
             }
 
             EntryLayout::Lock => {
-                trace!("SERVER Lock");
+                trace!("SERVER {:?} Lock", self.this_server_num);
                 let lock_num = unsafe { val.as_lock_entry().lock };
                 if kind.is_taking_lock() {
-                    trace!("SERVER TakeLock");
+                    trace!("SERVER {:?} TakeLock {:?}", self.this_server_num, self.last_lock);
                     let acquired_loc = self.try_lock(lock_num);
                     if acquired_loc {
                         val.kind.insert(EntryKind::ReadSuccess);
@@ -407,9 +419,9 @@ impl ServerLog {
                     return true
                 }
                 else {
-                    trace!("SERVER UnLock");
+                    trace!("SERVER {:?} UnLock {:?}", self.this_server_num, self.last_lock);
                     if lock_num == self.last_lock {
-                        trace!("SERVER Success");
+                        trace!("SERVER {:?} Success", self.this_server_num);
                         val.kind.insert(EntryKind::ReadSuccess);
                         self.last_unlock = self.last_lock;
                     }
@@ -431,17 +443,24 @@ impl ServerLog {
     }
 
     fn try_lock(&mut self, lock_num: u64) -> bool {
+        trace!("SERVER {:?} is unlocked {:?}", self.this_server_num, self.is_unlocked());
         if self.is_unlocked() {
             if lock_num == self.last_lock + 1 {
-                trace!("SERVER Lock {:?}", lock_num);
+                trace!("SERVER {:?} Lock {:?}", self.this_server_num, lock_num);
                 self.last_lock = lock_num;
+                true
             }
             else if lock_num == 0 {
-                trace!("SERVER NoLock");
+                trace!("SERVER {:?} NoLock", self.this_server_num);
+                true
             }
-            true
+            else {
+                trace!("SERVER {:?} wrong lock", self.this_server_num);
+                false
+            }
         }
         else {
+            trace!("SERVER {:?} already locked", self.this_server_num);
             false
         }
     }
