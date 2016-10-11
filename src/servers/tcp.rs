@@ -335,6 +335,7 @@ impl ServerLog {
                         trace!("SERVER Read Vacant entry {:?}", loc);
                         if val.kind == EntryKind::Read {
                             //TODO validate lock
+                            //     this will come after per-chain locks
                             let l = loc.0;
                             let last_entry = self.horizon.get(&l).cloned().unwrap_or(0.into());
                             assert!(last_entry == 0.into() || last_entry < loc.1,
@@ -366,6 +367,11 @@ impl ServerLog {
             EntryLayout::Data => {
                 trace!("SERVER Append");
                 //TODO locks
+                if !self.is_unlocked() {
+                    trace!("SERVER {:?} > {:?}", self.last_lock, self.last_unlock);
+                    trace!("SEVER append during lock");
+                    return true
+                }
                 let loc = {
                     let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
                     debug_assert!(self.stores_chain(l.0),
@@ -396,7 +402,7 @@ impl ServerLog {
                 trace!("SERVER Lock");
                 let lock_num = unsafe { val.as_lock_entry().lock };
                 if kind.is_taking_lock() {
-                    trace!("SERVER TakeLock");
+                    trace!("SERVER TakeLock {:?}", self.last_lock);
                     let acquired_loc = self.try_lock(lock_num);
                     if acquired_loc {
                         val.kind.insert(EntryKind::ReadSuccess);
@@ -407,7 +413,7 @@ impl ServerLog {
                     return true
                 }
                 else {
-                    trace!("SERVER UnLock");
+                    trace!("SERVER UnLock {:?}", self.last_lock);
                     if lock_num == self.last_lock {
                         trace!("SERVER Success");
                         val.kind.insert(EntryKind::ReadSuccess);

@@ -360,9 +360,16 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                 match self.receive_buffer.kind & EntryKind::Layout {
                     EntryKind::Data => {
                         // TODO types?
-                        trace!("correct response");
+                        trace!("A correct response");
                         let entr = unsafe { self.receive_buffer.as_data_entry() };
                         if entr.id == request_id {
+                            //FIXME currently we assume servers don't fail
+                            //      so on finding the chain is locked we simply retry
+                            //TODO multiserver op finish code
+                            if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
+                                trace!("A server is locked");
+                                continue 'send
+                            }
                             // let rtt = precise_time_ns() as i64 - start_time;
                             // self.rtt = ((self.rtt * 4) / 5) + (rtt / 5);
                             let sample_rtt = precise_time_ns() as i64 - start_time;
@@ -370,11 +377,11 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             self.dev = self.dev + (diff.abs() - self.dev) / 4;
                             self.rtt = self.rtt + (diff * 4 / 5);
                             if entr.id == request_id {
-                                trace!("write success @ {:?}", entr.flex.loc);
-                                trace!("wrote packet {:#?}", self.receive_buffer);
+                                trace!("A write success @ {:?}", entr.flex.loc);
+                                trace!("A wrote packet {:#?}", self.receive_buffer);
                                 return Ok(entr.flex.loc);
                             }
-                            trace!("already written");
+                            trace!("A already written");
                             return Err(InsertErr::AlreadyWritten);
                         } else {
                             println!("packet {:?}", self.receive_buffer);
@@ -575,36 +582,25 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         'validate: for (&socket_id, &lock_num) in indices.iter() {
             'receive: loop {
                 self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
-                trace!("got packet");
+                trace!("D got packet");
                 match self.receive_buffer.kind & EntryKind::Layout {
                     k @ EntryKind::Multiput | k @ EntryKind::Sentinel => {
                         // TODO should also have lock-success
                         // TODO types?
-                        trace!("correct response");
-                        trace!("id {:?}", self.receive_buffer.id);
+                        trace!("D correct response");
+                        trace!("D id {:?}", self.receive_buffer.id);
                         if self.receive_buffer.id == request_id {
                             if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
                                 self.send_buffer.kind = k | EntryKind::TakeLock;
                                 self.lock_and_emplace_multi_node(socket_id, lock_num);
                                 continue 'receive
                             }
-                            trace!("multiappend success");
+                            trace!("D multiappend success");
                             continue 'validate;
                         } else {
                             // trace!("?? packet {:?}", self.receive_buffer);
                             continue 'receive;
                         }
-                    }
-                    EntryKind::Lock => {
-                        unsafe {
-                            if self.receive_buffer.as_lock_entry().lock < <u32 as From<_>>::from(lock_num) as u64 {
-                                //TODO handle failures
-                                self.lock(socket_id, lock_num);
-                                continue 'receive
-                            }
-                        }
-                        trace!("lock success");
-                        continue 'validate;
                     }
                     v => {
                         trace!("D invalid response {:?}", v);
@@ -719,6 +715,8 @@ pub mod single_server_test {
                store.sockets.iter().map(|s| s.peer_addr()).collect::<Vec<_>>());
         store
     }
+
+    general_tests!(super::new_store);
 }
 
 #[cfg(test)]
