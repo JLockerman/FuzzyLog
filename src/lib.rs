@@ -56,7 +56,13 @@ pub mod c_binidings {
     use std::net::SocketAddr;
     use std::os::raw::c_char;
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use color_api::*;
+
+    use servers::tcp::Server;
+
+    use mio::EventLoop;
 
     pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
     pub type ColorID = u32;
@@ -68,7 +74,7 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub extern "C" fn new_dag_handle(num_ips: usize, server_ips: *const *const i8,
+    pub extern "C" fn new_dag_handle(num_ips: usize, server_ips: *const *const c_char,
         color: *const colors) -> Box<DAG> {
         assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
         //assert_eq!(num_ips, 1, "Multiple servers are not yet supported via the C API");
@@ -168,48 +174,64 @@ pub mod c_binidings {
     ////////////////////////////////////
 
     #[no_mangle]
-    pub extern "C" fn start_fuzzy_log_server(server_ip: *const i8) -> ! {
-        let server_addr_str = unsafe { CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
-        };
-        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+    pub extern "C" fn start_fuzzy_log_server(server_ip: *const c_char) -> ! {
+        start_fuzzy_log_server_for_group(server_ip, 0, 1)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn start_fuzzy_log_server_thread(server_ip: *const c_char) {
+        start_fuzzy_log_server_thread_from_group(server_ip, 0, 1)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn start_fuzzy_log_server_for_group(server_ip: *const c_char,
+        server_number: u32, total_servers_in_group: u32) -> ! {
         let mut event_loop = ::mio::EventLoop::new()
             .expect("unable to start server loop");
-        let mut server = ::servers::tcp::Server::new(&ip_addr, 0, 1, &mut event_loop)
-            .expect("unable to start server");
+        let mut server = start_server(&mut event_loop, server_ip, server_number,
+            total_servers_in_group);
         let res = event_loop.run(&mut server);
         panic!("server stopped with: {:?}", res)
     }
 
     #[no_mangle]
-    pub extern "C" fn start_fuzzy_log_server_thread(server_ip: *const i8) {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    pub extern "C" fn start_fuzzy_log_server_thread_from_group(server_ip: *const c_char,
+        server_number: u32, total_servers_in_group: u32) {
+            assert!(server_ip != ptr::null());
+            let server_started = AtomicBool::new(false);
+            let (started, server_ip) = unsafe {
+                //This should be safe since the while loop at the of the function
+                //prevents it from exiting until the server is started and
+                //server_started is no longer used
+                (extend_lifetime(&server_started), &*server_ip)
+            };
+            let handle = ::std::thread::spawn(move || {
+                let mut event_loop = ::mio::EventLoop::new()
+                    .expect("unable to start server loop");
+                let mut server = start_server(&mut event_loop, server_ip, server_number,
+                    total_servers_in_group);
+                started.store(true, Ordering::SeqCst);
+                mem::drop(started);
+                let res = event_loop.run(&mut server);
+                panic!("server stopped with: {:?}", res)
+            });
+            while !server_started.load(Ordering::SeqCst) {}
+            mem::forget(handle);
+            mem::drop(server_ip);
 
-        let server_started = AtomicBool::new(false);
-        let started = unsafe {
-            //This should be safe since the while loop at the of the function
-            //prevents it from exiting until the server is started and
-            //server_started is no longer used
-            extend_lifetime(&server_started)
-        };
-        let server_addr_str = unsafe { CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
-        };
-        let handle = ::std::thread::spawn(move || {
-            let ip_addr = server_addr_str.parse().expect("invalid IP addr");
-            let mut event_loop = ::mio::EventLoop::new()
-                .expect("unable to start server loop");
-            let mut server = ::servers::tcp::Server::new(&ip_addr, 0, 1, &mut event_loop)
-                .expect("unable to start server");
-            started.store(true, Ordering::SeqCst);
-            mem::drop(started);
-            let res = event_loop.run(&mut server);
-            panic!("server stopped with: {:?}", res)
-        });
-        while !server_started.load(Ordering::SeqCst) {}
-        ::std::mem::forget(handle);
+            unsafe fn extend_lifetime<'a, 'b, T>(r: &'a T) -> &'b T {
+                ::std::mem::transmute(r)
+            }
+    }
 
-        unsafe fn extend_lifetime<'a, 'b, T>(r: &'a T) -> &'b T {
-            ::std::mem::transmute(r)
-        }
+    fn start_server(event_loop: &mut EventLoop<Server>, server_ip: *const c_char,
+        server_num: u32, total_num_servers: u32) -> Server {
+        let server_addr_str = unsafe {
+            CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
+        };
+        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+        Server::new(&ip_addr, server_num, total_num_servers, event_loop)
+            .expect("unable to start server")
     }
 
     ////////////////////////////////////

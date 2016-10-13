@@ -45,12 +45,51 @@ void close_dag_handle(DAGHandle *handle);
 //         Server Bindings        //
 ////////////////////////////////////
 
-//Starts a fuzzy log server in the _current_ thread.
-//NOTE this function _never_ returns
+//! Starts a fuzzy log server which listens at server_ip in the _current_ thread.
+//!
+//! @param server_ip
+//!     a string of the form "<ip address>:<port>" at which the server should
+//!     listen
+//!
+//! NOTE this function _never_ returns, as it immediately starts running the
+//!   server
 void start_fuzzy_log_server(const char * server_ip);
 
-//Starts a fuzzy log server in a new thread.
+//! Just like start_fuzzy_log_server except it starts the server in a _new_ thread.
 void start_fuzzy_log_server_thread(const char * server_ip);
+
+//! Starts a fuzzy log server which is part of a group of N servers which
+//! listens at server_ip in the _current_ thread.
+//!
+//! @param server_ip
+//!     a string of the form "<ip address>:<port>" at which the server should
+//!     listen
+//!
+//! @param server_number
+//!     which server in [0, total_servers_in_group) this server is in it's group.
+//!
+//! @param total_servers_in_group
+//!     The number of servers in the group that this server is a part of.
+//!     Servers within the same group share the same chain address space and are
+//!     managed by the same lock-server
+//!
+//! NOTE this function _never_ returns, as it immediately starts running the
+//!   server
+void start_fuzzy_log_server_for_group(const char * server_ip,
+	 uint32_t server_number, uint32_t total_servers_in_group);
+
+//! Just like start_fuzzy_log_server_for_group except it starts the server in a
+//! _new_ thread.
+void start_fuzzy_log_server_thread_from_group(const char * server_ip,
+		uint32_t server_number, uint32_t total_servers_in_group);
+
+static inline void start_fuzzy_log_servers(uint32_t num_servers,
+	const char * server_ips[num_servers])
+{
+	for(uint32_t i = 0; i < num_servers; i++)
+		start_fuzzy_log_server_thread_from_group(server_ips[i], i, num_servers);
+}
+
 
 ////////////////////////////////////
 //    Old fuzzy log C bindings    //
