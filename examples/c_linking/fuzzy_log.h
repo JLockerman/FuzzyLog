@@ -11,7 +11,9 @@ typedef uint32_t ColorID;
 
 struct colors
 {
+	//! number of entries in mycolors
 	size_t numcolors;
+	//! pointer to ColorID[numcolors]
 	ColorID *mycolors;
 };
 
@@ -20,25 +22,67 @@ typedef struct DAGHandle DAGHandle;
 DAGHandle *new_dag_handle(size_t num_ips, const char * const* server_ips,
 	struct colors *interesting_colors);
 
+//! Appends a new node to the dag.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param data
+//!     The data contained within the node.
+//!
+//! @param data_size
+//!     The size, in bytes, of data.
+//!
+//! @param inhabits
+//!     The colors which the new node shall be colored with. Must be non-empty.
+//!
+//! @param depends_on
+//!     The colors which the new node should happen-after. May be empty.
+//!
 //NOTE currently can only use 31bits of return value
 uint32_t append(DAGHandle *handle, char *data, size_t data_size,
 	struct colors* inhabits, struct colors* depends_on);
 
+//! Reads a valid next node from the new nodes discovered with the latests
+//! snapshot. If there are no such nodes (i.e. all new nodes have been read)
+//! data_read and inhabits_out->numcolors will be set to 0.
+//!
+//! @param handle
+//!     The DAGHandle being worked through,
+//!
+//! @param[out] data_out
+//!     The size in bytes of the data that was read.
+//!
+//! @param[out] data_read
+//!     The data that was read.
+//!
+//! @param[out] inhabits_out
+//!     A pointer to a `struct colors` which will be populated with the colors
+//!     inhabited by the node just read.
+//!     If a node was read inhabits_out->numcolors will contain the number of
+//!     colors said node inhabits and inhabits_out->mycolors will be a pointer
+//!     to a _new_ array containing said colors ColorID. This array should be
+//!     freed with `free`
+//!     If no new nodes remain, inhabits_out-numcolors will be 0 and
+//!     inhabits_out->mycolors will be in an undefined state and
+//!     _must not be read_.
+//!
 //NOTE we need either a way to specify data size, or to pass out a pointer
 // this version simple assumes that no data+metadat passed in or out will be
 // greater than DELOS_MAX_DATA_SIZE
-// sets data_read to 0 and colors->numcolors to 0 when out of data for the
-// current snapshot
 uint32_t get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
 
-// If there is no unread updates attempts to take a snapshot of the interesting
-// colors returning 0 if after checking all interesting colors it cannot find
-// one which has unread data
-// TODO is it better to just force the client to check get next after each
-// snapshot for now?
+
+//! If there is no unread updates attempts to take a snapshot of the interesting
+//! colors
+//!
+// NOTE currently a nop if there are buffered nodes waiting to be read,
+//  eventually this will change to start prefetching even if there are still
+//  unread data
 void snapshot(DAGHandle *handle);
 
-//NOTE also frees the *handle
+
+//! Closes and frees a DAGHandle
 void close_dag_handle(DAGHandle *handle);
 
 ////////////////////////////////////
@@ -53,6 +97,7 @@ void close_dag_handle(DAGHandle *handle);
 //!
 //! NOTE this function _never_ returns, as it immediately starts running the
 //!   server
+//!
 void start_fuzzy_log_server(const char * server_ip);
 
 //! Just like start_fuzzy_log_server except it starts the server in a _new_ thread.
@@ -75,13 +120,16 @@ void start_fuzzy_log_server_thread(const char * server_ip);
 //!
 //! NOTE this function _never_ returns, as it immediately starts running the
 //!   server
+//!
 void start_fuzzy_log_server_for_group(const char * server_ip,
 	 uint32_t server_number, uint32_t total_servers_in_group);
 
 //! Just like start_fuzzy_log_server_for_group except it starts the server in a
 //! _new_ thread.
+//!
 void start_fuzzy_log_server_thread_from_group(const char * server_ip,
 		uint32_t server_number, uint32_t total_servers_in_group);
+
 
 static inline void start_fuzzy_log_servers(uint32_t num_servers,
 	const char * server_ips[num_servers])
