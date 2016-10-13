@@ -246,7 +246,9 @@ impl ServerLog {
     fn new(this_server_num: u32, total_servers: u32) -> Self {
         //TODO
         //assert!(this_server_num > 0);
-        assert!(this_server_num <= total_servers);
+        assert!(this_server_num <= total_servers,
+            "this_server_num <= total_servers, {:?} <= {:?}",
+            this_server_num, total_servers);
         ServerLog {
             log: HashMap::new(),
             horizon: HashMap::new(),

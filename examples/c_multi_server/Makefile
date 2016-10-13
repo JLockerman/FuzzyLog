@@ -25,9 +25,7 @@ WFLAGS += -Wall -Wextra -Wpointer-arith -Wundef -Wformat=2 -Wnested-externs
 
 .PHONY: all rust_code clean mostlyclean rust_clean new_dir
 
-all: out/start
-
-out/start: $(DELOS_RUST_LOC)/examples/c_linking/target/release/libc_link.a $(C_SRC)
+all: $(DELOS_RUST_LOC)/examples/c_linking/target/release/libc_link.a
 	@mkdir -p ./out
 	$(CC) start.c -o ./out/start $(CFLAGS) $(WFLAGS) $(LINK_FLAGS)
 
