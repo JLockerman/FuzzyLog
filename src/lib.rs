@@ -46,13 +46,14 @@ pub mod c_binidings {
 
     use prelude::*;
     use local_store::LocalHorizon;
-    use tcp_store::TcpStore;
-    //TODO use multitcp_store::TcpStore;
+    //use tcp_store::TcpStore;
+    use multitcp_store::TcpStore;
 
     use std::collections::HashMap;
     use std::{mem, ptr, slice};
 
     use std::ffi::CStr;
+    use std::net::SocketAddr;
     use std::os::raw::c_char;
 
     use color_api::*;
@@ -70,16 +71,27 @@ pub mod c_binidings {
     pub extern "C" fn new_dag_handle(num_ips: usize, server_ips: *const *const i8,
         color: *const colors) -> Box<DAG> {
         assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
-        assert_eq!(num_ips, 1, "Multiple servers are not yet supported via the C API");
+        //assert_eq!(num_ips, 1, "Multiple servers are not yet supported via the C API");
         assert!(server_ips != ptr::null());
         assert!(unsafe {*server_ips != ptr::null()});
         assert!(color != ptr::null());
         assert!(colors_valid(color));
-
-        let server_addr_str = unsafe { CStr::from_ptr(*server_ips).to_str().expect("invalid IP string") };
-        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+        let (lock_server_addr, server_addrs) = unsafe {
+            let mut addrs = slice::from_raw_parts(server_ips, num_ips).into_iter().map(|&s|
+                CStr::from_ptr(s).to_str().expect("invalid IP string")
+                .parse().expect("invalid IP addr")
+            );
+            let first_addr = addrs.next().unwrap();
+            let remaining_addrs = addrs.collect::<Vec<SocketAddr>>();
+            if remaining_addrs.is_empty() {
+                (first_addr, vec![first_addr])
+            }
+            else {
+                (first_addr, remaining_addrs)
+            }
+        };
         let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
-        Box::new(DAGHandle::new(TcpStore::new(ip_addr), LocalHorizon::new(), colors))
+        Box::new(DAGHandle::new(TcpStore::new(lock_server_addr, &*server_addrs).unwrap(), LocalHorizon::new(), colors))
     }
 
     //NOTE currently can only use 31bits of return value
@@ -216,8 +228,8 @@ pub mod c_binidings {
             callbacks.insert(chain.into(), callback);
         }
         let server_addr_str = unsafe { CStr::from_ptr(server_addr).to_str().expect("invalid IP string") };
-        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
-        let log = FuzzyLog::new(TcpStore::new(ip_addr), LocalHorizon::new(), callbacks);
+        //let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+        let log = FuzzyLog::new(TcpStore::new(server_addr_str, server_addr_str).unwrap(), LocalHorizon::new(), callbacks);
         Box::new(log)
     }
 
