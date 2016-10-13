@@ -74,26 +74,30 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub extern "C" fn new_dag_handle(num_ips: usize, server_ips: *const *const c_char,
+    pub extern "C" fn new_dag_handle(lock_server_ip: *const c_char,
+        num_chain_ips: usize, chain_server_ips: *const *const c_char,
         color: *const colors) -> Box<DAG> {
         assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
         //assert_eq!(num_ips, 1, "Multiple servers are not yet supported via the C API");
-        assert!(server_ips != ptr::null());
-        assert!(unsafe {*server_ips != ptr::null()});
+        assert!(chain_server_ips != ptr::null());
+        assert!(unsafe {*chain_server_ips != ptr::null()});
+        assert!(num_chain_ips >= 1);
         assert!(color != ptr::null());
         assert!(colors_valid(color));
         let (lock_server_addr, server_addrs) = unsafe {
-            let mut addrs = slice::from_raw_parts(server_ips, num_ips).into_iter().map(|&s|
-                CStr::from_ptr(s).to_str().expect("invalid IP string")
-                .parse().expect("invalid IP addr")
-            );
-            let first_addr = addrs.next().unwrap();
-            let remaining_addrs = addrs.collect::<Vec<SocketAddr>>();
-            if remaining_addrs.is_empty() {
-                (first_addr, vec![first_addr])
+            let addrs = slice::from_raw_parts(chain_server_ips, num_chain_ips)
+                .into_iter().map(|&s|
+                    CStr::from_ptr(s).to_str().expect("invalid IP string")
+                        .parse().expect("invalid IP addr")
+                    ).collect::<Vec<SocketAddr>>();
+            if lock_server_ip != ptr::null() {
+                let lock_server_addr = CStr::from_ptr(lock_server_ip).to_str()
+                    .expect("invalid IP string")
+                    .parse().expect("invalid IP addr");
+                (lock_server_addr, addrs)
             }
             else {
-                (first_addr, remaining_addrs)
+                (addrs[0], addrs)
             }
         };
         let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};

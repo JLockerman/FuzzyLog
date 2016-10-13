@@ -19,8 +19,35 @@ struct colors
 
 typedef struct DAGHandle DAGHandle;
 
-DAGHandle *new_dag_handle(size_t num_ips, const char * const* server_ips,
+//! Creates a new DAGHandle for a server group.
+//!
+//! @param lock_server_ip
+//!     The IP address of the lock server used by the server group. Should be
+//!     `NULL` if the group consists of only one server.
+//!     NOTE The lock server may _not_ be used as a chain server.
+//!
+//! @param num_chain_servers
+//!     The number of chain servers in the server group.
+//!
+//! @param chain_server_ips
+//!     The IP address of every chain server in the server group.
+//!     NOTE Currently the ordering of the IP addresses must be the same as the
+//!     ordering of the servers.
+//!
+//! @param interesting_colors
+//!     The colors this DAGHandle is interested in reading.
+//!
+DAGHandle *new_dag_handle(const char * lock_server_ip,
+	size_t num_chain_servers, const char * const* chain_server_ips,
 	struct colors *interesting_colors);
+
+static inline DAGHandle *new_dag_handle_for_single_server(const char *chain_server_ip,
+	struct colors *interesting_colors)
+{
+	const char *chain_server_ips[] = { chain_server_ip };
+	return new_dag_handle(NULL, 1, chain_server_ips, interesting_colors);
+}
+
 
 //! Appends a new node to the dag.
 //!
@@ -132,7 +159,7 @@ void start_fuzzy_log_server_thread_from_group(const char * server_ip,
 
 
 static inline void start_fuzzy_log_servers(uint32_t num_servers,
-	const char * server_ips[num_servers])
+	const char * const server_ips[num_servers])
 {
 	for(uint32_t i = 0; i < num_servers; i++)
 		start_fuzzy_log_server_thread_from_group(server_ips[i], i, num_servers);
