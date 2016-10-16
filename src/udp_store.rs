@@ -177,15 +177,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                         trace!("wrong loc {:?}, expected {:?}", this.receive_buffer, key);
                         continue 'send;
                     }
-                    EntryKind::ReadMulti => {
+                    EntryKind::ReadMulti | EntryKind::ReadSenti => {
                         // TODO base on loc instead?
-                        if unsafe {
-                            this.receive_buffer
-                                .as_multi_entry_mut()
-                                .multi_contents_mut()
-                                .columns
-                                .contains(&key)
-                        } {
+                        if this.receive_buffer.locs().contains(&key) {
                             trace!("correct response");
                             return Ok(*this.receive_buffer.clone());
                         }
@@ -295,7 +289,70 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
     fn dependent_multi_append(&mut self, chains: &[order],
         depends_on: &[order], data: &V,
         deps: &[OrderIndex]) -> InsertResult {
-        panic!("unimplemented")
+
+        let request_id = Uuid::new_v4();
+
+        let mchains: Vec<_> = chains.into_iter()
+            .map(|&c| (c, 0.into()))
+            .chain(::std::iter::once((0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .collect();
+
+        *self.send_buffer = EntryContents::Multiput {
+            data: data,
+            uuid: &request_id,
+            columns: &mchains,
+            deps: deps,
+        }.clone_entry();
+        self.send_buffer.id = request_id.clone();
+
+        'send: loop {
+            {
+                trace!("sending dmulti");
+                self.socket
+                    .send_to(self.send_buffer.bytes(), &self.server_addr)
+                    .expect("cannot send insert"); //TODO
+            }
+
+            let start_time = precise_time_ns() as i64;
+            'receive: loop {
+                let (_size, addr) = {
+                    self.socket
+                        .recv_from(self.receive_buffer.sized_bytes_mut())
+                        .expect("unable to receive ack") //TODO
+                        //precise_time_ns() as i64 - start_time < this.rtt + 4 * this.dev
+                };
+                trace!("got packet");
+                if addr == self.server_addr {
+                    match self.receive_buffer.kind.layout() {
+                        EntryLayout::Multiput => {
+                            // TODO types?
+                            trace!("correct response");
+                            trace!("id {:?}", self.receive_buffer.id);
+                            if self.receive_buffer.id == request_id {
+                                trace!("dmultiappend success");
+                                let sample_rtt = precise_time_ns() as i64 - start_time;
+                                let diff = sample_rtt - self.rtt;
+                                self.dev = self.dev + (diff.abs() - self.dev) / 4;
+                                self.rtt = self.rtt + (diff * 4 / 5);
+                                return Ok((0.into(), 0.into())); //TODO
+                            } else {
+                                trace!("?? packet {:?}", self.receive_buffer);
+                                continue 'receive;
+                            }
+                        }
+                        v => {
+                            trace!("invalid response {:?}", v);
+                            continue 'receive;
+                        }
+                    }
+                } else {
+                    trace!("unexpected addr {:?}, expected {:?}",
+                           addr, self.server_addr);
+                    continue 'receive;
+                }
+            }
+        }
     }
 }
 
