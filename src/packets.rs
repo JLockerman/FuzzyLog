@@ -10,6 +10,8 @@ pub use storeables::Storeable;
 
 use self::EntryContents::*;
 
+pub use self::EntryKind::EntryLayout;
+
 custom_derive! {
     #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeBitAnd(u32), NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
     #[allow(non_camel_case_types)]
@@ -85,13 +87,25 @@ pub mod EntryKind {
         }
     }
 
-    #[derive(Copy, Clone, PartialEq, Eq)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum EntryLayout {
         Data,
         Multiput,
         Lock,
         Sentinel,
         Read,
+    }
+
+    impl EntryLayout {
+        pub fn kind(&self) -> Kind {
+            match self {
+                &EntryLayout::Data => Data,
+                &EntryLayout::Multiput => Multiput,
+                &EntryLayout::Lock => Lock,
+                &EntryLayout::Sentinel => Sentinel,
+                &EntryLayout::Read => Read,
+            }
+        }
     }
 
     impl Kind {

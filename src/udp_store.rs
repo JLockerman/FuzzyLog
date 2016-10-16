@@ -4,7 +4,7 @@ use prelude::*;
 use std::fmt::Debug;
 //use std::marker::{Unsize, PhantomData};
 use std::marker::PhantomData;
-use std::mem::{self, size_of};
+use std::mem;
 use std::net::{SocketAddr, UdpSocket};
 // use std::ops::CoerceUnsized;
 //use std::time::Duration;
@@ -52,7 +52,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
 
         let request_id = Uuid::new_v4();
         *this.send_buffer = val.clone_entry();
-        assert_eq!(this.send_buffer.kind & EntryKind::Layout, EntryKind::Data);
+        assert_eq!(this.send_buffer.kind.layout(), EntryLayout::Data);
         {
             let entr = unsafe { this.send_buffer.as_data_entry_mut() };
             entr.flex.loc = key;
@@ -84,8 +84,8 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                     //    trace!("invalid response r ReadSuccess at insert");
                     //    continue 'receive
                     // }
-                    match this.receive_buffer.kind & EntryKind::Layout {
-                        EntryKind::Data => {
+                    match this.receive_buffer.kind.layout() {
+                        EntryLayout::Data => {
                             // TODO types?
                             trace!("correct response");
                             let entr = unsafe { this.receive_buffer.as_data_entry() };
@@ -108,7 +108,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                                 continue 'receive;
                             }
                         }
-                        EntryKind::Multiput => {
+                        EntryLayout::Multiput => {
                             match this.receive_buffer.contents() {
                                 EntryContents::Multiput { columns, .. } => {
                                     if columns.contains(&key) {
@@ -260,8 +260,8 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                 };
                 trace!("got packet");
                 if addr == this.server_addr {
-                    match this.receive_buffer.kind & EntryKind::Layout {
-                        EntryKind::Multiput => {
+                    match this.receive_buffer.kind.layout() {
+                        EntryLayout::Multiput => {
                             // TODO types?
                             trace!("correct response");
                             trace!("id {:?}", this.receive_buffer.id);

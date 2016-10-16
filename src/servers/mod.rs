@@ -3,7 +3,6 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::rc::Rc;
 
 use prelude::*;
-use packets::EntryKind::EntryLayout;
 
 pub mod tcp;
 pub mod udp;

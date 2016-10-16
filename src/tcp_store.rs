@@ -9,8 +9,6 @@ use std::mem::{self};
 use std::net::{SocketAddr, TcpStream};
 // use std::ops::CoerceUnsized;
 
-use net2::TcpStreamExt;
-
 // use mio::buf::{SliceBuf, MutSliceBuf};
 // use mio::udp::UdpSocket;
 // use mio::unix;
@@ -83,7 +81,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
     fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
         let request_id = Uuid::new_v4();
         *self.send_buffer = val.clone_entry();
-        assert_eq!(self.send_buffer.kind & EntryKind::Layout, EntryKind::Data);
+        assert_eq!(self.send_buffer.kind.layout(), EntryLayout::Data);
         {
             let entr = unsafe { self.send_buffer.as_data_entry_mut() };
             entr.flex.loc = key;
@@ -102,12 +100,12 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             'receive: loop {
                 self.read_packet();
                 trace!("got packet");
-                // if self.receive_buffer.kind & EntryKind::ReadSuccess == EntryKind::ReadSuccess {
+                // if self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
                 //    trace!("invalid response r ReadSuccess at insert");
                 //    continue 'receive
                 // }
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    EntryKind::Data => {
+                match self.receive_buffer.kind.layout() {
+                    EntryLayout::Data => {
                         // TODO types?
                         trace!("correct response");
                         let entr = unsafe { self.receive_buffer.as_data_entry() };
@@ -130,7 +128,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             continue 'receive;
                         }
                     }
-                    EntryKind::Multiput => {
+                    EntryLayout::Multiput => {
                         match self.receive_buffer.contents() {
                             EntryContents::Multiput { columns, .. } => {
                                 if columns.contains(&key) {
@@ -239,8 +237,8 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             'receive: loop {
                 self.read_packet();
                 trace!("got packet");
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    EntryKind::Multiput => {
+                match self.receive_buffer.kind.layout() {
+                    EntryLayout::Multiput => {
                         // TODO types?
                         trace!("correct response");
                         trace!("id {:?}", self.receive_buffer.id);
@@ -294,8 +292,8 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             'receive: loop {
                 self.read_packet();
                 trace!("got packet");
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    EntryKind::Multiput => {
+                match self.receive_buffer.kind.layout() {
+                    EntryLayout::Multiput => {
                         // TODO types?
                         trace!("correct response");
                         trace!("id {:?}", self.receive_buffer.id);
