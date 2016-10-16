@@ -366,5 +366,5 @@ pub mod test {
         assert_eq!(mem::size_of::<u16>(), 2);
     }
 
-    //general_tests!(super::new_store);
+    general_tests!(super::new_store);
 }
