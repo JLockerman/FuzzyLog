@@ -111,6 +111,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
         trace!("dma @ {:?} -> {:?}", chains, depends_on);
         let id = Uuid::new_v4();
         let entr = EntryContents::Sentinel(&id);
+        //TODO
         for &chain in depends_on {
             let next_loc = {
                 let horizon_loc = self.horizon.entry(chain).or_insert(1.into());
@@ -125,6 +126,9 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 }
                 Vacant(v) => {
                     let mut new_val = entr.clone_entry();
+                    unsafe {
+                        new_val.as_multi_entry_mut().flex.cols = 1;
+                    }
                     new_val.locs_mut()[0] = (chain, next_loc);
                     trace!("new val {:?}", new_val);
                     v.insert(new_val);

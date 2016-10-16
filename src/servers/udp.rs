@@ -1,139 +1,104 @@
 
 use prelude::*;
 
-use std::collections::HashMap;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::mem::{self, forget, transmute};
+use std::mem;
 use std::net::SocketAddr;
 
+use mio;
+use mio::prelude::*;
 use mio::udp::UdpSocket;
 
+use servers::ServerLog;
+
+const SOCKET_TOKEN: mio::Token = mio::Token(0);
+
 pub struct Server {
-    receive: UdpSocket,
-    log: HashMap<OrderIndex, Box<Entry<()>>>,
-    horizon: HashMap<order, entry>,
-    buff: Box<Entry<()>>,
+    log: ServerLog,
+    buffer: Box<Entry<()>>,
+    socket: UdpSocket,
 }
 
-impl Server {
-    pub fn new(server_addr: &SocketAddr) -> Result<Self, ::std::io::Error> {
-        let receive = try!(UdpSocket::bound(&server_addr));
-        Ok(Server {
-            receive: receive,
-            log: HashMap::new(),
-            horizon: HashMap::new(),
-            buff: Box::new(unsafe { mem::zeroed::<Entry<()>>() })
-        })
-    }
+impl mio::Handler for Server {
+    type Timeout = ();
+    type Message = ();
 
-    pub fn run(&mut self) -> ! {
-        let &mut Server {ref mut receive, ref mut log, ref mut horizon, ref mut buff} = self;
-        trace!("starting server");
-        'server: loop {
-            let res = receive.recv_from(buff.sized_bytes_mut());
-            match res {
-                Err(e) => panic!("{}", e),
-                Ok(Some((_, sa))) => {
-                    trace!("server recieved from {:?}", sa);
-
-                    let kind = {
-                        buff.kind
-                    };
-
-                    trace!("server recieved a {:?}", kind);
-                    if let EntryKind::Multiput = kind & EntryKind::Layout {
-                        {
-                            {
-                                buff.kind = kind | EntryKind::ReadSuccess;
-                                let locs = buff.locs_mut();
-                                for i in 0..locs.len() {
-                                    let hor: entry = horizon
-                                                         .get(&locs[i].0)
-                                                         .cloned()
-                                                         .unwrap_or(0.into()) +
-                                                     1;
-                                    locs[i].1 = hor;
-                                    horizon.insert(locs[i].0, hor);
-                                }
-                            }
-                            let locs = buff.locs();
-                            trace!("appending at {:?}", locs);
-                            for &loc in locs {
-                                let b = buff.clone();
-                                log.insert(loc, b);
-                                // trace!("appended at {:?}", loc);
-                            }
-                        }
-                        let _ = receive.send_to(buff.bytes(), &sa).expect("unable to ack");
-                    } else {
-                        let loc = {
-                            let loc = unsafe { &mut buff.as_data_entry_mut().flex.loc };
-                            trace!("loc {:?}", loc);
-                            if kind & EntryKind::Layout == EntryKind::Data {
-                                trace!("is write");
-                                let hor = horizon.get(&loc.0).cloned().unwrap_or(0.into()) + 1;
-                                *loc = (loc.0, hor);
-                            } else {
-                                trace!("is read");
-                            }
-                            trace!("loc {:?}", loc);
-                            *loc
-                        };
-
-                        match log.entry(loc) {
-                            Vacant(e) => {
-                                trace!("Vacant entry {:?}", loc);
-                                match kind & EntryKind::Layout {
-                                    EntryKind::Data => {
-                                        trace!("writing");
-                                        let packet = mem::replace(buff,
-                                            Box::new(unsafe { mem::zeroed::<Entry<()>>() }));
-                                        let packet: &mut Box<Entry<()>> = unsafe {
-                                            transmute_ref_mut(e.insert(packet))
-                                        };
-                                        horizon.insert(loc.0, loc.1);
-                                        // packet.header.kind = Kind::Written;
-                                        receive.send_to(packet.bytes(), &sa)
-                                               .expect("unable to ack");
-                                    }
-                                    EntryKind::Read => {
-                                        let last_entry = horizon.get(&loc.0).cloned().unwrap_or(0.into());
-                                        let (old_id, old_loc) = unsafe {
-                                            (buff.id, buff.as_data_entry().flex.loc)
-                                        };
-                                        **buff = EntryContents::Data(&(), &[(loc.0, last_entry)]).clone_entry();
-                                        buff.id = old_id;
-                                        buff.kind = EntryKind::NoValue;
-                                        unsafe {
-                                            buff.as_data_entry_mut().flex.loc = old_loc;
-                                        }
-                                        receive.send_to(buff.bytes(), &sa)
-                                               .expect("unable to ack");
-                                    }
-                                    _ => {
-                                        // buff.kind = unoccupied_response(kind);
-                                        receive.send_to(buff.bytes(), &sa)
-                                               .expect("unable to ack");
-                                    }
-                                }
-                            }
-                            Occupied(mut e) => {
-                                trace!("Occupied entry {:?}", loc);
-                                let packet = e.get_mut();
-                                packet.kind = packet.kind | EntryKind::ReadSuccess;
-                                //trace!("returning {:?}", packet);
-                                receive.send_to(packet.bytes(), &sa).expect("unable to ack");
-                            }
-                        };
-                    }
+    fn ready(&mut self,
+             event_loop: &mut EventLoop<Self>,
+             token: mio::Token,
+             events: mio::EventSet) {
+        match token {
+            SOCKET_TOKEN => {
+                // trace!("SERVER got client event");
+                if events.is_error() {
+                    trace!("SERVER error");
+                    return
                 }
-                _ => continue 'server,
+                if events.is_readable() {
+                    // trace!("SERVER gonna read from client");
+                    //TODO currently we assume we read an entire packet
+                    if let Some(addr) = self.read_packet() {
+                        trace!("SERVER finished read from {:?}", addr);
+                        let need_to_respond = self.log.handle_op(&mut *self.buffer);
+                        //TODO
+                        //if need_to_respond {
+                        self.write_packet(&addr);
+                        trace!("SERVER finished write to {:?}", addr);
+                        //}
+                    }
+                } else {
+                    panic!("invalid event {:?}", events);
+                };
+                event_loop.reregister(&self.socket,
+                                      SOCKET_TOKEN,
+                                      mio::EventSet::readable() | mio::EventSet::error(),
+                                      mio::PollOpt::edge() | mio::PollOpt::oneshot())
+                          .expect("could not reregister client socket")
             }
+            t => panic!("SERVER invalid tokem {:?}.", t)
         }
     }
 }
 
-unsafe fn transmute_ref_mut<T, U>(t: &mut T) -> &mut U {
-    assert_eq!(mem::size_of::<T>(), mem::size_of::<U>());
-    mem::transmute(t)
+impl Server {
+    pub fn new(server_addr: &SocketAddr) -> Result<Self, ::std::io::Error> {
+        let socket = try!(UdpSocket::bound(&server_addr));
+        Ok(Server {
+            socket: socket,
+            //TODO
+            log: ServerLog::new(0, 1),
+            buffer: Box::new(unsafe { mem::zeroed::<Entry<()>>() })
+        })
+    }
+
+    pub fn run(&mut self) -> ! {
+        let mut event_loop = EventLoop::new().unwrap();
+        event_loop.register(&self.socket, SOCKET_TOKEN,
+            mio::EventSet::readable() | mio::EventSet::error(),
+            mio::PollOpt::edge() | mio::PollOpt::oneshot())
+            .expect("could not register server");
+        let res = event_loop.run(self);
+        panic!("Server stopped with {:?}", res)
+    }
+
+    fn read_packet(&mut self) -> Option<SocketAddr> {
+        let finished_read = self.try_read_packet();
+        finished_read.map(|(read, addr)| {
+            assert_eq!(read, self.buffer.entry_size());
+            addr
+         })
+    }
+
+    fn try_read_packet(&mut self) -> Option<(usize, SocketAddr)> {
+        //TODO ick
+        self.socket.recv_from(&mut self.buffer.sized_bytes_mut()).expect("socket error")
+    }
+
+    fn write_packet(&mut self, addr: &SocketAddr) {
+        //TODO ick
+        let finished_write = self.socket.send_to(self.buffer.bytes(), addr)
+            .expect("socket error");
+        finished_write.map(|written| {
+            assert_eq!(written, self.buffer.entry_size());
+        });
+    }
 }

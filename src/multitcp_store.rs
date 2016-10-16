@@ -1,7 +1,6 @@
 #![allow(unused_imports)]
 
 use prelude::*;
-use packets::EntryKind::EntryLayout;
 
 use std::collections::{HashSet, HashMap};
 use std::fmt::Debug;
@@ -11,8 +10,6 @@ use std::marker::PhantomData;
 use std::mem;
 use std::net::{TcpStream, ToSocketAddrs};
 // use std::ops::CoerceUnsized;
-
-use net2::TcpStreamExt;
 
 // use mio::buf::{SliceBuf, MutSliceBuf};
 // use mio::udp::UdpSocket;
@@ -111,8 +108,8 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             'receive: loop {
                 self.read_packet(socket_id);
                 trace!("got packet");
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    EntryKind::Multiput => {
+                match self.receive_buffer.kind.layout() {
+                    EntryLayout::Multiput => {
                         // TODO types?
                         trace!("correct response");
                         trace!("id {:?}", self.receive_buffer.id);
@@ -153,8 +150,8 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             'receive: loop {
                 self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
                 trace!("got packet from {:?}", <u32 as From<_>>::from(socket_id) as usize);
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    EntryKind::Multiput => {
+                match self.receive_buffer.kind.layout() {
+                    EntryLayout::Multiput => {
                         // TODO should also have lock-success
                         // TODO types?
                         trace!("correct response");
@@ -258,8 +255,8 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         'receive: loop {
             self.read_lockserver_packet();
             trace!("got packet");
-            match self.receive_buffer.kind & EntryKind::Layout {
-                EntryKind::Multiput => {
+            match self.receive_buffer.kind.layout() {
+                EntryLayout::Multiput => {
                     // TODO types?
                     trace!("correct response");
                     trace!("id {:?}", self.receive_buffer.id);
@@ -356,12 +353,12 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             'receive: loop {
                 self.read_packet(socket_id);
                 trace!("got packet");
-                // if self.receive_buffer.kind & EntryKind::ReadSuccess == EntryKind::ReadSuccess {
+                // if self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
                 //    trace!("invalid response r ReadSuccess at insert");
                 //    continue 'receive
                 // }
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    EntryKind::Data => {
+                match self.receive_buffer.kind.layout() {
+                    EntryLayout::Data => {
                         // TODO types?
                         trace!("A correct response");
                         let entr = unsafe { self.receive_buffer.as_data_entry() };
@@ -391,7 +388,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             continue 'receive;
                         }
                     }
-                    EntryKind::Multiput => {
+                    EntryLayout::Multiput => {
                         trace!("got multi?");
                         match self.receive_buffer.contents() {
                             EntryContents::Multiput { columns, .. } => {
@@ -535,8 +532,8 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             'receive: loop {
                 self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
                 trace!("M got packet");
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    EntryKind::Multiput => {
+                match self.receive_buffer.kind.layout() {
+                    EntryLayout::Multiput => {
                         // TODO should also have lock-success
                         // TODO types?
                         trace!("M correct response");
@@ -666,15 +663,15 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             'receive: loop {
                 self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
                 trace!("D got packet");
-                match self.receive_buffer.kind & EntryKind::Layout {
-                    k @ EntryKind::Multiput | k @ EntryKind::Sentinel => {
+                match self.receive_buffer.kind.layout() {
+                    k @ EntryLayout::Multiput | k @ EntryLayout::Sentinel => {
                         // TODO should also have lock-success
                         // TODO types?
                         trace!("D correct response");
                         trace!("D id {:?}", self.receive_buffer.id);
                         if self.receive_buffer.id == request_id {
                             if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
-                                self.send_buffer.kind = k | EntryKind::TakeLock;
+                                self.send_buffer.kind = k.kind() | EntryKind::TakeLock;
                                 self.emplace_multi_node(socket_id, lock_num);
                                 continue 'receive
                             }
