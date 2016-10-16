@@ -64,7 +64,8 @@ pub mod c_binidings {
 
     use mio::EventLoop;
 
-    pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
+    //pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
+    pub type DAG = DAGHandle<[u8], Box<Store<[u8]>>, LocalHorizon>;
     pub type ColorID = u32;
 
     #[repr(C)]
@@ -101,7 +102,9 @@ pub mod c_binidings {
             }
         };
         let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
-        Box::new(DAGHandle::new(TcpStore::new(lock_server_addr, &*server_addrs).unwrap(), LocalHorizon::new(), colors))
+        Box::new(DAGHandle::new(
+            Box::new(TcpStore::new(lock_server_addr, &*server_addrs).unwrap()),
+            LocalHorizon::new(), colors))
     }
 
     //NOTE currently can only use 31bits of return value

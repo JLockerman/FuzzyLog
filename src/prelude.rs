@@ -20,6 +20,24 @@ pub trait Store<V: ?Sized> {
     //fn get_horizon(&mut self, chains: &mut [OrderIndex]);
 }
 
+impl<V: ?Sized> Store<V> for Box<Store<V>> {
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
+        (**self).insert(key, val)
+    }
+
+    fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
+        (**self).get(key)
+    }
+
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        (**self).multi_append(chains, data, deps)
+    }
+
+    fn dependent_multi_append(&mut self, chains: &[order], depends_on: &[order], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        (**self).dependent_multi_append(chains, depends_on, data, deps)
+    }
+}
+
 pub type InsertResult = Result<OrderIndex, InsertErr>;
 pub type GetResult<T> = Result<T, GetErr>;
 
