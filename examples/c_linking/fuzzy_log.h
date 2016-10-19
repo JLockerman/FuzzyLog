@@ -48,6 +48,9 @@ static inline DAGHandle *new_dag_handle_for_single_server(const char *chain_serv
 	return new_dag_handle(NULL, 1, chain_server_ips, interesting_colors);
 }
 
+//! Creates a new DAGHandle for a server group based on a config file.
+DAGHandle *new_dag_handle_from_config(const char *config_filename,
+	struct colors *interesting_colors);
 
 //! Appends a new node to the dag.
 //!
@@ -165,6 +168,9 @@ static inline void start_fuzzy_log_servers(uint32_t num_servers,
 		start_fuzzy_log_server_thread_from_group(server_ips[i], i, num_servers);
 }
 
+//! Start a number of fuzzy log server threads based on a config file.
+//! NOTE this function _does_ return after all servers start.
+void start_servers_from_config(const char *config_filename);
 
 ////////////////////////////////////
 //    Old fuzzy log C bindings    //
