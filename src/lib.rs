@@ -24,6 +24,7 @@ extern crate mio;
 extern crate nix;
 extern crate net2;
 extern crate time;
+extern crate toml;
 extern crate rand;
 extern crate uuid;
 extern crate libc;
@@ -109,6 +110,32 @@ pub mod c_binidings {
         Box::new(DAGHandle::new(TcpStore::new(lock_server_addr, &*server_addrs).unwrap(), LocalHorizon::new(), colors))
     }
 
+    #[no_mangle]
+    pub extern "C" fn new_dag_handle_from_config(config_filename: *const c_char,
+        color: *const colors) -> Box<DAG> {
+        assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
+        assert!(config_filename != ptr::null());
+        assert!(color != ptr::null());
+        assert!(colors_valid(color));
+
+        let (lock_server_addr, chain_server_addrs) = read_config_file(config_filename);
+        let (lock_server_addr, server_addrs) = {
+            let addrs = chain_server_addrs.into_iter()
+                .map(|s| s.parse().expect("Invalid server addr"))
+                .collect::<Vec<SocketAddr>>();
+            let lock_server_addr = lock_server_addr.map(|a| a.parse().expect("Invalid lockserver addr"));
+            if let Some(a) = lock_server_addr {
+                (a, addrs)
+            }
+            else {
+                (addrs[0], addrs)
+            }
+        };
+        let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
+        Box::new(DAGHandle::new(TcpStore::new(lock_server_addr, &*server_addrs).unwrap(),
+            LocalHorizon::new(), colors))
+    }
+
     //NOTE currently can only use 31bits of return value
     #[no_mangle]
     pub extern "C" fn append(dag: *mut DAG, data: *const u8, data_size: usize,
@@ -190,14 +217,22 @@ pub mod c_binidings {
 
     #[no_mangle]
     pub extern "C" fn start_fuzzy_log_server_thread(server_ip: *const c_char) {
+        assert!(server_ip != ptr::null());
+        let server_ip = unsafe {
+            CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
+        };
         start_fuzzy_log_server_thread_from_group(server_ip, 0, 1)
     }
 
     #[no_mangle]
     pub extern "C" fn start_fuzzy_log_server_for_group(server_ip: *const c_char,
         server_number: u32, total_servers_in_group: u32) -> ! {
+        assert!(server_ip != ptr::null());
         let mut event_loop = ::mio::EventLoop::new()
             .expect("unable to start server loop");
+        let server_ip = unsafe {
+            CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
+        };
         let mut server = start_server(&mut event_loop, server_ip, server_number,
             total_servers_in_group);
         let res = event_loop.run(&mut server);
@@ -205,21 +240,21 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub extern "C" fn start_fuzzy_log_server_thread_from_group(server_ip: *const c_char,
+    pub extern "C" fn start_fuzzy_log_server_thread_from_group(server_ip: &str,
         server_number: u32, total_servers_in_group: u32) {
-            assert!(server_ip != ptr::null());
             let server_started = AtomicBool::new(false);
-            let (started, server_ip) = unsafe {
+            let ip_addr = server_ip.parse().expect("invalid IP addr");
+            let started = unsafe {
                 //This should be safe since the while loop at the of the function
                 //prevents it from exiting until the server is started and
                 //server_started is no longer used
-                (extend_lifetime(&server_started), &*server_ip)
+                extend_lifetime(&server_started)
             };
             let handle = ::std::thread::spawn(move || {
                 let mut event_loop = ::mio::EventLoop::new()
                     .expect("unable to start server loop");
-                let mut server = start_server(&mut event_loop, server_ip, server_number,
-                    total_servers_in_group);
+                let mut server = Server::new(&ip_addr, server_number, total_servers_in_group, &mut event_loop)
+                    .expect("unable to start server");
                 started.store(true, Ordering::SeqCst);
                 mem::drop(started);
                 let res = event_loop.run(&mut server);
@@ -234,14 +269,60 @@ pub mod c_binidings {
             }
     }
 
-    fn start_server(event_loop: &mut EventLoop<Server>, server_ip: *const c_char,
+    fn start_server<'a, 'b>(event_loop: &'a mut EventLoop<Server>, server_ip: &'b str,
         server_num: u32, total_num_servers: u32) -> Server {
-        let server_addr_str = unsafe {
-            CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
-        };
-        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+        let ip_addr = server_ip.parse().expect("invalid IP addr");
         Server::new(&ip_addr, server_num, total_num_servers, event_loop)
             .expect("unable to start server")
+    }
+
+    #[no_mangle]
+    pub extern "C" fn start_servers_from_config(file_name: *const c_char) {
+        assert!(file_name != ptr::null());
+        let (lock_server_addr, chain_server_addrs) = read_config_file(file_name);
+        if chain_server_addrs.len() > 1 && lock_server_addr.is_none() {
+            panic!("Must provide a lock server if there are multiple chain servers")
+        }
+        if let Some(addr) = lock_server_addr {
+            start_fuzzy_log_server_thread_from_group(&addr, 0, 1);
+        }
+        let total_chain_servers = chain_server_addrs.len() as u32;
+        for (i, addr) in chain_server_addrs.into_iter().enumerate() {
+            start_fuzzy_log_server_thread_from_group(&addr, i as u32, total_chain_servers);
+        }
+    }
+
+    ////////////////////////////////////
+    //           Config I/O           //
+    ////////////////////////////////////
+
+    fn read_config_file(file_name: *const c_char)
+    -> (Option<String>, Vec<String>) {
+        use std::fs::File;
+        use std::io::Read;
+        use toml::{self, Value};
+
+        let file_name = unsafe { CStr::from_ptr(file_name) }
+            .to_str().expect("Can only hanlde utf-8 filenames.");
+        let mut config_string = String::new();
+        {
+            let mut config = File::open(file_name)
+                .expect("Could not open config file.");
+            config.read_to_string(&mut config_string)
+                .expect("Invalid config file encoding.");
+        }
+        let mut vals = toml::Parser::new(&config_string)
+            .parse().expect("Invalid config file format.");
+        let lock_server_str =
+            if let Some(Value::String(s)) = vals.remove("DELOS_LOCK_SERVER") {
+                Some(s)
+            } else { None };
+        let css = vals.remove("DELOS_CHAIN_SERVERS")
+            .expect("Must provide at least one chain server addr.");
+        let chain_server_strings = if let Value::String(s) = css {
+                s.split_whitespace().map(|s| s.to_string()).collect()
+            } else { panic!("Must provide at least one chain server addr.") };
+        (lock_server_str, chain_server_strings)
     }
 
     ////////////////////////////////////

@@ -4,21 +4,14 @@
 
 #include "../c_linking/fuzzy_log.h"
 
-
-static char *lock_server_ip = "127.0.0.1:13270";
-static char *chain_server_ips[] = { "127.0.0.1:13271", "127.0.0.1:13272",
-	"127.0.0.1:13273"};
-
 static char out[DELOS_MAX_DATA_SIZE];
 
 int main()
 {
-	start_fuzzy_log_server_thread(lock_server_ip);
-	start_fuzzy_log_servers(3, (const char *const *)chain_server_ips);
+	start_servers_from_config("./server_config");
 
 	struct colors color = { .numcolors = 3, .mycolors = (ColorID[]){2, 3, 4}};
-	struct DAGHandle* dag = new_dag_handle(lock_server_ip,
-		3, (const char *const *)chain_server_ips, &color);
+	struct DAGHandle* dag = new_dag_handle_from_config("./server_config", &color);
 	printf("fuzzy log client at %p.\n", dag);
 
 	uint32_t data;

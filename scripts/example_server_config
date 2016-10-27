@@ -1,0 +1,3 @@
+DELOS_LOCK_SERVER="vmhost5.cloud.cs.yale.internal:13240"
+DELOS_CHAIN_SERVERS="vmhost5.cloud.cs.yale.internal:13241 vmhost5.cloud.cs.yale.internal:13242 vmhost5.cloud.cs.yale.internal:13243"
+
