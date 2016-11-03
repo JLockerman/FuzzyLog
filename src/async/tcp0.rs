@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 use packets::*;
 
+use bit_set::BitSet;
+
 use mio;
 use mio::prelude::*;
 use mio::tcp::*;
@@ -19,8 +21,10 @@ pub type FinishedWriteChannel = Rc<RefCell<VecDeque<(Uuid, Vec<OrderIndex>)>>>;
 pub struct AsyncTcpStore {
     sent_writes: HashMap<Uuid, WriteState>,
     sent_reads: HashMap<OrderIndex, Vec<u8>>,
-    lock_server: PerServer,
     servers: Vec<PerServer>,
+    registered_for_write: BitSet,
+    needs_to_write: BitSet,
+    num_chain_servers: usize,
     finished_reads: FinishedReadChannel,
     //TODO what info is needed?
     finished_writes: FinishedWriteChannel,
@@ -46,28 +50,30 @@ impl AsyncTcpStore {
         finished_writes: FinishedWriteChannel,
         event_loop: &mut EventLoop<Self>)
     -> Result<Self, io::Error>
-    where I: IntoIterator<Item=SocketAddr>{
+    where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
-        let servers = try!(chain_servers
+        let mut servers = try!(chain_servers
             .into_iter()
             .map(PerServer::new)
             .collect::<Result<Vec<_>, _>>());
+        let num_chain_servers = servers.len();
+        let lock_server = try!(PerServer::new(lock_server));
+        //TODO if let Some(lock_server) = lock_server...
+        servers.push(lock_server);
         for (i, server) in servers.iter().enumerate() {
             event_loop.register(&server.stream, Token(i),
                 mio::EventSet::readable() | mio::EventSet::error(),
                 mio::PollOpt::edge() | mio::PollOpt::oneshot())
                 .expect("could not reregister client socket")
         }
-        let lock_server = try!(PerServer::new(lock_server));
-        event_loop.register(&lock_server.stream, Token(servers.len() + 7),
-            mio::EventSet::readable() | mio::EventSet::error(),
-            mio::PollOpt::edge() | mio::PollOpt::oneshot())
-                .expect("could not reregister client socket");
+        let num_servers = servers.len();
         Ok(AsyncTcpStore {
             sent_writes: HashMap::new(),
             sent_reads: HashMap::new(),
-            lock_server: lock_server,
             servers: servers,
+            registered_for_write: BitSet::with_capacity(num_servers),
+            needs_to_write: BitSet::with_capacity(num_servers),
+            num_chain_servers: num_chain_servers,
             finished_reads: finished_reads,
             finished_writes: finished_writes
         })
@@ -89,6 +95,31 @@ impl mio::Handler for AsyncTcpStore {
     type Timeout = ();
     type Message = Vec<u8>;
 
+    fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
+        let new_msg_kind = Entry::<()>::wrap_bytes(&msg).kind.layout();
+        match new_msg_kind {
+            EntryLayout::Read | EntryLayout::Data => {
+                let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
+                let s = self.server_for_chain(loc);
+                //TODO if writeable write?
+                self.add_single_server_send(s, msg);
+            }
+            EntryLayout::Multiput => {
+                if self.is_single_node_append(&msg) {
+                    let chain = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
+                    let s = self.server_for_chain(chain);
+                    self.add_single_server_send(s, msg);
+                }
+                else {
+                    self.add_get_lock_nums(msg);
+                };
+            }
+            r @ EntryLayout::Sentinel | r @ EntryLayout::Lock =>
+                panic!("Invalid send request {:?}", r),
+        }
+        self.regregister_writes(event_loop);
+    }//End fn notify
+
     fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: mio::EventSet) {
         //TODO special case lock server token
         // if token == Token(self.servers.len())
@@ -97,6 +128,7 @@ impl mio::Handler for AsyncTcpStore {
 
         //TODO should this be in a loop?
         //TODO match token...
+        self.registered_for_write.remove(token.as_usize());
         if events.is_readable() {
             let kind = {
                 let server = self.server_for_token_mut(token);
@@ -119,8 +151,8 @@ impl mio::Handler for AsyncTcpStore {
             }
         }
         if events.is_writable() {
-            let num_servers = self.servers.len();
-            let sent = self.server_for_token_mut(token).send_packet(token, num_servers);
+            let num_chain_servers = self.num_chain_servers;
+            let sent = self.server_for_token_mut(token).send_packet(token, num_chain_servers);
             if let Some(sent) = sent {
                 let layout = sent.layout();
                 if layout == EntryLayout::Read {
@@ -136,48 +168,16 @@ impl mio::Handler for AsyncTcpStore {
                 trace!("Async spurious write");
             }
         }
-        self.reregister(event_loop, token)
-    }
-
-    fn notify(&mut self, event_loop: &mut EventLoop<Self>, mut msg: Self::Message) {
-        let new_msg_kind = Entry::<()>::wrap_bytes(&msg).kind.layout();
-        match new_msg_kind {
-            EntryLayout::Read | EntryLayout::Data => {
-                let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
-                let s = self.server_for_chain(loc);
-                self.servers[s].add_single_server_send(msg);
-                //TODO if writeable write?
-                self.register_write(event_loop, s);
-            }
-            EntryLayout::Multiput => {
-                let is_single_node_append = {
-                    let locked_chains = Entry::<()>::wrap_bytes(&msg).locs()
-                        .iter().cloned().filter(|&oi| oi != (0.into(), 0.into()));
-                    self.is_single_node_append(locked_chains)
-                };
-                if is_single_node_append {
-                    let chain = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
-                    let s = self.server_for_chain(chain);
-                    self.servers[s].add_single_server_send(msg);
-                    //TODO if writeable write?
-                    self.register_write(event_loop, s);
-                }
-                else {
-                    //TODO bitset?
-                    Entry::<()>::wrap_bytes_mut(&mut msg).kind.insert(EntryKind::TakeLock);
-                    let lock_chains = self.get_lock_server_chains_for(&msg);
-                    let lock_req = EntryContents::Multiput {
-                           data: &msg, uuid: &Uuid::new_v4(), columns: &lock_chains, deps: &[],
-                    }.clone_bytes();
-                    self.lock_server.add_get_lock_nums(lock_req, msg);
-                    //TODO detect multiserver
-                    self.register_write(event_loop, self.lock_token().as_usize());
-                };
-            }
-            r @ EntryLayout::Sentinel | r @ EntryLayout::Lock =>
-                panic!("Invalid send request {:?}", r),
+        let needs_to_write = self.server_for_token(token).needs_to_write();
+        if needs_to_write {
+            self.needs_to_write.insert(token.as_usize());
         }
-    }
+        else {
+            self.reregister_for_read(event_loop, token.as_usize());
+        }
+        self.regregister_writes(event_loop)
+    }//End fn ready
+
 }
 
 impl AsyncTcpStore {
@@ -201,14 +201,15 @@ impl AsyncTcpStore {
                     trace!("CLIENT finished lock");
                     //TODO should I bother keeping around lockbuf for resends?
                     assert_eq!(token, self.lock_token());
+                    let lock_tok = self.lock_token();
                     let lock_nums: HashMap<_, _> =
-                        self.lock_server.entry().locs().into_iter().cloned()
+                        self.server_for_token(lock_tok).entry().locs().into_iter().cloned()
                         .map(|(o, i)| {
                             let (o, i): (u32, u32) = ((o - 1).into(), i.into());
                             (o as usize, i as u64)
                         })
                         .collect();
-                    self.add_multis(msg, lock_nums, event_loop);
+                    self.add_multis(msg, lock_nums);
                 }
                 WriteState::MultiServer(buf, lock_nums) => {
                     assert!(token != self.lock_token());
@@ -227,7 +228,7 @@ impl AsyncTcpStore {
                     };
                     match ready_to_unlock {
                         Some(locs) => {
-                            self.add_unlocks(buf, lock_nums, event_loop);
+                            self.add_unlocks(buf, lock_nums);
                             //TODO
                             self.finished_writes.borrow_mut().push_back((id, locs));
                         }
@@ -279,8 +280,7 @@ impl AsyncTcpStore {
         unimplemented!()
     }
 
-    fn add_unlocks(&mut self, mut buf: Rc<RefCell<Vec<u8>>>, lock_nums: Rc<HashMap<usize, u64>>,
-        event_loop: &mut EventLoop<AsyncTcpStore>) {
+    fn add_unlocks(&mut self, mut buf: Rc<RefCell<Vec<u8>>>, lock_nums: Rc<HashMap<usize, u64>>) {
         match Rc::get_mut(&mut buf) {
             None => unreachable!(),
             Some(mut buf) => {
@@ -297,24 +297,43 @@ impl AsyncTcpStore {
             }
         }
         for (&server, &lock_num) in lock_nums.iter() {
-            self.servers[server].add_unlock(buf.clone(), lock_num)
+            self.servers[server].add_unlock(buf.clone(), lock_num);
+            self.needs_to_write.insert(server);
         }
     }
 
-    fn add_multis(&mut self, msg: Vec<u8>, lock_nums: HashMap<usize, u64>,
-        event_loop: &mut EventLoop<AsyncTcpStore>) {
+    fn add_multis(&mut self, msg: Vec<u8>, lock_nums: HashMap<usize, u64>) {
         let lock_nums = Rc::new(lock_nums);
         let msg = Rc::new(RefCell::new(msg));
         for (&s, _) in lock_nums.iter() {
             self.servers[s].add_multi(msg.clone(), lock_nums.clone());
-            self.register_write(event_loop, s)
+            self.needs_to_write.insert(s);
         }
     }
 
-    fn is_single_node_append<I: IntoIterator<Item=OrderIndex>>(&self, chains: I) -> bool {
+    fn add_single_server_send(&mut self, server: usize, msg: Vec<u8>) {
+        self.needs_to_write.insert(server);
+        self.server_for_token_mut(Token(server)).add_single_server_send(msg);
+        self.needs_to_write.insert(server);
+    }
+
+    fn add_get_lock_nums(&mut self, mut msg: Vec<u8>) {
+        Entry::<()>::wrap_bytes_mut(&mut msg).kind.insert(EntryKind::TakeLock);
+        let lock_chains = self.get_lock_server_chains_for(&msg);
+        let lock_req = EntryContents::Multiput {
+               data: &msg, uuid: &Uuid::new_v4(), columns: &lock_chains, deps: &[],
+        }.clone_bytes();
+        let lock_server = self.lock_token();
+        self.server_for_token_mut(lock_server).add_get_lock_nums(lock_req, msg);
+        self.needs_to_write.insert(lock_server.as_usize());
+    }
+
+    fn is_single_node_append(&self, msg: &[u8]) -> bool {
         let mut single = true;
         let mut server_token = None;
-        for c in chains {
+        let locked_chains = Entry::<()>::wrap_bytes(&msg).locs()
+            .iter().cloned().filter(|&oi| oi != (0.into(), 0.into()));
+        for c in locked_chains {
             if let Some(server_token) = server_token {
                 single &= self.server_for_chain(c.0) == server_token
             }
@@ -344,49 +363,42 @@ impl AsyncTcpStore {
     }
 
     fn server_for_chain(&self, chain: order) -> usize {
-        server_for_chain(chain, self.servers.len())
+        server_for_chain(chain, self.num_chain_servers)
     }
 
     fn server_for_token(&self, token: Token) -> &PerServer {
-        if token == self.lock_token() {
-            &self.lock_server
-        }
-        else {
-            &self.servers[token.as_usize()]
-        }
+        &self.servers[token.as_usize()]
     }
 
     fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer {
-        if token == self.lock_token() {
-            &mut self.lock_server
-        }
-        else {
-            &mut self.servers[token.as_usize()]
-        }
+        &mut self.servers[token.as_usize()]
     }
 
     fn lock_token(&self) -> Token {
-        Token(self.servers.len() + 7)
+        Token(self.num_chain_servers)
     }
 
-    fn register_write(&self, event_loop: &mut EventLoop<Self>, server: usize) {
+    fn regregister_writes(&mut self, event_loop: &mut EventLoop<Self>) {
+        for i in 0..self.servers.len() {
+            if self.needs_to_write.contains(i) && !self.registered_for_write.contains(i) {
+                self.register_for_write(event_loop, i);
+                self.registered_for_write.insert(i);
+            }
+        }
+    }
+
+    fn reregister_for_read(&self, event_loop: &mut EventLoop<Self>, server: usize) {
         let stream = &self.server_for_token(Token(server)).stream;
         event_loop.reregister(stream, Token(server),
-            mio::EventSet::readable() | mio::EventSet::writable() | mio::EventSet::error(),
+            mio::EventSet::readable() | mio::EventSet::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
             .expect("could not reregister client socket")
     }
 
-    fn reregister(&self, event_loop: &mut EventLoop<Self>, token: Token) {
-        let server = self.server_for_token(token);
-        let write_flag =
-            if server.needs_to_write() {
-                mio::EventSet::writable()
-            } else {
-                mio::EventSet::readable()
-            };
-        event_loop.reregister(&server.stream, token,
-            mio::EventSet::readable() | write_flag | mio::EventSet::error(),
+    fn register_for_write(&self, event_loop: &mut EventLoop<Self>, server: usize) {
+        let stream = &self.server_for_token(Token(server)).stream;
+        event_loop.reregister(stream, Token(server),
+            mio::EventSet::readable() | mio::EventSet::writable() | mio::EventSet::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
             .expect("could not reregister client socket")
     }
@@ -690,7 +702,7 @@ mod sync_store_tests {
 
         fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex])
             -> InsertResult {
-            let mut buffer = EntryContents::Multiput {
+            let buffer = EntryContents::Multiput {
                     data: data,
                     uuid: &Uuid::new_v4(),
                     columns: chains,

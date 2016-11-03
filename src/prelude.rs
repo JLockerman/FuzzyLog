@@ -163,6 +163,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 self.update_local_horizon(column, index);
             }
             Sentinel(..) => {
+                //FIXME save the sentinel ID if we'll need it later
                 self.update_local_horizon(column, index);
             }
         }

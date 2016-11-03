@@ -14,6 +14,7 @@ extern crate rusoto;
 //#[cfg(test)]
 //extern crate test;
 
+extern crate bit_set;
 extern crate rustc_serialize;
 extern crate mio;
 extern crate nix;
