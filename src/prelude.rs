@@ -198,7 +198,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
             trace!("searching for multiput {:?}\n\tat: {:?}", put_id, (column, index));
             let ent = self.store.get((column, index)).clone();
             let ent = match ent {
-                Err(GetErr::NoValue(..)) => panic!("invalid multiput."),
+                Err(GetErr::NoValue(..)) => panic!("invalid multiput @ {:?}.", (column, index)),
                 Ok(e) => e
             };
             self.play_deps(ent.dependencies());
