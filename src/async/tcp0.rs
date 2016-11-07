@@ -17,6 +17,13 @@ use mio::Token;
 pub type FinishedReadChannel = Rc<RefCell<VecDeque<Vec<u8>>>>;
 pub type FinishedWriteChannel = Rc<RefCell<VecDeque<(Uuid, Vec<OrderIndex>)>>>;
 
+trait AsyncStoreClient {
+    //TODO nocopy?
+    fn on_finished_read(&mut self, read_packet: Vec<u8>);
+    //TODO what info is needed?
+    fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>);
+}
+
 //TODO use FNV hash
 pub struct AsyncTcpStore {
     sent_writes: HashMap<Uuid, WriteState>,
@@ -26,7 +33,6 @@ pub struct AsyncTcpStore {
     needs_to_write: BitSet,
     num_chain_servers: usize,
     finished_reads: FinishedReadChannel,
-    //TODO what info is needed?
     finished_writes: FinishedWriteChannel,
 }
 
@@ -139,13 +145,13 @@ impl mio::Handler for AsyncTcpStore {
             trace!("A recv {:?} for {:?}", kind, token);
             if kind.contains(EntryKind::ReadSuccess) {
                 let num_chain_servers = self.num_chain_servers;
-                self.handle_completion(token, num_chain_servers, kind)
+                self.handle_completion(token, num_chain_servers)
             }
             //TODO distinguish between locks and empties
             else if kind.layout() == EntryLayout::Read
                 && !kind.contains(EntryKind::TakeLock) {
                 //A read that found an usused entry still contains useful data
-                self.handle_completed_read(token, kind)
+                self.handle_completed_read(token)
             }
             else {
                 self.handle_redo(token, kind)
@@ -182,15 +188,15 @@ impl mio::Handler for AsyncTcpStore {
 }
 
 impl AsyncTcpStore {
-    fn handle_completion(&mut self, token: Token, num_chain_servers: usize, kind: EntryKind::Kind) {
-        let write_completed = self.handle_completed_write(token, num_chain_servers, kind);
+    fn handle_completion(&mut self, token: Token, num_chain_servers: usize) {
+        let write_completed = self.handle_completed_write(token, num_chain_servers);
         if write_completed {
-            self.handle_completed_read(token, kind);
+            self.handle_completed_read(token);
         }
     }
 
-    fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize,
-        kind: EntryKind::Kind) -> bool {
+    //TODO I should probably return the buffer on read_packet, and pass it into here
+    fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize) -> bool {
         let id = self.server_for_token(token).entry().id;
         trace!("CLIENT handle_completed_write");
         //TODO for multistage writes check if we need to do more work...
@@ -273,7 +279,7 @@ impl AsyncTcpStore {
         }
     }// end handle_completed_write
 
-    fn handle_completed_read(&mut self, token: Token, kind: EntryKind::Kind) {
+    fn handle_completed_read(&mut self, token: Token) {
         if token == self.lock_token() { return }
         for &oi in self.servers[token.as_usize()].entry().locs() {
             if let Some(mut v) = self.sent_reads.remove(&oi) {
@@ -452,8 +458,8 @@ impl AsyncTcpStore {
 }
 
 impl PerServer {
-    fn read_packet(&mut self) {
-        //TODO
+    fn read_packet(&mut self) -> bool {
+        //TODO switch to nonblocking reads
         assert_eq!(self.bytes_handled, 0);
         if self.bytes_handled < base_header_size() {
             if self.buffer.capacity() < base_header_size() {
@@ -477,7 +483,8 @@ impl PerServer {
             }
             unsafe { self.buffer.set_len(header_size) }
             //let read =
-            self.stream.read_exact(&mut self.buffer[self.bytes_handled..header_size]);
+            self.stream.read_exact(&mut self.buffer[self.bytes_handled..header_size])
+                .expect("cannot read");
             self.bytes_handled = header_size;
         }
         //TODO ensure cap
@@ -488,9 +495,12 @@ impl PerServer {
                 self.buffer.reserve_exact(size - cap);
             }
             unsafe { self.buffer.set_len(size) }
-            self.stream.read_exact(&mut self.buffer[self.bytes_handled..size]);
+            self.stream.read_exact(&mut self.buffer[self.bytes_handled..size])
+                .expect("cannot read");
             self.bytes_handled = size;
         }
+        //TODO multipart reads
+        true
     }
 
     fn handle_redo(&mut self, failed: WriteState, kind: EntryKind::Kind) -> Option<WriteState> {
@@ -526,10 +536,6 @@ impl PerServer {
     fn send_next_packet(&mut self, token: Token, num_servers: usize) -> Option<WriteState> {
         use self::WriteState::*;
         match self.awaiting_send.pop_front() {
-            //SingleServer(Vec<u8>),
-            //ToLockServer(Vec<u8>, Rc<Vec<u8>>),
-            //MultiServer(Rc<Vec<u8>>, Rc<HashMap<usize, u64>>),
-            //UnlockServer(Rc<Vec<u8>>, u64),
             None => None,
             Some(MultiServer(to_send, lock_nums)) => {
                 {
@@ -562,7 +568,8 @@ impl PerServer {
                             e.as_multi_entry_mut().flex.lock = *lock_num;
                         }
                     }
-                    self.stream.write_all(&ts);
+                    //TODO nonblocking writes
+                    self.stream.write_all(&ts).expect("cannot write");
                 }
                 Some(MultiServer(to_send, lock_nums))
             }
@@ -575,7 +582,8 @@ impl PerServer {
                         Entry::<()>::wrap_bytes_mut(&mut *ts).as_multi_entry_mut().flex.lock =
                             lock_num;
                     }
-                    self.stream.write_all(&*ts);
+                    //TODO nonblocking writes
+                    self.stream.write_all(&*ts).expect("cannot write");
                 }
                 Some(UnlockServer(to_send, lock_num))
             }
