@@ -138,27 +138,29 @@ impl mio::Handler for AsyncTcpStore {
         //TODO should this be in a loop?
         self.registered_for_write.remove(token.as_usize());
         if events.is_readable() {
-            let kind = {
+            let finished_packet = {
                 let server = self.server_for_token_mut(token);
                 //TODO incremental reads
-                server.read_packet();
-                //TODO incremental reads
-                server.bytes_handled = 0;
-                server.entry().kind
+                server.read_packet()
             };
-            trace!("A recv {:?} for {:?}", kind, token);
-            if kind.contains(EntryKind::ReadSuccess) {
-                let num_chain_servers = self.num_chain_servers;
-                self.handle_completion(token, num_chain_servers)
-            }
-            //TODO distinguish between locks and empties
-            else if kind.layout() == EntryLayout::Read
-                && !kind.contains(EntryKind::TakeLock) {
-                //A read that found an usused entry still contains useful data
-                self.handle_completed_read(token)
-            }
-            else {
-                self.handle_redo(token, kind)
+            if let Some(packet) = finished_packet {
+                let kind = packet.entry().kind;
+                trace!("A recv {:?} for {:?}", kind, token);
+                if kind.contains(EntryKind::ReadSuccess) {
+                    let num_chain_servers = self.num_chain_servers;
+                    self.handle_completion(token, num_chain_servers, &packet)
+                }
+                //TODO distinguish between locks and empties
+                else if kind.layout() == EntryLayout::Read
+                    && !kind.contains(EntryKind::TakeLock) {
+                    //A read that found an usused entry still contains useful data
+                    self.handle_completed_read(token, &packet)
+                }
+                //TODO use option instead
+                else {
+                    self.handle_redo(token, kind, &packet)
+                }
+                self.server_for_token_mut(token).read_buffer = packet
             }
         }
         if self.server_for_token(token).needs_to_write() && events.is_writable() {
@@ -192,16 +194,17 @@ impl mio::Handler for AsyncTcpStore {
 }
 
 impl AsyncTcpStore {
-    fn handle_completion(&mut self, token: Token, num_chain_servers: usize) {
-        let write_completed = self.handle_completed_write(token, num_chain_servers);
+    fn handle_completion(&mut self, token: Token, num_chain_servers: usize, packet: &Buffer) {
+        let write_completed = self.handle_completed_write(token, num_chain_servers, packet);
         if write_completed {
-            self.handle_completed_read(token);
+            self.handle_completed_read(token, packet);
         }
     }
 
     //TODO I should probably return the buffer on read_packet, and pass it into here
-    fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize) -> bool {
-        let id = self.server_for_token(token).entry().id;
+    fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize,
+        packet: &Buffer) -> bool {
+        let id = packet.entry().id;
         trace!("CLIENT handle_completed_write");
         //TODO for multistage writes check if we need to do more work...
         if let Some(v) = self.sent_writes.remove(&id) {
@@ -213,7 +216,7 @@ impl AsyncTcpStore {
                     trace!("CLIENT finished lock");
                     //TODO should I bother keeping around lockbuf for resends?
                     assert_eq!(token, self.lock_token());
-                    let lock_nums = self.get_lock_nums();
+                    let lock_nums = packet.get_lock_nums();
                     self.add_multis(msg, lock_nums);
                     return false
                 }
@@ -222,14 +225,13 @@ impl AsyncTcpStore {
                     trace!("CLIENT finished multi section");
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
-                        let finished_writes = fill_locs(&mut b,
-                            self.servers[token.as_usize()].entry(),
+                        let finished_writes = fill_locs(&mut b, packet.entry(),
                             token, num_chain_servers);
                         mem::drop(b);
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
-                            let locs = self.servers[token.as_usize()].entry().locs().to_vec();
+                            let locs = packet.entry().locs().to_vec();
                             Some(locs)
                         } else { None }
                     };
@@ -251,9 +253,8 @@ impl AsyncTcpStore {
                 WriteState::SingleServer(mut buf) => {
                     assert!(token != self.lock_token());
                     trace!("CLIENT finished single server");
-                    fill_locs(&mut buf, self.servers[token.as_usize()].entry(),
-                        token, num_chain_servers);
-                    let locs = self.servers[token.as_usize()].entry().locs().to_vec();
+                    fill_locs(&mut buf, packet.entry(), token, num_chain_servers);
+                    let locs = packet.entry().locs().to_vec();
                     self.finished_writes.borrow_mut().push_back((id, locs));
                     return true
                 }
@@ -283,26 +284,26 @@ impl AsyncTcpStore {
         }
     }// end handle_completed_write
 
-    fn handle_completed_read(&mut self, token: Token) {
+    fn handle_completed_read(&mut self, token: Token, packet: &Buffer) {
         if token == self.lock_token() { return }
-        for &oi in self.servers[token.as_usize()].entry().locs() {
+        for &oi in packet.entry().locs() {
             if let Some(mut v) = self.sent_reads.remove(&oi) {
                 //TODO num copies?
                 v.clear();
-                v.extend_from_slice(&self.servers[token.as_usize()].read_buffer[..]);
+                v.extend_from_slice(&packet[..]);
                 self.finished_reads.borrow_mut().push_back(v)
             }
         }
     }
 
-    fn handle_redo(&mut self, token: Token, kind: EntryKind::Kind) {
+    fn handle_redo(&mut self, token: Token, kind: EntryKind::Kind, packet: &Buffer) {
         let write_state = match kind.layout() {
             EntryLayout::Data | EntryLayout::Multiput | EntryLayout::Sentinel => {
-                let id = self.server_for_token(token).entry().id;
+                let id = packet.entry().id;
                 self.sent_writes.remove(&id)
             }
             EntryLayout::Read => {
-                let read_loc = self.server_for_token(token).entry().locs()[0];
+                let read_loc = packet.entry().locs()[0];
                 self.sent_reads.remove(&read_loc).map(WriteState::SingleServer)
             }
             EntryLayout::Lock => {
@@ -405,20 +406,6 @@ impl AsyncTcpStore {
             .collect::<Vec<OrderIndex>>()
     }
 
-    fn get_lock_nums(&self) -> HashMap<usize, u64> {
-        let lock_tok = self.lock_token();
-        self.server_for_token(lock_tok)
-            .entry()
-            .locs()
-            .into_iter()
-            .cloned()
-            .map(|(o, i)| {
-                let (o, i): (u32, u32) = ((o - 1).into(), i.into());
-                (o as usize, i as u64)
-            })
-            .collect()
-    }
-
     fn server_for_chain(&self, chain: order) -> usize {
         server_for_chain(chain, self.num_chain_servers)
     }
@@ -462,7 +449,7 @@ impl AsyncTcpStore {
 }
 
 impl PerServer {
-    fn read_packet(&mut self) -> bool {
+    fn read_packet(&mut self) -> Option<Buffer> {
         //TODO switch to nonblocking reads
         assert_eq!(self.bytes_handled, 0);
         if self.bytes_handled < base_header_size() {
@@ -492,7 +479,9 @@ impl PerServer {
             self.bytes_handled = size;
         }
         //TODO multipart reads
-        true
+        self.bytes_handled = 0;
+        let buff = mem::replace(&mut self.read_buffer, Buffer::new());
+        Some(buff)
     }
 
     fn handle_redo(&mut self, failed: WriteState, kind: EntryKind::Kind) -> Option<WriteState> {
@@ -587,9 +576,10 @@ impl PerServer {
         }
     }
 
-    fn entry(&self) -> &Entry<()> {
-        self.read_buffer.entry()
-    }
+    //XXX I believe this is unneeded
+    //fn entry(&self) -> &Entry<()> {
+    //    self.read_buffer.entry()
+    //}
 
     fn needs_to_write(&self) -> bool {
         !self.awaiting_send.is_empty()
@@ -678,6 +668,18 @@ impl Buffer {
             self.inner.reserve_exact(capacity - curr_cap);
             unsafe { self.inner.set_len(capacity) }
         }
+    }
+
+    fn get_lock_nums(&self) -> HashMap<usize, u64> {
+        self.entry()
+            .locs()
+            .into_iter()
+            .cloned()
+            .map(|(o, i)| {
+                let (o, i): (u32, u32) = ((o - 1).into(), i.into());
+                (o as usize, i as u64)
+            })
+            .collect()
     }
 
     fn entry(&self) -> &Entry<()> {
