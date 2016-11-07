@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
-use std::mem;
+use std::{ops, mem};
 use std::net::SocketAddr;
 use std::rc::Rc;
 
@@ -38,7 +38,7 @@ pub struct AsyncTcpStore {
 
 struct PerServer {
     awaiting_send: VecDeque<WriteState>,
-    buffer: Vec<u8>,
+    read_buffer: Buffer,
     stream: TcpStream,
     bytes_handled: usize,
 }
@@ -49,6 +49,10 @@ enum WriteState {
     ToLockServer(Vec<u8>, Vec<u8>),
     MultiServer(Rc<RefCell<Vec<u8>>>, Rc<HashMap<usize, u64>>),
     UnlockServer(Rc<RefCell<Vec<u8>>>, u64),
+}
+
+struct Buffer {
+    inner: Vec<u8>,
 }
 
 impl AsyncTcpStore {
@@ -91,7 +95,7 @@ impl PerServer {
     fn new(addr: SocketAddr) -> Result<Self, io::Error> {
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
-            buffer: Vec::new(), //TODO cap
+            read_buffer: Buffer::new(), //TODO cap
             stream: try!(TcpStream::connect(&addr)),
             bytes_handled: 0,
         })
@@ -285,7 +289,7 @@ impl AsyncTcpStore {
             if let Some(mut v) = self.sent_reads.remove(&oi) {
                 //TODO num copies?
                 v.clear();
-                v.extend_from_slice(&self.servers[token.as_usize()].buffer);
+                v.extend_from_slice(&self.servers[token.as_usize()].read_buffer[..]);
                 self.finished_reads.borrow_mut().push_back(v)
             }
         }
@@ -462,40 +466,28 @@ impl PerServer {
         //TODO switch to nonblocking reads
         assert_eq!(self.bytes_handled, 0);
         if self.bytes_handled < base_header_size() {
-            if self.buffer.capacity() < base_header_size() {
-                let cap = self.buffer.capacity();
-                self.buffer.reserve_exact(base_header_size() - cap);
-            }
-            unsafe { self.buffer.set_len(base_header_size()) }
+            self.read_buffer.ensure_capacity(base_header_size());
             //TODO switch to read and async reads
             //self.bytes_handled +=
             self.stream.read_exact(
-                &mut self.buffer[self.bytes_handled..base_header_size()])
+                &mut self.read_buffer[self.bytes_handled..base_header_size()])
                 .expect("cannot read");
             self.bytes_handled += base_header_size();
         }
-        let header_size = Entry::<()>::wrap_bytes(&self.buffer).header_size();
+        let header_size = self.read_buffer.entry().header_size();
         assert!(header_size >= base_header_size());
         if self.bytes_handled < header_size {
-            if self.buffer.capacity() < header_size {
-                let cap = self.buffer.capacity();
-                self.buffer.reserve_exact(header_size - cap);
-            }
-            unsafe { self.buffer.set_len(header_size) }
+            self.read_buffer.ensure_capacity(header_size);
             //let read =
-            self.stream.read_exact(&mut self.buffer[self.bytes_handled..header_size])
+            self.stream.read_exact(&mut self.read_buffer[self.bytes_handled..header_size])
                 .expect("cannot read");
             self.bytes_handled = header_size;
         }
         //TODO ensure cap
-        let size = Entry::<()>::wrap_bytes(&self.buffer).entry_size();
+        let size = self.read_buffer.entry().entry_size();
         if self.bytes_handled < size {
-            if self.buffer.capacity() < size {
-                let cap = self.buffer.capacity();
-                self.buffer.reserve_exact(size - cap);
-            }
-            unsafe { self.buffer.set_len(size) }
-            self.stream.read_exact(&mut self.buffer[self.bytes_handled..size])
+            self.read_buffer.ensure_capacity(size);
+            self.stream.read_exact(&mut self.read_buffer[self.bytes_handled..size])
                 .expect("cannot read");
             self.bytes_handled = size;
         }
@@ -596,7 +588,7 @@ impl PerServer {
     }
 
     fn entry(&self) -> &Entry<()> {
-        Entry::<()>::wrap_bytes(&self.buffer)
+        self.read_buffer.entry()
     }
 
     fn needs_to_write(&self) -> bool {
@@ -672,6 +664,46 @@ impl WriteState {
             s => panic!("invlaid clone multi on {:?}", s)
         }
 
+    }
+}
+
+impl Buffer {
+    fn new() -> Self {
+        Buffer { inner: Vec::new() }
+    }
+
+    fn ensure_capacity(&mut self, capacity: usize) {
+        if self.inner.capacity() < capacity {
+            let curr_cap = self.inner.capacity();
+            self.inner.reserve_exact(capacity - curr_cap);
+            unsafe { self.inner.set_len(capacity) }
+        }
+    }
+
+    fn entry(&self) -> &Entry<()> {
+        Entry::<()>::wrap_bytes(&self[..])
+    }
+}
+
+//FIXME impl AsRef for Buffer...
+impl ops::Index<ops::Range<usize>> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ops::Range<usize>) -> &Self::Output {
+        &self.inner[index]
+    }
+}
+
+impl ops::IndexMut<ops::Range<usize>> for Buffer {
+    fn index_mut(&mut self, index: ops::Range<usize>) -> &mut Self::Output {
+        //TODO should this ensure capacity?
+        &mut self.inner[index]
+    }
+}
+
+impl ops::Index<ops::RangeFull> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ops::RangeFull) -> &Self::Output {
+        &self.inner[index]
     }
 }
 
