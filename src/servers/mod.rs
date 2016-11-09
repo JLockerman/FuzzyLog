@@ -245,4 +245,8 @@ impl ServerLog {
     fn is_unlocked(&self) -> bool {
         self.last_lock == self.last_unlock
     }
+
+    fn server_num(&self) -> u32 {
+        self.this_server_num
+    }
 }

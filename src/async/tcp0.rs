@@ -14,10 +14,7 @@ use mio::prelude::*;
 use mio::tcp::*;
 use mio::Token;
 
-pub type FinishedReadChannel = Rc<RefCell<VecDeque<Vec<u8>>>>;
-pub type FinishedWriteChannel = Rc<RefCell<VecDeque<(Uuid, Vec<OrderIndex>)>>>;
-
-trait AsyncStoreClient {
+pub trait AsyncStoreClient {
     //TODO nocopy?
     fn on_finished_read(&mut self, read_packet: Vec<u8>);
     //TODO what info is needed?
@@ -25,15 +22,14 @@ trait AsyncStoreClient {
 }
 
 //TODO use FNV hash
-pub struct AsyncTcpStore {
+pub struct AsyncTcpStore<C: AsyncStoreClient> {
     sent_writes: HashMap<Uuid, WriteState>,
     sent_reads: HashMap<OrderIndex, Vec<u8>>,
     servers: Vec<PerServer>,
     registered_for_write: BitSet,
     needs_to_write: BitSet,
     num_chain_servers: usize,
-    finished_reads: FinishedReadChannel,
-    finished_writes: FinishedWriteChannel,
+    client: C,
 }
 
 struct PerServer {
@@ -55,10 +51,9 @@ struct Buffer {
     inner: Vec<u8>,
 }
 
-impl AsyncTcpStore {
-    pub fn new<I>(lock_server: SocketAddr, chain_servers: I,
-        finished_reads: FinishedReadChannel,
-        finished_writes: FinishedWriteChannel,
+impl<C> AsyncTcpStore<C>
+where C: AsyncStoreClient {
+    pub fn new<I>(lock_server: SocketAddr, chain_servers: I, client: C,
         event_loop: &mut EventLoop<Self>)
     -> Result<Self, io::Error>
     where I: IntoIterator<Item=SocketAddr> {
@@ -85,8 +80,7 @@ impl AsyncTcpStore {
             registered_for_write: BitSet::with_capacity(num_servers),
             needs_to_write: BitSet::with_capacity(num_servers),
             num_chain_servers: num_chain_servers,
-            finished_reads: finished_reads,
-            finished_writes: finished_writes
+            client: client
         })
     }
 }
@@ -102,7 +96,8 @@ impl PerServer {
     }
 }
 
-impl mio::Handler for AsyncTcpStore {
+impl<C> mio::Handler for AsyncTcpStore<C>
+where C: AsyncStoreClient {
     type Timeout = ();
     type Message = Vec<u8>;
 
@@ -145,7 +140,7 @@ impl mio::Handler for AsyncTcpStore {
             };
             if let Some(packet) = finished_packet {
                 let kind = packet.entry().kind;
-                trace!("A recv {:?} for {:?}", kind, token);
+                trace!("CLIENT got a {:?} from {:?}", kind, token);
                 if kind.contains(EntryKind::ReadSuccess) {
                     let num_chain_servers = self.num_chain_servers;
                     self.handle_completion(token, num_chain_servers, &packet)
@@ -163,8 +158,10 @@ impl mio::Handler for AsyncTcpStore {
                 self.server_for_token_mut(token).read_buffer = packet
             }
         }
+
         if self.server_for_token(token).needs_to_write() && events.is_writable() {
             let num_chain_servers = self.num_chain_servers;
+            //TODO incremental writes
             let sent = self.server_for_token_mut(token).send_next_packet(token, num_chain_servers);
             if let Some(sent) = sent {
                 let layout = sent.layout();
@@ -193,7 +190,8 @@ impl mio::Handler for AsyncTcpStore {
 
 }
 
-impl AsyncTcpStore {
+impl<C> AsyncTcpStore<C>
+where C: AsyncStoreClient {
     fn handle_completion(&mut self, token: Token, num_chain_servers: usize, packet: &Buffer) {
         let write_completed = self.handle_completed_write(token, num_chain_servers, packet);
         if write_completed {
@@ -227,11 +225,10 @@ impl AsyncTcpStore {
                         let mut b = buf.borrow_mut();
                         let finished_writes = fill_locs(&mut b, packet.entry(),
                             token, num_chain_servers);
-                        mem::drop(b);
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
-                            let locs = packet.entry().locs().to_vec();
+                            let locs = Entry::<()>::wrap_bytes(&b).locs().to_vec();
                             Some(locs)
                         } else { None }
                     };
@@ -240,7 +237,7 @@ impl AsyncTcpStore {
                             self.add_unlocks(buf, lock_nums);
                             trace!("CLIENT finished multi at {:?}", locs);
                             //TODO
-                            self.finished_writes.borrow_mut().push_back((id, locs));
+                            self.client.on_finished_write(id, locs);
                             return true
                         }
                         None => {
@@ -255,7 +252,7 @@ impl AsyncTcpStore {
                     trace!("CLIENT finished single server");
                     fill_locs(&mut buf, packet.entry(), token, num_chain_servers);
                     let locs = packet.entry().locs().to_vec();
-                    self.finished_writes.borrow_mut().push_back((id, locs));
+                    self.client.on_finished_write(id, locs);
                     return true
                 }
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
@@ -265,9 +262,11 @@ impl AsyncTcpStore {
                 server: Token, num_chain_servers: usize) -> bool {
                 let locs = Entry::<()>::wrap_bytes_mut(buf).locs_mut();
                 let mut remaining = locs.len();
-                for (i, &loc) in e.locs().into_iter().enumerate() {
-                    if server_for_chain(loc.0, num_chain_servers) == server.as_usize() {
-                        trace!("sfc {:?} =? {:?}", loc.0, server);
+                let fill_from = e.locs();
+                //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
+                for (i, &loc) in fill_from.into_iter().enumerate() {
+                    if locs[i].0 != 0.into()
+                        && server_for_chain(loc.0, num_chain_servers) == server.as_usize() {
                         assert!(loc.1 != 0.into());
                         locs[i] = loc;
                     }
@@ -291,7 +290,7 @@ impl AsyncTcpStore {
                 //TODO num copies?
                 v.clear();
                 v.extend_from_slice(&packet[..]);
-                self.finished_reads.borrow_mut().push_back(v)
+                self.client.on_finished_read(v);
             }
         }
     }
@@ -329,24 +328,33 @@ impl AsyncTcpStore {
             None => unreachable!(),
             Some(mut buf) => {
                 let buf = buf.get_mut();
+                trace!("buf pre clear {:?}", buf);
                 buf.clear();
+                trace!("buf after clear {:?}", buf);
                 let lock = Lock {
                     //TODO id?
                     id: Uuid::nil(),
-                    _padding: unsafe { mem::uninitialized() },
+                    _padding: unsafe { mem::zeroed() },
                     kind: EntryKind::Lock,
                     lock: 0,
                 };
-                buf.extend_from_slice(lock.bytes());
+                let lock = lock.bytes();
+                trace!("lock bytes {:?}", lock);
+                buf.extend_from_slice(lock);
+                trace!("buflock {:?}", buf);
             }
         }
+        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).kind.layout(), EntryLayout::Lock);
+        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).entry_size(), buf.borrow().len());
         for (&server, &lock_num) in lock_nums.iter() {
+            trace!("CLIENT add unlock for {:?}", (server, lock_num));
             self.servers[server].add_unlock(buf.clone(), lock_num);
             self.needs_to_write.insert(server);
         }
     }
 
     fn add_multis(&mut self, msg: Vec<u8>, lock_nums: HashMap<usize, u64>) {
+        assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
         let lock_nums = Rc::new(lock_nums);
         let msg = Rc::new(RefCell::new(msg));
         for (&s, _) in lock_nums.iter() {
@@ -356,6 +364,7 @@ impl AsyncTcpStore {
     }
 
     fn add_single_server_send(&mut self, server: usize, msg: Vec<u8>) {
+        assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
         self.needs_to_write.insert(server);
         self.server_for_token_mut(Token(server)).add_single_server_send(msg);
         self.needs_to_write.insert(server);
@@ -497,6 +506,91 @@ impl PerServer {
         to_ret
     }
 
+    fn send_next_packet(&mut self, token: Token, num_servers: usize) -> Option<WriteState> {
+        use self::WriteState::*;
+        match self.awaiting_send.pop_front() {
+            None => None,
+            Some(MultiServer(to_send, lock_nums)) => {
+                {
+                    trace!("CLIENT PerServer {:?} multi", token);
+                    let mut ts = to_send.borrow_mut();
+                    let kind = {
+                        Entry::<()>::wrap_bytes(&*ts).kind
+                    };
+                    assert!(kind.layout() == EntryLayout::Multiput
+                        || kind.layout() == EntryLayout::Sentinel);
+                    assert!(kind.contains(EntryKind::TakeLock));
+                    let lock_num = lock_nums.get(&token.as_usize())
+                        .expect("sending unlock for non-locked server");
+                    let send_end = unsafe {
+                        let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
+                        {
+                            let is_data = e.locs().into_iter()
+                                .take_while(|&&oi| oi != (0.into(), 0.into()))
+                                .any(|oi| is_server_for(oi.0, token, num_servers));
+                            let kind = &mut e.kind;
+                            if is_data {
+                                kind.remove(EntryKind::Lock);
+                                assert_eq!(kind.layout(), EntryLayout::Multiput);
+                            }
+                            else {
+                                kind.insert(EntryKind::Lock);
+                                assert_eq!(kind.layout(), EntryLayout::Sentinel);
+                            }
+                            kind.insert(EntryKind::TakeLock);
+
+                        }
+                        e.as_multi_entry_mut().flex.lock = *lock_num;
+                        //TODO this is either vec.len, or sentinelsize
+                        e.entry_size()
+                    };
+                    let kind = {
+                        Entry::<()>::wrap_bytes(&*ts).kind
+                    };
+                    assert!(kind.layout() == EntryLayout::Multiput
+                        || kind.layout() == EntryLayout::Sentinel);
+                    //TODO nonblocking writes
+                    //Since sentinels have a different size than multis, we need to truncate
+                    //for those sends
+                    self.stream.write_all(&ts[..send_end]).expect("cannot write");
+                }
+                Some(MultiServer(to_send, lock_nums))
+            }
+            Some(UnlockServer(to_send, lock_num)) => {
+                {
+                    trace!("CLIENT PerServer {:?} unlock", token);
+                    let mut ts = to_send.borrow_mut();
+                    let tslen = ts.len();
+                    unsafe {
+                        let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
+                        assert_eq!(e.kind.layout(), EntryLayout::Lock);
+                        e.as_multi_entry_mut().flex.lock = lock_num;
+                        assert_eq!(e.kind.layout(), EntryLayout::Lock);
+                        assert_eq!(e.entry_size(), tslen);
+                    }
+                    trace!("CLIENT willsend {:?}", &*ts);
+                    //TODO nonblocking writes
+                    self.stream.write_all(&*ts).expect("cannot write");
+                }
+                Some(UnlockServer(to_send, lock_num))
+            }
+            Some(to_send @ ToLockServer(_, _)) | Some(to_send @ SingleServer(_)) => {
+                trace!("CLIENT PerServer {:?} single", token);
+                unsafe {
+                    let (l, s) = to_send.with_packet(|p| {
+                        let e = Entry::<()>::wrap_bytes(&*p);
+                        (e.kind.layout(), e.entry_size())
+                    });
+                    assert!(l == EntryLayout::Data || l == EntryLayout::Multiput
+                        || l == EntryLayout::Read)
+                }
+                //TODO multipart writes?
+                to_send.with_packet(|p| self.stream.write_all(p).expect("network err") );
+                Some(to_send)
+            }
+        }
+    }
+
     fn add_single_server_send(&mut self, msg: Vec<u8>) {
         self.awaiting_send.push_back(WriteState::SingleServer(msg));
     }
@@ -514,87 +608,20 @@ impl PerServer {
         self.awaiting_send.push_back(WriteState::ToLockServer(lock_req, msg))
     }
 
-    fn send_next_packet(&mut self, token: Token, num_servers: usize) -> Option<WriteState> {
-        use self::WriteState::*;
-        match self.awaiting_send.pop_front() {
-            None => None,
-            Some(MultiServer(to_send, lock_nums)) => {
-                {
-                    let mut ts = to_send.borrow_mut();
-                    let kind = {
-                        Entry::<()>::wrap_bytes(&*ts).kind
-                    };
-                    assert_eq!(kind.layout(), EntryLayout::Multiput);
-                    if kind.contains(EntryKind::TakeLock) {
-                        let lock_num = lock_nums.get(&token.as_usize())
-                            .expect("sending unlock for non-locked server");
-                        unsafe {
-                            let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
-                            {
-                                let is_data = e.locs().into_iter()
-                                    .take_while(|&&oi| oi != (0.into(), 0.into()))
-                                    .any(|oi| is_server_for(oi.0, token, num_servers));
-                                let kind = &mut e.kind;
-                                if is_data {
-                                    kind.remove(EntryKind::Lock);
-                                    assert_eq!(kind.layout(), EntryLayout::Multiput);
-                                }
-                                else {
-                                    kind.insert(EntryKind::Lock);
-                                    assert_eq!(kind.layout(), EntryLayout::Sentinel);
-                                }
-                                kind.insert(EntryKind::TakeLock);
-
-                            }
-                            e.as_multi_entry_mut().flex.lock = *lock_num;
-                        }
-                    }
-                    //TODO nonblocking writes
-                    self.stream.write_all(&ts).expect("cannot write");
-                }
-                Some(MultiServer(to_send, lock_nums))
-            }
-            Some(UnlockServer(to_send, lock_num)) => {
-                {
-                    let mut ts = to_send.borrow_mut();
-                    unsafe {
-                        assert_eq!(Entry::<()>::wrap_bytes(&*ts).kind.layout(),
-                            EntryLayout::Lock);
-                        Entry::<()>::wrap_bytes_mut(&mut *ts).as_multi_entry_mut().flex.lock =
-                            lock_num;
-                    }
-                    //TODO nonblocking writes
-                    self.stream.write_all(&*ts).expect("cannot write");
-                }
-                Some(UnlockServer(to_send, lock_num))
-            }
-            Some(to_send @ ToLockServer(_, _)) | Some(to_send @ SingleServer(_)) => {
-                //TODO multipart writes?
-                to_send.with_packet(|p| self.stream.write_all(p).expect("network err") );
-                Some(to_send)
-            }
-        }
-    }
-
-    //XXX I believe this is unneeded
-    //fn entry(&self) -> &Entry<()> {
-    //    self.read_buffer.entry()
-    //}
-
     fn needs_to_write(&self) -> bool {
         !self.awaiting_send.is_empty()
     }
 }
 
 impl WriteState {
-    fn with_packet<F>(&self, f: F)
-    where F: for<'a> FnOnce(&'a [u8]) {
+    fn with_packet<F, R>(&self, f: F) -> R
+    where F: for<'a> FnOnce(&'a [u8]) -> R {
         use self::WriteState::*;
         match self {
             &SingleServer(ref buf) | &ToLockServer(ref buf, _) => f(&**buf),
             &MultiServer(ref buf, _) | &UnlockServer(ref buf, _) => {
                 let b = buf.borrow();
-                f(&*b);
+                f(&*b)
             },
         }
     }
@@ -734,30 +761,44 @@ mod sync_store_tests {
     extern crate env_logger;
     use local_store::MapEntry;
     use local_store::test::Map;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    #[derive(Clone, Default)]
+    struct Queues {
+        finished_reads: VecDeque<Vec<u8>>,
+        finished_writes: VecDeque<(Uuid, Vec<OrderIndex>)>,
+    }
+
+    type Client = Rc<RefCell<Queues>>;
+
     struct AsyncStoreToStore {
-        store: AsyncTcpStore,
-        finished_reads: FinishedReadChannel,
-        finished_writes: FinishedWriteChannel,
+        store: AsyncTcpStore<Client>,
+        client: Client,
         to_store: ::mio::Sender<Vec<u8>>,
-        event_loop: EventLoop<AsyncTcpStore>,
+        event_loop: EventLoop<AsyncTcpStore<Client>>,
+    }
+
+    impl AsyncStoreClient for Client {
+        fn on_finished_read(&mut self, read_packet: Vec<u8>) {
+            self.borrow_mut().finished_reads.push_back(read_packet)
+        }
+
+        fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>) {
+            self.borrow_mut().finished_writes.push_back((write_id, write_locs))
+        }
     }
 
     impl AsyncStoreToStore {
-        fn new<I>(lock_server: SocketAddr, chain_servers: I, mut event_loop: EventLoop<AsyncTcpStore>) -> Self
+        fn new<I>(lock_server: SocketAddr, chain_servers: I, mut event_loop: EventLoop<AsyncTcpStore<Client>>) -> Self
         where I: IntoIterator<Item=SocketAddr> {
-            let finished_reads: FinishedReadChannel = Default::default();
-            let finished_writes: FinishedWriteChannel = Default::default();
+            let client: Client = Default::default();
             let store = AsyncTcpStore::new(lock_server, chain_servers,
-                finished_reads.clone(), finished_writes.clone(),
-                &mut event_loop).expect("");
+                client.clone(), &mut event_loop).expect("");
             AsyncStoreToStore {
                 store: store,
-                finished_reads: finished_reads,
-                finished_writes: finished_writes,
+                client: client,
                 to_store: event_loop.channel(),
                 event_loop: event_loop,
             }
@@ -780,7 +821,7 @@ mod sync_store_tests {
             }
             self.to_store.send(buffer).expect("Could not send to store");
             'wait: loop {
-                let read = self.finished_reads.borrow_mut().pop_front();
+                let read = self.client.borrow_mut().finished_reads.pop_front();
                 match read {
                     None => self.event_loop.run_once(&mut self.store, None).unwrap(),
                     Some(e) => {
@@ -809,7 +850,7 @@ mod sync_store_tests {
             }
             self.to_store.send(buffer).expect("Could not send to store");
             'wait: loop {
-                let read = self.finished_writes.borrow_mut().pop_front();
+                let read = self.client.borrow_mut().finished_writes.pop_front();
                 match read {
                     None => self.event_loop.run_once(&mut self.store, None).unwrap(),
                     Some(v) => return Ok(v.1[0]),
@@ -827,7 +868,7 @@ mod sync_store_tests {
                 }.clone_bytes();
             self.to_store.send(buffer).expect("Could not send to store");
             'wait: loop {
-                let read = self.finished_writes.borrow_mut().pop_front();
+                let read = self.client.borrow_mut().finished_writes.pop_front();
                 match read {
                     None => self.event_loop.run_once(&mut self.store, None).unwrap(),
                     Some(v) => return Ok(v.1[0]),
@@ -837,7 +878,25 @@ mod sync_store_tests {
 
         fn dependent_multi_append(&mut self, chains: &[order], depends_on: &[order],
             data: &V, deps: &[OrderIndex])-> InsertResult {
-            unimplemented!()
+            let mchains: Vec<_> = chains.into_iter()
+                .map(|&c| (c, 0.into()))
+                .chain(::std::iter::once((0.into(), 0.into())))
+                .chain(depends_on.iter().map(|&c| (c, 0.into())))
+                .collect();
+            let buffer = EntryContents::Multiput {
+                    data: data,
+                    uuid: &Uuid::new_v4(),
+                    columns: &mchains,
+                    deps: deps,
+                }.clone_bytes();
+            self.to_store.send(buffer).expect("Could not send to store");
+            'wait: loop {
+                let read = self.client.borrow_mut().finished_writes.pop_front();
+                match read {
+                    None => self.event_loop.run_once(&mut self.store, None).unwrap(),
+                    Some(v) => return Ok(v.1[0]),
+                }
+            }
         }
     }
 
@@ -857,13 +916,21 @@ mod sync_store_tests {
 
         static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
-        const server_strs: [&'static str; 4] = ["0.0.0.0:13289", "0.0.0.0:13290", "0.0.0.0:13291", "0.0.0.0:13292"];
-        for &addr_str in server_strs.iter() {
+        const lock_str: &'static str = "0.0.0.0:13289";
+        const addr_strs: &'static [&'static str] = &["0.0.0.0:13290", "0.0.0.0:13291", "0.0.0.0:13292"];
+
+        for (i, &addr_str) in iter::once(&lock_str).chain(addr_strs.iter()).enumerate() {
             let handle = thread::spawn(move || {
 
                 let addr = addr_str.parse().expect("invalid inet address");
                 let mut event_loop = EventLoop::new().unwrap();
-                let server = Server::new(&addr, 0, 1, &mut event_loop);
+                let server = if i == 0 {
+                    Server::new(&addr, 0, 1, &mut event_loop)
+                }
+                else {
+                    Server::new(&addr, i as u32 -1, addr_strs.len() as u32,
+                        &mut event_loop)
+                };
                 if let Ok(mut server) = server {
                     SERVERS_READY.fetch_add(1, Ordering::Release);
                     trace!("starting server");
@@ -875,10 +942,9 @@ mod sync_store_tests {
             mem::forget(handle);
         }
 
-        while SERVERS_READY.load(Ordering::Acquire) < server_strs.len() {}
+        while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}
 
-        const lock_str: &'static str = "0.0.0.0:13289";
-        const addr_strs: &'static [&'static str] = &["0.0.0.0:13290", "0.0.0.0:13291", "0.0.0.0:13292"];
+
 
         let lock_addr = lock_str.parse::<SocketAddr>().unwrap();
         let chain_addrs = addr_strs.into_iter().map(|s| s.parse::<SocketAddr>().unwrap());
@@ -1008,6 +1074,32 @@ mod sync_store_tests {
         log.multiappend(&[20.into(),21.into(),22.into()], &-1, &[]);
         log.play_foward(20.into());
         assert_eq!(&**list.borrow(), &[2,3,4,-1,-1,-1][..]);
+    }
+
+    #[test]
+    fn test_dorder() {
+        let _ = env_logger::init();
+        let store = new_store(
+            (0..5).map(|i| (23.into(), i.into()))
+                .chain((0..5).map(|i| (24.into(), i.into())))
+                .chain((0..5).map(|i| (25.into(), i.into())))
+                .collect());
+        let horizon = HashMap::new();
+        let list: Rc<RefCell<Vec<i32>>> = Default::default();
+        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
+        for i in 23..26 {
+            let l = list.clone();
+            upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
+                true
+            }));
+        }
+        let mut log = FuzzyLog::new(store, horizon, upcalls);
+        log.append(24.into(), &4, &[]);
+        log.append(23.into(), &2, &[]);
+        log.append(25.into(), &3, &[]);
+        log.dependent_multiappend(&[23.into()], &[24.into(),25.into()], &-1, &[]);
+        log.play_foward(23.into());
+        assert_eq!(&**list.borrow(), &[2,4,3,-1,][..]);
     }
 
 } // End mod test

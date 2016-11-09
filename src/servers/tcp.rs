@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry::Vacant;
 use std::io::{self, Read, Write};
 use std::mem;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 
@@ -56,9 +57,9 @@ impl mio::Handler for Server {
         match token {
             LISTENER_TOKEN => {
                 assert!(events.is_readable());
-                trace!("SERVER got accept");
+                trace!("SERVER {:?} got accept", self.log.server_num());
                 match self.acceptor.accept() {
-                    Ok(None) => trace!("SERVER false accept"),
+                    Ok(None) => trace!("SERVER {} false accept", self.log.server_num()),
                     Err(e) => panic!("error {}", e),
                     Ok(Some((socket, addr))) => {
                         let _ = socket.set_keepalive(Some(1));
@@ -66,7 +67,8 @@ impl mio::Handler for Server {
                         // let _ = socket.set_tcp_nodelay(true);
                         let next_client_id = self.clients.len() + 1;
                         let client_token = mio::Token(next_client_id);
-                        trace!("SERVER new client {:?}, {:?}", next_client_id, addr);
+                        trace!("SERVER {} new client {:?}, {:?}",
+                            self.log.server_num(), next_client_id, addr);
                         let client = PerClient::new(socket);
                         let client_socket = &match self.clients.entry(client_token) {
                                                  Vacant(v) => v.insert(client),
@@ -94,7 +96,8 @@ impl mio::Handler for Server {
                                                                "socket does not exist"))
                                   .map(|s| s.stream.take_socket_error());
                     if err.is_err() {
-                        trace!("SERVER dropping client {:?} due to", client_token);
+                        trace!("SERVER {} dropping client {:?} due to",
+                            self.log.server_num(), client_token);
                         self.clients.remove(&client_token);
                     }
                     return;
@@ -102,9 +105,30 @@ impl mio::Handler for Server {
                 let client = self.clients.get_mut(&client_token).unwrap();
                 let next_interest = if events.is_readable() {
                     // trace!("SERVER gonna read from client");
-                    let finished_read = client.read_packet();
+
+                    let unwound = catch_unwind(AssertUnwindSafe(|| client.read_packet()));
+                    trace!("SERVER {} reading from client {:?}...",
+                        self.log.server_num(), client_token);
+                    let finished_read = match unwound {
+                        Err(cause) => {
+                            trace!("SERVER {} dropping client {:?} due to panic {:?}",
+                                self.log.server_num(), client_token, cause);
+                            trace!("SERVER {} had read {:?}",
+                                self.log.server_num(),
+                                &client.buffer.sized_bytes_mut()[..client.sent_bytes]);
+                            //TODO self.clients.remove(&client_token);
+                            //client.sent_bytes = 0;
+                            //event_loop.reregister(&client.stream, client_token,
+                            //    mio::EventSet::readable() | mio::EventSet::error(),
+                            //    mio::PollOpt::edge() | mio::PollOpt::oneshot())
+                            //          .expect("could not reregister client socket");
+                            return
+                        }
+                        Ok(f) => f,
+                    };
                     if finished_read {
-                        trace!("SERVER finished read from client {:?}", client_token);
+                        trace!("SERVER {} finished read from client {:?}",
+                            self.log.server_num(), client_token);
                         let need_to_respond = self.log.handle_op(&mut *client.buffer);
                         //TODO
                         //if need_to_respond {
@@ -120,9 +144,19 @@ impl mio::Handler for Server {
                     }
                 } else if events.is_writable() {
                     //trace!("SERVER gonna write from client {:?}", client_token);
-                    let finished_write = client.write_packet();
+                    let unwound = catch_unwind(AssertUnwindSafe(|| client.write_packet()));
+                    let finished_write = match unwound {
+                        Err(cause) => {
+                            trace!("SERVER {} dropping client {:?} due to {:?}",
+                                self.log.server_num(), client_token, cause);
+                            //TODO self.clients.remove(&client_token);
+                            return
+                        }
+                        Ok(f) => f,
+                    };
                     if finished_write {
-                        trace!("SERVER finished write from client {:?}", client_token);
+                        trace!("SERVER {} finished write from client {:?}",
+                            self.log.server_num(), client_token);
                         //TODO is this, or setting options to edge needed?
                         //let finished_read = client.read_packet();
                         //if finished_read {
@@ -140,7 +174,7 @@ impl mio::Handler for Server {
                         mio::EventSet::writable()
                     }
                 } else {
-                    panic!("invalid event {:?}", events);
+                    panic!("SERVER {} invalid event {:?}", self.log.server_num(), events);
                 };
                 event_loop.reregister(&client.stream,
                                       client_token,

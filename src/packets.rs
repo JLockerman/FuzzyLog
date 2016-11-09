@@ -117,7 +117,7 @@ pub mod EntryKind {
                 Sentinel => EntryLayout::Sentinel,
                 Read => EntryLayout::Read,
                 Invalid => panic!("Empty Layout"),
-                v => unreachable!("{:?}", v),
+                _ => unreachable!("no layout {:x}", self.bits()),
             }
         }
 
@@ -459,7 +459,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                 mem::size_of::<Entry<(), MultiFlex<()>>>()
             }
             EntryKind::Lock => mem::size_of::<Lock>(),
-            _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
+            _ => panic!("header_size: invalid layout {:x} {:?}", self.kind.bits(), self.kind),
         }
     }
 
