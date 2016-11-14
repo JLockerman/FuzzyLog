@@ -722,7 +722,29 @@ mod tests {
         //TODO assert_eq!(lh.play_foward(), None)
     }
 
-    //TODO test append after fetch
+    #[test]
+    pub fn test_append_after_fetch_short() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let mut lh = new_thread_log(vec![22.into()]);
+        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
+        for i in 0u32..2 {
+            let _ = log.append(22.into(), &i, &[]);
+        }
+        lh.snapshot(22.into());
+        for i in 0u32..2 {
+            assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
+        }
+        //TODO assert_eq!(lh.play_foward(), None)
+        for i in 2u32..4 {
+            let _ = log.append(22.into(), &i, &[]);
+        }
+        lh.snapshot(22.into());
+        for i in 2u32..4 {
+            assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
+        }
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
 
     /*
 
