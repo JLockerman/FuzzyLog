@@ -159,19 +159,27 @@ impl ThreadLog {
                 debug_assert!(!kind.contains(EntryKind::ReadSuccess));
                 if first_loc.1 < u32::MAX.into() {
                     trace!("FUZZY overread at {:?}", first_loc);
-                    return
+                    //TODO would be nice to handle ooo reads better...
+                    //     we can probably do it by checking (chain, read_loc - 1)
+                    //     to see if the read we're about to attempt is there, but
+                    //     it might be better to switch to a buffer per-chain model
+                    self.per_chains.get_mut(&first_loc.0).map(|s| {
+                        s.overread_at(first_loc.1);
+                    });
                 }
-                let unblocked = self.per_chains.get_mut(&first_loc.0).and_then(|s| {
-                    let e = bytes_as_entry(&msg);
-                    assert_eq!(e.locs()[0].1, u32::MAX.into());
-                    assert!(!e.kind.contains(EntryKind::ReadSuccess));
-                    let new_horizon = e.dependencies()[0].1;
-                    trace!("FUZZY try update horizon to {:?}", (first_loc.0, new_horizon));
-                    s.update_horizon(first_loc.0, new_horizon)
-                });
-                if let Some(val) = unblocked {
-                    let locs = self.return_entry(val);
-                    if let Some(locs) = locs { self.stop_blocking_on_locs(locs) }
+                else {
+                    let unblocked = self.per_chains.get_mut(&first_loc.0).and_then(|s| {
+                        let e = bytes_as_entry(&msg);
+                        assert_eq!(e.locs()[0].1, u32::MAX.into());
+                        assert!(!e.kind.contains(EntryKind::ReadSuccess));
+                        let new_horizon = e.dependencies()[0].1;
+                        trace!("FUZZY try update horizon to {:?}", (first_loc.0, new_horizon));
+                        s.update_horizon(first_loc.0, new_horizon)
+                    });
+                    if let Some(val) = unblocked {
+                        let locs = self.return_entry(val);
+                        if let Some(locs) = locs { self.stop_blocking_on_locs(locs) }
+                    }
                 }
                 self.continue_fetch_if_needed(first_loc.0);
             }
@@ -340,7 +348,7 @@ impl ThreadLog {
                 return false
             }
 
-            trace!("QQQQ setting returned {:?}", (o, i));
+            trace!("QQQQQ setting returned {:?}", (o, i));
             pc.set_returned(i);
         };
         trace!("FUZZY returning read @ {:?}", loc);
@@ -429,6 +437,17 @@ impl PerChain {
             self.last_snapshot = index
         }
         debug_assert!(self.last_returned_to_client == index);
+    }
+
+    fn overread_at(&mut self, index: entry) {
+        // The conditional is needed because sends we sent before reseting
+        // last_read_sent_to_server race future calls to this function
+        if self.last_read_sent_to_server > index
+            && self.last_read_sent_to_server > self.last_returned_to_client {
+            trace!("FUZZY resetting read loc for {:?} from {:?} to {:?}",
+                self.chain, self.last_read_sent_to_server, index);
+            self.last_read_sent_to_server = index - 1
+        }
     }
 
     fn can_return(&self, index: entry) -> bool {
@@ -675,6 +694,30 @@ mod tests {
         lh.snapshot(20.into());
         for &i in &interesting_chains {
             assert_eq!(lh.get_next(), Some((&i,  &[(i, 1.into())][..])));
+        }
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
+
+    #[test]
+    pub fn test_append_after_fetch() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let mut lh = new_thread_log(vec![21.into()]);
+        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
+        for i in 0u32..10 {
+            let _ = log.append(21.into(), &i, &[]);
+        }
+        lh.snapshot(21.into());
+        for i in 0u32..10 {
+            assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
+        }
+        //TODO assert_eq!(lh.play_foward(), None)
+        for i in 10u32..21 {
+            let _ = log.append(21.into(), &i, &[]);
+        }
+        lh.snapshot(21.into());
+        for i in 10u32..21 {
+            assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
         }
         //TODO assert_eq!(lh.play_foward(), None)
     }
