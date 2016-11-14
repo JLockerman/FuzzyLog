@@ -242,7 +242,7 @@ impl ThreadLog {
 
     fn fetch_blockers_if_needed(&mut self, packet: &ChainEntry) {
         //TODO num_to_fetch
-        //FIXME only do if below last_snapshot
+        //FIXME only do if below last_snapshot?
         let deps = bytes_as_entry(packet).dependencies();
         for &(chain, index) in deps {
             let unblocked;
@@ -298,6 +298,7 @@ impl ThreadLog {
 
     fn try_return_blocked_by(&mut self, loc: OrderIndex) {
         //FIXME switch to using try_returning so needed fetches are done
+        //      move up the stop_block loop into try_returning?
         let blocked = self.blockers.remove(&loc);
         if let Some(blocked) = blocked {
             for blocked in blocked.into_iter() {
@@ -385,6 +386,9 @@ impl ThreadLog {
                 pc.set_returned(i);
             }
             //TODO no-alloc
+            //     a better solution might be to have this function push onto a temporary
+            //     VecDeque who's head is used to unblock further entries, and is then sent
+            //     to the client
             locs.to_vec()
         };
         trace!("FUZZY returning read @ {:?}", locs);
@@ -430,14 +434,9 @@ impl PerChain {
     fn set_returned(&mut self, index: entry) {
         assert!(self.next_return_is(index));
         assert!(index > self.last_returned_to_client);
+        assert!(index <= self.last_snapshot);
         trace!("QQQQQ returning {:?}", (self.chain, index));
         self.last_returned_to_client = index;
-        //FIXME is unreachable with the blocking code
-        if self.last_snapshot + 1 == index {
-            trace!("QQQQQ set updating horizon to {:?}", (self.chain, index));
-            self.last_snapshot = index
-        }
-        debug_assert!(self.last_returned_to_client == index);
     }
 
     fn overread_at(&mut self, index: entry) {
