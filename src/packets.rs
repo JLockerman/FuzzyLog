@@ -799,8 +799,43 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
         }
         buffer
     }
+
+    pub fn fill_vec<'s, 'a>(&'s self, vec: &'a mut Vec<u8>) -> &'a mut Entry<V> {
+        let size = match self {
+            &Data(data, deps) =>
+                mem::size_of::<Entry<(), DataFlex<()>>>()
+                 + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>()),
+            &Multiput{ data, columns, deps, ..} =>
+                mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>())
+                + (columns.len() * size_of::<OrderIndex>()),
+            &Sentinel(..) => {
+                //TODO currently we treat a Sentinel like a multiappend with no data
+                //     nor deps
+                mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + size_of::<OrderIndex>()
+            }
+        };
+        if vec.capacity() < size {
+            let add_cap = size - vec.capacity();
+            vec.reserve_exact(add_cap)
+        }
+        unsafe {
+            vec.set_len(size);
+            let e = Entry::wrap_bytes_mut(&mut *vec);
+            self.fill_entry(e);
+            e
+        }
+    }
 }
 
+pub fn bytes_as_entry(bytes: &[u8]) -> &Entry<()> {
+    Entry::<()>::wrap_bytes(bytes)
+}
+
+pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> &mut Entry<()> {
+    Entry::<()>::wrap_bytes_mut(bytes)
+}
 
 ///////////////////////////////////////
 ///////////////////////////////////////

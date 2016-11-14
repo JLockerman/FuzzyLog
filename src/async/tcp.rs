@@ -747,7 +747,7 @@ fn is_server_for(chain: order, tok: Token, num_servers: usize) -> bool {
 }
 
 #[cfg(test)]
-mod sync_store_tests {
+pub mod sync_store_tests {
     use super::*;
     use packets::*;
     use prelude::{Store, InsertResult, GetResult, GetErr, FuzzyLog};
@@ -768,14 +768,14 @@ mod sync_store_tests {
     use std::thread;
 
     #[derive(Clone, Default)]
-    struct Queues {
+    pub struct Queues {
         finished_reads: VecDeque<Vec<u8>>,
         finished_writes: VecDeque<(Uuid, Vec<OrderIndex>)>,
     }
 
-    type Client = Rc<RefCell<Queues>>;
+    pub type Client = Rc<RefCell<Queues>>;
 
-    struct AsyncStoreToStore {
+    pub struct AsyncStoreToStore {
         store: AsyncTcpStore<Client>,
         client: Client,
         to_store: ::mio::Sender<Vec<u8>>,
@@ -793,7 +793,7 @@ mod sync_store_tests {
     }
 
     impl AsyncStoreToStore {
-        fn new<I>(lock_server: SocketAddr, chain_servers: I, mut event_loop: EventLoop<AsyncTcpStore<Client>>) -> Self
+        pub fn new<I>(lock_server: SocketAddr, chain_servers: I, mut event_loop: EventLoop<AsyncTcpStore<Client>>) -> Self
         where I: IntoIterator<Item=SocketAddr> {
             let client: Client = Default::default();
             let store = AsyncTcpStore::new(lock_server, chain_servers,
