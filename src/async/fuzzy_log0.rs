@@ -664,7 +664,7 @@ mod tests {
         let mut lh = new_thread_log(interesting_chains.clone());
         let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         for &i in &interesting_chains {
-            if i > 9.into() {
+            if i > 10.into() {
                 let _ = log.append(i.into(), &i, &[(i - 1, 1.into())]);
             }
             else {
