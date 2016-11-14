@@ -193,7 +193,6 @@ impl ThreadLog {
                 self.add_blockers(first_loc, &packet);
                 self.try_returning(first_loc, packet);
                 self.continue_fetch_if_needed(first_loc.0);
-                //FIXME keep fetching if needed
             }
             EntryLayout::Multiput => {
                 trace!("FUZZY read is multi");
@@ -253,6 +252,7 @@ impl ThreadLog {
                 unblocked = pc.update_horizon(chain, index);
                 pc.num_to_fetch()
             };
+            trace!("FUZZY blocker {:?} needs {:?} additional reads", chain, num_to_fetch);
             for _ in 0..num_to_fetch {
                 self.fetch_next(chain)
             }
@@ -321,6 +321,7 @@ impl ThreadLog {
     fn continue_fetch_if_needed(&mut self, chain: order) {
         //TODO num_to_fetch
         let num_to_fetch: u32 = self.per_chains[&chain].num_to_fetch();
+        trace!("FUZZY {:?} needs {:?} additional reads", chain, num_to_fetch);
         for _ in 0..num_to_fetch {
             self.fetch_next(chain)
         }
@@ -422,7 +423,7 @@ impl PerChain {
             last_read_sent_to_server: 0.into(),
             last_returned_to_client: 0.into(),
             blocked_on_new_snapshot: None,
-            is_searching_for_multiappend: true,
+            is_searching_for_multiappend: false,
         }
     }
 
@@ -433,7 +434,7 @@ impl PerChain {
         self.last_returned_to_client = index;
         //FIXME is unreachable with the blocking code
         if self.last_snapshot + 1 == index {
-            trace!("QQQQQ updating horizon to  {:?}", (self.chain, index));
+            trace!("QQQQQ set updating horizon to {:?}", (self.chain, index));
             self.last_snapshot = index
         }
         debug_assert!(self.last_returned_to_client == index);
