@@ -1,6 +1,6 @@
 
 //TODO use faster HashMap, HashSet
-use std::{self, mem};
+use std::{self, iter, mem};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::collections::hash_map;
 use std::rc::Rc;
@@ -24,6 +24,7 @@ pub struct ThreadLog {
     to_store: mio::Sender<Vec<u8>>, //TODO send WriteState or other enum?
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
+    blocked_multiappends: HashMap<Uuid, MultiSearch>,
     per_chains: HashMap<order, PerChain>,
     //TODO replace with queue from deque to allow multiple consumers
     ready_reads: mpsc::Sender<Vec<u8>>,
@@ -46,7 +47,15 @@ struct PerChain {
     //TODO is this necessary first_buffered: entry,
     last_returned_to_client: entry,
     blocked_on_new_snapshot: Option<Vec<u8>>,
-    is_searching_for_multiappend: bool
+    //FIXME this must be a counter
+    num_multiappends_searching_for: usize,
+    //TODO this is where is might be nice to have a more structured id format
+    found_but_unused_multiappends: HashSet<Uuid>,
+}
+
+struct MultiSearch {
+    val: ChainEntry,
+    pieces_remaining: usize,
 }
 
 pub enum Message {
@@ -57,7 +66,7 @@ pub enum Message {
 //TODO hide in struct
 pub enum FromStore {
     WriteComplete(Uuid, Vec<OrderIndex>), //TODO
-    ReadComplete(Vec<u8>),
+    ReadComplete(OrderIndex, Vec<u8>),
 }
 
 pub enum FromClient {
@@ -86,6 +95,7 @@ impl ThreadLog {
             to_store: to_store,
             from_outside: from_outside,
             blockers: Default::default(),
+            blocked_multiappends: Default::default(),
             ready_reads: ready_reads,
             finished_writes: Default::default(),
             per_chains: interesting_chains.into_iter().map(|c| (c, PerChain::new(c))).collect(),
@@ -120,7 +130,7 @@ impl ThreadLog {
     fn handle_from_store(&mut self, msg: FromStore) {
         match msg {
             WriteComplete(..) => unimplemented!(),
-            ReadComplete(msg) => self.handle_completed_read(msg),
+            ReadComplete(loc, msg) => self.handle_completed_read(loc, msg),
         }
     }
 
@@ -145,59 +155,72 @@ impl ThreadLog {
         }
     }
 
-    fn handle_completed_read(&mut self, msg: Vec<u8>) {
+    fn handle_completed_read(&mut self, read_loc: OrderIndex, msg: Vec<u8>) {
         //TODO right now this assumes order...
-        let (kind, first_loc) = {
-            let e = bytes_as_entry(&msg);
-            (e.kind, e.locs()[0])
-        };
-        trace!("FUZZY handle read @ {:?}", first_loc);
+        let kind = bytes_as_entry(&msg).kind;
+        trace!("FUZZY handle read @ {:?}", read_loc);
 
         match kind.layout() {
             EntryLayout::Read => {
                 trace!("FUZZY read has no data");
                 debug_assert!(!kind.contains(EntryKind::ReadSuccess));
-                if first_loc.1 < u32::MAX.into() {
-                    trace!("FUZZY overread at {:?}", first_loc);
+                debug_assert!(bytes_as_entry(&msg).locs()[0] == read_loc);
+                if read_loc.1 < u32::MAX.into() {
+                    trace!("FUZZY overread at {:?}", read_loc);
                     //TODO would be nice to handle ooo reads better...
                     //     we can probably do it by checking (chain, read_loc - 1)
                     //     to see if the read we're about to attempt is there, but
                     //     it might be better to switch to a buffer per-chain model
-                    self.per_chains.get_mut(&first_loc.0).map(|s| {
-                        s.overread_at(first_loc.1);
+                    self.per_chains.get_mut(&read_loc.0).map(|s| {
+                        s.overread_at(read_loc.1);
                     });
                 }
                 else {
-                    let unblocked = self.per_chains.get_mut(&first_loc.0).and_then(|s| {
+                    let unblocked = self.per_chains.get_mut(&read_loc.0).and_then(|s| {
                         let e = bytes_as_entry(&msg);
                         assert_eq!(e.locs()[0].1, u32::MAX.into());
-                        assert!(!e.kind.contains(EntryKind::ReadSuccess));
+                        debug_assert!(!e.kind.contains(EntryKind::ReadSuccess));
                         let new_horizon = e.dependencies()[0].1;
-                        trace!("FUZZY try update horizon to {:?}", (first_loc.0, new_horizon));
-                        s.update_horizon(first_loc.0, new_horizon)
+                        trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
+                        s.update_horizon(read_loc.0, new_horizon)
                     });
                     if let Some(val) = unblocked {
                         let locs = self.return_entry(val);
-                        if let Some(locs) = locs { self.stop_blocking_on_locs(locs) }
+                        if let Some(locs) = locs { self.stop_blocking_on(locs) }
                     }
                 }
-                self.continue_fetch_if_needed(first_loc.0);
+                self.continue_fetch_if_needed(read_loc.0);
             }
             EntryLayout::Data => {
                 trace!("FUZZY read is single");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
-                //assert!(first_loc.1 >= pc.first_buffered);
+                //assert!(read_loc.1 >= pc.first_buffered);
                 //TODO no-alloc?
                 let packet = Rc::new(msg);
-                //let will_block =
-                self.add_blockers(first_loc, &packet);
-                self.try_returning(first_loc, packet);
-                self.continue_fetch_if_needed(first_loc.0);
+                self.add_blockers(&packet);
+                self.try_returning_at(read_loc, packet);
+                self.continue_fetch_if_needed(read_loc.0);
             }
             EntryLayout::Multiput => {
-                trace!("FUZZY read is multi");
+                /*trace!("FUZZY read is multi");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
-                //TODO add read_loc to that which is returned at the next layer
+                //TODO add read_loc to that which is returned at the next layer?
+                //TODO no-alloc?
+                let packet = Rc::new(msg);
+                let search_status = self.update_multi_part_read(packet);
+                match search_status {
+                    MultiSearch::Finished(packet) => {
+                        self.add_blockers(&packet);
+                        self.try_returning(packet);
+                    }
+                    MultiSearch::InProgress(..) => {
+                        unimplemented!()
+                    }
+                    MultiSearch::FirstPart(..) => {
+                        unimplemented!()
+                    }
+                }
+                self.continue_fetch_if_needed(read_loc.0);*/
                 //self.add_blockers(read_loc, &msg);
                 //self.update_wait_for_ids(read_loc)
                 //if ? then self.per_chains.get_mut(&first_loc.0)
@@ -211,33 +234,36 @@ impl ThreadLog {
         }
     }
 
-    fn add_blockers(&mut self, loc: OrderIndex, packet: &ChainEntry) -> bool {
+    /// Blocks a packet on entries a it depends on. Will increment the refcount for each
+    /// blockage.
+    fn add_blockers(&mut self, packet: &ChainEntry) {
         //FIXME dependencies currently assumes you gave it the correct type
         //      this is unnecessary and should be changed
-        let deps = bytes_as_entry(packet).dependencies();
-        let mut will_block = false;
-        trace!("FUZZY checking {:?} for blockers in {:?}", loc, deps);
+        let entr = bytes_as_entry(packet);
+        let deps = entr.dependencies();
+        let locs = entr.locs();
+        trace!("FUZZY checking {:?} for blockers in {:?}", locs, deps);
         for &(chain, index) in deps {
             let blocker_already_returned = self.per_chains.get_mut(&chain)
                 .expect("read uninteresting chain")
                 .has_returned(index);
             if !blocker_already_returned {
-                trace!("FUZZY read @ {:?} blocked on {:?}", loc, (chain, index));
+                trace!("FUZZY read @ {:?} blocked on {:?}", locs, (chain, index));
+                //TODO no-alloc?
                 let blocked = self.blockers.entry((chain, index)).or_insert_with(Vec::new);
                 blocked.push(packet.clone());
-                will_block = true;
             } else {
-                trace!("FUZZY read @ {:?} need not wait for {:?}", loc, (chain, index));
+                trace!("FUZZY read @ {:?} need not wait for {:?}", locs, (chain, index));
             }
         }
-        let is_next_in_chain = self.per_chains.get(&loc.0)
-            .expect("fetching uninteresting chain")
-            .next_return_is(loc.1);
-        if !is_next_in_chain {
-            self.enqueue_packet(loc, packet.clone());
-            will_block = true;
+        for &loc in locs {
+            let is_next_in_chain = self.per_chains.get(&loc.0)
+                .expect("fetching uninteresting chain")
+                .next_return_is(loc.1);
+            if !is_next_in_chain {
+                self.enqueue_packet(loc, packet.clone());
+            }
         }
-        will_block
     }
 
     fn fetch_blockers_if_needed(&mut self, packet: &ChainEntry) {
@@ -258,17 +284,17 @@ impl ThreadLog {
             }
             if let Some(val) = unblocked {
                 let locs = self.return_entry(val);
-                if let Some(locs) = locs { self.stop_blocking_on_locs(locs) }
+                if let Some(locs) = locs { self.stop_blocking_on(locs) }
             }
         }
     }
 
-    fn try_returning(&mut self, loc: OrderIndex, packet: ChainEntry) {
+    fn try_returning_at(&mut self, loc: OrderIndex, packet: ChainEntry) {
         match Rc::try_unwrap(packet) {
             Ok(e) => {
                 trace!("FUZZY read {:?} is next", loc);
                 if self.return_entry_at(loc, e) {
-                    self.stop_blocking_on(loc);
+                    self.stop_blocking_on(iter::once(loc));
                 }
             }
             //TODO should this be in add_blockers?
@@ -276,18 +302,24 @@ impl ThreadLog {
         }
     }
 
-    fn stop_blocking_on(&mut self, loc: OrderIndex) {
-        trace!("FUZZY unblocking reads after {:?}", loc);
-        self.try_return_blocked_by(loc);
-        while let Some(loc) = self.no_longer_blocked.pop() {
-            trace!("FUZZY continue unblocking reads after {:?}", loc);
-            self.try_return_blocked_by(loc);
+    fn try_returning(&mut self, packet: ChainEntry) {
+        match Rc::try_unwrap(packet) {
+            Ok(e) => {
+                trace!("FUZZY returning next read?");
+                if let Some(locs) = self.return_entry(e) {
+                    trace!("FUZZY {:?} unblocked", locs);
+                    self.stop_blocking_on(locs);
+                }
+            }
+            //TODO should this be in add_blockers?
+            Err(e) => self.fetch_blockers_if_needed(&e),
         }
     }
 
-    fn stop_blocking_on_locs<I>(&mut self, locs: I)
+    fn stop_blocking_on<I>(&mut self, locs: I)
     where I: IntoIterator<Item=OrderIndex> {
         for loc in locs {
+            trace!("FUZZY unblocking reads after {:?}", loc);
             self.try_return_blocked_by(loc);
         }
         while let Some(loc) = self.no_longer_blocked.pop() {
@@ -333,6 +365,7 @@ impl ThreadLog {
         debug_assert!(self.per_chains.get(&loc.0).unwrap().last_returned_to_client < loc.1 - 1);
         let blocked_on = (loc.0, loc.1 - 1);
         trace!("FUZZY read @ {:?} blocked on prior {:?}", loc, blocked_on);
+        //TODO no-alloc?
         let blocked = self.blockers.entry(blocked_on).or_insert_with(Vec::new);
         blocked.push(packet.clone());
     }
@@ -359,6 +392,12 @@ impl ThreadLog {
         true
     }
 
+    ///returns None if return stalled Some(Locations which are now unblocked>) if return
+    ///        succeeded
+    //TODO it may make sense to change these funtions to add the returned messages to an
+    //     internal ring which can be used to discover the unblocked entries before the
+    //     messages are flushed to the client, as this would remove the intermidate allocation
+    //     and it may be a bit nicer
     fn return_entry(&mut self, val: Vec<u8>) -> Option<Vec<OrderIndex>> {
         let locs = {
             let mut should_block_on = None;
@@ -427,7 +466,8 @@ impl PerChain {
             last_read_sent_to_server: 0.into(),
             last_returned_to_client: 0.into(),
             blocked_on_new_snapshot: None,
-            is_searching_for_multiappend: false,
+            num_multiappends_searching_for: 0,
+            found_but_unused_multiappends: Default::default(),
         }
     }
 
@@ -509,7 +549,7 @@ impl PerChain {
         if self.last_read_sent_to_server >= self.last_snapshot {
             //FIXME this should be based on the number of requests outstanding from the server
             //     only if the number of requests is zero do we read beyond the horizon
-            if self.is_searching_for_multiappend { 1 } else { 0 }
+            if self.num_multiappends_searching_for > 0 { 1 } else { 0 }
         } else {
             let fetches_needed = self.last_snapshot - self.last_read_sent_to_server.into();
             fetches_needed.into()
@@ -538,8 +578,9 @@ impl BufferCache {
 }
 
 impl AsyncStoreClient for mpsc::Sender<Message> {
-    fn on_finished_read(&mut self, read_packet: Vec<u8>) {
-        self.send(Message::FromStore(ReadComplete(read_packet))).expect("store disabled")
+    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>) {
+        self.send(Message::FromStore(ReadComplete(read_loc, read_packet)))
+            .expect("store disabled")
     }
 
     //TODO what info is needed?

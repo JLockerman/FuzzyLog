@@ -16,7 +16,7 @@ use mio::Token;
 
 pub trait AsyncStoreClient {
     //TODO nocopy?
-    fn on_finished_read(&mut self, read_packet: Vec<u8>);
+    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>);
     //TODO what info is needed?
     fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>);
 }
@@ -290,7 +290,7 @@ where C: AsyncStoreClient {
                 //TODO num copies?
                 v.clear();
                 v.extend_from_slice(&packet[..]);
-                self.client.on_finished_read(v);
+                self.client.on_finished_read(oi, v);
             }
         }
     }
@@ -783,7 +783,7 @@ pub mod sync_store_tests {
     }
 
     impl AsyncStoreClient for Client {
-        fn on_finished_read(&mut self, read_packet: Vec<u8>) {
+        fn on_finished_read(&mut self, _: OrderIndex, read_packet: Vec<u8>) {
             self.borrow_mut().finished_reads.push_back(read_packet)
         }
 
