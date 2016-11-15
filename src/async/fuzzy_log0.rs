@@ -24,12 +24,14 @@ pub struct ThreadLog {
     to_store: mio::Sender<Vec<u8>>, //TODO send WriteState or other enum?
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
-    blocked_multiappends: HashMap<Uuid, MultiSearch>,
+    blocked_multiappends: HashMap<Uuid, MultiSearchState>,
     per_chains: HashMap<order, PerChain>,
     //TODO replace with queue from deque to allow multiple consumers
     ready_reads: mpsc::Sender<Vec<u8>>,
     //TODO blocked_chains: BitSet ?
     finished_writes: Vec<mpsc::Sender<()>>,
+    //FIXME is currently unused
+    to_return: VecDeque<Vec<u8>>,
     //TODO
     no_longer_blocked: Vec<OrderIndex>,
     cache: BufferCache,
@@ -53,8 +55,8 @@ struct PerChain {
     found_but_unused_multiappends: HashSet<Uuid>,
 }
 
-struct MultiSearch {
-    val: ChainEntry,
+struct MultiSearchState {
+    val: Vec<u8>,
     pieces_remaining: usize,
 }
 
@@ -72,6 +74,12 @@ pub enum FromStore {
 pub enum FromClient {
     //TODO
     SnapshotAndPrefetch(order),
+}
+
+enum MultiSearch {
+    Finished(Vec<u8>),
+    InProgress,
+    //MultiSearch::FirstPart(),
 }
 
 struct BufferCache {
@@ -99,6 +107,7 @@ impl ThreadLog {
             ready_reads: ready_reads,
             finished_writes: Default::default(),
             per_chains: interesting_chains.into_iter().map(|c| (c, PerChain::new(c))).collect(),
+            to_return: Default::default(),
             no_longer_blocked: Default::default(),
             cache: BufferCache::new(),
         }
@@ -182,7 +191,7 @@ impl ThreadLog {
                         debug_assert!(!e.kind.contains(EntryKind::ReadSuccess));
                         let new_horizon = e.dependencies()[0].1;
                         trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
-                        s.update_horizon(read_loc.0, new_horizon)
+                        s.update_horizon(new_horizon)
                     });
                     if let Some(val) = unblocked {
                         let locs = self.return_entry(val);
@@ -202,31 +211,23 @@ impl ThreadLog {
                 self.continue_fetch_if_needed(read_loc.0);
             }
             EntryLayout::Multiput => {
-                /*trace!("FUZZY read is multi");
+                trace!("FUZZY read is multi");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
                 //TODO add read_loc to that which is returned at the next layer?
-                //TODO no-alloc?
-                let packet = Rc::new(msg);
-                let search_status = self.update_multi_part_read(packet);
+                let search_status = self.update_multi_part_read(read_loc, msg);
                 match search_status {
-                    MultiSearch::Finished(packet) => {
+                    MultiSearch::InProgress => {}
+                    MultiSearch::Finished(msg) => {
+                        //TODO no-alloc?
+                        let packet = Rc::new(msg);
+                        //TODO it would be nice to fetch the blockers in parallel...
+                        //     we can add a fetch blockers call in update_multi_part_read
+                        //     which updates the horizon but doesn't actually add the block
                         self.add_blockers(&packet);
                         self.try_returning(packet);
                     }
-                    MultiSearch::InProgress(..) => {
-                        unimplemented!()
-                    }
-                    MultiSearch::FirstPart(..) => {
-                        unimplemented!()
-                    }
                 }
-                self.continue_fetch_if_needed(read_loc.0);*/
-                //self.add_blockers(read_loc, &msg);
-                //self.update_wait_for_ids(read_loc)
-                //if ? then self.per_chains.get_mut(&first_loc.0)
-                //    .expect("read uninteresting chain")
-                //    .add_read_packet(first_loc, msg);?
-                unimplemented!()
+                self.continue_fetch_if_needed(read_loc.0);
             }
             EntryLayout::Sentinel => unimplemented!(),
 
@@ -275,7 +276,7 @@ impl ThreadLog {
             let num_to_fetch: u32 = {
                 let pc = self.per_chains.get_mut(&chain)
                     .expect("tried reading uninteresting chain");
-                unblocked = pc.update_horizon(chain, index);
+                unblocked = pc.update_horizon(index);
                 pc.num_to_fetch()
             };
             trace!("FUZZY blocker {:?} needs {:?} additional reads", chain, num_to_fetch);
@@ -349,6 +350,88 @@ impl ThreadLog {
                 }
             }
         }
+    }
+
+    fn update_multi_part_read(&mut self, read_loc: OrderIndex, msg: Vec<u8>) -> MultiSearch {
+        let (id, pieces_remaining) = {
+            let entr = bytes_as_entry(&msg);
+            let id = entr.id;
+            let pieces_remaining = entr.locs().into_iter()
+                .filter(|&&(o, i)| o != 0.into())
+                .count();
+            (id, pieces_remaining)
+        };
+
+        //TODO this should never really occur
+        if pieces_remaining == 0 {
+            for &(o, i) in bytes_as_entry(&msg).locs() {
+                let pc = self.per_chains.get_mut(&o).expect("tried reading boring chain");
+                if let Some(unblocked) = pc.update_horizon(i) {
+                    self.to_return.push_back(unblocked);
+                }
+            }
+            return MultiSearch::Finished(msg)
+        }
+
+        let is_first_piece = self.blocked_multiappends.contains_key(&id);
+        if is_first_piece {
+            for &(o, i) in bytes_as_entry(&msg).locs() {
+                if o != 0.into() { self.fetch_multi_parts(o, i) }
+            }
+            self.blocked_multiappends.insert(id, MultiSearchState {
+                val: msg,
+                pieces_remaining: pieces_remaining
+            });
+        }
+
+        let finished = {
+            if let hash_map::Entry::Occupied(mut found) = self.blocked_multiappends.entry(id) {
+                let finished = {
+                    let multi = found.get_mut();
+                    *bytes_as_entry_mut(&mut multi.val)
+                        .locs_mut().into_iter()
+                        .find(|&&mut (o, i)| o == read_loc.0)
+                        .unwrap() = read_loc;
+                    multi.pieces_remaining -= 1;
+                    multi.pieces_remaining == 0
+                };
+                match finished {
+                    true => Some(found.remove().val),
+                    false => None,
+                }
+            }
+            else { unreachable!() }
+        };
+
+        //TODO we only need to do this if it was a blind search, i.e. old_loc.1 == 0
+        self.found_multi_part(read_loc.0);
+
+        match finished {
+            Some(val) => MultiSearch::Finished(val),
+            None => MultiSearch::InProgress,
+        }
+    }
+
+    fn fetch_multi_parts(&mut self, chain: order, index: entry) {
+        //TODO argh, no-alloc
+        let unblocked = {
+            let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
+            //TODO we only need to do this if it was a blind search.
+            //     i.e. in the else part of the conditional
+            pc.increment_multi_search();
+            if index != 0.into() { pc.update_horizon(index) } else { None }
+        };
+
+        if let Some(unblocked) = unblocked {
+            //TODO no-alloc
+            let locs = self.return_entry(unblocked);
+            if let Some(locs) = locs { self.stop_blocking_on(locs) }
+        }
+    }
+
+    fn found_multi_part(&mut self, chain: order) {
+        let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
+        pc.decrement_multi_search();
     }
 
     fn continue_fetch_if_needed(&mut self, chain: order) {
@@ -509,11 +592,11 @@ impl PerChain {
         index <= self.last_snapshot
     }
 
-    fn update_horizon(&mut self, chain: order, new_horizon: entry) -> Option<Vec<u8>> {
+    fn update_horizon(&mut self, new_horizon: entry) -> Option<Vec<u8>> {
         if self.last_snapshot < new_horizon {
             trace!("FUZZY update horizon {:?}", (self.chain, new_horizon));
             self.last_snapshot = new_horizon;
-            if entry_is_unblocked(&self.blocked_on_new_snapshot, chain, new_horizon) {
+            if entry_is_unblocked(&self.blocked_on_new_snapshot, self.chain, new_horizon) {
                 trace!("FUZZY unblocked entry");
                 return mem::replace(&mut self.blocked_on_new_snapshot, None)
             }
@@ -563,6 +646,15 @@ impl PerChain {
             - self.last_returned_to_client.into();
         let currently_fetching: u32 = currently_fetching.into();
         currently_fetching
+    }
+
+    fn increment_multi_search(&mut self) {
+        self.num_multiappends_searching_for += 1
+    }
+
+    fn decrement_multi_search(&mut self) {
+        assert!(self.num_multiappends_searching_for > 1);
+        self.num_multiappends_searching_for -= 1
     }
 }
 
