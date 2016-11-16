@@ -46,6 +46,7 @@ struct PerChain {
     chain: order,
     last_snapshot: entry,
     last_read_sent_to_server: entry,
+    outstanding_reads: u32, //TODO what size should this be
     //TODO is this necessary first_buffered: entry,
     last_returned_to_client: entry,
     blocked_on_new_snapshot: Option<Vec<u8>>,
@@ -79,6 +80,7 @@ pub enum FromClient {
 enum MultiSearch {
     Finished(Vec<u8>),
     InProgress,
+    BeyondHorizon(Vec<u8>),
     //MultiSearch::FirstPart(),
 }
 
@@ -155,8 +157,9 @@ impl ThreadLog {
             let pc = &self.per_chains[&chain];
             let num_to_fetch = pc.num_to_fetch();
             let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
-            let currently_fetching = pc.currently_fetching();
-            if currently_fetching < num_to_fetch { num_to_fetch - currently_fetching }
+            let currently_buffering = pc.currently_buffering();
+            //FIXME use outstanding reads
+            if currently_buffering < num_to_fetch { num_to_fetch - currently_buffering }
             else { 0 }
         };
         for _ in 0..num_to_fetch {
@@ -182,6 +185,7 @@ impl ThreadLog {
                     //     it might be better to switch to a buffer per-chain model
                     self.per_chains.get_mut(&read_loc.0).map(|s| {
                         s.overread_at(read_loc.1);
+                        s.outstanding_reads -= 1;
                     });
                 }
                 else {
@@ -205,6 +209,7 @@ impl ThreadLog {
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
                 //assert!(read_loc.1 >= pc.first_buffered);
                 //TODO no-alloc?
+                self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
                 let packet = Rc::new(msg);
                 self.add_blockers(&packet);
                 self.try_returning_at(read_loc, packet);
@@ -213,10 +218,16 @@ impl ThreadLog {
             EntryLayout::Multiput => {
                 trace!("FUZZY read is multi");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
-                //TODO add read_loc to that which is returned at the next layer?
+                self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
+
                 let search_status = self.update_multi_part_read(read_loc, msg);
                 match search_status {
                     MultiSearch::InProgress => {}
+                    MultiSearch::BeyondHorizon(..) => {
+                        //TODO better ooo reads
+                        self.per_chains.get_mut(&read_loc.0).expect("boring chain")
+                            .overread_at(read_loc.1);
+                    }
                     MultiSearch::Finished(msg) => {
                         //TODO no-alloc?
                         let packet = Rc::new(msg);
@@ -229,7 +240,11 @@ impl ThreadLog {
                 }
                 self.continue_fetch_if_needed(read_loc.0);
             }
-            EntryLayout::Sentinel => unimplemented!(),
+            EntryLayout::Sentinel => {
+                self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
+                //TODO
+                unimplemented!()
+            }
 
             EntryLayout::Lock => unreachable!(),
         }
@@ -353,46 +368,58 @@ impl ThreadLog {
     }
 
     fn update_multi_part_read(&mut self, read_loc: OrderIndex, msg: Vec<u8>) -> MultiSearch {
-        let (id, pieces_remaining) = {
+        let (id, num_pieces) = {
             let entr = bytes_as_entry(&msg);
             let id = entr.id;
-            let pieces_remaining = entr.locs().into_iter()
-                .filter(|&&(o, i)| o != 0.into())
+            let locs = entr.locs();
+            let num_pieces = locs.into_iter()
+                .filter(|&&(o, _)| o != 0.into())
                 .count();
-            (id, pieces_remaining)
+            trace!("FUZZY multi part read {:?} @ {:?}, {:?} pieces", id, locs, num_pieces);
+            (id, num_pieces)
         };
 
-        //TODO this should never really occur
-        if pieces_remaining == 0 {
-            for &(o, i) in bytes_as_entry(&msg).locs() {
-                let pc = self.per_chains.get_mut(&o).expect("tried reading boring chain");
-                if let Some(unblocked) = pc.update_horizon(i) {
-                    self.to_return.push_back(unblocked);
-                }
-            }
+        //TODO this should never really occur...
+        if num_pieces == 1 {
             return MultiSearch::Finished(msg)
         }
 
-        let is_first_piece = self.blocked_multiappends.contains_key(&id);
-        if is_first_piece {
+        let is_later_piece = self.blocked_multiappends.contains_key(&id);
+        if !is_later_piece {
+            //FIXME I'm not sure if this is right
+            if !self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1) {
+                trace!("FUZZY read multi too early @ {:?}", read_loc);
+                return MultiSearch::BeyondHorizon(msg)
+            }
+
+            trace!("FUZZY first part of multi part read");
             for &(o, i) in bytes_as_entry(&msg).locs() {
-                if o != 0.into() { self.fetch_multi_parts(o, i) }
+                if o != 0.into() {
+                    trace!("FUZZY fetching multi part @ {:?}", (o, i));
+                    self.fetch_multi_parts(o, i)
+                } else { trace!("FUZZY no need to fetch multi part @ {:?}", (o, i)); }
             }
             self.blocked_multiappends.insert(id, MultiSearchState {
                 val: msg,
-                pieces_remaining: pieces_remaining
+                pieces_remaining: num_pieces
             });
-        }
+        } else { trace!("FUZZY later part of multi part read"); }
 
+        debug_assert!(self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1));
+
+        let was_blind_search;
         let finished = {
             if let hash_map::Entry::Occupied(mut found) = self.blocked_multiappends.entry(id) {
                 let finished = {
                     let multi = found.get_mut();
-                    *bytes_as_entry_mut(&mut multi.val)
+                    let loc_ptr = bytes_as_entry_mut(&mut multi.val)
                         .locs_mut().into_iter()
-                        .find(|&&mut (o, i)| o == read_loc.0)
-                        .unwrap() = read_loc;
+                        .find(|&&mut (o, _)| o == read_loc.0)
+                        .unwrap();
+                    was_blind_search = loc_ptr.1 == 0.into();
+                    *loc_ptr = read_loc;
                     multi.pieces_remaining -= 1;
+                    trace!("FUZZY multi pieces remaining {:?}", multi.pieces_remaining);
                     multi.pieces_remaining == 0
                 };
                 match finished {
@@ -403,12 +430,22 @@ impl ThreadLog {
             else { unreachable!() }
         };
 
-        //TODO we only need to do this if it was a blind search, i.e. old_loc.1 == 0
-        self.found_multi_part(read_loc.0);
+        //self.found_multi_part(read_loc.0, read_loc.1, was_blind_search);
+        if was_blind_search {
+            trace!("FUZZY finished blind seach for {:?}", read_loc);
+            let pc = self.per_chains.get_mut(&read_loc.0).expect("tried reading boring chain");
+            pc.decrement_multi_search();
+        }
 
         match finished {
-            Some(val) => MultiSearch::Finished(val),
-            None => MultiSearch::InProgress,
+            Some(val) => {
+                trace!("FUZZY finished multi part read");
+                MultiSearch::Finished(val)
+            }
+            None => {
+                trace!("FUZZY multi part read still waiting");
+                MultiSearch::InProgress
+            }
         }
     }
 
@@ -418,9 +455,15 @@ impl ThreadLog {
             let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
             //TODO we only need to do this if it was a blind search.
             //     i.e. in the else part of the conditional
-            pc.increment_multi_search();
-            if index != 0.into() { pc.update_horizon(index) } else { None }
+            //TODO don't do this for the first val
+            if index != 0.into() {
+                pc.update_horizon(index)
+            } else {
+                pc.increment_multi_search();
+                None
+            }
         };
+        self.continue_fetch_if_needed(chain);
 
         if let Some(unblocked) = unblocked {
             //TODO no-alloc
@@ -429,17 +472,44 @@ impl ThreadLog {
         }
     }
 
-    fn found_multi_part(&mut self, chain: order) {
-        let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
-        pc.decrement_multi_search();
+    fn found_multi_part(&mut self, chain: order, index: entry, was_blind_search: bool) {
+        /*
+        //TODO I belive this is unneeded
+        let unblocked = {
+            let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
+            pc.decrement_multi_search();
+            pc.update_horizon(index)
+        };
+        if let Some(unblocked) = unblocked {
+            //TODO no-alloc
+            let locs = self.return_entry(unblocked);
+            if let Some(locs) = locs { self.stop_blocking_on(locs) }
+        }*/
     }
 
     fn continue_fetch_if_needed(&mut self, chain: order) {
         //TODO num_to_fetch
-        let num_to_fetch: u32 = self.per_chains[&chain].num_to_fetch();
-        trace!("FUZZY {:?} needs {:?} additional reads", chain, num_to_fetch);
+        let (num_to_fetch, unblocked) = {
+            let pc = self.per_chains.get_mut(&chain).expect("boring chain");
+            let num_to_fetch = pc.num_to_fetch();
+            if num_to_fetch == 0 && pc.is_searching_for_multi() && pc.outstanding_reads == 0 {
+                trace!("FUZZY {:?} updating horizon due to multi search", chain);
+                (1, pc.increment_horizon())
+            }
+            else {
+                trace!("FUZZY {:?} needs {:?} additional reads", chain, num_to_fetch);
+                (num_to_fetch, None)
+            }
+        };
+
         for _ in 0..num_to_fetch {
             self.fetch_next(chain)
+        }
+
+        if let Some(unblocked) = unblocked {
+            //TODO no-alloc
+            let locs = self.return_entry(unblocked);
+            if let Some(locs) = locs { self.stop_blocking_on(locs) }
         }
     }
 
@@ -524,6 +594,7 @@ impl ThreadLog {
             let per_chain = &mut self.per_chains.get_mut(&chain)
                 .expect("fetching uninteresting chain");
             per_chain.last_read_sent_to_server = per_chain.last_read_sent_to_server + 1;
+            per_chain.outstanding_reads += 1;
             per_chain.last_read_sent_to_server
         };
         let packet = self.make_read_packet(chain, next);
@@ -547,6 +618,7 @@ impl PerChain {
             chain: chain,
             last_snapshot: 0.into(),
             last_read_sent_to_server: 0.into(),
+            outstanding_reads: 0,
             last_returned_to_client: 0.into(),
             blocked_on_new_snapshot: None,
             num_multiappends_searching_for: 0,
@@ -588,8 +660,17 @@ impl PerChain {
     }
 
     fn is_within_snapshot(&self, index: entry) -> bool {
-        trace!("QQQQQ {:?} <= {:?}", index, self.last_snapshot);
+        trace!("QQQQQ {:?}: {:?} <= {:?}", self.chain, index, self.last_snapshot);
         index <= self.last_snapshot
+    }
+
+    fn is_searching_for_multi(&self) -> bool {
+        self.num_multiappends_searching_for > 0
+    }
+
+    fn increment_horizon(&mut self) -> Option<Vec<u8>> {
+        let new_horizon = self.last_snapshot + 1;
+        self.update_horizon(new_horizon)
     }
 
     fn update_horizon(&mut self, new_horizon: entry) -> Option<Vec<u8>> {
@@ -600,6 +681,10 @@ impl PerChain {
                 trace!("FUZZY unblocked entry");
                 return mem::replace(&mut self.blocked_on_new_snapshot, None)
             }
+        }
+        else {
+            trace!("FUZZY needless horizon update for {:?}: {:?} <= {:?}",
+                self.chain, new_horizon, self.last_snapshot);
         }
 
         return None;
@@ -629,32 +714,39 @@ impl PerChain {
         assert!(self.last_returned_to_client <= self.last_snapshot,
             "FUZZY returned value early. {:?} should be less than {:?}",
             self.last_returned_to_client, self.last_snapshot);
-        if self.last_read_sent_to_server >= self.last_snapshot {
-            //FIXME this should be based on the number of requests outstanding from the server
-            //     only if the number of requests is zero do we read beyond the horizon
-            if self.num_multiappends_searching_for > 0 { 1 } else { 0 }
+        if self.last_read_sent_to_server <= self.last_snapshot {
+            (self.last_snapshot - self.last_read_sent_to_server.into()).into()
+
         } else {
-            let fetches_needed = self.last_snapshot - self.last_read_sent_to_server.into();
-            fetches_needed.into()
+            0
         }
+        /*
+        //FIXME this should be based on the number of requests outstanding from the server
+        //     only if the number of requests is zero do we read beyond the horizon
+        if self.num_multiappends_searching_for > 0 { 1 } else { 0 }
+        */
 
     }
 
-    fn currently_fetching(&self) -> u32 {
+    fn currently_buffering(&self) -> u32 {
         //TODO switch to saturating sub?
-        let currently_fetching = self.last_read_sent_to_server
+        let currently_buffering = self.last_read_sent_to_server
             - self.last_returned_to_client.into();
-        let currently_fetching: u32 = currently_fetching.into();
-        currently_fetching
+        let currently_buffering: u32 = currently_buffering.into();
+        currently_buffering
     }
 
     fn increment_multi_search(&mut self) {
-        self.num_multiappends_searching_for += 1
+        self.num_multiappends_searching_for += 1;
+        trace!("QQQQQ {:?} + now searching for {:?} multis",
+            self.chain, self.num_multiappends_searching_for);
     }
 
     fn decrement_multi_search(&mut self) {
-        assert!(self.num_multiappends_searching_for > 1);
-        self.num_multiappends_searching_for -= 1
+        assert!(self.num_multiappends_searching_for > 0);
+        self.num_multiappends_searching_for -= 1;
+        trace!("QQQQQ {:?} - now searching for {:?} multis",
+            self.chain, self.num_multiappends_searching_for);
     }
 }
 
@@ -878,6 +970,98 @@ mod tests {
         }
         //TODO assert_eq!(lh.play_foward(), None)
     }
+
+    #[test]
+    pub fn test_multi() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let columns = vec![23.into(), 24.into(), 25.into()];
+        let mut lh = new_thread_log::<u64>(columns.clone());
+        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
+        let _ = log.multiappend(&columns, &0xfeed, &[]);
+        let _ = log.multiappend(&columns, &0xbad , &[]);
+        let _ = log.multiappend(&columns, &0xcad , &[]);
+        let _ = log.multiappend(&columns, &13    , &[]);
+        lh.snapshot(24.into());
+        assert_eq!(lh.get_next(), Some((&0xfeed, &[(23.into(), 1.into()),
+            (24.into(), 1.into()), (25.into(), 1.into())][..])));
+        assert_eq!(lh.get_next(), Some((&0xbad , &[(23.into(), 2.into()),
+            (24.into(), 2.into()), (25.into(), 2.into())][..])));
+        assert_eq!(lh.get_next(), Some((&0xcad , &[(23.into(), 3.into()),
+            (24.into(), 3.into()), (25.into(), 3.into())][..])));
+        assert_eq!(lh.get_next(), Some((&13    , &[(23.into(), 4.into()),
+            (24.into(), 4.into()), (25.into(), 4.into())][..])));
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
+
+    #[test]
+    pub fn test_multi_shingled() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let columns = vec![26.into(), 27.into(), 28.into(), 29.into(), 30.into()];
+        let mut lh = new_thread_log::<u64>(columns.clone());
+        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
+        for (i, cols) in columns.windows(2).rev().enumerate() {
+            let i = i as u64;
+            let _ = log.multiappend(&cols, &((i + 1) * 2), &[]);
+        }
+        lh.snapshot(26.into());
+        assert_eq!(lh.get_next(),
+            Some((&2, &[(29.into(), 1.into()), (30.into(), 1.into())][..])));
+        assert_eq!(lh.get_next(),
+            Some((&4, &[(28.into(), 1.into()), (29.into(), 2.into())][..])));
+        assert_eq!(lh.get_next(),
+            Some((&6, &[(27.into(), 1.into()), (28.into(), 2.into())][..])));
+        assert_eq!(lh.get_next(),
+            Some((&8, &[(26.into(), 1.into()), (27.into(), 2.into())][..])));
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
+
+    #[test]
+    pub fn test_multi_wide() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let columns: Vec<_> = (31..45).map(Into::into).collect();
+        let mut lh = new_thread_log::<u64>(columns.clone());
+        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
+        let _ = log.multiappend(&columns, &82352  , &[]);
+        let _ = log.multiappend(&columns, &018945 , &[]);
+        let _ = log.multiappend(&columns, &119332 , &[]);
+        let _ = log.multiappend(&columns, &0      , &[]);
+        let _ = log.multiappend(&columns, &17     , &[]);
+        lh.snapshot(33.into());
+        let locs: Vec<_> = columns.iter().map(|&o| (o, 1.into())).collect();
+        assert_eq!(lh.get_next(), Some((&82352 , &locs[..])));
+        let locs: Vec<_> = columns.iter().map(|&o| (o, 2.into())).collect();
+        assert_eq!(lh.get_next(), Some((&018945, &locs[..])));
+        let locs: Vec<_> = columns.iter().map(|&o| (o, 3.into())).collect();
+        assert_eq!(lh.get_next(), Some((&119332, &locs[..])));
+        let locs: Vec<_> = columns.iter().map(|&o| (o, 4.into())).collect();
+        assert_eq!(lh.get_next(), Some((&0     , &locs[..])));
+        let locs: Vec<_> = columns.iter().map(|&o| (o, 5.into())).collect();
+        assert_eq!(lh.get_next(), Some((&17    , &locs[..])));
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
+
+    #[test]
+    pub fn test_multi_deep() {
+        let _ = env_logger::init();
+        let store = new_store(vec![]);
+        let columns: Vec<_> = (45..49).map(Into::into).collect();
+        let mut lh = new_thread_log::<u32>(columns.clone());
+        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
+        for i in 1..32 {
+            let _ = log.multiappend(&columns, &i, &[]);
+        }
+        lh.snapshot(48.into());
+        for i in 1..32 {
+            let locs: Vec<_> = columns.iter().map(|&o| (o, i.into())).collect();
+            assert_eq!(lh.get_next(), Some((&i , &locs[..])));
+        }
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
+
+    //TODO test append after prefetch bu before read
 
     /*
 
