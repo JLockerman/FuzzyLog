@@ -12,7 +12,7 @@ use bit_set::BitSet;
 use mio;
 
 use packets::*;
-use async::tcp::{AsyncStoreClient, AsyncTcpStore};
+use async::tcp::AsyncStoreClient;
 use self::FromStore::*;
 use self::FromClient::*;
 
@@ -29,7 +29,8 @@ pub struct ThreadLog {
     //TODO replace with queue from deque to allow multiple consumers
     ready_reads: mpsc::Sender<Vec<u8>>,
     //TODO blocked_chains: BitSet ?
-    finished_writes: Vec<mpsc::Sender<()>>,
+    //TODO how to multiplex writers finished_writes: Vec<mpsc::Sender<()>>,
+    finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
     //FIXME is currently unused
     to_return: VecDeque<Vec<u8>>,
     //TODO
@@ -75,6 +76,7 @@ pub enum FromStore {
 pub enum FromClient {
     //TODO
     SnapshotAndPrefetch(order),
+    PerformAppend(Vec<u8>),
 }
 
 enum MultiSearch {
@@ -98,6 +100,7 @@ impl ThreadLog {
     pub fn new<I>(to_store: mio::Sender<Vec<u8>>,
         from_outside: mpsc::Receiver<Message>,
         ready_reads: mpsc::Sender<Vec<u8>>,
+        finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
         interesting_chains: I)
     -> Self
     where I: IntoIterator<Item=order>{
@@ -107,7 +110,7 @@ impl ThreadLog {
             blockers: Default::default(),
             blocked_multiappends: Default::default(),
             ready_reads: ready_reads,
-            finished_writes: Default::default(),
+            finished_writes: finished_writes,
             per_chains: interesting_chains.into_iter().map(|c| (c, PerChain::new(c))).collect(),
             to_return: Default::default(),
             no_longer_blocked: Default::default(),
@@ -135,12 +138,20 @@ impl ThreadLog {
                 self.fetch_snapshot(chain);
                 self.prefetch(chain);
             }
+            PerformAppend(msg) => {
+                {
+                    let layout = bytes_as_entry(&msg).kind.layout();
+                    assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
+                }
+                self.to_store.send(msg).expect("store hung up")
+            }
         }
     }
 
     fn handle_from_store(&mut self, msg: FromStore) {
         match msg {
-            WriteComplete(..) => unimplemented!(),
+            WriteComplete(id, locs) =>
+                self.finished_writes.send((id, locs)).expect("client is gone"),
             ReadComplete(loc, msg) => self.handle_completed_read(loc, msg),
         }
     }
@@ -472,21 +483,6 @@ impl ThreadLog {
         }
     }
 
-    fn found_multi_part(&mut self, chain: order, index: entry, was_blind_search: bool) {
-        /*
-        //TODO I belive this is unneeded
-        let unblocked = {
-            let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
-            pc.decrement_multi_search();
-            pc.update_horizon(index)
-        };
-        if let Some(unblocked) = unblocked {
-            //TODO no-alloc
-            let locs = self.return_entry(unblocked);
-            if let Some(locs) = locs { self.stop_blocking_on(locs) }
-        }*/
-    }
-
     fn continue_fetch_if_needed(&mut self, chain: order) {
         //TODO num_to_fetch
         let (num_to_fetch, unblocked) = {
@@ -777,21 +773,16 @@ impl AsyncStoreClient for mpsc::Sender<Message> {
 #[cfg(test)]
 mod tests {
     use packets::*;
-    use prelude::FuzzyLog;
     use super::*;
     use super::FromClient::*;
     use async::tcp::AsyncTcpStore;
-    use async::tcp::sync_store_tests::AsyncStoreToStore;
 
-    use std::collections::HashMap;
     use std::marker::PhantomData;
     use std::{mem, thread};
-    use std::net::SocketAddr;
     use std::sync::{mpsc, Arc, Mutex};
 
     use mio::{self, EventLoop};
 
-    use local_store::MapEntry;
     //TODO move to crate root under cfg...
     extern crate env_logger;
 
@@ -808,16 +799,12 @@ mod tests {
     #[test]
     pub fn test_1_column() {
         let _ = env_logger::init();
-        let store = new_store(
-            vec![(3.into(), 1.into()), (3.into(), 2.into()),
-            (3.into(), 3.into())]
-        );
+        trace!("TEST 1 column");
         let mut lh = new_thread_log::<i32>(vec![3.into()]);
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
-        let _ = log.append(3.into(), &1, &[]);
-        let _ = log.append(3.into(), &17, &[]);
-        let _ = log.append(3.into(), &32, &[]);
-        let _ = log.append(3.into(), &-1, &[]);
+        let _ = lh.append(3.into(), &1, &[]);
+        let _ = lh.append(3.into(), &17, &[]);
+        let _ = lh.append(3.into(), &32, &[]);
+        let _ = lh.append(3.into(), &-1, &[]);
         lh.snapshot(3.into());
         assert_eq!(lh.get_next(), Some((&1,  &[(3.into(), 1.into())][..])));
         assert_eq!(lh.get_next(), Some((&17, &[(3.into(), 2.into())][..])));
@@ -829,15 +816,15 @@ mod tests {
     #[test]
     pub fn test_3_column() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST 3 column");
+
         let mut lh = new_thread_log::<i32>(vec![4.into(), 5.into(), 6.into()]);
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         let cols = vec![vec![12, 19, 30006, 122, 9],
             vec![45, 111111, -64, 102, -10101],
             vec![-1, -2, -9, 16, -108]];
         for (j, col) in cols.iter().enumerate() {
             for i in col.iter() {
-                let _ = log.append(((j + 4) as u32).into(), i, &[]);
+                let _ = lh.append(((j + 4) as u32).into(), i, &[]);
             }
         }
         lh.snapshot(4.into());
@@ -864,15 +851,15 @@ mod tests {
     #[test]
     pub fn test_read_deps() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
-        let mut lh = new_thread_log::<i32>(vec![7.into(), 8.into()]);
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
+        trace!("TEST read deps");
 
-        let _ = log.append(7.into(), &63,  &[]);
-        let _ = log.append(8.into(), &-2,  &[(7.into(), 1.into())]);
-        let _ = log.append(8.into(), &-56, &[]);
-        let _ = log.append(7.into(), &111, &[(8.into(), 2.into())]);
-        let _ = log.append(8.into(), &0,   &[(7.into(), 2.into())]);
+        let mut lh = new_thread_log::<i32>(vec![7.into(), 8.into()]);
+
+        let _ = lh.append(7.into(), &63,  &[]);
+        let _ = lh.append(8.into(), &-2,  &[(7.into(), 1.into())]);
+        let _ = lh.append(8.into(), &-56, &[]);
+        let _ = lh.append(7.into(), &111, &[(8.into(), 2.into())]);
+        let _ = lh.append(8.into(), &0,   &[(7.into(), 2.into())]);
         lh.snapshot(8.into());
         lh.snapshot(7.into());
         assert_eq!(lh.get_next(), Some((&63,  &[(7.into(), 1.into())][..])));
@@ -886,11 +873,11 @@ mod tests {
     #[test]
     pub fn test_long() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST long");
+
         let mut lh = new_thread_log::<i32>(vec![9.into()]);
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         for i in 0..19i32 {
-            let _ = log.append(9.into(), &i, &[]);
+            let _ = lh.append(9.into(), &i, &[]);
         }
         lh.snapshot(9.into());
         for i in 0..19i32 {
@@ -903,16 +890,16 @@ mod tests {
     #[test]
     pub fn test_wide() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST wide");
+
         let interesting_chains: Vec<_> = (10..21).map(|i| i.into()).collect();
         let mut lh = new_thread_log(interesting_chains.clone());
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         for &i in &interesting_chains {
             if i > 10.into() {
-                let _ = log.append(i.into(), &i, &[(i - 1, 1.into())]);
+                let _ = lh.append(i.into(), &i, &[(i - 1, 1.into())]);
             }
             else {
-                let _ = log.append(i.into(), &i, &[]);
+                let _ = lh.append(i.into(), &i, &[]);
             }
 
         }
@@ -926,11 +913,11 @@ mod tests {
     #[test]
     pub fn test_append_after_fetch() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST append after fetch");
+
         let mut lh = new_thread_log(vec![21.into()]);
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         for i in 0u32..10 {
-            let _ = log.append(21.into(), &i, &[]);
+            let _ = lh.append(21.into(), &i, &[]);
         }
         lh.snapshot(21.into());
         for i in 0u32..10 {
@@ -938,7 +925,7 @@ mod tests {
         }
         //TODO assert_eq!(lh.play_foward(), None)
         for i in 10u32..21 {
-            let _ = log.append(21.into(), &i, &[]);
+            let _ = lh.append(21.into(), &i, &[]);
         }
         lh.snapshot(21.into());
         for i in 10u32..21 {
@@ -950,11 +937,11 @@ mod tests {
     #[test]
     pub fn test_append_after_fetch_short() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST append after fetch short");
+
         let mut lh = new_thread_log(vec![22.into()]);
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         for i in 0u32..2 {
-            let _ = log.append(22.into(), &i, &[]);
+            let _ = lh.append(22.into(), &i, &[]);
         }
         lh.snapshot(22.into());
         for i in 0u32..2 {
@@ -962,7 +949,7 @@ mod tests {
         }
         //TODO assert_eq!(lh.play_foward(), None)
         for i in 2u32..4 {
-            let _ = log.append(22.into(), &i, &[]);
+            let _ = lh.append(22.into(), &i, &[]);
         }
         lh.snapshot(22.into());
         for i in 2u32..4 {
@@ -974,14 +961,14 @@ mod tests {
     #[test]
     pub fn test_multi() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST multi");
+
         let columns = vec![23.into(), 24.into(), 25.into()];
         let mut lh = new_thread_log::<u64>(columns.clone());
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
-        let _ = log.multiappend(&columns, &0xfeed, &[]);
-        let _ = log.multiappend(&columns, &0xbad , &[]);
-        let _ = log.multiappend(&columns, &0xcad , &[]);
-        let _ = log.multiappend(&columns, &13    , &[]);
+        let _ = lh.multiappend(&columns, &0xfeed, &[]);
+        let _ = lh.multiappend(&columns, &0xbad , &[]);
+        let _ = lh.multiappend(&columns, &0xcad , &[]);
+        let _ = lh.multiappend(&columns, &13    , &[]);
         lh.snapshot(24.into());
         assert_eq!(lh.get_next(), Some((&0xfeed, &[(23.into(), 1.into()),
             (24.into(), 1.into()), (25.into(), 1.into())][..])));
@@ -997,13 +984,13 @@ mod tests {
     #[test]
     pub fn test_multi_shingled() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST multi shingled");
+
         let columns = vec![26.into(), 27.into(), 28.into(), 29.into(), 30.into()];
         let mut lh = new_thread_log::<u64>(columns.clone());
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         for (i, cols) in columns.windows(2).rev().enumerate() {
             let i = i as u64;
-            let _ = log.multiappend(&cols, &((i + 1) * 2), &[]);
+            let _ = lh.multiappend(&cols, &((i + 1) * 2), &[]);
         }
         lh.snapshot(26.into());
         assert_eq!(lh.get_next(),
@@ -1020,15 +1007,15 @@ mod tests {
     #[test]
     pub fn test_multi_wide() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST multi wide");
+
         let columns: Vec<_> = (31..45).map(Into::into).collect();
         let mut lh = new_thread_log::<u64>(columns.clone());
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
-        let _ = log.multiappend(&columns, &82352  , &[]);
-        let _ = log.multiappend(&columns, &018945 , &[]);
-        let _ = log.multiappend(&columns, &119332 , &[]);
-        let _ = log.multiappend(&columns, &0      , &[]);
-        let _ = log.multiappend(&columns, &17     , &[]);
+        let _ = lh.multiappend(&columns, &82352  , &[]);
+        let _ = lh.multiappend(&columns, &018945 , &[]);
+        let _ = lh.multiappend(&columns, &119332 , &[]);
+        let _ = lh.multiappend(&columns, &0      , &[]);
+        let _ = lh.multiappend(&columns, &17     , &[]);
         lh.snapshot(33.into());
         let locs: Vec<_> = columns.iter().map(|&o| (o, 1.into())).collect();
         assert_eq!(lh.get_next(), Some((&82352 , &locs[..])));
@@ -1046,12 +1033,12 @@ mod tests {
     #[test]
     pub fn test_multi_deep() {
         let _ = env_logger::init();
-        let store = new_store(vec![]);
+        trace!("TEST multi deep");
+
         let columns: Vec<_> = (45..49).map(Into::into).collect();
         let mut lh = new_thread_log::<u32>(columns.clone());
-        let mut log = FuzzyLog::new(store, HashMap::new(), Default::default());
         for i in 1..32 {
-            let _ = log.multiappend(&columns, &i, &[]);
+            let _ = lh.multiappend(&columns, &i, &[]);
         }
         lh.snapshot(48.into());
         for i in 1..32 {
@@ -1061,7 +1048,7 @@ mod tests {
         //TODO assert_eq!(lh.play_foward(), None)
     }
 
-    //TODO test append after prefetch bu before read
+    //TODO test append after prefetch but before read
 
     /*
 
@@ -1182,10 +1169,15 @@ mod tests {
             _pd: PhantomData<V>,
         to_log: mpsc::Sender<Message>,
         ready_reads: mpsc::Receiver<Vec<u8>>,
+        finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
         //TODO finished_writes: ..
         curr_entry: Vec<u8>,
     }
 
+    //TODO I kinda get the feeling that this should send writes directly to the store without
+    //     the AsyncLog getting in the middle
+    //     Also, I think if I can send assosiated data with the wites I could do multiplexing
+    //     over different writers very easily
     impl<V> LogHandle<V>
     where V: Storeable {
         fn snapshot(&mut self, chain: order) {
@@ -1203,6 +1195,69 @@ mod tests {
             let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
             Some((val, locs))
         }
+
+        fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Vec<OrderIndex> {
+            //TODO no-alloc?
+            let mut buffer = EntryContents::Data(data, &deps).clone_bytes();
+            {
+                //TODO I should make a better entry builder
+                let e = bytes_as_entry_mut(&mut buffer);
+                e.id = Uuid::new_v4();
+                e.locs_mut()[0] = (chain, 0.into());
+            }
+            self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+            //TODO return buffers here and cache them?
+            self.finished_writes.recv().unwrap().1
+        }
+
+        fn multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+        -> Vec<OrderIndex> {
+            //TODO no-alloc?
+            assert!(chains.len() > 1);
+            let mut locs: Vec<_> = chains.into_iter().map(|&o| (o, 0.into())).collect();
+            locs.sort();
+            let buffer = EntryContents::Multiput {
+                data: data,
+                uuid: &Uuid::new_v4(),
+                columns: &locs,
+                deps: deps,
+            }.clone_bytes();
+            self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+            //TODO return buffers here and cache them?
+            self.finished_writes.recv().unwrap().1
+        }
+
+        fn dependent_multiappend(&mut self,
+            chains: &[order],
+            depends_on: &[order],
+            data: &V,
+            deps: &[OrderIndex])
+        -> Vec<OrderIndex> {
+            assert!(depends_on.len() > 1);
+            let mut mchains: Vec<_> = chains.into_iter()
+                .map(|&c| (c, 0.into()))
+                .chain(::std::iter::once((0.into(), 0.into())))
+                .chain(depends_on.iter().map(|&c| (c, 0.into())))
+                .collect();
+            {
+
+                let (chains, deps) = mchains.split_at_mut(chains.len());
+                chains.sort();
+                deps[1..].sort();
+            }
+            assert!(mchains[chains.len()] == (0.into(), 0.into()));
+            debug_assert!(mchains[..chains.len()].iter().all(|&(o, _)| chains.contains(&o)));
+            debug_assert!(mchains[(chains.len() + 1)..]
+                .iter().all(|&(o, _)| depends_on.contains(&o)));
+            let buffer = EntryContents::Multiput {
+                data: data,
+                uuid: &Uuid::new_v4(),
+                columns: &mchains,
+                deps: deps,
+            }.clone_bytes();
+            self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+            self.finished_writes.recv().unwrap().1
+        }
     }
 
     #[allow(non_upper_case_globals)]
@@ -1211,11 +1266,14 @@ mod tests {
     const addr_strs: &'static [&'static str] = &["0.0.0.0:13390", "0.0.0.0:13391"];
 
     fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+        start_servers();
+
         let to_store_m = Arc::new(Mutex::new(None));
         let tsm = to_store_m.clone();
         let (to_log, from_outside) = mpsc::channel();
         let client = to_log.clone();
         let (ready_reads_s, ready_reads_r) = mpsc::channel();
+        let (finished_writes_s, finished_writes_r) = mpsc::channel();
         thread::spawn(move || {
             let mut event_loop = EventLoop::new().unwrap();
             let to_store = event_loop.channel();
@@ -1234,21 +1292,24 @@ mod tests {
             }
         }
         thread::spawn(move || {
-            let log = ThreadLog::new(to_store, from_outside, ready_reads_s,
+            let log = ThreadLog::new(to_store, from_outside, ready_reads_s, finished_writes_s,
                 interesting_chains.into_iter());
             log.run()
         });
 
+
+
         LogHandle {
             to_log: to_log,
             ready_reads: ready_reads_r,
+            finished_writes: finished_writes_r,
             _pd: Default::default(),
             curr_entry: Default::default()
         }
     }
 
 
-    fn new_store(_: Vec<OrderIndex>) -> AsyncStoreToStore
+    fn start_servers()
     {
         use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
         use std::{thread, iter};
@@ -1272,7 +1333,7 @@ mod tests {
                 if let Ok(mut server) = server {
                     SERVERS_READY.fetch_add(1, Ordering::Release);
                     trace!("starting server");
-                    event_loop.run(&mut server);
+                    event_loop.run(&mut server).expect("server should never stop");
                 }
                 trace!("server already started");
                 return;
@@ -1281,11 +1342,5 @@ mod tests {
         }
 
         while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}
-
-        let lock_addr = lock_str.parse::<SocketAddr>().unwrap();
-        let chain_addrs = addr_strs.into_iter().map(|s| s.parse::<SocketAddr>().unwrap());
-        let store = AsyncStoreToStore::new(lock_addr, chain_addrs,
-            EventLoop::new().unwrap());
-        store
     }
 }
