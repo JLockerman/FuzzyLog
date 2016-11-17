@@ -1,7 +1,7 @@
 
 //TODO use faster HashMap, HashSet
 use std::{self, iter, mem};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::collections::hash_map;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -54,7 +54,7 @@ struct PerChain {
     //FIXME this must be a counter
     num_multiappends_searching_for: usize,
     //TODO this is where is might be nice to have a more structured id format
-    found_but_unused_multiappends: HashSet<Uuid>,
+    found_but_unused_multiappends: HashMap<Uuid, entry>,
 }
 
 struct MultiSearchState {
@@ -77,11 +77,13 @@ pub enum FromClient {
     //TODO
     SnapshotAndPrefetch(order),
     PerformAppend(Vec<u8>),
+    Shutdown,
 }
 
 enum MultiSearch {
     Finished(Vec<u8>),
     InProgress,
+    EarlySentinel,
     BeyondHorizon(Vec<u8>),
     //MultiSearch::FirstPart(),
 }
@@ -118,42 +120,49 @@ impl ThreadLog {
         }
     }
 
-    pub fn run(mut self) -> ! {
+    pub fn run(mut self) {
         loop {
             let msg = self.from_outside.recv().expect("outside is gone");
-            self.handle_message(msg)
+            if !self.handle_message(msg) { return }
         }
     }
 
-    fn handle_message(&mut self, msg: Message) {
+    fn handle_message(&mut self, msg: Message) -> bool {
         match msg {
             Message::FromClient(msg) => self.handle_from_client(msg),
             Message::FromStore(msg) => self.handle_from_store(msg),
         }
     }
 
-    fn handle_from_client(&mut self, msg: FromClient) {
+    fn handle_from_client(&mut self, msg: FromClient) -> bool {
         match msg {
             SnapshotAndPrefetch(chain) => {
                 self.fetch_snapshot(chain);
                 self.prefetch(chain);
+                true
             }
             PerformAppend(msg) => {
                 {
                     let layout = bytes_as_entry(&msg).kind.layout();
                     assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
                 }
-                self.to_store.send(msg).expect("store hung up")
+                self.to_store.send(msg).expect("store hung up");
+                true
+            }
+            Shutdown => {
+                //TODO send shutdown
+                false
             }
         }
     }
 
-    fn handle_from_store(&mut self, msg: FromStore) {
+    fn handle_from_store(&mut self, msg: FromStore) -> bool {
         match msg {
             WriteComplete(id, locs) =>
                 self.finished_writes.send((id, locs)).expect("client is gone"),
             ReadComplete(loc, msg) => self.handle_completed_read(loc, msg),
         }
+        true
     }
 
     fn fetch_snapshot(&mut self, chain: order) {
@@ -226,14 +235,14 @@ impl ThreadLog {
                 self.try_returning_at(read_loc, packet);
                 self.continue_fetch_if_needed(read_loc.0);
             }
-            EntryLayout::Multiput => {
+            layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
                 trace!("FUZZY read is multi");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
                 self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
-
-                let search_status = self.update_multi_part_read(read_loc, msg);
+                let is_sentinel = layout == EntryLayout::Sentinel;
+                let search_status = self.update_multi_part_read(read_loc, msg, is_sentinel);
                 match search_status {
-                    MultiSearch::InProgress => {}
+                    MultiSearch::InProgress | MultiSearch::EarlySentinel => {}
                     MultiSearch::BeyondHorizon(..) => {
                         //TODO better ooo reads
                         self.per_chains.get_mut(&read_loc.0).expect("boring chain")
@@ -251,14 +260,10 @@ impl ThreadLog {
                 }
                 self.continue_fetch_if_needed(read_loc.0);
             }
-            EntryLayout::Sentinel => {
-                self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
-                //TODO
-                unimplemented!()
-            }
 
             EntryLayout::Lock => unreachable!(),
         }
+        //FIXME if finshed_reading { send to client empty vec }
     }
 
     /// Blocks a packet on entries a it depends on. Will increment the refcount for each
@@ -284,6 +289,7 @@ impl ThreadLog {
             }
         }
         for &loc in locs {
+            if loc.0 == order::from(0) { continue }
             let is_next_in_chain = self.per_chains.get(&loc.0)
                 .expect("fetching uninteresting chain")
                 .next_return_is(loc.1);
@@ -346,6 +352,7 @@ impl ThreadLog {
     fn stop_blocking_on<I>(&mut self, locs: I)
     where I: IntoIterator<Item=OrderIndex> {
         for loc in locs {
+            if loc.0 == order::from(0) { continue }
             trace!("FUZZY unblocking reads after {:?}", loc);
             self.try_return_blocked_by(loc);
         }
@@ -378,13 +385,17 @@ impl ThreadLog {
         }
     }
 
-    fn update_multi_part_read(&mut self, read_loc: OrderIndex, msg: Vec<u8>) -> MultiSearch {
+    fn update_multi_part_read(&mut self,
+        read_loc: OrderIndex,
+        mut msg: Vec<u8>,
+        is_sentinel: bool)
+    -> MultiSearch {
         let (id, num_pieces) = {
             let entr = bytes_as_entry(&msg);
             let id = entr.id;
             let locs = entr.locs();
             let num_pieces = locs.into_iter()
-                .filter(|&&(o, _)| o != 0.into())
+                .filter(|&&(o, _)| o != order::from(0))
                 .count();
             trace!("FUZZY multi part read {:?} @ {:?}, {:?} pieces", id, locs, num_pieces);
             (id, num_pieces)
@@ -396,25 +407,49 @@ impl ThreadLog {
         }
 
         let is_later_piece = self.blocked_multiappends.contains_key(&id);
-        if !is_later_piece {
+        if !is_later_piece && !is_sentinel {
             //FIXME I'm not sure if this is right
             if !self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1) {
                 trace!("FUZZY read multi too early @ {:?}", read_loc);
                 return MultiSearch::BeyondHorizon(msg)
             }
 
+            let mut pieces_remaining = num_pieces;
             trace!("FUZZY first part of multi part read");
-            for &(o, i) in bytes_as_entry(&msg).locs() {
-                if o != 0.into() {
-                    trace!("FUZZY fetching multi part @ {:?}", (o, i));
-                    self.fetch_multi_parts(o, i)
-                } else { trace!("FUZZY no need to fetch multi part @ {:?}", (o, i)); }
+            for &mut (o, ref mut i) in bytes_as_entry_mut(&mut msg).locs_mut() {
+                if o != order::from(0) {
+                    trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
+                    let early_sentinel = self.fetch_multi_parts(&id, o, *i);
+                    if let Some(loc) = early_sentinel {
+                        trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
+                        assert!(loc != entry::from(0));
+                        *i = loc;
+                        pieces_remaining -= 1
+                    }
+                } else {
+                    trace!("FUZZY no need to fetch multi part @ {:?}", (o, *i));
+                }
             }
+
+            if num_pieces == 0 {
+                trace!("FUZZY all sentinels had already been found for {:?}", read_loc);
+                return MultiSearch::Finished(msg)
+            }
+
+            trace!("FUZZY {:?} waiting for {:?} pieces", read_loc, num_pieces);
             self.blocked_multiappends.insert(id, MultiSearchState {
                 val: msg,
-                pieces_remaining: num_pieces
+                pieces_remaining: pieces_remaining
             });
-        } else { trace!("FUZZY later part of multi part read"); }
+        }
+        else if !is_later_piece && is_sentinel {
+            trace!("FUZZY early sentinel");
+            self.per_chains.get_mut(&read_loc.0)
+                .expect("boring chain")
+                .add_early_sentinel(id, read_loc.1);
+            return MultiSearch::EarlySentinel
+        }
+        else { trace!("FUZZY later part of multi part read"); }
 
         debug_assert!(self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1));
 
@@ -427,7 +462,7 @@ impl ThreadLog {
                         .locs_mut().into_iter()
                         .find(|&&mut (o, _)| o == read_loc.0)
                         .unwrap();
-                    was_blind_search = loc_ptr.1 == 0.into();
+                    was_blind_search = loc_ptr.1 == entry::from(0);
                     *loc_ptr = read_loc;
                     multi.pieces_remaining -= 1;
                     trace!("FUZZY multi pieces remaining {:?}", multi.pieces_remaining);
@@ -460,18 +495,27 @@ impl ThreadLog {
         }
     }
 
-    fn fetch_multi_parts(&mut self, chain: order, index: entry) {
+    fn fetch_multi_parts(&mut self, id: &Uuid, chain: order, index: entry) -> Option<entry> {
         //TODO argh, no-alloc
-        let unblocked = {
+        let (unblocked, early_sentinel) = {
             let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
-            //TODO we only need to do this if it was a blind search.
-            //     i.e. in the else part of the conditional
-            //TODO don't do this for the first val
-            if index != 0.into() {
-                pc.update_horizon(index)
+
+            let early_sentinel = pc.take_early_sentinel(&id);
+            let potential_new_horizon = match early_sentinel {
+                Some(loc) => loc,
+                None => index,
+            };
+
+            //perform a non blind search if possible
+            if index != entry::from(0) {
+                let unblocked = pc.update_horizon(potential_new_horizon);
+                (unblocked, early_sentinel)
+            } else if early_sentinel.is_some() {
+                //FIXME How does this interact with cached reads?
+                (None, early_sentinel)
             } else {
                 pc.increment_multi_search();
-                None
+                (None, None)
             }
         };
         self.continue_fetch_if_needed(chain);
@@ -481,6 +525,7 @@ impl ThreadLog {
             let locs = self.return_entry(unblocked);
             if let Some(locs) = locs { self.stop_blocking_on(locs) }
         }
+        early_sentinel
     }
 
     fn continue_fetch_if_needed(&mut self, chain: order) {
@@ -499,6 +544,8 @@ impl ThreadLog {
         };
 
         for _ in 0..num_to_fetch {
+            //FIXME check if we have a cached version before issuing fetch
+            //      laking this can cause unsound behzvior on multipart reads
             self.fetch_next(chain)
         }
 
@@ -554,6 +601,7 @@ impl ThreadLog {
                 let locs = bytes_as_entry(&val).locs();
                 trace!("FUZZY trying to return read from {:?}", locs);
                 for &(o, i) in locs.into_iter() {
+                    if o == order::from(0) { continue }
                     let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
                     if !pc.is_within_snapshot(i) {
                         trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
@@ -568,6 +616,7 @@ impl ThreadLog {
             }
             let locs = bytes_as_entry(&val).locs();
             for &(o, i) in locs.into_iter() {
+                if o == order::from(0) { continue }
                 trace!("QQQQ setting returned {:?}", (o, i));
                 let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
                 debug_assert!(pc.is_within_snapshot(i));
@@ -744,6 +793,16 @@ impl PerChain {
         trace!("QQQQQ {:?} - now searching for {:?} multis",
             self.chain, self.num_multiappends_searching_for);
     }
+
+    fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
+        assert!(index != 0.into());
+        let old = self.found_but_unused_multiappends.insert(id, index);
+        debug_assert!(old.is_none());
+    }
+
+    fn take_early_sentinel(&mut self, id: &Uuid) -> Option<entry> {
+        self.found_but_unused_multiappends.remove(id)
+    }
 }
 
 impl BufferCache {
@@ -759,14 +818,12 @@ impl BufferCache {
 
 impl AsyncStoreClient for mpsc::Sender<Message> {
     fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>) {
-        self.send(Message::FromStore(ReadComplete(read_loc, read_packet)))
-            .expect("store disabled")
+        let _ = self.send(Message::FromStore(ReadComplete(read_loc, read_packet)));
     }
 
     //TODO what info is needed?
     fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>) {
-        self.send(Message::FromStore(WriteComplete(write_id, write_locs)))
-            .expect("store disabled")
+        let _ = self.send(Message::FromStore(WriteComplete(write_id, write_locs)));
     }
 }
 
@@ -777,6 +834,7 @@ mod tests {
     use super::FromClient::*;
     use async::tcp::AsyncTcpStore;
 
+    use std::collections::HashMap;
     use std::marker::PhantomData;
     use std::{mem, thread};
     use std::sync::{mpsc, Arc, Mutex};
@@ -1048,6 +1106,81 @@ mod tests {
         //TODO assert_eq!(lh.play_foward(), None)
     }
 
+    #[test]
+    pub fn test_dependent_multi() {
+        let _ = env_logger::init();
+        trace!("TEST multi");
+
+        let columns = vec![49.into(), 50.into(), 51.into()];
+        let mut lh = new_thread_log::<u64>(columns.clone());
+        let _ = lh.append(50.into(), &22, &[]);
+        let _ = lh.append(51.into(), &11, &[]);
+        let _ = lh.append(49.into(), &0xf0000, &[]);
+        let _ = lh.dependent_multiappend(&[49.into()], &[50.into(), 51.into()], &0xbaaa, &[]);
+        lh.snapshot(49.into());
+        {
+            let potential_vals: [_; 3] =
+                [(22     , vec![(50.into(), 1.into())]),
+                 (11     , vec![(51.into(), 1.into())]),
+                 (0xf0000, vec![(49.into(), 1.into())])
+                ];
+            let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
+            for _ in 0..3 {
+                let next_val = &lh.get_next().expect("should find val");
+                let locs = potential_vals.remove(next_val.0).expect("must be expected");
+                assert_eq!(next_val.1, &locs[..]);
+            }
+        }
+        assert_eq!(lh.get_next(),
+            Some((&0xbaaa,
+                &[(49.into(), 2.into()),
+                  ( 0.into(), 0.into()),
+                  (50.into(), 2.into()),
+                  (51.into(), 2.into())
+                 ][..])));
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
+
+    #[test]
+    pub fn test_dependent_multi_with_early_fetch() {
+        let _ = env_logger::init();
+        trace!("TEST multi");
+
+        let columns = vec![52.into(), 53.into(), 54.into()];
+        let mut lh = new_thread_log::<i64>(columns.clone());
+        let _ = lh.append(52.into(), &99999, &[]);
+        let _ = lh.append(53.into(), &101, &[]);
+        let _ = lh.append(54.into(), &-99, &[]);
+        let _ = lh.dependent_multiappend(&[53.into()], &[52.into(), 54.into()], &-7777, &[]);
+        lh.snapshot(52.into());
+        lh.snapshot(54.into());
+        {
+            let potential_vals =
+                [(99999, vec![(52.into(), 1.into())]),
+                 (-99  , vec![(54.into(), 1.into())]),
+                ];
+            let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
+            for _ in 0..2 {
+                let next_val = &lh.get_next().expect("should find val");
+                match potential_vals.remove(next_val.0) {
+                    Some(locs) => assert_eq!(next_val.1, &locs[..]),
+                    None => panic!("unexpected val {:?}", next_val),
+                }
+
+            }
+        }
+        lh.snapshot(53.into());
+        assert_eq!(lh.get_next(), Some((&101, &[(53.into(), 1.into())][..])));
+        assert_eq!(lh.get_next(),
+            Some((&-7777,
+                &[(53.into(), 2.into()),
+                  ( 0.into(), 0.into()),
+                  (52.into(), 2.into()),
+                  (54.into(), 2.into())
+                 ][..])));
+        //TODO assert_eq!(lh.play_foward(), None)
+    }
+
     //TODO test append after prefetch but before read
 
     /*
@@ -1166,12 +1299,18 @@ mod tests {
 
 
     struct LogHandle<V> {
-            _pd: PhantomData<V>,
+        _pd: PhantomData<V>,
         to_log: mpsc::Sender<Message>,
         ready_reads: mpsc::Receiver<Vec<u8>>,
         finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
         //TODO finished_writes: ..
         curr_entry: Vec<u8>,
+    }
+
+    impl<V> Drop for LogHandle<V> {
+        fn drop(&mut self) {
+            let _ = self.to_log.send(Message::FromClient(Shutdown));
+        }
     }
 
     //TODO I kinda get the feeling that this should send writes directly to the store without
