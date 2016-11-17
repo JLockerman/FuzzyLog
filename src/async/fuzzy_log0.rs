@@ -38,6 +38,9 @@ pub struct ThreadLog {
     cache: BufferCache,
 }
 
+//TODO we could add messages from the client on read, and keep a counter of messages sent
+//     this would allow us to ensure that every client gets an end-of-data message, as long
+//     ad there're no concurrent snapshots...
 struct PerChain {
     //TODO repr?
     //blocking: HashMap<entry, OrderIndex>,
@@ -263,7 +266,15 @@ impl ThreadLog {
 
             EntryLayout::Lock => unreachable!(),
         }
-        //FIXME if finshed_reading { send to client empty vec }
+
+        if self.finshed_reading() {
+            //FIXME store the number of outstanding snapshots so we can return an end marker
+            //      for each
+            //FIXME add is_snapshoting to PerChain so this doesn't race?
+            trace!("FUZZY finished reading");
+            //TODO do we need a better system?
+            let _ = self.ready_reads.send(vec![]);
+        }
     }
 
     /// Blocks a packet on entries a it depends on. Will increment the refcount for each
@@ -655,6 +666,16 @@ impl ThreadLog {
         }
         buffer
     }
+
+    fn finshed_reading(&self) -> bool {
+        //FIXME this is dumb, it might be better to have a counter of how many servers we are
+        //      waiting for
+        let mut still_reading = false;
+        for (_, pc) in self.per_chains.iter() {
+            still_reading |= pc.is_reading()
+        }
+        !still_reading
+    }
 }
 
 impl PerChain {
@@ -803,6 +824,10 @@ impl PerChain {
     fn take_early_sentinel(&mut self, id: &Uuid) -> Option<entry> {
         self.found_but_unused_multiappends.remove(id)
     }
+
+    fn is_reading(&self) -> bool {
+        self.outstanding_reads > 0
+    }
 }
 
 impl BufferCache {
@@ -844,15 +869,13 @@ mod tests {
     //TODO move to crate root under cfg...
     extern crate env_logger;
 
-
-    /*TODO #[test]
+    #[test]
     fn test_get_none() {
         let _ = env_logger::init();
-        let _ = new_store(vec![]);
-        let mut lh = new_thread_log::<i32>(vec![0.into()]);
-        let n = lh.get_next();
-        assert_eq!(n, None);
-    }*/
+        let mut lh = new_thread_log::<()>(vec![1.into()]);
+        lh.snapshot(1.into());
+        assert_eq!(lh.get_next(), None);
+    }
 
     #[test]
     pub fn test_1_column() {
@@ -868,7 +891,7 @@ mod tests {
         assert_eq!(lh.get_next(), Some((&17, &[(3.into(), 2.into())][..])));
         assert_eq!(lh.get_next(), Some((&32, &[(3.into(), 3.into())][..])));
         assert_eq!(lh.get_next(), Some((&-1, &[(3.into(), 4.into())][..])));
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -903,7 +926,7 @@ mod tests {
             let c = is[off as usize] - 1;
             assert_eq!(n, cols[off as usize][c as usize]);
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -925,7 +948,7 @@ mod tests {
         assert_eq!(lh.get_next(), Some((&-56, &[(8.into(), 2.into())][..])));
         assert_eq!(lh.get_next(), Some((&111, &[(7.into(), 2.into())][..])));
         assert_eq!(lh.get_next(), Some((&0,   &[(8.into(), 3.into())][..])));
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -942,7 +965,7 @@ mod tests {
             let u = i as u32;
             assert_eq!(lh.get_next(), Some((&i,  &[(9.into(), (u + 1).into())][..])));
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -965,7 +988,7 @@ mod tests {
         for &i in &interesting_chains {
             assert_eq!(lh.get_next(), Some((&i,  &[(i, 1.into())][..])));
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -981,7 +1004,7 @@ mod tests {
         for i in 0u32..10 {
             assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
         for i in 10u32..21 {
             let _ = lh.append(21.into(), &i, &[]);
         }
@@ -989,7 +1012,7 @@ mod tests {
         for i in 10u32..21 {
             assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -1005,7 +1028,7 @@ mod tests {
         for i in 0u32..2 {
             assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
         for i in 2u32..4 {
             let _ = lh.append(22.into(), &i, &[]);
         }
@@ -1013,7 +1036,7 @@ mod tests {
         for i in 2u32..4 {
             assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -1036,7 +1059,7 @@ mod tests {
             (24.into(), 3.into()), (25.into(), 3.into())][..])));
         assert_eq!(lh.get_next(), Some((&13    , &[(23.into(), 4.into()),
             (24.into(), 4.into()), (25.into(), 4.into())][..])));
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -1059,7 +1082,7 @@ mod tests {
             Some((&6, &[(27.into(), 1.into()), (28.into(), 2.into())][..])));
         assert_eq!(lh.get_next(),
             Some((&8, &[(26.into(), 1.into()), (27.into(), 2.into())][..])));
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -1085,7 +1108,7 @@ mod tests {
         assert_eq!(lh.get_next(), Some((&0     , &locs[..])));
         let locs: Vec<_> = columns.iter().map(|&o| (o, 5.into())).collect();
         assert_eq!(lh.get_next(), Some((&17    , &locs[..])));
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -1103,7 +1126,7 @@ mod tests {
             let locs: Vec<_> = columns.iter().map(|&o| (o, i.into())).collect();
             assert_eq!(lh.get_next(), Some((&i , &locs[..])));
         }
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -1138,7 +1161,7 @@ mod tests {
                   (50.into(), 2.into()),
                   (51.into(), 2.into())
                  ][..])));
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
     }
 
     #[test]
@@ -1178,7 +1201,33 @@ mod tests {
                   (52.into(), 2.into()),
                   (54.into(), 2.into())
                  ][..])));
-        //TODO assert_eq!(lh.play_foward(), None)
+        assert_eq!(lh.get_next(), None);
+    }
+
+    #[test]
+    pub fn test_dependent_multi_with_partial_early_fetch() {
+        let _ = env_logger::init();
+        trace!("TEST multi");
+
+        let columns = vec![55.into(), 56.into(), 57.into()];
+        let mut lh = new_thread_log::<i64>(columns.clone());
+        let _ = lh.append(55.into(), &99999, &[]);
+        let _ = lh.append(56.into(), &101, &[]);
+        let _ = lh.append(57.into(), &-99, &[]);
+        let _ = lh.dependent_multiappend(&[55.into()], &[56.into(), 57.into()], &-7777, &[]);
+        lh.snapshot(56.into());
+        assert_eq!(lh.get_next(), Some((&101, &[(56.into(), 1.into())][..])));
+        lh.snapshot(55.into());
+        assert_eq!(lh.get_next(), Some((&99999, &[(55.into(), 1.into())][..])));
+        assert_eq!(lh.get_next(), Some((&-99, &[(57.into(), 1.into())][..])));
+        assert_eq!(lh.get_next(),
+            Some((&-7777,
+                &[(55.into(), 2.into()),
+                  ( 0.into(), 0.into()),
+                  (56.into(), 2.into()),
+                  (57.into(), 2.into())
+                 ][..])));
+        assert_eq!(lh.get_next(), None);
     }
 
     //TODO test append after prefetch but before read
@@ -1324,6 +1373,7 @@ mod tests {
                 .unwrap();
         }
 
+        //TODO return two/three slices?
         fn get_next(&mut self) -> Option<(&V, &[OrderIndex])> {
             //TODO use recv_timeout in real version
             self.curr_entry = self.ready_reads.recv().unwrap();
@@ -1366,6 +1416,7 @@ mod tests {
             self.finished_writes.recv().unwrap().1
         }
 
+        //TODO return two vecs
         fn dependent_multiappend(&mut self,
             chains: &[order],
             depends_on: &[order],
