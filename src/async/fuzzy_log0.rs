@@ -36,6 +36,8 @@ pub struct ThreadLog {
     //TODO
     no_longer_blocked: Vec<OrderIndex>,
     cache: BufferCache,
+    chains_currently_being_read: IsRead,
+    num_snapshots: usize,
 }
 
 //TODO we could add messages from the client on read, and keep a counter of messages sent
@@ -58,7 +60,11 @@ struct PerChain {
     num_multiappends_searching_for: usize,
     //TODO this is where is might be nice to have a more structured id format
     found_but_unused_multiappends: HashMap<Uuid, entry>,
+    outstanding_snapshots: u32,
+    is_being_read: Option<IsRead>,
 }
+
+type IsRead = Rc<()>;
 
 struct MultiSearchState {
     val: Vec<u8>,
@@ -120,6 +126,8 @@ impl ThreadLog {
             to_return: Default::default(),
             no_longer_blocked: Default::default(),
             cache: BufferCache::new(),
+            chains_currently_being_read: Default::default(),
+            num_snapshots: 0,
         }
     }
 
@@ -140,6 +148,7 @@ impl ThreadLog {
     fn handle_from_client(&mut self, msg: FromClient) -> bool {
         match msg {
             SnapshotAndPrefetch(chain) => {
+                self.num_snapshots = self.num_snapshots.saturating_add(1);
                 self.fetch_snapshot(chain);
                 self.prefetch(chain);
                 true
@@ -169,6 +178,7 @@ impl ThreadLog {
     }
 
     fn fetch_snapshot(&mut self, chain: order) {
+        //XXX outstanding_snapshots is incremented in prefetch
         let packet = self.make_read_packet(chain, u32::MAX.into());
         self.to_store.send(packet).expect("store hung up")
     }
@@ -177,7 +187,11 @@ impl ThreadLog {
         //TODO allow new chains?
         //TODO how much to fetch
         let num_to_fetch = {
-            let pc = &self.per_chains[&chain];
+            let pc = &mut self.per_chains.get_mut(&chain).expect("boring server read");
+            if pc.is_being_read.is_none() {
+                pc.is_being_read = Some(self.chains_currently_being_read.clone());
+            };
+            pc.outstanding_snapshots += 1;
             let num_to_fetch = pc.num_to_fetch();
             let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
             let currently_buffering = pc.currently_buffering();
@@ -218,6 +232,7 @@ impl ThreadLog {
                         debug_assert!(!e.kind.contains(EntryKind::ReadSuccess));
                         let new_horizon = e.dependencies()[0].1;
                         trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
+                        s.outstanding_snapshots -= 1;
                         s.update_horizon(new_horizon)
                     });
                     if let Some(val) = unblocked {
@@ -225,7 +240,6 @@ impl ThreadLog {
                         if let Some(locs) = locs { self.stop_blocking_on(locs) }
                     }
                 }
-                self.continue_fetch_if_needed(read_loc.0);
             }
             EntryLayout::Data => {
                 trace!("FUZZY read is single");
@@ -236,7 +250,6 @@ impl ThreadLog {
                 let packet = Rc::new(msg);
                 self.add_blockers(&packet);
                 self.try_returning_at(read_loc, packet);
-                self.continue_fetch_if_needed(read_loc.0);
             }
             layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
                 trace!("FUZZY read is multi");
@@ -261,19 +274,28 @@ impl ThreadLog {
                         self.try_returning(packet);
                     }
                 }
-                self.continue_fetch_if_needed(read_loc.0);
             }
 
             EntryLayout::Lock => unreachable!(),
         }
 
-        if self.finshed_reading() {
-            //FIXME store the number of outstanding snapshots so we can return an end marker
-            //      for each
-            //FIXME add is_snapshoting to PerChain so this doesn't race?
-            trace!("FUZZY finished reading");
-            //TODO do we need a better system?
-            let _ = self.ready_reads.send(vec![]);
+        let finished_server = self.continue_fetch_if_needed(read_loc.0);
+        if finished_server {
+            trace!("FUZZY finished reading {:?}", read_loc.0);
+            self.per_chains.get_mut(&read_loc.0).map(|pc| pc.is_being_read = None);
+            if self.finshed_reading() {
+                trace!("FUZZY finished reading all chains");
+                //FIXME store the number of outstanding snapshots so we can return an end marker
+                //      for each
+                //FIXME add is_snapshoting to PerChain so this doesn't race?
+                trace!("FUZZY finished reading");
+                //TODO do we need a better system?
+                let num_completeds = mem::replace(&mut self.num_snapshots, 0);
+                assert!(num_completeds > 0);
+                for _ in 0..num_completeds {
+                    let _ = self.ready_reads.send(vec![]);
+                }
+            }
         }
     }
 
@@ -519,13 +541,16 @@ impl ThreadLog {
 
             //perform a non blind search if possible
             if index != entry::from(0) {
+                trace!("RRRRR non-blind search {:?} {:?}", chain, index);
                 let unblocked = pc.update_horizon(potential_new_horizon);
                 (unblocked, early_sentinel)
             } else if early_sentinel.is_some() {
+                trace!("RRRRR already found {:?} {:?}", chain, early_sentinel);
                 //FIXME How does this interact with cached reads?
                 (None, early_sentinel)
             } else {
                 pc.increment_multi_search();
+                trace!("RRRRR blind search {:?}", chain);
                 (None, None)
             }
         };
@@ -539,7 +564,7 @@ impl ThreadLog {
         early_sentinel
     }
 
-    fn continue_fetch_if_needed(&mut self, chain: order) {
+    fn continue_fetch_if_needed(&mut self, chain: order) -> bool {
         //TODO num_to_fetch
         let (num_to_fetch, unblocked) = {
             let pc = self.per_chains.get_mut(&chain).expect("boring chain");
@@ -565,6 +590,8 @@ impl ThreadLog {
             let locs = self.return_entry(unblocked);
             if let Some(locs) = locs { self.stop_blocking_on(locs) }
         }
+
+        self.server_is_finished(chain)
     }
 
     fn enqueue_packet(&mut self, loc: OrderIndex, packet: ChainEntry) {
@@ -649,6 +676,12 @@ impl ThreadLog {
         let next = {
             let per_chain = &mut self.per_chains.get_mut(&chain)
                 .expect("fetching uninteresting chain");
+            //TODO this is no a great place for this?
+            //TODO maybe a bitmask instead?
+            if per_chain.is_being_read.is_none() {
+                trace!("RRRRR {:?} is now being read", chain);
+                per_chain.is_being_read = Some(self.chains_currently_being_read.clone());
+            };
             per_chain.last_read_sent_to_server = per_chain.last_read_sent_to_server + 1;
             per_chain.outstanding_reads += 1;
             per_chain.last_read_sent_to_server
@@ -667,14 +700,31 @@ impl ThreadLog {
         buffer
     }
 
-    fn finshed_reading(&self) -> bool {
+    fn finshed_reading(&mut self) -> bool {
+        let finished = Rc::get_mut(&mut self.chains_currently_being_read).is_some();
         //FIXME this is dumb, it might be better to have a counter of how many servers we are
         //      waiting for
-        let mut still_reading = false;
-        for (_, pc) in self.per_chains.iter() {
-            still_reading |= pc.is_reading()
-        }
-        !still_reading
+        debug_assert_eq!({
+            let mut currently_being_read = 0;
+            for (_, pc) in self.per_chains.iter() {
+                if !pc.is_finished() {
+                    currently_being_read += 1
+                }
+                //still_reading |= pc.has_outstanding_reads()
+            }
+            // !still_reading == (self.servers_currently_being_read == 0)
+            currently_being_read == 0
+        }, finished);
+
+        finished
+    }
+
+    fn server_is_finished(&self, chain: order) -> bool {
+        let pc = &self.per_chains[&chain];
+        assert!(!(pc.outstanding_reads == 0
+            && pc.last_read_sent_to_server < pc.last_snapshot));
+        assert!(!(pc.is_searching_for_multi() && !pc.has_outstanding_reads()));
+        pc.is_finished()
     }
 }
 
@@ -689,6 +739,8 @@ impl PerChain {
             blocked_on_new_snapshot: None,
             num_multiappends_searching_for: 0,
             found_but_unused_multiappends: Default::default(),
+            outstanding_snapshots: 0,
+            is_being_read: None,
         }
     }
 
@@ -825,8 +877,19 @@ impl PerChain {
         self.found_but_unused_multiappends.remove(id)
     }
 
-    fn is_reading(&self) -> bool {
+    fn has_outstanding_reads(&self) -> bool {
         self.outstanding_reads > 0
+    }
+
+    fn has_outstanding_snapshots(&self) -> bool {
+        self.outstanding_snapshots > 0
+    }
+
+    fn is_finished(&self) -> bool {
+        assert!(!(self.outstanding_reads == 0
+            && self.last_read_sent_to_server != self.last_snapshot));
+        !(self.has_outstanding_reads() || self.is_searching_for_multi()
+        || self.has_outstanding_snapshots())
     }
 }
 
@@ -1349,6 +1412,7 @@ mod tests {
 
     struct LogHandle<V> {
         _pd: PhantomData<V>,
+        num_snapshots: usize,
         to_log: mpsc::Sender<Message>,
         ready_reads: mpsc::Receiver<Vec<u8>>,
         finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
@@ -1369,16 +1433,28 @@ mod tests {
     impl<V> LogHandle<V>
     where V: Storeable {
         fn snapshot(&mut self, chain: order) {
+            self.num_snapshots = self.num_snapshots.saturating_add(1);
             self.to_log.send(Message::FromClient(SnapshotAndPrefetch(chain)))
                 .unwrap();
         }
 
         //TODO return two/three slices?
         fn get_next(&mut self) -> Option<(&V, &[OrderIndex])> {
-            //TODO use recv_timeout in real version
-            self.curr_entry = self.ready_reads.recv().unwrap();
-            if self.curr_entry.len() == 0 {
+            if self.num_snapshots == 0 {
                 return None
+            }
+
+            'recv: loop {
+                //TODO use recv_timeout in real version
+                self.curr_entry = self.ready_reads.recv().unwrap();
+                if self.curr_entry.len() != 0 {
+                    break 'recv
+                }
+
+                self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+                if self.num_snapshots == 0 {
+                    return None
+                }
             }
 
             let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
@@ -1494,7 +1570,8 @@ mod tests {
             ready_reads: ready_reads_r,
             finished_writes: finished_writes_r,
             _pd: Default::default(),
-            curr_entry: Default::default()
+            curr_entry: Default::default(),
+            num_snapshots: 0,
         }
     }
 
