@@ -21,7 +21,7 @@ impl<V> Storeable for V { //TODO should V be Copy/Clone?
     }
 
     unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
-        assert_eq!(size, mem::size_of::<Self>());
+        //TODO assert_eq!(size, mem::size_of::<Self>());
         mem::transmute(val)
     }
 

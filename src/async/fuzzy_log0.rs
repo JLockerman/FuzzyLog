@@ -3,6 +3,7 @@
 use std::{self, iter, mem};
 use std::collections::{HashMap, VecDeque};
 use std::collections::hash_map;
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::u32;
@@ -915,6 +916,139 @@ impl AsyncStoreClient for mpsc::Sender<Message> {
     }
 }
 
+
+pub struct LogHandle<V> {
+    _pd: PhantomData<V>,
+    num_snapshots: usize,
+    to_log: mpsc::Sender<Message>,
+    ready_reads: mpsc::Receiver<Vec<u8>>,
+    finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
+    //TODO finished_writes: ..
+    curr_entry: Vec<u8>,
+}
+
+impl<V> Drop for LogHandle<V> {
+    fn drop(&mut self) {
+        let _ = self.to_log.send(Message::FromClient(Shutdown));
+    }
+}
+
+//TODO I kinda get the feeling that this should send writes directly to the store without
+//     the AsyncLog getting in the middle
+//     Also, I think if I can send assosiated data with the wites I could do multiplexing
+//     over different writers very easily
+impl<V> LogHandle<V>
+where V: Storeable {
+
+    pub fn new(
+        to_log: mpsc::Sender<Message>,
+        ready_reads: mpsc::Receiver<Vec<u8>>,
+        finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>
+    ) -> Self {
+        LogHandle {
+            to_log: to_log,
+            ready_reads: ready_reads,
+            finished_writes: finished_writes,
+            _pd: Default::default(),
+            curr_entry: Default::default(),
+            num_snapshots: 0,
+        }
+    }
+
+    pub fn snapshot(&mut self, chain: order) {
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.to_log.send(Message::FromClient(SnapshotAndPrefetch(chain)))
+            .unwrap();
+    }
+
+    //TODO return two/three slices?
+    pub fn get_next(&mut self) -> Option<(&V, &[OrderIndex])> {
+        if self.num_snapshots == 0 {
+            return None
+        }
+
+        'recv: loop {
+            //TODO use recv_timeout in real version
+            self.curr_entry = self.ready_reads.recv().unwrap();
+            if self.curr_entry.len() != 0 {
+                break 'recv
+            }
+
+            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+            if self.num_snapshots == 0 {
+                return None
+            }
+        }
+
+        let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
+        Some((val, locs))
+    }
+
+    pub fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Vec<OrderIndex> {
+        //TODO no-alloc?
+        let mut buffer = EntryContents::Data(data, &deps).clone_bytes();
+        {
+            //TODO I should make a better entry builder
+            let e = bytes_as_entry_mut(&mut buffer);
+            e.id = Uuid::new_v4();
+            e.locs_mut()[0] = (chain, 0.into());
+        }
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        //TODO return buffers here and cache them?
+        self.finished_writes.recv().unwrap().1
+    }
+
+    pub fn multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Vec<OrderIndex> {
+        //TODO no-alloc?
+        assert!(chains.len() > 1);
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| (o, 0.into())).collect();
+        locs.sort();
+        let buffer = EntryContents::Multiput {
+            data: data,
+            uuid: &Uuid::new_v4(),
+            columns: &locs,
+            deps: deps,
+        }.clone_bytes();
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        //TODO return buffers here and cache them?
+        self.finished_writes.recv().unwrap().1
+    }
+
+    //TODO return two vecs
+    pub fn dependent_multiappend(&mut self,
+        chains: &[order],
+        depends_on: &[order],
+        data: &V,
+        deps: &[OrderIndex])
+    -> Vec<OrderIndex> {
+        assert!(depends_on.len() > 1);
+        let mut mchains: Vec<_> = chains.into_iter()
+            .map(|&c| (c, 0.into()))
+            .chain(::std::iter::once((0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .collect();
+        {
+
+            let (chains, deps) = mchains.split_at_mut(chains.len());
+            chains.sort();
+            deps[1..].sort();
+        }
+        assert!(mchains[chains.len()] == (0.into(), 0.into()));
+        debug_assert!(mchains[..chains.len()].iter().all(|&(o, _)| chains.contains(&o)));
+        debug_assert!(mchains[(chains.len() + 1)..]
+            .iter().all(|&(o, _)| depends_on.contains(&o)));
+        let buffer = EntryContents::Multiput {
+            data: data,
+            uuid: &Uuid::new_v4(),
+            columns: &mchains,
+            deps: deps,
+        }.clone_bytes();
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        self.finished_writes.recv().unwrap().1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use packets::*;
@@ -923,7 +1057,6 @@ mod tests {
     use async::tcp::AsyncTcpStore;
 
     use std::collections::HashMap;
-    use std::marker::PhantomData;
     use std::{mem, thread};
     use std::sync::{mpsc, Arc, Mutex};
 
@@ -934,6 +1067,13 @@ mod tests {
 
     #[test]
     fn test_get_none() {
+        let _ = env_logger::init();
+        let mut lh = new_thread_log::<()>(vec![1.into()]);
+        assert_eq!(lh.get_next(), None);
+    }
+
+    #[test]
+    fn test_get_none2() {
         let _ = env_logger::init();
         let mut lh = new_thread_log::<()>(vec![1.into()]);
         lh.snapshot(1.into());
@@ -1295,237 +1435,6 @@ mod tests {
 
     //TODO test append after prefetch but before read
 
-    /*
-
-    #[test]
-    fn test_1_column_ni() {
-        let _ = env_logger::init();
-        let store = new_store(
-            vec![(4.into(), 1.into()), (4.into(), 2.into()),
-                (4.into(), 3.into()), (5.into(), 1.into())]
-        );
-        let horizon = HashMap::new();
-        let map = Rc::new(RefCell::new(HashMap::new()));
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = HashMap::new();
-        let re = map.clone();
-        upcalls.insert(4.into(), Box::new(move |_, _, &MapEntry(k, v)| {
-            re.borrow_mut().insert(k, v);
-            true
-        }));
-        upcalls.insert(5.into(), Box::new(|_, _, _| false));
-
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        let e1 = log.append(4.into(), &MapEntry(0, 1), &*vec![]);
-        assert_eq!(e1, (4.into(), 1.into()));
-        let e2 = log.append(4.into(), &MapEntry(1, 17), &*vec![]);
-        assert_eq!(e2, (4.into(), 2.into()));
-        let last_index = log.append(4.into(), &MapEntry(32, 5), &*vec![]);
-        assert_eq!(last_index, (4.into(), 3.into()));
-        let en = log.append(5.into(), &MapEntry(0, 0), &*vec![last_index]);
-        assert_eq!(en, (5.into(), 1.into()));
-        log.play_foward(4.into());
-        assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
-    }
-
-    #[test]
-    fn test_deps() {
-        let _ = env_logger::init();
-        let store = new_store(
-            vec![(6.into(), 1.into()), (6.into(), 2.into()),
-                (6.into(), 3.into()), (7.into(), 1.into())]
-        );
-        let horizon = HashMap::new();
-        let map = Rc::new(RefCell::new(HashMap::new()));
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = HashMap::new();
-        let re = map.clone();
-        upcalls.insert(6.into(), Box::new(move |_, _, &MapEntry(k, v)| {
-            re.borrow_mut().insert(k, v);
-            true
-        }));
-        upcalls.insert(7.into(), Box::new(|_, _, _| false));
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        let e1 = log.append(6.into(), &MapEntry(0, 1), &*vec![]);
-        assert_eq!(e1, (6.into(), 1.into()));
-        let e2 = log.append(6.into(), &MapEntry(1, 17), &*vec![]);
-        assert_eq!(e2, (6.into(), 2.into()));
-        let last_index = log.append(6.into(), &MapEntry(32, 5), &*vec![]);
-        assert_eq!(last_index, (6.into(), 3.into()));
-        let en = log.append(7.into(), &MapEntry(0, 0), &*vec![last_index]);
-        assert_eq!(en, (7.into(), 1.into()));
-        log.play_foward(7.into());
-        assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
-    }
-
-    #[test]
-    fn test_order() {
-        let _ = env_logger::init();
-        let store = new_store(
-            (0..5).map(|i| (20.into(), i.into()))
-                .chain((0..21).map(|i| (21.into(), i.into())))
-                .chain((0..22).map(|i| (22.into(), i.into())))
-                .collect());
-        let horizon = HashMap::new();
-        let list: Rc<RefCell<Vec<i32>>> = Default::default();
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
-        for i in 20..23 {
-            let l = list.clone();
-            upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
-                true
-            }));
-        }
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        log.append(22.into(), &4, &[]);
-        log.append(20.into(), &2, &[]);
-        log.append(21.into(), &3, &[]);
-        log.multiappend(&[20.into(),21.into(),22.into()], &-1, &[]);
-        log.play_foward(20.into());
-        assert_eq!(&**list.borrow(), &[2,3,4,-1,-1,-1][..]);
-    }
-
-    #[test]
-    fn test_dorder() {
-        let _ = env_logger::init();
-        let store = new_store(
-            (0..5).map(|i| (23.into(), i.into()))
-                .chain((0..5).map(|i| (24.into(), i.into())))
-                .chain((0..5).map(|i| (25.into(), i.into())))
-                .collect());
-        let horizon = HashMap::new();
-        let list: Rc<RefCell<Vec<i32>>> = Default::default();
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
-        for i in 23..26 {
-            let l = list.clone();
-            upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
-                true
-            }));
-        }
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        log.append(24.into(), &4, &[]);
-        log.append(23.into(), &2, &[]);
-        log.append(25.into(), &3, &[]);
-        log.dependent_multiappend(&[23.into()], &[24.into(),25.into()], &-1, &[]);
-        log.play_foward(23.into());
-        assert_eq!(&**list.borrow(), &[2,4,3,-1,][..]);
-    }*/
-
-
-
-    struct LogHandle<V> {
-        _pd: PhantomData<V>,
-        num_snapshots: usize,
-        to_log: mpsc::Sender<Message>,
-        ready_reads: mpsc::Receiver<Vec<u8>>,
-        finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
-        //TODO finished_writes: ..
-        curr_entry: Vec<u8>,
-    }
-
-    impl<V> Drop for LogHandle<V> {
-        fn drop(&mut self) {
-            let _ = self.to_log.send(Message::FromClient(Shutdown));
-        }
-    }
-
-    //TODO I kinda get the feeling that this should send writes directly to the store without
-    //     the AsyncLog getting in the middle
-    //     Also, I think if I can send assosiated data with the wites I could do multiplexing
-    //     over different writers very easily
-    impl<V> LogHandle<V>
-    where V: Storeable {
-        fn snapshot(&mut self, chain: order) {
-            self.num_snapshots = self.num_snapshots.saturating_add(1);
-            self.to_log.send(Message::FromClient(SnapshotAndPrefetch(chain)))
-                .unwrap();
-        }
-
-        //TODO return two/three slices?
-        fn get_next(&mut self) -> Option<(&V, &[OrderIndex])> {
-            if self.num_snapshots == 0 {
-                return None
-            }
-
-            'recv: loop {
-                //TODO use recv_timeout in real version
-                self.curr_entry = self.ready_reads.recv().unwrap();
-                if self.curr_entry.len() != 0 {
-                    break 'recv
-                }
-
-                self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
-                if self.num_snapshots == 0 {
-                    return None
-                }
-            }
-
-            let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
-            Some((val, locs))
-        }
-
-        fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Vec<OrderIndex> {
-            //TODO no-alloc?
-            let mut buffer = EntryContents::Data(data, &deps).clone_bytes();
-            {
-                //TODO I should make a better entry builder
-                let e = bytes_as_entry_mut(&mut buffer);
-                e.id = Uuid::new_v4();
-                e.locs_mut()[0] = (chain, 0.into());
-            }
-            self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-            //TODO return buffers here and cache them?
-            self.finished_writes.recv().unwrap().1
-        }
-
-        fn multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
-        -> Vec<OrderIndex> {
-            //TODO no-alloc?
-            assert!(chains.len() > 1);
-            let mut locs: Vec<_> = chains.into_iter().map(|&o| (o, 0.into())).collect();
-            locs.sort();
-            let buffer = EntryContents::Multiput {
-                data: data,
-                uuid: &Uuid::new_v4(),
-                columns: &locs,
-                deps: deps,
-            }.clone_bytes();
-            self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-            //TODO return buffers here and cache them?
-            self.finished_writes.recv().unwrap().1
-        }
-
-        //TODO return two vecs
-        fn dependent_multiappend(&mut self,
-            chains: &[order],
-            depends_on: &[order],
-            data: &V,
-            deps: &[OrderIndex])
-        -> Vec<OrderIndex> {
-            assert!(depends_on.len() > 1);
-            let mut mchains: Vec<_> = chains.into_iter()
-                .map(|&c| (c, 0.into()))
-                .chain(::std::iter::once((0.into(), 0.into())))
-                .chain(depends_on.iter().map(|&c| (c, 0.into())))
-                .collect();
-            {
-
-                let (chains, deps) = mchains.split_at_mut(chains.len());
-                chains.sort();
-                deps[1..].sort();
-            }
-            assert!(mchains[chains.len()] == (0.into(), 0.into()));
-            debug_assert!(mchains[..chains.len()].iter().all(|&(o, _)| chains.contains(&o)));
-            debug_assert!(mchains[(chains.len() + 1)..]
-                .iter().all(|&(o, _)| depends_on.contains(&o)));
-            let buffer = EntryContents::Multiput {
-                data: data,
-                uuid: &Uuid::new_v4(),
-                columns: &mchains,
-                deps: deps,
-            }.clone_bytes();
-            self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-            self.finished_writes.recv().unwrap().1
-        }
-    }
-
     #[allow(non_upper_case_globals)]
     const lock_str: &'static str = "0.0.0.0:13389";
     #[allow(non_upper_case_globals)]
@@ -1563,16 +1472,7 @@ mod tests {
             log.run()
         });
 
-
-
-        LogHandle {
-            to_log: to_log,
-            ready_reads: ready_reads_r,
-            finished_writes: finished_writes_r,
-            _pd: Default::default(),
-            curr_entry: Default::default(),
-            num_snapshots: 0,
-        }
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
     }
 
 
