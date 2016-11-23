@@ -2,13 +2,30 @@
 use std::{mem, ptr, slice};
 
 //TODO require !Drop?
+//FIXME should methods take &u8 or *u8?
+//TODO make methods default
 pub trait Storeable {
     fn size(&self) -> usize;
     unsafe fn ref_to_bytes(&self) -> &u8;
+    unsafe fn ref_to_slice(&self) -> &[u8];
     unsafe fn bytes_to_ref(&u8, usize) -> &Self;
     unsafe fn bytes_to_mut(&mut u8, usize) -> &mut Self;
     unsafe fn clone_box(&self) -> Box<Self>;
     unsafe fn copy_to_mut(&self, &mut Self) -> usize;
+}
+
+pub trait UnStoreable: Storeable {
+    fn size_from_bytes(bytes: &u8) -> usize;
+
+    unsafe fn unstore(bytes: &u8) -> &Self {
+        let size = <Self as UnStoreable>::size_from_bytes(bytes);
+        <Self as Storeable>::bytes_to_ref(bytes, size)
+    }
+
+    unsafe fn unstore_mut(bytes: &mut u8) -> &mut Self {
+        let size = <Self as UnStoreable>::size_from_bytes(bytes);
+        <Self as Storeable>::bytes_to_mut(bytes, size)
+    }
 }
 
 impl<V> Storeable for V { //TODO should V be Copy/Clone?
@@ -18,6 +35,12 @@ impl<V> Storeable for V { //TODO should V be Copy/Clone?
 
     unsafe fn ref_to_bytes(&self) -> &u8 {
         mem::transmute(self)
+    }
+
+    unsafe fn ref_to_slice(&self) -> &[u8] {
+        let ptr = self as *const _ as *const u8;
+        let size = self.size();
+        slice::from_raw_parts(ptr, size)
     }
 
     unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
@@ -51,6 +74,12 @@ impl<V> Storeable for [V] {
         mem::transmute(&self[0])
     }
 
+    unsafe fn ref_to_slice(&self) -> &[u8] {
+        let ptr = self as *const _ as *const u8;
+        let size = self.size();
+        slice::from_raw_parts(ptr, size)
+    }
+
     unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
         assert_eq!(size % mem::size_of::<V>(), 0);
         slice::from_raw_parts(val as *const _ as *const _, size / mem::size_of::<V>())
@@ -73,5 +102,11 @@ impl<V> Storeable for [V] {
         let to_copy = ::std::cmp::min(self.len(), out.len());
         ptr::copy(&self[0], &mut out[0], to_copy);
         to_copy * mem::size_of::<V>()
+    }
+}
+
+impl<V> UnStoreable for V { //TODO should V be Copy/Clone?
+    fn size_from_bytes(_: &u8) -> usize {
+        mem::size_of::<Self>()
     }
 }

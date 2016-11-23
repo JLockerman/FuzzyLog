@@ -2,30 +2,34 @@
 use std::{mem, ptr};
 use std::cell::RefCell;
 
-use storeables::Storeable;
+use std::marker::PhantomData;
+
+use storeables::{Storeable, UnStoreable};
 
 //XXX UGH this is going to be wildly unsafe...
 
 
-pub struct Trie<V> {
+pub struct Trie<V>
+where V: Storeable {
     root: RootEdge<V>, // is an array
 }
 
 type RootEdge<V> = Box<RootTable<V>>;
 
 struct RootTable<V> {
-    l3: Shortcut<ValEdge<V>>,
-    l2: Shortcut<L3Edge<V>>,
-    l1: Shortcut<L2Edge<V>>,
-    array: [L1Edge<V>; 4],
+    l3: Shortcut<ValEdge>,
+    l2: Shortcut<L3Edge>,
+    l1: Shortcut<L2Edge>,
+    array: [L1Edge; 4],
     next_entry: u32,
     alloc: AllocPtr<u8>,
+    _pd: PhantomData<V>,
 }
 
-type L1Edge<V> = Option<Box<[L2Edge<V>; ARRAY_SIZE]>>;
-type L2Edge<V> = Option<Box<[L3Edge<V>; ARRAY_SIZE]>>;
-type L3Edge<V> = Option<Box<[ValEdge<V>; ARRAY_SIZE]>>;
-type ValEdge<V> = *const V;
+type L1Edge = Option<Box<[L2Edge; ARRAY_SIZE]>>;
+type L2Edge = Option<Box<[L3Edge; ARRAY_SIZE]>>;
+type L3Edge = Option<Box<[ValEdge; ARRAY_SIZE]>>;
+type ValEdge = *const u8;
 
 const LEVEL_BYTES: usize = 8192;
 const ARRAY_SIZE: usize = 8192 / 8;
@@ -78,12 +82,13 @@ impl AllocPtr<u8> {
         unsafe { mem::zeroed() }
     }
 
-    fn append(&mut self, data: &[u8]) -> *const u8 {
-        let storage_size = data.len(); // FIXME
+    fn append<V>(&mut self, data: &V) -> *const u8
+    where V: Storeable {
+        let storage_size = data.size(); // FIXME
         if self.alloc_rem < storage_size {
             if storage_size > LEVEL_BYTES {
                 let mut storage = Vec::with_capacity(storage_size);
-                storage.extend_from_slice(data);
+                unsafe { storage.extend_from_slice(data.ref_to_slice()) };
                 return &mut unsafe { (*Box::into_raw(storage.into_boxed_slice()))[0] }
             }
             self.ptr = unsafe { Box::into_raw(Box::new([0; LEVEL_BYTES])) };
@@ -96,7 +101,7 @@ impl AllocPtr<u8> {
         //TODO storage_size * mem::size_of::<V>()?
         self.alloc_rem -= storage_size;
         //safe do to if self.alloc_rem < storage_size at the second line of the function
-        unsafe { ptr::copy_nonoverlapping(&data[0], append_to, data.len()) };
+        unsafe { ptr::copy_nonoverlapping(data.ref_to_bytes(), append_to, storage_size) };
         append_to
     }
 }
@@ -154,7 +159,8 @@ pub struct entry_pointer_and_index {
     pub index: u32,
 }
 
-impl Trie<u8> {
+impl<V> Trie<V>
+where V: Storeable {
     pub fn new() -> Self {
         unsafe {
             //FIXME
@@ -162,7 +168,7 @@ impl Trie<u8> {
         }
     }
 
-    pub fn append(&mut self, data: &[u8]) -> u32 {
+    pub fn append(&mut self, data: &V) -> (u32, &mut u8) {
         let root: &mut RootTable<_> =&mut *self.root;
         let val_ptr = root.alloc.append(data);
         let next_entry = root.next_entry;
@@ -190,7 +196,8 @@ impl Trie<u8> {
         // fill val
         root.l3.append(val_ptr);
         root.next_entry += 1;
-        next_entry
+        let val_ptr = val_ptr as *mut u8;
+        (next_entry, unsafe {val_ptr.as_mut().unwrap()})
     }
 
     #[cfg(FALSE)]
@@ -227,8 +234,12 @@ impl Trie<u8> {
             }
         }
     }
+}
 
-    pub fn get(&self, k: u32) -> Option<&u8> {
+impl<V> Trie<V>
+where V: UnStoreable {
+
+    pub fn get(&self, k: u32) -> Option<&V> {
         unsafe {
             // let root = self.array;
             // let l1_ptr = index!(root, k, 1);
@@ -241,13 +252,20 @@ impl Trie<u8> {
             let val_ptr = unsafe { val_ptr.as_ref() };
             match val_ptr {
                 None => None,
-                Some(v) => Some(v),
+                Some(v) => {
+                    let size = <V as UnStoreable>::size_from_bytes(v);
+                    Some(<V as Storeable>::bytes_to_ref(v, size))
+                }
             }
         }
     }
 
     #[inline(always)]
-    pub fn entry<'s>(&'s mut self, k: u32) -> Entry<'s, u8> {
+    pub fn entry<'s>(&'s mut self, k: u32) -> Entry<'s, V> {
+        //FIXME specialize for the case when k in next
+        if k == self.root.next_entry {
+            return Entry::Vacant(VacantEntry(k, Vacancy::Next(self)));
+        }
         unsafe {
             let root_index = (((k & 0xffffffff) >> ROOT_SHIFT) & MASK) as usize;
             assert!(root_index <= 3);
@@ -262,9 +280,9 @@ impl Trie<u8> {
             if val_ptr.is_null() {
                 return Entry::Vacant(VacantEntry(k, Vacancy::Val(val_ptr)))
             }
-            let val_ptr: *const u8 = *val_ptr;
-            let val_ptr: *mut u8 = val_ptr as *mut _;
-            Entry::Occupied(OccupiedEntry(unsafe {&mut *val_ptr }))
+            let val_ptr: *mut u8 = *val_ptr as *mut _;
+            let val = unsafe {<V as UnStoreable>::unstore_mut(&mut *val_ptr)};
+            Entry::Occupied(OccupiedEntry(val))
         }
     }
 }
@@ -290,7 +308,7 @@ impl<'a, V: 'a> Entry<'a, V> {
         use self::Entry::*;
         match self {
             Occupied(e) => e.into_mut(),
-            //TODO
+            //FIXME
             Vacant(e) => unsafe { e.insert_with(default, alloc_seg2()) },
         }
     }
@@ -299,7 +317,7 @@ impl<'a, V: 'a> Entry<'a, V> {
         use self::Entry::*;
         match self {
             Occupied(e) => e.insert_with(default),
-            //TODO
+            //FIXME
             Vacant(e) => unsafe { e.insert_with(default, alloc_seg2()) },
         }
     }
@@ -329,11 +347,11 @@ impl<'a, V: 'a> OccupiedEntry<'a, V> {
 }
 
 enum Vacancy<'a, V: 'a> {
-    L0(&'a mut RootEdge<V>),
-    L1(&'a mut L1Edge<V>),
-    L2(&'a mut L2Edge<V>),
-    L3(&'a mut L3Edge<V>),
-    Val(&'a mut ValEdge<V>),
+    Next(&'a mut Trie<V>),
+    L1(&'a mut L1Edge),
+    L2(&'a mut L2Edge),
+    L3(&'a mut L3Edge),
+    Val(&'a mut ValEdge),
 }
 
 macro_rules! fill_entry {
@@ -355,21 +373,30 @@ macro_rules! fill_entry {
     };
     ($array:ident, $k:expr, $v:expr, 1, $val_loc:ident) => {
         {
-            let l: &mut L2Edge<_> = fill_entry!($array, $k, 1, body);
+            let l: &mut L2Edge = fill_entry!($array, $k, 1, body);
             fill_entry!(l, $k, $v, 2, $val_loc)
         }
     };
     ($array:ident, $k:expr, $v:expr, 2, $val_loc:ident) => {
         {
-            let l: &mut L3Edge<_> = fill_entry!($array, $k, 2, body);
+            let l: &mut L3Edge = fill_entry!($array, $k, 2, body);
             fill_entry!(l, $k, $v, 3, $val_loc)
         }
     };
     ($array:ident, $k:expr, $v:expr, 3, $val_loc:ident) => {
         {
-            let slot: &mut ValEdge<_> = fill_entry!($array, $k, 3, body);
-            //FIXME
-            *$val_loc = $v();
+            let slot: &mut ValEdge = fill_entry!($array, $k, 3, body);
+            fill_entry!(val: $v, $val_loc, slot)
+        }
+    };
+    (val: $v:expr, $val_loc:ident, $slot: expr) => {
+        {
+            let val = $v();
+            let size = val.size();
+            let val = &val as *const _ as *const u8;
+            //FIXME bounds check
+            unsafe { ptr::copy_nonoverlapping(val, $val_loc, size) }
+            let slot: &mut ValEdge = $slot;
             *slot = $val_loc;
             let slot: *mut V = (*slot) as *mut _;
             slot.as_mut().unwrap()
@@ -377,19 +404,19 @@ macro_rules! fill_entry {
     };
     ($array:ident, $k:expr, $v:expr, 4, $val_loc:ident) => {
         {
-            let l: &mut L5Edge<_> = fill_entry!($array, $k, 4, body);
+            let l: &mut L5Edge = fill_entry!($array, $k, 4, body);
             fill_entry!(l, $k, $v, 5, $val_loc)
         }
     };
     ($array:ident, $k:expr, $v:expr, 5, $val_loc:ident) => {
         {
-            let l: &mut L6Edge<_> = fill_entry!($array, $k, 5, body);
+            let l: &mut L6Edge = fill_entry!($array, $k, 5, body);
             fill_entry!(l, $k, $v, 6, $val_loc)
         }
     };
     ($array:ident, $k:expr, $v:expr, 6, $val_loc:ident) => {
         {
-            let slot: &mut ValEdge<_> = fill_entry!($array, $k, 6, body);
+            let slot: &mut ValEdge = fill_entry!($array, $k, 6, body);
 // TODO
 // *slot = Some(Unique::new(Box::into_raw(Box::new($v))));
 
@@ -406,37 +433,17 @@ impl<'a, V: 'a> VacantEntry<'a, V> {
         let VacantEntry(k, entry) = self;
         unsafe {
             //FIXME
-            let val_loc = seg as *mut _;
+            let val_loc = seg;
             match entry {
-                Val(slot) => {
-                    // TODO
-                    // *slot = Some(Unique::new(Box::into_raw(Box::new(v))));
-                    // let ptr = ualloc_seg() as *mut _;
-                    //TODO this is fill_entry!(slot, k, v, 3, val_loc),
-                    //FIXME
-                    //*val_loc = v();
-                    *val_loc = unimplemented!();
-                    *slot = val_loc;
-                    let slot: *mut V = (*slot) as *mut _;
-                    return slot.as_mut().unwrap();
-                }
-                L0(slot) => {
-                    unreachable!()
-                    /*let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-                    assert!(root_index < 3);
-                    let l1 = &mut match slot {
-                        &mut Some(ref mut ptr) => &mut ***ptr,
-                        slot => {
-                            // *slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
-                            *slot = Some(P::new(alloc_seg() as *mut _));
-                            &mut ***slot.as_mut().unwrap()
-                        }
-                    }[root_index];
-                    fill_entry!(l1, k, v, 1, val_loc)*/
-                }
+                Val(slot) => return fill_entry!(val: v, val_loc, slot),
                 L1(slot) => fill_entry!(slot, k, v, 1, val_loc),
                 L2(slot) => fill_entry!(slot, k, v, 2, val_loc),
                 L3(slot) => fill_entry!(slot, k, v, 3, val_loc),
+                Next(root) => {
+                    let val = root.append(&v()).1;
+                    let size = <V as UnStoreable>::size_from_bytes(val);
+                    <V as UnStoreable>::unstore_mut(val)
+                }
             }
         }
     }
@@ -467,7 +474,7 @@ pub mod test {
 
     #[test]
     pub fn empty() {
-        let t: Trie<u8> = Trie::new();
+        let t: Trie<()> = Trie::new();
         assert!(t.get(0).is_none());
         assert!(t.get(10).is_none());
         assert!(t.get(1).is_none());
@@ -479,7 +486,7 @@ pub mod test {
     pub fn append() {
         let mut m = Trie::new();
         for i in 0..255u8 {
-            assert_eq!(m.append(&[i]), i as u32);
+            assert_eq!(m.append(&i).0, i as u32);
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
 
@@ -495,14 +502,27 @@ pub mod test {
         }
     }
 
+    #[test]
+    pub fn entry_insert() {
+        let mut t = Trie::new();
+        assert!(t.get(0).is_none());
+        assert_eq!(t.entry(0).or_insert(5i32), &mut 5);
+        assert!(t.get(10).is_none());
+        assert_eq!(t.entry(10).or_insert(7), &mut 7);
+        assert_eq!(t.get(10).unwrap(), &7);
+        assert!(t.get(1).is_none());
+        assert!(t.get(0xffff).is_none());
+        assert_eq!(t.get(0x0).unwrap(), &5);
+    }
+
     pub mod from_hash_map {
         use super::super::*;
 
-        /*#[test]
+        #[test]
         pub fn more_append() {
             let mut m = Trie::new();
             for i in 0..1001 {
-                assert_eq!(m.append(i).0, i);
+                assert_eq!(m.append(&i).0, i);
                 // println!("{:#?}", m);
                 // assert_eq!(m.get(&i).unwrap(), &i);
 
@@ -522,23 +542,34 @@ pub mod test {
         pub fn even_more_append() {
             let mut m = Trie::new();
             for i in 0..0x18000 {
-                assert_eq!(m.append(i).0, i);
-                // println!("{:#?}", m);
-                // assert_eq!(m.get(&i).unwrap(), &i);
-
-                for j in 0..i + 1 {
-                    let r = m.get(j);
-                    assert_eq!(r, Some(&j));
+                assert_eq!(m.append(&i).0, i);
+                //println!("{:#?}", m);
+                //println!("{:#?}", i);
+                if i > 0 {
+                    assert_eq!(m.get(i - 1), Some(&(i - 1)));
                 }
-
-                for j in i + 1..0x18000 {
-                    let r = m.get(j);
-                    assert_eq!(r, None);
+                if i >= 3 {
+                    assert_eq!(m.get(i - 3), Some(&(i - 3)));
                 }
+                if i >= 1000 {
+                    assert_eq!(m.get(i - 1000), Some(&(i - 1000)));
+                }
+                assert_eq!(m.get(i), Some(&i));
+                assert_eq!(m.get(i + 1), None);
+            }
+
+            for j in 0..0x18000 {
+                let r = m.get(j);
+                assert_eq!(r, Some(&j));
+            }
+
+            for j in 0x18000..0x28000 {
+                let r = m.get(j);
+                assert_eq!(r, None);
             }
         }
 
-        // #[test]
+        #[test]
         pub fn more_entry_insert() {
             let mut m = Trie::new();
             for i in 1..1001 {
@@ -556,6 +587,6 @@ pub mod test {
                     assert_eq!(r, None);
                 }
             }
-        }*/
+        }
     }
 }
