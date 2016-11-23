@@ -7,6 +7,8 @@ use prelude::*;
 pub mod tcp;
 pub mod udp;
 
+mod trie;
+
 struct ServerLog {
     log: HashMap<OrderIndex, Rc<Entry<()>>>,
     horizon: HashMap<order, entry>,
