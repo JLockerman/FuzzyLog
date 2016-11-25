@@ -85,10 +85,32 @@ impl AllocPtr<u8> {
     fn append<V>(&mut self, data: &V) -> *const u8
     where V: Storeable {
         let storage_size = data.size(); // FIXME
+        //if self.alloc_rem < storage_size {
+        //    if storage_size > LEVEL_BYTES {
+        //        let mut storage = Vec::with_capacity(storage_size);
+        //        unsafe { storage.extend_from_slice(data.ref_to_slice()) };
+        //        return &mut unsafe { (*Box::into_raw(storage.into_boxed_slice()))[0] }
+        //    }
+        //    self.ptr = unsafe { Box::into_raw(Box::new([0; LEVEL_BYTES])) };
+        //    //TODO
+        //    self.alloc_rem = LEVEL_BYTES;
+        //}
+        //let (append_to, rem) = unsafe {&mut *self.ptr}.split_at_mut(storage_size);
+        //self.ptr = rem;
+        //let append_to = &mut (*append_to)[0];
+        ////TODO storage_size * mem::size_of::<V>()?
+        //self.alloc_rem -= storage_size;
+        let append_to = self.prep_append(storage_size);
+        //safe do to: if self.alloc_rem < storage_size {..} at first line of fn prep_append
+        unsafe { ptr::copy_nonoverlapping(data.ref_to_bytes(), append_to, storage_size) };
+        append_to
+    }
+
+    fn prep_append(&mut self, storage_size: usize) -> *mut u8 {
         if self.alloc_rem < storage_size {
             if storage_size > LEVEL_BYTES {
                 let mut storage = Vec::with_capacity(storage_size);
-                unsafe { storage.extend_from_slice(data.ref_to_slice()) };
+                unsafe { storage.set_len(storage_size) };
                 return &mut unsafe { (*Box::into_raw(storage.into_boxed_slice()))[0] }
             }
             self.ptr = unsafe { Box::into_raw(Box::new([0; LEVEL_BYTES])) };
@@ -100,8 +122,6 @@ impl AllocPtr<u8> {
         let append_to = &mut (*append_to)[0];
         //TODO storage_size * mem::size_of::<V>()?
         self.alloc_rem -= storage_size;
-        //safe do to if self.alloc_rem < storage_size at the second line of the function
-        unsafe { ptr::copy_nonoverlapping(data.ref_to_bytes(), append_to, storage_size) };
         append_to
     }
 }
@@ -163,12 +183,15 @@ impl<V> Trie<V>
 where V: Storeable {
     pub fn new() -> Self {
         unsafe {
-            //FIXME
             Trie { root: Box::new(mem::zeroed()) }
         }
     }
 
-    pub fn append(&mut self, data: &V) -> (u32, &mut u8) {
+    pub fn append(&mut self, data: &V) -> u32 {
+        self._append(data).0
+    }
+
+    fn _append(&mut self, data: &V) -> (u32, &mut u8) {
         let root: &mut RootTable<_> =&mut *self.root;
         let val_ptr = root.alloc.append(data);
         let next_entry = root.next_entry;
@@ -204,7 +227,7 @@ where V: Storeable {
     fn insert(&mut self, k: u32, v: &[u8]) -> Option<&u8> {
         unsafe {
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index < 3);
+            assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
             let l1 = &mut match self.root {
                 Some(ref mut ptr) => &mut ***ptr,
                 ref mut slot => {
@@ -237,6 +260,13 @@ where V: Storeable {
 }
 
 impl<V> Trie<V>
+where V: Storeable {
+    pub fn len(&self) -> u32 {
+        self.root.next_entry
+    }
+}
+
+impl<V> Trie<V>
 where V: UnStoreable {
 
     pub fn get(&self, k: u32) -> Option<&V> {
@@ -244,7 +274,7 @@ where V: UnStoreable {
             // let root = self.array;
             // let l1_ptr = index!(root, k, 1);
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index < 3);
+            assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
             let l1 = &self.root.array[root_index];
             let l2 = index!(l1, k, 1);
             let l3 = index!(l2, k, 2);
@@ -268,7 +298,7 @@ where V: UnStoreable {
         }
         unsafe {
             let root_index = (((k & 0xffffffff) >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index <= 3);
+            assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
             //let l2 = match &mut self.root.array[root_index] {
             //    &mut Some(ref mut ptr) => &mut (**ptr)[root_index],
             //    none => return Entry::Vacant(VacantEntry(k, Vacancy::L1(none))),
@@ -440,7 +470,7 @@ impl<'a, V: 'a> VacantEntry<'a, V> {
                 L2(slot) => fill_entry!(slot, k, v, 2, val_loc),
                 L3(slot) => fill_entry!(slot, k, v, 3, val_loc),
                 Next(root) => {
-                    let val = root.append(&v()).1;
+                    let val = root._append(&v()).1;
                     let size = <V as UnStoreable>::size_from_bytes(val);
                     <V as UnStoreable>::unstore_mut(val)
                 }
@@ -486,7 +516,7 @@ pub mod test {
     pub fn append() {
         let mut m = Trie::new();
         for i in 0..255u8 {
-            assert_eq!(m.append(&i).0, i as u32);
+            assert_eq!(m.append(&i), i as u32);
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
 
@@ -522,7 +552,7 @@ pub mod test {
         pub fn more_append() {
             let mut m = Trie::new();
             for i in 0..1001 {
-                assert_eq!(m.append(&i).0, i);
+                assert_eq!(m.append(&i), i);
                 // println!("{:#?}", m);
                 // assert_eq!(m.get(&i).unwrap(), &i);
 
@@ -542,7 +572,7 @@ pub mod test {
         pub fn even_more_append() {
             let mut m = Trie::new();
             for i in 0..0x18000 {
-                assert_eq!(m.append(&i).0, i);
+                assert_eq!(m.append(&i), i);
                 //println!("{:#?}", m);
                 //println!("{:#?}", i);
                 if i > 0 {

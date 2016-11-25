@@ -4,14 +4,17 @@ use std::rc::Rc;
 
 use prelude::*;
 
+use servers::trie::Trie;
+
 pub mod tcp;
 pub mod udp;
 
 mod trie;
 
 struct ServerLog {
-    log: HashMap<OrderIndex, Rc<Entry<()>>>,
-    horizon: HashMap<order, entry>,
+    //log: HashMap<OrderIndex, Rc<Entry<()>>>,
+    log: HashMap<order, Trie<Entry<()>>>,
+    //TODO per chain locks...
     last_lock: u64,
     last_unlock: u64,
     total_servers: u32,
@@ -28,7 +31,6 @@ impl ServerLog {
             this_server_num, total_servers);
         ServerLog {
             log: HashMap::new(),
-            horizon: HashMap::new(),
             last_lock: 0,
             last_unlock: 0,
             _seen_ids: HashSet::new(),
@@ -44,108 +46,107 @@ impl ServerLog {
                 trace!("SERVER {:?} multiput", self.this_server_num);
                 //TODO handle sentinels
                 //TODO check TakeLock flag?
-                if self.try_lock(val.lock_num()) {
-                    assert!(self._seen_ids.insert(val.id));
-                    assert!(self.last_lock == self.last_unlock + 1 || self.last_lock == 0,
-                        "SERVER {:?} l {:?} == ul {:?} + 1",
-                        self.this_server_num, self.last_lock, self.last_unlock);
-                    assert!(self.last_lock == val.lock_num(),
-                        "SERVER {:?} l {:?} == vl {:?}",
-                        self.this_server_num, self.last_lock, val.lock_num());
-                    let mut sentinel_start_index = None;
-                    {
-                        val.kind.insert(EntryKind::ReadSuccess);
-                        let locs = val.locs_mut();
-                        //TODO select only relevent chains
-                        //trace!("SERVER {:?} Horizon A {:?}", self.horizon);
-                        'update_append_horizon: for i in 0..locs.len() {
-                            if locs[i] == (0.into(), 0.into()) {
-                                sentinel_start_index = Some(i + 1);
-                                break 'update_append_horizon
-                            }
+                if !self.try_lock(val.lock_num()) {
+                    trace!("SERVER {:?} wrong lock {} @ ({},{})", self.this_server_num,
+                        val.lock_num(), self.last_lock, self.last_unlock);
+                        return true
+                }
+
+                assert!(self._seen_ids.insert(val.id));
+                assert!(self.last_lock == self.last_unlock + 1 || self.last_lock == 0,
+                    "SERVER {:?} l {:?} == ul {:?} + 1",
+                    self.this_server_num, self.last_lock, self.last_unlock);
+                assert!(self.last_lock == val.lock_num(),
+                    "SERVER {:?} l {:?} == vl {:?}",
+                    self.this_server_num, self.last_lock, val.lock_num());
+                let mut sentinel_start_index = None;
+                {
+                    val.kind.insert(EntryKind::ReadSuccess);
+                    let locs = val.locs_mut();
+                    //TODO select only relevent chains
+                    //trace!("SERVER {:?} Horizon A {:?}", self.horizon);
+                    //FIXME handle duplicates
+                    'update_append_horizon: for i in 0..locs.len() {
+                        if locs[i] == (0.into(), 0.into()) {
+                            sentinel_start_index = Some(i + 1);
+                            break 'update_append_horizon
+                        }
+                        let chain = locs[i].0;
+                        if self.stores_chain(chain) {
+                            //FIXME handle duplicates
+                            let next_entry = self.ensure_chain(chain).len();
+                            assert!(next_entry > 0);
+                            let next_entry = entry::from(next_entry);
+                            locs[i].1 = next_entry;
+                        }
+                    }
+                    if let Some(ssi) = sentinel_start_index {
+                        for i in ssi..locs.len() {
+                            assert!(locs[i] != (0.into(), 0.into()));
                             let chain = locs[i].0;
                             if self.stores_chain(chain) {
-                                let hor: entry = self.increment_horizon(chain);
-                                locs[i].1 = hor;
+                                //FIXME handle duplicates
+                                let next_entry = self.ensure_chain(chain).len();
+                                assert!(next_entry > 0);
+                                let next_entry = entry::from(next_entry);
+                                locs[i].1 = next_entry;
                             }
                         }
-                        if let Some(ssi) = sentinel_start_index {
-                            for i in ssi..locs.len() {
-                                assert!(locs[i] != (0.into(), 0.into()));
-                                if self.stores_chain(locs[i].0) {
-                                    let hor: entry = self.increment_horizon(locs[i].0);
-                                    locs[i].1 = hor;
-                                }
-                            }
-                        }
-                        //trace!("SERVER {:?} Horizon B {:?}", self.horizon);
-                        trace!("SERVER {:?} locs {:?}", self.this_server_num, locs);
-                        trace!("SERVER {:?} ssi {:?}", self.this_server_num, sentinel_start_index);
                     }
-                    trace!("SERVER {:?} appending at {:?}", self.this_server_num, val.locs());
-                    let contents = Rc::new(val.clone());
-                    'emplace: for &loc in val.locs() {
-                        if loc == (0.into(), 0.into()) {
-                            break 'emplace
-                        }
-                        if self.stores_chain(loc.0) {
-                            self.log.insert(loc, contents.clone());
+                    //trace!("SERVER {:?} Horizon B {:?}", self.horizon);
+                    trace!("SERVER {:?} locs {:?}", self.this_server_num, locs);
+                    trace!("SERVER {:?} ssi {:?}", self.this_server_num, sentinel_start_index);
+                }
+                trace!("SERVER {:?} appending at {:?}", self.this_server_num, val.locs());
+                'emplace: for &(chain, index) in val.locs() {
+                    if (chain, index) == (0.into(), 0.into()) {
+                        break 'emplace
+                    }
+                    if self.stores_chain(chain) {
+                        assert!(index != entry::from(0));
+                        self.ensure_chain(chain).append(&val);
+                    }
+                    // trace!("SERVER {:?} appended at {:?}", loc);
+                }
+                if let Some(ssi) = sentinel_start_index {
+                    val.kind.remove(EntryKind::Multiput);
+                    val.kind.insert(EntryKind::Sentinel);
+                    trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.locs()[ssi..]);
+                    for &(chain, index) in &val.locs()[ssi..] {
+                        if self.stores_chain(chain) {
+                            assert!(index != entry::from(0));
+                            self.ensure_chain(chain).append(&val);
                         }
                         // trace!("SERVER {:?} appended at {:?}", loc);
                     }
-                    if let Some(ssi) = sentinel_start_index {
-                        val.kind.remove(EntryKind::Multiput);
-                        val.kind.insert(EntryKind::Sentinel);
-                        let contents = Rc::new(val.clone());
-                        trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.locs()[ssi..]);
-                        for &loc in &val.locs()[ssi..] {
-                            if self.stores_chain(loc.0) {
-                                self.log.insert(loc, contents.clone());
-                            }
-                            // trace!("SERVER {:?} appended at {:?}", loc);
-                        }
-                        val.kind.remove(EntryKind::Sentinel);
-                        val.kind.insert(EntryKind::Multiput);
-                    }
-                } else {
-                    trace!("SERVER {:?} wrong lock {} @ ({},{})", self.this_server_num,
-                        val.lock_num(), self.last_lock, self.last_unlock);
+                    val.kind.remove(EntryKind::Sentinel);
+                    val.kind.insert(EntryKind::Multiput);
                 }
             }
+
             EntryLayout::Read => {
                 trace!("SERVER {:?} Read", self.this_server_num);
-                let loc = unsafe { val.as_data_entry_mut().flex.loc };
-                match self.log.entry(loc) {
-                    Vacant(..) => {
-                        trace!("SERVER {:?} Read Vacant entry {:?}", self.this_server_num, loc);
-                        if val.kind == EntryKind::Read {
-                            //TODO validate lock
-                            //     this will come after per-chain locks
-                            let l = loc.0;
-                            let last_entry = self.horizon.get(&l).cloned().unwrap_or(0.into());
-                            assert!(last_entry == 0.into() || last_entry < loc.1,
-                                "{:?} >= {:?}", last_entry, loc);
-                            let (old_id, old_loc) = unsafe {
-                                (val.id, val.as_data_entry().flex.loc)
-                            };
-                            *val = EntryContents::Data(&(), &[(l, last_entry)]).clone_entry();
-                            val.id = old_id;
-                            val.kind = EntryKind::NoValue;
-                            unsafe {
-                                val.as_data_entry_mut().flex.loc = old_loc;
-                            }
-                            trace!("SERVER {:?} empty read {:?}", self.this_server_num, loc)
-                        }
-                        else {
-                            trace!("SERVER {:?} nop {:?}", self.this_server_num, val.kind)
+                let (chain, index) = val.locs()[0];
+                //TODO validate lock
+                //     this will come after per-chain locks
+                match self.log.get(&chain) {
+                    None => {
+                        trace!("SERVER {:?} Read Vacant chain {:?}",
+                            self.this_server_num, chain);
+                        match val.kind {
+                            EntryKind::Read => empty_read(val, 0),
+                            _ => trace!("SERVER {:?} nop {:?}", self.this_server_num, val.kind)
                         }
                     }
-                    Occupied(mut e) => {
-                        trace!("SERVER {:?} Read Occupied entry {:?} {:?}", self.this_server_num, loc, e.get().id);
-                        let packet = e.get_mut();
-                        *val = (**packet).clone();
-                        // trace!("SERVER {:?} returning {:?}", packet);
-                    }
+                    Some(log) => match log.get(index.into()) {
+                        None => empty_read(val, log.len() - 1),
+                        Some(packet) => {
+                            trace!("SERVER {:?} Read Occupied entry {:?} {:?}",
+                                self.this_server_num, (chain, index), packet.id);
+                            //FIXME
+                            *val = (*packet).clone();
+                        }
+                    },
                 }
             }
 
@@ -157,30 +158,23 @@ impl ServerLog {
                     trace!("SERVER {:?} append during lock", self.this_server_num);
                     return true
                 }
-                let loc = {
-                    let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
-                    debug_assert!(self.stores_chain(l.0),
-                        "tried to store {:?} at server {:?} of {:?}",
-                        l, self.this_server_num, self.total_servers);
-                    let hor = self.increment_horizon(l.0);
-                    l.1 = hor;
-                    *l
-                };
 
-                match self.log.entry(loc) {
-                    Vacant(e) => {
-                        trace!("SERVER {:?} Writing vacant entry {:?}", self.this_server_num, loc);
-                        assert_eq!(unsafe { val.as_data_entry().flex.loc }, loc);
-                        //TODO validate lock
-                        val.kind.insert(EntryKind::ReadSuccess);
-                        let packet = Rc::new(val.clone());
-                        e.insert(packet);
-                    }
-                    _ => {
-                        unreachable!("SERVER Occupied entry {:?}", loc)
-                        //*val = (**packet).clone();
-                    }
-                }
+                let chain = val.locs()[0].0;
+                debug_assert!(self.stores_chain(chain),
+                    "tried to store {:?} at server {:?} of {:?}",
+                    chain, self.this_server_num, self.total_servers);
+
+                let this_server_num = self.this_server_num;
+                let log = self.ensure_chain(chain);
+                {
+                    let index = log.len();
+                    val.kind.insert(EntryKind::ReadSuccess);
+                    let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
+                    l.1 = entry::from(index);
+                    trace!("SERVER {:?} Writing entry {:?}",
+                        this_server_num, (chain, index));
+                };
+                log.append(val);
             }
 
             EntryLayout::Lock => {
@@ -215,12 +209,6 @@ impl ServerLog {
         chain % self.total_servers == self.this_server_num.into()
     }
 
-    fn increment_horizon(&mut self, chain: order) -> entry {
-        let h = self.horizon.entry(chain).or_insert(0.into());
-        *h = *h + 1;
-        *h
-    }
-
     fn try_lock(&mut self, lock_num: u64) -> bool {
         trace!("SERVER {:?} is unlocked {:?}", self.this_server_num, self.is_unlocked());
         if self.is_unlocked() {
@@ -244,6 +232,14 @@ impl ServerLog {
         }
     }
 
+    fn ensure_chain(&mut self, chain: order) -> &mut Trie<Entry<()>> {
+        self.log.entry(chain).or_insert_with(|| {
+            let mut t = Trie::new();
+            t.append(&EntryContents::Data(&(), &[]).clone_entry());
+            t
+        })
+    }
+
     fn is_unlocked(&self) -> bool {
         self.last_lock == self.last_unlock
     }
@@ -251,4 +247,20 @@ impl ServerLog {
     fn server_num(&self) -> u32 {
         self.this_server_num
     }
+}
+
+fn empty_read(packet: &mut Entry<()>, last_loc: u32) {
+    let (old_id, old_loc) = unsafe {
+        (packet.id, packet.locs()[0])
+    };
+    let chain: order = old_loc.0;
+    assert!(last_loc == 0 || entry::from(last_loc) < old_loc.1,
+        "{:?} >= {:?}", last_loc, old_loc);
+    *packet = EntryContents::Data(&(), &[(chain, entry::from(last_loc))]).clone_entry();
+    packet.id = old_id;
+    packet.kind = EntryKind::NoValue;
+    unsafe {
+        packet.as_data_entry_mut().flex.loc = old_loc;
+    }
+    trace!("SERVER : empty read {:?}", old_loc);
 }

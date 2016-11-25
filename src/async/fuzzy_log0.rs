@@ -1004,6 +1004,7 @@ where V: Storeable {
         assert!(chains.len() > 1);
         let mut locs: Vec<_> = chains.into_iter().map(|&o| (o, 0.into())).collect();
         locs.sort();
+        locs.dedup();
         let buffer = EntryContents::Multiput {
             data: data,
             uuid: &Uuid::new_v4(),
@@ -1034,6 +1035,8 @@ where V: Storeable {
             chains.sort();
             deps[1..].sort();
         }
+        //FIXME ensure there are no chains which are also in depends_on
+        mchains.dedup();
         assert!(mchains[chains.len()] == (0.into(), 0.into()));
         debug_assert!(mchains[..chains.len()].iter().all(|&(o, _)| chains.contains(&o)));
         debug_assert!(mchains[(chains.len() + 1)..]
