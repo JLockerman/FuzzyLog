@@ -1073,487 +1073,581 @@ where V: Storeable {
 
 #[cfg(test)]
 mod tests {
-    use packets::*;
-    use super::*;
-    use super::FromClient::*;
-    use async::store::AsyncTcpStore;
 
-    use std::collections::HashMap;
-    use std::{mem, thread};
-    use std::sync::{mpsc, Arc, Mutex};
+    macro_rules! async_tests {
+        (test $new_thread_log:ident) => (
 
-    use mio::{self, EventLoop};
+            use packets::*;
+            use super::super::*;
+            use super::super::FromClient::*;
+            use async::store::AsyncTcpStore;
 
-    //TODO move to crate root under cfg...
-    extern crate env_logger;
+            use std::collections::HashMap;
+            use std::{mem, thread};
+            use std::sync::{mpsc, Arc, Mutex};
 
-    #[test]
-    fn test_get_none() {
-        let _ = env_logger::init();
-        let mut lh = new_thread_log::<()>(vec![1.into()]);
-        assert_eq!(lh.get_next(), None);
-    }
+            use mio::{self, EventLoop};
 
-    #[test]
-    fn test_get_none2() {
-        let _ = env_logger::init();
-        let mut lh = new_thread_log::<()>(vec![1.into()]);
-        lh.snapshot(1.into());
-        assert_eq!(lh.get_next(), None);
-    }
+            //TODO move to crate root under cfg...
+            extern crate env_logger;
 
-    #[test]
-    pub fn test_1_column() {
-        let _ = env_logger::init();
-        trace!("TEST 1 column");
-        let mut lh = new_thread_log::<i32>(vec![3.into()]);
-        let _ = lh.append(3.into(), &1, &[]);
-        let _ = lh.append(3.into(), &17, &[]);
-        let _ = lh.append(3.into(), &32, &[]);
-        let _ = lh.append(3.into(), &-1, &[]);
-        lh.snapshot(3.into());
-        assert_eq!(lh.get_next(), Some((&1,  &[(3.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(), Some((&17, &[(3.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(), Some((&32, &[(3.into(), 3.into())][..])));
-        assert_eq!(lh.get_next(), Some((&-1, &[(3.into(), 4.into())][..])));
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_3_column() {
-        let _ = env_logger::init();
-        trace!("TEST 3 column");
-
-        let mut lh = new_thread_log::<i32>(vec![4.into(), 5.into(), 6.into()]);
-        let cols = vec![vec![12, 19, 30006, 122, 9],
-            vec![45, 111111, -64, 102, -10101],
-            vec![-1, -2, -9, 16, -108]];
-        for (j, col) in cols.iter().enumerate() {
-            for i in col.iter() {
-                let _ = lh.append(((j + 4) as u32).into(), i, &[]);
-            }
-        }
-        lh.snapshot(4.into());
-        lh.snapshot(6.into());
-        lh.snapshot(5.into());
-        let mut is = [0u32, 0, 0, 0];
-        let total_len = cols.iter().fold(0, |len, col| len + col.len());
-        for _ in 0..total_len {
-            let next = lh.get_next();
-            assert!(next.is_some());
-            let (&n, ois) = next.unwrap();
-            assert_eq!(ois.len(), 1);
-            let (o, i) = ois[0];
-            let off: u32 = (o - 4).into();
-            is[off as usize] = is[off as usize] + 1;
-            let i: u32 = i.into();
-            assert_eq!(is[off as usize], i);
-            let c = is[off as usize] - 1;
-            assert_eq!(n, cols[off as usize][c as usize]);
-        }
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_read_deps() {
-        let _ = env_logger::init();
-        trace!("TEST read deps");
-
-        let mut lh = new_thread_log::<i32>(vec![7.into(), 8.into()]);
-
-        let _ = lh.append(7.into(), &63,  &[]);
-        let _ = lh.append(8.into(), &-2,  &[(7.into(), 1.into())]);
-        let _ = lh.append(8.into(), &-56, &[]);
-        let _ = lh.append(7.into(), &111, &[(8.into(), 2.into())]);
-        let _ = lh.append(8.into(), &0,   &[(7.into(), 2.into())]);
-        lh.snapshot(8.into());
-        lh.snapshot(7.into());
-        assert_eq!(lh.get_next(), Some((&63,  &[(7.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(), Some((&-2,  &[(8.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(), Some((&-56, &[(8.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(), Some((&111, &[(7.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(), Some((&0,   &[(8.into(), 3.into())][..])));
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_long() {
-        let _ = env_logger::init();
-        trace!("TEST long");
-
-        let mut lh = new_thread_log::<i32>(vec![9.into()]);
-        for i in 0..19i32 {
-            let _ = lh.append(9.into(), &i, &[]);
-        }
-        lh.snapshot(9.into());
-        for i in 0..19i32 {
-            let u = i as u32;
-            assert_eq!(lh.get_next(), Some((&i,  &[(9.into(), (u + 1).into())][..])));
-        }
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_wide() {
-        let _ = env_logger::init();
-        trace!("TEST wide");
-
-        let interesting_chains: Vec<_> = (10..21).map(|i| i.into()).collect();
-        let mut lh = new_thread_log(interesting_chains.clone());
-        for &i in &interesting_chains {
-            if i > 10.into() {
-                let _ = lh.append(i.into(), &i, &[(i - 1, 1.into())]);
-            }
-            else {
-                let _ = lh.append(i.into(), &i, &[]);
+            #[test]
+            fn test_get_none() {
+                let _ = env_logger::init();
+                let mut lh = $new_thread_log::<()>(vec![1.into()]);
+                assert_eq!(lh.get_next(), None);
             }
 
-        }
-        lh.snapshot(20.into());
-        for &i in &interesting_chains {
-            assert_eq!(lh.get_next(), Some((&i,  &[(i, 1.into())][..])));
-        }
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_append_after_fetch() {
-        let _ = env_logger::init();
-        trace!("TEST append after fetch");
-
-        let mut lh = new_thread_log(vec![21.into()]);
-        for i in 0u32..10 {
-            let _ = lh.append(21.into(), &i, &[]);
-        }
-        lh.snapshot(21.into());
-        for i in 0u32..10 {
-            assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
-        }
-        assert_eq!(lh.get_next(), None);
-        for i in 10u32..21 {
-            let _ = lh.append(21.into(), &i, &[]);
-        }
-        lh.snapshot(21.into());
-        for i in 10u32..21 {
-            assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
-        }
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_append_after_fetch_short() {
-        let _ = env_logger::init();
-        trace!("TEST append after fetch short");
-
-        let mut lh = new_thread_log(vec![22.into()]);
-        for i in 0u32..2 {
-            let _ = lh.append(22.into(), &i, &[]);
-        }
-        lh.snapshot(22.into());
-        for i in 0u32..2 {
-            assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
-        }
-        assert_eq!(lh.get_next(), None);
-        for i in 2u32..4 {
-            let _ = lh.append(22.into(), &i, &[]);
-        }
-        lh.snapshot(22.into());
-        for i in 2u32..4 {
-            assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
-        }
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_multi() {
-        let _ = env_logger::init();
-        trace!("TEST multi");
-
-        let columns = vec![23.into(), 24.into(), 25.into()];
-        let mut lh = new_thread_log::<u64>(columns.clone());
-        let _ = lh.multiappend(&columns, &0xfeed, &[]);
-        let _ = lh.multiappend(&columns, &0xbad , &[]);
-        let _ = lh.multiappend(&columns, &0xcad , &[]);
-        let _ = lh.multiappend(&columns, &13    , &[]);
-        lh.snapshot(24.into());
-        assert_eq!(lh.get_next(), Some((&0xfeed, &[(23.into(), 1.into()),
-            (24.into(), 1.into()), (25.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(), Some((&0xbad , &[(23.into(), 2.into()),
-            (24.into(), 2.into()), (25.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(), Some((&0xcad , &[(23.into(), 3.into()),
-            (24.into(), 3.into()), (25.into(), 3.into())][..])));
-        assert_eq!(lh.get_next(), Some((&13    , &[(23.into(), 4.into()),
-            (24.into(), 4.into()), (25.into(), 4.into())][..])));
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_multi_shingled() {
-        let _ = env_logger::init();
-        trace!("TEST multi shingled");
-
-        let columns = vec![26.into(), 27.into(), 28.into(), 29.into(), 30.into()];
-        let mut lh = new_thread_log::<u64>(columns.clone());
-        for (i, cols) in columns.windows(2).rev().enumerate() {
-            let i = i as u64;
-            let _ = lh.multiappend(&cols, &((i + 1) * 2), &[]);
-        }
-        lh.snapshot(26.into());
-        assert_eq!(lh.get_next(),
-            Some((&2, &[(29.into(), 1.into()), (30.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(),
-            Some((&4, &[(28.into(), 1.into()), (29.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(),
-            Some((&6, &[(27.into(), 1.into()), (28.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(),
-            Some((&8, &[(26.into(), 1.into()), (27.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_multi_wide() {
-        let _ = env_logger::init();
-        trace!("TEST multi wide");
-
-        let columns: Vec<_> = (31..45).map(Into::into).collect();
-        let mut lh = new_thread_log::<u64>(columns.clone());
-        let _ = lh.multiappend(&columns, &82352  , &[]);
-        let _ = lh.multiappend(&columns, &018945 , &[]);
-        let _ = lh.multiappend(&columns, &119332 , &[]);
-        let _ = lh.multiappend(&columns, &0      , &[]);
-        let _ = lh.multiappend(&columns, &17     , &[]);
-        lh.snapshot(33.into());
-        let locs: Vec<_> = columns.iter().map(|&o| (o, 1.into())).collect();
-        assert_eq!(lh.get_next(), Some((&82352 , &locs[..])));
-        let locs: Vec<_> = columns.iter().map(|&o| (o, 2.into())).collect();
-        assert_eq!(lh.get_next(), Some((&018945, &locs[..])));
-        let locs: Vec<_> = columns.iter().map(|&o| (o, 3.into())).collect();
-        assert_eq!(lh.get_next(), Some((&119332, &locs[..])));
-        let locs: Vec<_> = columns.iter().map(|&o| (o, 4.into())).collect();
-        assert_eq!(lh.get_next(), Some((&0     , &locs[..])));
-        let locs: Vec<_> = columns.iter().map(|&o| (o, 5.into())).collect();
-        assert_eq!(lh.get_next(), Some((&17    , &locs[..])));
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_multi_deep() {
-        let _ = env_logger::init();
-        trace!("TEST multi deep");
-
-        let columns: Vec<_> = (45..49).map(Into::into).collect();
-        let mut lh = new_thread_log::<u32>(columns.clone());
-        for i in 1..32 {
-            let _ = lh.multiappend(&columns, &i, &[]);
-        }
-        lh.snapshot(48.into());
-        for i in 1..32 {
-            let locs: Vec<_> = columns.iter().map(|&o| (o, i.into())).collect();
-            assert_eq!(lh.get_next(), Some((&i , &locs[..])));
-        }
-        assert_eq!(lh.get_next(), None);
-    }
-
-    #[test]
-    pub fn test_dependent_multi() {
-        let _ = env_logger::init();
-        trace!("TEST multi");
-
-        let columns = vec![49.into(), 50.into(), 51.into()];
-        let mut lh = new_thread_log::<u64>(columns.clone());
-        let _ = lh.append(50.into(), &22, &[]);
-        let _ = lh.append(51.into(), &11, &[]);
-        let _ = lh.append(49.into(), &0xf0000, &[]);
-        let _ = lh.dependent_multiappend(&[49.into()], &[50.into(), 51.into()], &0xbaaa, &[]);
-        lh.snapshot(49.into());
-        {
-            let potential_vals: [_; 3] =
-                [(22     , vec![(50.into(), 1.into())]),
-                 (11     , vec![(51.into(), 1.into())]),
-                 (0xf0000, vec![(49.into(), 1.into())])
-                ];
-            let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
-            for _ in 0..3 {
-                let next_val = &lh.get_next().expect("should find val");
-                let locs = potential_vals.remove(next_val.0).expect("must be expected");
-                assert_eq!(next_val.1, &locs[..]);
+            #[test]
+            fn test_get_none2() {
+                let _ = env_logger::init();
+                let mut lh = $new_thread_log::<()>(vec![1.into()]);
+                lh.snapshot(1.into());
+                assert_eq!(lh.get_next(), None);
             }
-        }
-        assert_eq!(lh.get_next(),
-            Some((&0xbaaa,
-                &[(49.into(), 2.into()),
-                  ( 0.into(), 0.into()),
-                  (50.into(), 2.into()),
-                  (51.into(), 2.into())
-                 ][..])));
-        assert_eq!(lh.get_next(), None);
-    }
 
-    #[test]
-    pub fn test_dependent_multi_with_early_fetch() {
-        let _ = env_logger::init();
-        trace!("TEST multi");
+            #[test]
+            pub fn test_1_column() {
+                let _ = env_logger::init();
+                trace!("TEST 1 column");
+                let mut lh = $new_thread_log::<i32>(vec![3.into()]);
+                let _ = lh.append(3.into(), &1, &[]);
+                let _ = lh.append(3.into(), &17, &[]);
+                let _ = lh.append(3.into(), &32, &[]);
+                let _ = lh.append(3.into(), &-1, &[]);
+                lh.snapshot(3.into());
+                assert_eq!(lh.get_next(), Some((&1,  &[(3.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&17, &[(3.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&32, &[(3.into(), 3.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-1, &[(3.into(), 4.into())][..])));
+                assert_eq!(lh.get_next(), None);
+            }
 
-        let columns = vec![52.into(), 53.into(), 54.into()];
-        let mut lh = new_thread_log::<i64>(columns.clone());
-        let _ = lh.append(52.into(), &99999, &[]);
-        let _ = lh.append(53.into(), &101, &[]);
-        let _ = lh.append(54.into(), &-99, &[]);
-        let _ = lh.dependent_multiappend(&[53.into()], &[52.into(), 54.into()], &-7777, &[]);
-        lh.snapshot(52.into());
-        lh.snapshot(54.into());
-        {
-            let potential_vals =
-                [(99999, vec![(52.into(), 1.into())]),
-                 (-99  , vec![(54.into(), 1.into())]),
-                ];
-            let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
-            for _ in 0..2 {
-                let next_val = &lh.get_next().expect("should find val");
-                match potential_vals.remove(next_val.0) {
-                    Some(locs) => assert_eq!(next_val.1, &locs[..]),
-                    None => panic!("unexpected val {:?}", next_val),
+            #[test]
+            pub fn test_3_column() {
+                let _ = env_logger::init();
+                trace!("TEST 3 column");
+
+                let mut lh = $new_thread_log::<i32>(vec![4.into(), 5.into(), 6.into()]);
+                let cols = vec![vec![12, 19, 30006, 122, 9],
+                    vec![45, 111111, -64, 102, -10101],
+                    vec![-1, -2, -9, 16, -108]];
+                for (j, col) in cols.iter().enumerate() {
+                    for i in col.iter() {
+                        let _ = lh.append(((j + 4) as u32).into(), i, &[]);
+                    }
+                }
+                lh.snapshot(4.into());
+                lh.snapshot(6.into());
+                lh.snapshot(5.into());
+                let mut is = [0u32, 0, 0, 0];
+                let total_len = cols.iter().fold(0, |len, col| len + col.len());
+                for _ in 0..total_len {
+                    let next = lh.get_next();
+                    assert!(next.is_some());
+                    let (&n, ois) = next.unwrap();
+                    assert_eq!(ois.len(), 1);
+                    let (o, i) = ois[0];
+                    let off: u32 = (o - 4).into();
+                    is[off as usize] = is[off as usize] + 1;
+                    let i: u32 = i.into();
+                    assert_eq!(is[off as usize], i);
+                    let c = is[off as usize] - 1;
+                    assert_eq!(n, cols[off as usize][c as usize]);
+                }
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_read_deps() {
+                let _ = env_logger::init();
+                trace!("TEST read deps");
+
+                let mut lh = $new_thread_log::<i32>(vec![7.into(), 8.into()]);
+
+                let _ = lh.append(7.into(), &63,  &[]);
+                let _ = lh.append(8.into(), &-2,  &[(7.into(), 1.into())]);
+                let _ = lh.append(8.into(), &-56, &[]);
+                let _ = lh.append(7.into(), &111, &[(8.into(), 2.into())]);
+                let _ = lh.append(8.into(), &0,   &[(7.into(), 2.into())]);
+                lh.snapshot(8.into());
+                lh.snapshot(7.into());
+                assert_eq!(lh.get_next(), Some((&63,  &[(7.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-2,  &[(8.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-56, &[(8.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&111, &[(7.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0,   &[(8.into(), 3.into())][..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_long() {
+                let _ = env_logger::init();
+                trace!("TEST long");
+
+                let mut lh = $new_thread_log::<i32>(vec![9.into()]);
+                for i in 0..19i32 {
+                    let _ = lh.append(9.into(), &i, &[]);
+                }
+                lh.snapshot(9.into());
+                for i in 0..19i32 {
+                    let u = i as u32;
+                    assert_eq!(lh.get_next(), Some((&i,  &[(9.into(), (u + 1).into())][..])));
+                }
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_wide() {
+                let _ = env_logger::init();
+                trace!("TEST wide");
+
+                let interesting_chains: Vec<_> = (10..21).map(|i| i.into()).collect();
+                let mut lh = $new_thread_log(interesting_chains.clone());
+                for &i in &interesting_chains {
+                    if i > 10.into() {
+                        let _ = lh.append(i.into(), &i, &[(i - 1, 1.into())]);
+                    }
+                    else {
+                        let _ = lh.append(i.into(), &i, &[]);
+                    }
+
+                }
+                lh.snapshot(20.into());
+                for &i in &interesting_chains {
+                    assert_eq!(lh.get_next(), Some((&i,  &[(i, 1.into())][..])));
+                }
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_append_after_fetch() {
+                let _ = env_logger::init();
+                trace!("TEST append after fetch");
+
+                let mut lh = $new_thread_log(vec![21.into()]);
+                for i in 0u32..10 {
+                    let _ = lh.append(21.into(), &i, &[]);
+                }
+                lh.snapshot(21.into());
+                for i in 0u32..10 {
+                    assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
+                }
+                assert_eq!(lh.get_next(), None);
+                for i in 10u32..21 {
+                    let _ = lh.append(21.into(), &i, &[]);
+                }
+                lh.snapshot(21.into());
+                for i in 10u32..21 {
+                    assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
+                }
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_append_after_fetch_short() {
+                let _ = env_logger::init();
+                trace!("TEST append after fetch short");
+
+                let mut lh = $new_thread_log(vec![22.into()]);
+                for i in 0u32..2 {
+                    let _ = lh.append(22.into(), &i, &[]);
+                }
+                lh.snapshot(22.into());
+                for i in 0u32..2 {
+                    assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
+                }
+                assert_eq!(lh.get_next(), None);
+                for i in 2u32..4 {
+                    let _ = lh.append(22.into(), &i, &[]);
+                }
+                lh.snapshot(22.into());
+                for i in 2u32..4 {
+                    assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
+                }
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_multi() {
+                let _ = env_logger::init();
+                trace!("TEST multi");
+
+                let columns = vec![23.into(), 24.into(), 25.into()];
+                let mut lh = $new_thread_log::<u64>(columns.clone());
+                let _ = lh.multiappend(&columns, &0xfeed, &[]);
+                let _ = lh.multiappend(&columns, &0xbad , &[]);
+                let _ = lh.multiappend(&columns, &0xcad , &[]);
+                let _ = lh.multiappend(&columns, &13    , &[]);
+                lh.snapshot(24.into());
+                assert_eq!(lh.get_next(), Some((&0xfeed, &[(23.into(), 1.into()),
+                    (24.into(), 1.into()), (25.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xbad , &[(23.into(), 2.into()),
+                    (24.into(), 2.into()), (25.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xcad , &[(23.into(), 3.into()),
+                    (24.into(), 3.into()), (25.into(), 3.into())][..])));
+                assert_eq!(lh.get_next(), Some((&13    , &[(23.into(), 4.into()),
+                    (24.into(), 4.into()), (25.into(), 4.into())][..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_multi_shingled() {
+                let _ = env_logger::init();
+                trace!("TEST multi shingled");
+
+                let columns = vec![26.into(), 27.into(), 28.into(), 29.into(), 30.into()];
+                let mut lh = $new_thread_log::<u64>(columns.clone());
+                for (i, cols) in columns.windows(2).rev().enumerate() {
+                    let i = i as u64;
+                    let _ = lh.multiappend(&cols, &((i + 1) * 2), &[]);
+                }
+                lh.snapshot(26.into());
+                assert_eq!(lh.get_next(),
+                    Some((&2, &[(29.into(), 1.into()), (30.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&4, &[(28.into(), 1.into()), (29.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&6, &[(27.into(), 1.into()), (28.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&8, &[(26.into(), 1.into()), (27.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_multi_wide() {
+                let _ = env_logger::init();
+                trace!("TEST multi wide");
+
+                let columns: Vec<_> = (31..45).map(Into::into).collect();
+                let mut lh = $new_thread_log::<u64>(columns.clone());
+                let _ = lh.multiappend(&columns, &82352  , &[]);
+                let _ = lh.multiappend(&columns, &018945 , &[]);
+                let _ = lh.multiappend(&columns, &119332 , &[]);
+                let _ = lh.multiappend(&columns, &0      , &[]);
+                let _ = lh.multiappend(&columns, &17     , &[]);
+                lh.snapshot(33.into());
+                let locs: Vec<_> = columns.iter().map(|&o| (o, 1.into())).collect();
+                assert_eq!(lh.get_next(), Some((&82352 , &locs[..])));
+                let locs: Vec<_> = columns.iter().map(|&o| (o, 2.into())).collect();
+                assert_eq!(lh.get_next(), Some((&018945, &locs[..])));
+                let locs: Vec<_> = columns.iter().map(|&o| (o, 3.into())).collect();
+                assert_eq!(lh.get_next(), Some((&119332, &locs[..])));
+                let locs: Vec<_> = columns.iter().map(|&o| (o, 4.into())).collect();
+                assert_eq!(lh.get_next(), Some((&0     , &locs[..])));
+                let locs: Vec<_> = columns.iter().map(|&o| (o, 5.into())).collect();
+                assert_eq!(lh.get_next(), Some((&17    , &locs[..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_multi_deep() {
+                let _ = env_logger::init();
+                trace!("TEST multi deep");
+
+                let columns: Vec<_> = (45..49).map(Into::into).collect();
+                let mut lh = $new_thread_log::<u32>(columns.clone());
+                for i in 1..32 {
+                    let _ = lh.multiappend(&columns, &i, &[]);
+                }
+                lh.snapshot(48.into());
+                for i in 1..32 {
+                    let locs: Vec<_> = columns.iter().map(|&o| (o, i.into())).collect();
+                    assert_eq!(lh.get_next(), Some((&i , &locs[..])));
+                }
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_dependent_multi() {
+                let _ = env_logger::init();
+                trace!("TEST multi");
+
+                let columns = vec![49.into(), 50.into(), 51.into()];
+                let mut lh = $new_thread_log::<u64>(columns.clone());
+                let _ = lh.append(50.into(), &22, &[]);
+                let _ = lh.append(51.into(), &11, &[]);
+                let _ = lh.append(49.into(), &0xf0000, &[]);
+                let _ = lh.dependent_multiappend(&[49.into()], &[50.into(), 51.into()], &0xbaaa, &[]);
+                lh.snapshot(49.into());
+                {
+                    let potential_vals: [_; 3] =
+                        [(22     , vec![(50.into(), 1.into())]),
+                         (11     , vec![(51.into(), 1.into())]),
+                         (0xf0000, vec![(49.into(), 1.into())])
+                        ];
+                    let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
+                    for _ in 0..3 {
+                        let next_val = &lh.get_next().expect("should find val");
+                        let locs = potential_vals.remove(next_val.0).expect("must be expected");
+                        assert_eq!(next_val.1, &locs[..]);
+                    }
+                }
+                assert_eq!(lh.get_next(),
+                    Some((&0xbaaa,
+                        &[(49.into(), 2.into()),
+                          ( 0.into(), 0.into()),
+                          (50.into(), 2.into()),
+                          (51.into(), 2.into())
+                         ][..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_dependent_multi_with_early_fetch() {
+                let _ = env_logger::init();
+                trace!("TEST multi");
+
+                let columns = vec![52.into(), 53.into(), 54.into()];
+                let mut lh = $new_thread_log::<i64>(columns.clone());
+                let _ = lh.append(52.into(), &99999, &[]);
+                let _ = lh.append(53.into(), &101, &[]);
+                let _ = lh.append(54.into(), &-99, &[]);
+                let _ = lh.dependent_multiappend(&[53.into()], &[52.into(), 54.into()], &-7777, &[]);
+                lh.snapshot(52.into());
+                lh.snapshot(54.into());
+                {
+                    let potential_vals =
+                        [(99999, vec![(52.into(), 1.into())]),
+                         (-99  , vec![(54.into(), 1.into())]),
+                        ];
+                    let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
+                    for _ in 0..2 {
+                        let next_val = &lh.get_next().expect("should find val");
+                        match potential_vals.remove(next_val.0) {
+                            Some(locs) => assert_eq!(next_val.1, &locs[..]),
+                            None => panic!("unexpected val {:?}", next_val),
+                        }
+
+                    }
+                }
+                lh.snapshot(53.into());
+                assert_eq!(lh.get_next(), Some((&101, &[(53.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&-7777,
+                        &[(53.into(), 2.into()),
+                          ( 0.into(), 0.into()),
+                          (52.into(), 2.into()),
+                          (54.into(), 2.into())
+                         ][..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_dependent_multi_with_partial_early_fetch() {
+                let _ = env_logger::init();
+                trace!("TEST multi");
+
+                let columns = vec![55.into(), 56.into(), 57.into()];
+                let mut lh = $new_thread_log::<i64>(columns.clone());
+                let _ = lh.append(55.into(), &99999, &[]);
+                let _ = lh.append(56.into(), &101, &[]);
+                let _ = lh.append(57.into(), &-99, &[]);
+                let _ = lh.dependent_multiappend(&[55.into()], &[56.into(), 57.into()], &-7777, &[]);
+                lh.snapshot(56.into());
+                assert_eq!(lh.get_next(), Some((&101, &[(56.into(), 1.into())][..])));
+                lh.snapshot(55.into());
+                assert_eq!(lh.get_next(), Some((&99999, &[(55.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-99, &[(57.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&-7777,
+                        &[(55.into(), 2.into()),
+                          ( 0.into(), 0.into()),
+                          (56.into(), 2.into()),
+                          (57.into(), 2.into())
+                         ][..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
+            #[test]
+            pub fn test_multi_boring() {
+                let _ = env_logger::init();
+                trace!("TEST multi");
+
+                let _columns = &[order::from(58), order::from(59), order::from(60)];
+                let interesting_columns = vec![58.into(), 59.into()];
+                let mut lh = $new_thread_log::<i64>(interesting_columns);
+                //1. even if one of the columns is boring we can still read the multi
+                let _ = lh.multiappend(&[58.into(), 60.into()], &0xfeed, &[]);
+                //2. transitives are obeyed beyond boring columns
+                let _ = lh.multiappend(&[59.into(), 60.into()], &0xbad , &[]);
+                let _ = lh.append(60.into(), &-1 , &[]);
+                let _ = lh.multiappend(&[58.into(), 60.into()], &0xdeed, &[]);
+                lh.snapshot(58.into());
+                assert_eq!(lh.get_next(), Some((&0xfeed, &[(58.into(), 1.into()),
+                    (60.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xbad, &[(59.into(), 1.into()),
+                    (60.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xdeed, &[(58.into(), 2.into()),
+                    (60.into(), 4.into())][..])));
+            }
+
+            //TODO test append after prefetch but before read
+        );
+        () => ( async_tests!(tcp); async_tests!(udp); );
+        (tcp) => (
+            mod tcp {
+                async_tests!(test new_thread_log);
+
+                #[allow(non_upper_case_globals)]
+                const lock_str: &'static str = "0.0.0.0:13389";
+                #[allow(non_upper_case_globals)]
+                const addr_strs: &'static [&'static str] = &["0.0.0.0:13390", "0.0.0.0:13391"];
+
+                fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                    start_tcp_servers();
+
+                    let to_store_m = Arc::new(Mutex::new(None));
+                    let tsm = to_store_m.clone();
+                    let (to_log, from_outside) = mpsc::channel();
+                    let client = to_log.clone();
+                    let (ready_reads_s, ready_reads_r) = mpsc::channel();
+                    let (finished_writes_s, finished_writes_r) = mpsc::channel();
+                    thread::spawn(move || {
+                        let mut event_loop = EventLoop::new().unwrap();
+                        let to_store = event_loop.channel();
+                        *tsm.lock().unwrap() = Some(to_store);
+                        let mut store = AsyncTcpStore::tcp(lock_str.parse().unwrap(),
+                            addr_strs.into_iter().map(|s| s.parse().unwrap()),
+                            client, &mut event_loop).expect("");
+                            event_loop.run(&mut store).expect("should never return");
+                    });
+                    let to_store;
+                    loop {
+                        let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                        if let Some(s) = ts {
+                            to_store = s;
+                            break
+                        }
+                    }
+                    thread::spawn(move || {
+                        let log = ThreadLog::new(to_store, from_outside, ready_reads_s, finished_writes_s,
+                            interesting_chains.into_iter());
+                        log.run()
+                    });
+
+                    LogHandle::new(to_log, ready_reads_r, finished_writes_r)
                 }
 
-            }
-        }
-        lh.snapshot(53.into());
-        assert_eq!(lh.get_next(), Some((&101, &[(53.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(),
-            Some((&-7777,
-                &[(53.into(), 2.into()),
-                  ( 0.into(), 0.into()),
-                  (52.into(), 2.into()),
-                  (54.into(), 2.into())
-                 ][..])));
-        assert_eq!(lh.get_next(), None);
-    }
 
-    #[test]
-    pub fn test_dependent_multi_with_partial_early_fetch() {
-        let _ = env_logger::init();
-        trace!("TEST multi");
+                fn start_tcp_servers()
+                {
+                    use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+                    use std::{thread, iter};
 
-        let columns = vec![55.into(), 56.into(), 57.into()];
-        let mut lh = new_thread_log::<i64>(columns.clone());
-        let _ = lh.append(55.into(), &99999, &[]);
-        let _ = lh.append(56.into(), &101, &[]);
-        let _ = lh.append(57.into(), &-99, &[]);
-        let _ = lh.dependent_multiappend(&[55.into()], &[56.into(), 57.into()], &-7777, &[]);
-        lh.snapshot(56.into());
-        assert_eq!(lh.get_next(), Some((&101, &[(56.into(), 1.into())][..])));
-        lh.snapshot(55.into());
-        assert_eq!(lh.get_next(), Some((&99999, &[(55.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(), Some((&-99, &[(57.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(),
-            Some((&-7777,
-                &[(55.into(), 2.into()),
-                  ( 0.into(), 0.into()),
-                  (56.into(), 2.into()),
-                  (57.into(), 2.into())
-                 ][..])));
-        assert_eq!(lh.get_next(), None);
-    }
+                    use servers::tcp::Server;
 
-    #[test]
-    pub fn test_multi_boring() {
-        let _ = env_logger::init();
-        trace!("TEST multi");
+                    static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
-        let _columns = &[order::from(58), order::from(59), order::from(60)];
-        let interesting_columns = vec![58.into(), 59.into()];
-        let mut lh = new_thread_log::<i64>(interesting_columns);
-        //1. even if one of the columns is boring we can still read the multi
-        let _ = lh.multiappend(&[58.into(), 60.into()], &0xfeed, &[]);
-        //2. transitives are obeyed beyond boring columns
-        let _ = lh.multiappend(&[59.into(), 60.into()], &0xbad , &[]);
-        let _ = lh.append(60.into(), &-1 , &[]);
-        let _ = lh.multiappend(&[58.into(), 60.into()], &0xdeed, &[]);
-        lh.snapshot(58.into());
-        assert_eq!(lh.get_next(), Some((&0xfeed, &[(58.into(), 1.into()),
-            (60.into(), 1.into())][..])));
-        assert_eq!(lh.get_next(), Some((&0xbad, &[(59.into(), 1.into()),
-            (60.into(), 2.into())][..])));
-        assert_eq!(lh.get_next(), Some((&0xdeed, &[(58.into(), 2.into()),
-            (60.into(), 4.into())][..])));
-    }
+                    for (i, &addr_str) in iter::once(&lock_str).chain(addr_strs.iter()).enumerate() {
+                        let handle = thread::spawn(move || {
 
-    //TODO test append after prefetch but before read
-    //TODO test UDP
+                            let addr = addr_str.parse().expect("invalid inet address");
+                            let mut event_loop = EventLoop::new().unwrap();
+                            let server = if i == 0 {
+                                Server::new(&addr, 0, 1, &mut event_loop)
+                            }
+                            else {
+                                Server::new(&addr, i as u32 -1, addr_strs.len() as u32,
+                                    &mut event_loop)
+                            };
+                            if let Ok(mut server) = server {
+                                SERVERS_READY.fetch_add(1, Ordering::Release);
+                                trace!("starting server");
+                                event_loop.run(&mut server).expect("server should never stop");
+                            }
+                            trace!("server already started");
+                            return;
+                        });
+                        mem::forget(handle);
+                    }
 
-    #[allow(non_upper_case_globals)]
-    const lock_str: &'static str = "0.0.0.0:13389";
-    #[allow(non_upper_case_globals)]
-    const addr_strs: &'static [&'static str] = &["0.0.0.0:13390", "0.0.0.0:13391"];
-
-    fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
-        start_servers();
-
-        let to_store_m = Arc::new(Mutex::new(None));
-        let tsm = to_store_m.clone();
-        let (to_log, from_outside) = mpsc::channel();
-        let client = to_log.clone();
-        let (ready_reads_s, ready_reads_r) = mpsc::channel();
-        let (finished_writes_s, finished_writes_r) = mpsc::channel();
-        thread::spawn(move || {
-            let mut event_loop = EventLoop::new().unwrap();
-            let to_store = event_loop.channel();
-            *tsm.lock().unwrap() = Some(to_store);
-            let mut store = AsyncTcpStore::tcp(lock_str.parse().unwrap(),
-                addr_strs.into_iter().map(|s| s.parse().unwrap()),
-                client, &mut event_loop).expect("");
-                event_loop.run(&mut store).expect("should never return");
-        });
-        let to_store;
-        loop {
-            let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
-            if let Some(s) = ts {
-                to_store = s;
-                break
-            }
-        }
-        thread::spawn(move || {
-            let log = ThreadLog::new(to_store, from_outside, ready_reads_s, finished_writes_s,
-                interesting_chains.into_iter());
-            log.run()
-        });
-
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
-    }
-
-
-    fn start_servers()
-    {
-        use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
-        use std::{thread, iter};
-
-        use servers::tcp::Server;
-
-        static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
-
-        for (i, &addr_str) in iter::once(&lock_str).chain(addr_strs.iter()).enumerate() {
-            let handle = thread::spawn(move || {
-
-                let addr = addr_str.parse().expect("invalid inet address");
-                let mut event_loop = EventLoop::new().unwrap();
-                let server = if i == 0 {
-                    Server::new(&addr, 0, 1, &mut event_loop)
+                    while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}
                 }
-                else {
-                    Server::new(&addr, i as u32 -1, addr_strs.len() as u32,
-                        &mut event_loop)
-                };
-                if let Ok(mut server) = server {
-                    SERVERS_READY.fetch_add(1, Ordering::Release);
-                    trace!("starting server");
-                    event_loop.run(&mut server).expect("server should never stop");
-                }
-                trace!("server already started");
-                return;
-            });
-            mem::forget(handle);
-        }
+            }
+        );
+        (udp) => (
+            mod udp {
+                async_tests!(test new_thread_log);
 
-        while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}
+                //TODO make UDP server multi server aware
+                //#[allow(non_upper_case_globals)]
+                //const lock_str: &'static str = "0.0.0.0:13393";
+                //#[allow(non_upper_case_globals)]
+                //const addr_strs: &'static [&'static str] = &["0.0.0.0:13394", "0.0.0.0:13395"];
+                const addr_str: &'static str = "0.0.0.0:13393";
+
+                fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                    use std::iter;
+                    start_udp_servers();
+
+                    let to_store_m = Arc::new(Mutex::new(None));
+                    let tsm = to_store_m.clone();
+                    let (to_log, from_outside) = mpsc::channel();
+                    let client = to_log.clone();
+                    let (ready_reads_s, ready_reads_r) = mpsc::channel();
+                    let (finished_writes_s, finished_writes_r) = mpsc::channel();
+                    thread::spawn(move || {
+                        let mut event_loop = EventLoop::new().unwrap();
+                        let to_store = event_loop.channel();
+                        *tsm.lock().unwrap() = Some(to_store);
+                        let mut store = AsyncTcpStore::udp(addr_str.parse().unwrap(),
+                            iter::once(addr_str).map(|s| s.parse().unwrap()),
+                            client, &mut event_loop).expect("");
+                            event_loop.run(&mut store).expect("should never return");
+                    });
+                    let to_store;
+                    loop {
+                        let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                        if let Some(s) = ts {
+                            to_store = s;
+                            break
+                        }
+                    }
+                    thread::spawn(move || {
+                        let log = ThreadLog::new(to_store, from_outside, ready_reads_s, finished_writes_s,
+                            interesting_chains.into_iter());
+                        log.run()
+                    });
+
+                    LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+                }
+
+
+                fn start_udp_servers()
+                {
+                    use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+                    use std::{thread, iter};
+
+                    use servers::udp::Server;
+
+                    static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+
+                    {
+                        let handle = thread::spawn(move || {
+
+                            let addr = addr_str.parse().expect("invalid inet address");
+                            //let mut event_loop = EventLoop::new().unwrap();
+                            let server = Server::new(&addr);
+                            if let Ok(mut server) = server {
+                                SERVERS_READY.fetch_add(1, Ordering::Release);
+                                trace!("starting server");
+                                //event_loop.run(&mut server).expect("server should never stop");
+                                server.run()
+                            }
+                            trace!("server already started");
+                            return;
+                        });
+                        mem::forget(handle);
+                    }
+
+                    //while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}
+                    while SERVERS_READY.load(Ordering::Acquire) < 1 {}
+                    trace!("server started, client starting");
+                }
+            }
+        );
     }
+
+    async_tests!();
 }
