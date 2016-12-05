@@ -1,4 +1,3 @@
-//pub mod fuzzy_log;
-pub mod fuzzy_log0;
+pub mod fuzzy_log;
 pub mod colors;
 pub mod store;
