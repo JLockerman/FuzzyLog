@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 use std::{ops, mem};
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use packets::*;
 
@@ -13,29 +14,32 @@ use mio;
 use mio::prelude::*;
 use mio::tcp::*;
 use mio::Token;
+use mio::udp::UdpSocket;
 
 pub trait AsyncStoreClient {
     //TODO nocopy?
     fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>);
     //TODO what info is needed?
     fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>);
+
+    //TODO fn should_shutdown(&mut self) -> bool { false }
 }
 
 //TODO use FNV hash
-pub struct AsyncTcpStore<C: AsyncStoreClient> {
+pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     sent_writes: HashMap<Uuid, WriteState>,
     sent_reads: HashMap<OrderIndex, Vec<u8>>,
-    servers: Vec<PerServer>,
+    servers: Vec<PerServer<Socket>>,
     registered_for_write: BitSet,
     needs_to_write: BitSet,
     num_chain_servers: usize,
     client: C,
 }
 
-struct PerServer {
+pub struct PerServer<Socket> {
     awaiting_send: VecDeque<WriteState>,
     read_buffer: Buffer,
-    stream: TcpStream,
+    stream: Socket,
     bytes_handled: usize,
 }
 
@@ -47,27 +51,40 @@ enum WriteState {
     UnlockServer(Rc<RefCell<Vec<u8>>>, u64),
 }
 
-struct Buffer {
+pub struct Buffer {
     inner: Vec<u8>,
 }
 
-impl<C> AsyncTcpStore<C>
+struct UdpConnection {
+    socket: UdpSocket,
+    addr: SocketAddr,
+}
+
+pub trait Connected {
+    type Connection: mio::Evented;
+    fn connection(&self) -> &Self::Connection;
+    fn read_packet(&mut self) -> Option<Buffer>;
+    fn write_packet(&mut self, packet: &[u8]);
+}
+
+//TODO rename to AsyncStore
+impl<C> AsyncTcpStore<TcpStream, C>
 where C: AsyncStoreClient {
-    pub fn new<I>(lock_server: SocketAddr, chain_servers: I, client: C,
+    pub fn tcp<I>(lock_server: SocketAddr, chain_servers: I, client: C,
         event_loop: &mut EventLoop<Self>)
     -> Result<Self, io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
         let mut servers = try!(chain_servers
             .into_iter()
-            .map(PerServer::new)
+            .map(PerServer::tcp)
             .collect::<Result<Vec<_>, _>>());
         let num_chain_servers = servers.len();
-        let lock_server = try!(PerServer::new(lock_server));
+        let lock_server = try!(PerServer::tcp(lock_server));
         //TODO if let Some(lock_server) = lock_server...
         servers.push(lock_server);
         for (i, server) in servers.iter().enumerate() {
-            event_loop.register(&server.stream, Token(i),
+            event_loop.register(server.connection(), Token(i),
                 mio::EventSet::readable() | mio::EventSet::error(),
                 mio::PollOpt::edge() | mio::PollOpt::oneshot())
                 .expect("could not reregister client socket")
@@ -85,8 +102,43 @@ where C: AsyncStoreClient {
     }
 }
 
-impl PerServer {
-    fn new(addr: SocketAddr) -> Result<Self, io::Error> {
+impl<C> AsyncTcpStore<UdpConnection, C>
+where C: AsyncStoreClient {
+    pub fn udp<I>(lock_server: SocketAddr, chain_servers: I, client: C,
+        event_loop: &mut EventLoop<Self>)
+    -> Result<Self, io::Error>
+    where I: IntoIterator<Item=SocketAddr> {
+        //TODO assert no duplicates
+        let mut servers = try!(chain_servers
+            .into_iter()
+            //TODO socket per servers is dumb, see if there's a better way to do multiplexing
+            .map(PerServer::udp)
+            .collect::<Result<Vec<_>, _>>());
+        let num_chain_servers = servers.len();
+        let lock_server = try!(PerServer::udp(lock_server));
+        //TODO if let Some(lock_server) = lock_server...
+        servers.push(lock_server);
+        for (i, server) in servers.iter().enumerate() {
+            event_loop.register(server.connection(), Token(i),
+                mio::EventSet::readable() | mio::EventSet::error(),
+                mio::PollOpt::edge() | mio::PollOpt::oneshot())
+                .expect("could not reregister client socket")
+        }
+        let num_servers = servers.len();
+        Ok(AsyncTcpStore {
+            sent_writes: HashMap::new(),
+            sent_reads: HashMap::new(),
+            servers: servers,
+            registered_for_write: BitSet::with_capacity(num_servers),
+            needs_to_write: BitSet::with_capacity(num_servers),
+            num_chain_servers: num_chain_servers,
+            client: client
+        })
+    }
+}
+
+impl PerServer<TcpStream> {
+    fn tcp(addr: SocketAddr) -> Result<Self, io::Error> {
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
             read_buffer: Buffer::new(), //TODO cap
@@ -94,10 +146,30 @@ impl PerServer {
             bytes_handled: 0,
         })
     }
+
+    fn connection(&self) -> &TcpStream {
+        &self.stream
+    }
 }
 
-impl<C> mio::Handler for AsyncTcpStore<C>
-where C: AsyncStoreClient {
+impl PerServer<UdpConnection> {
+    fn udp(addr: SocketAddr) -> Result<Self, io::Error> {
+        Ok(PerServer {
+            awaiting_send: VecDeque::new(),
+            read_buffer: Buffer::new(), //TODO cap
+            stream: UdpConnection { socket: try!(UdpSocket::v4()), addr: addr },
+            bytes_handled: 0,
+        })
+    }
+
+    fn connection(&self) -> &UdpSocket {
+        &self.stream.socket
+    }
+}
+
+impl<S, C> mio::Handler for AsyncTcpStore<S, C>
+where PerServer<S>: Connected,
+      C: AsyncStoreClient {
     type Timeout = ();
     type Message = Vec<u8>;
 
@@ -190,8 +262,9 @@ where C: AsyncStoreClient {
 
 }
 
-impl<C> AsyncTcpStore<C>
-where C: AsyncStoreClient {
+impl<S, C> AsyncTcpStore<S, C>
+where PerServer<S>: Connected,
+      C: AsyncStoreClient {
     fn handle_completion(&mut self, token: Token, num_chain_servers: usize, packet: &Buffer) {
         let write_completed = self.handle_completed_write(token, num_chain_servers, packet);
         if write_completed {
@@ -287,6 +360,7 @@ where C: AsyncStoreClient {
         if token == self.lock_token() { return }
         for &oi in packet.entry().locs() {
             if let Some(mut v) = self.sent_reads.remove(&oi) {
+                //TODO validate correct id for failing read
                 //TODO num copies?
                 v.clear();
                 v.extend_from_slice(&packet[..]);
@@ -421,11 +495,11 @@ where C: AsyncStoreClient {
         server_for_chain(chain, self.num_chain_servers)
     }
 
-    fn server_for_token(&self, token: Token) -> &PerServer {
+    fn server_for_token(&self, token: Token) -> &PerServer<S> {
         &self.servers[token.as_usize()]
     }
 
-    fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer {
+    fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer<S> {
         &mut self.servers[token.as_usize()]
     }
 
@@ -443,7 +517,7 @@ where C: AsyncStoreClient {
     }
 
     fn reregister_for_read(&self, event_loop: &mut EventLoop<Self>, server: usize) {
-        let stream = &self.server_for_token(Token(server)).stream;
+        let stream = self.server_for_token(Token(server)).connection();
         event_loop.reregister(stream, Token(server),
             mio::EventSet::readable() | mio::EventSet::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
@@ -451,7 +525,7 @@ where C: AsyncStoreClient {
     }
 
     fn register_for_write(&self, event_loop: &mut EventLoop<Self>, server: usize) {
-        let stream = &self.server_for_token(Token(server)).stream;
+        let stream = self.server_for_token(Token(server)).connection();
         event_loop.reregister(stream, Token(server),
             mio::EventSet::readable() | mio::EventSet::writable() | mio::EventSet::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
@@ -459,7 +533,13 @@ where C: AsyncStoreClient {
     }
 }
 
-impl PerServer {
+impl Connected for PerServer<TcpStream> {
+    type Connection = TcpStream;
+    fn connection(&self) -> &Self::Connection {
+        &self.stream
+    }
+
+    //FIXME split function into TCP and UDP versions
     fn read_packet(&mut self) -> Option<Buffer> {
         //TODO switch to nonblocking reads
         assert_eq!(self.bytes_handled, 0);
@@ -495,19 +575,46 @@ impl PerServer {
         Some(buff)
     }
 
+    fn write_packet(&mut self, packet: &[u8]) {
+        //TODO nonblocking writes
+        self.stream.write_all(packet).expect("cannot write");
+    }
+}
+
+impl Connected for PerServer<UdpConnection> {
+    type Connection = UdpSocket;
+    fn connection(&self) -> &Self::Connection {
+        &self.stream.socket
+    }
+
+    fn read_packet(&mut self) -> Option<Buffer> {
+        //TODO
+        self.read_buffer.ensure_capacity(8192);
+        self.stream.socket.recv_from(&mut self.read_buffer[0..8192]).expect("cannot read");
+        let buff = mem::replace(&mut self.read_buffer, Buffer::new());
+        Some(buff)
+    }
+
+    fn write_packet(&mut self, packet: &[u8]) {
+        let addr = &self.stream.addr;
+        self.stream.socket.send_to(packet, addr).expect("cannot write");
+    }
+}
+
+impl<S> PerServer<S>
+where PerServer<S>: Connected {
+
     fn handle_redo(&mut self, failed: WriteState, kind: EntryKind::Kind) -> Option<WriteState> {
-        let to_ret =
-            if kind.contains(EntryKind::Multiput) {
-                Some(failed.clone_multi())
-            }
-            else {
-                None
-            };
+        let to_ret = match &failed {
+            f @ &WriteState::MultiServer(..) => Some(f.clone_multi()),
+            _ => None,
+        };
         //TODO front or back?
         self.awaiting_send.push_front(failed);
         to_ret
     }
 
+    //FIXME add seperate write function which is split into TCP and UDP versions
     fn send_next_packet(&mut self, token: Token, num_servers: usize) -> Option<WriteState> {
         use self::WriteState::*;
         match self.awaiting_send.pop_front() {
@@ -554,7 +661,8 @@ impl PerServer {
                     //TODO nonblocking writes
                     //Since sentinels have a different size than multis, we need to truncate
                     //for those sends
-                    self.stream.write_all(&ts[..send_end]).expect("cannot write");
+                    //self.stream.write_all(&ts[..send_end]).expect("cannot write");
+                    self.write_packet(&ts[..send_end]);
                 }
                 Some(MultiServer(to_send, lock_nums))
             }
@@ -571,8 +679,7 @@ impl PerServer {
                         assert_eq!(e.entry_size(), tslen);
                     }
                     trace!("CLIENT willsend {:?}", &*ts);
-                    //TODO nonblocking writes
-                    self.stream.write_all(&*ts).expect("cannot write");
+                    self.write_packet(&*ts);
                 }
                 Some(UnlockServer(to_send, lock_num))
             }
@@ -587,7 +694,7 @@ impl PerServer {
                         || l == EntryLayout::Read)
                 }
                 //TODO multipart writes?
-                to_send.with_packet(|p| self.stream.write_all(p).expect("network err") );
+                to_send.with_packet(|p| self.write_packet(p) );
                 Some(to_send)
             }
         }
@@ -745,363 +852,3 @@ fn server_for_chain(chain: order, num_servers: usize) -> usize {
 fn is_server_for(chain: order, tok: Token, num_servers: usize) -> bool {
     server_for_chain(chain, num_servers) == tok.as_usize()
 }
-
-#[cfg(test)]
-pub mod sync_store_tests {
-    use super::*;
-    use packets::*;
-    use prelude::{Store, InsertResult, GetResult, GetErr, FuzzyLog};
-
-    use std::cell::RefCell;
-    use std::mem;
-    use std::net::SocketAddr;
-    use std::rc::Rc;
-
-    use mio::prelude::EventLoop;
-
-
-    extern crate env_logger;
-    use local_store::MapEntry;
-    use local_store::test::Map;
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-
-    #[derive(Clone, Default)]
-    pub struct Queues {
-        finished_reads: VecDeque<Vec<u8>>,
-        finished_writes: VecDeque<(Uuid, Vec<OrderIndex>)>,
-    }
-
-    pub type Client = Rc<RefCell<Queues>>;
-
-    pub struct AsyncStoreToStore {
-        store: AsyncTcpStore<Client>,
-        client: Client,
-        to_store: ::mio::Sender<Vec<u8>>,
-        event_loop: EventLoop<AsyncTcpStore<Client>>,
-    }
-
-    impl AsyncStoreClient for Client {
-        fn on_finished_read(&mut self, _: OrderIndex, read_packet: Vec<u8>) {
-            self.borrow_mut().finished_reads.push_back(read_packet)
-        }
-
-        fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>) {
-            self.borrow_mut().finished_writes.push_back((write_id, write_locs))
-        }
-    }
-
-    impl AsyncStoreToStore {
-        pub fn new<I>(lock_server: SocketAddr, chain_servers: I, mut event_loop: EventLoop<AsyncTcpStore<Client>>) -> Self
-        where I: IntoIterator<Item=SocketAddr> {
-            let client: Client = Default::default();
-            let store = AsyncTcpStore::new(lock_server, chain_servers,
-                client.clone(), &mut event_loop).expect("");
-            AsyncStoreToStore {
-                store: store,
-                client: client,
-                to_store: event_loop.channel(),
-                event_loop: event_loop,
-            }
-        }
-    }
-
-    impl<V: Storeable + ?Sized> Store<V> for AsyncStoreToStore {
-        fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
-            let mut buffer = EntryContents::Data(&(), &[]).clone_bytes();
-            let read_entry_size = mem::size_of::<Entry<(), DataFlex<()>>>();
-            if buffer.capacity() < read_entry_size {
-                let add_cap = read_entry_size - buffer.capacity();
-                buffer.reserve_exact(add_cap)
-            }
-            unsafe { buffer.set_len(read_entry_size) }
-            {
-                let e = Entry::<()>::wrap_bytes_mut(&mut buffer);
-                e.kind = EntryKind::Read;
-                e.locs_mut()[0] = key;
-            }
-            self.to_store.send(buffer).expect("Could not send to store");
-            'wait: loop {
-                let read = self.client.borrow_mut().finished_reads.pop_front();
-                match read {
-                    None => self.event_loop.run_once(&mut self.store, None).unwrap(),
-                    Some(e) => {
-                        let kind = Entry::<()>::wrap_bytes(&e).kind;
-                        if kind.contains(EntryKind::ReadSuccess) {
-                            return Ok(Entry::wrap_bytes(&e).clone())
-                        }
-                        else {
-                            assert_eq!(kind, EntryKind::NoValue);
-                            return Err(
-                                GetErr::NoValue(
-                                    Entry::<()>::wrap_bytes(&e).dependencies()[0].1))
-                        }
-                    }
-                }
-            }
-        }
-
-        fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
-            let mut buffer = val.clone_bytes();
-            {
-                let e = Entry::<()>::wrap_bytes_mut(&mut buffer);
-                assert_eq!(e.kind.layout(), EntryLayout::Data);
-                e.id = Uuid::new_v4();
-                e.locs_mut()[0] = key;
-            }
-            self.to_store.send(buffer).expect("Could not send to store");
-            'wait: loop {
-                let read = self.client.borrow_mut().finished_writes.pop_front();
-                match read {
-                    None => self.event_loop.run_once(&mut self.store, None).unwrap(),
-                    Some(v) => return Ok(v.1[0]),
-                }
-            }
-        }
-
-        fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex])
-            -> InsertResult {
-            let buffer = EntryContents::Multiput {
-                    data: data,
-                    uuid: &Uuid::new_v4(),
-                    columns: chains,
-                    deps: deps,
-                }.clone_bytes();
-            self.to_store.send(buffer).expect("Could not send to store");
-            'wait: loop {
-                let read = self.client.borrow_mut().finished_writes.pop_front();
-                match read {
-                    None => self.event_loop.run_once(&mut self.store, None).unwrap(),
-                    Some(v) => return Ok(v.1[0]),
-                }
-            }
-        }
-
-        fn dependent_multi_append(&mut self, chains: &[order], depends_on: &[order],
-            data: &V, deps: &[OrderIndex])-> InsertResult {
-            let mchains: Vec<_> = chains.into_iter()
-                .map(|&c| (c, 0.into()))
-                .chain(::std::iter::once((0.into(), 0.into())))
-                .chain(depends_on.iter().map(|&c| (c, 0.into())))
-                .collect();
-            let buffer = EntryContents::Multiput {
-                    data: data,
-                    uuid: &Uuid::new_v4(),
-                    columns: &mchains,
-                    deps: deps,
-                }.clone_bytes();
-            self.to_store.send(buffer).expect("Could not send to store");
-            'wait: loop {
-                let read = self.client.borrow_mut().finished_writes.pop_front();
-                match read {
-                    None => self.event_loop.run_once(&mut self.store, None).unwrap(),
-                    Some(v) => return Ok(v.1[0]),
-                }
-            }
-        }
-    }
-
-    impl Clone for AsyncStoreToStore {
-        fn clone(&self) -> Self {
-            unimplemented!()
-        }
-    }
-
-    #[allow(non_upper_case_globals)]
-    fn new_store(_: Vec<OrderIndex>) -> AsyncStoreToStore
-    {
-        use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
-        use std::{thread, iter};
-
-        use servers::tcp::Server;
-
-        static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
-
-        const lock_str: &'static str = "0.0.0.0:13289";
-        const addr_strs: &'static [&'static str] = &["0.0.0.0:13290", "0.0.0.0:13291", "0.0.0.0:13292"];
-
-        for (i, &addr_str) in iter::once(&lock_str).chain(addr_strs.iter()).enumerate() {
-            let handle = thread::spawn(move || {
-
-                let addr = addr_str.parse().expect("invalid inet address");
-                let mut event_loop = EventLoop::new().unwrap();
-                let server = if i == 0 {
-                    Server::new(&addr, 0, 1, &mut event_loop)
-                }
-                else {
-                    Server::new(&addr, i as u32 -1, addr_strs.len() as u32,
-                        &mut event_loop)
-                };
-                if let Ok(mut server) = server {
-                    SERVERS_READY.fetch_add(1, Ordering::Release);
-                    trace!("starting server");
-                    event_loop.run(&mut server);
-                }
-                trace!("server already started");
-                return;
-            });
-            mem::forget(handle);
-        }
-
-        while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}
-
-
-
-        let lock_addr = lock_str.parse::<SocketAddr>().unwrap();
-        let chain_addrs = addr_strs.into_iter().map(|s| s.parse::<SocketAddr>().unwrap());
-        let store = AsyncStoreToStore::new(lock_addr, chain_addrs,
-            EventLoop::new().unwrap());
-        store
-    }
-
-    #[test]
-    fn test_get_none() {
-        let _ = env_logger::init();
-        let mut store = new_store(Vec::new());
-        let r = <Store<MapEntry<i32, i32>>>::get(&mut store, (14.into(), 0.into()));
-        assert_eq!(r, Err(GetErr::NoValue(0.into())))
-    }
-
-    #[test]
-    fn test_get_none2() {
-        let _ = env_logger::init();
-        let mut store = new_store(vec![(19.into(), 1.into()), (19.into(), 2.into()), (19.into(), 3.into()), (19.into(), 4.into()), (19.into(), 5.into())]);
-        for i in 0..5 {
-            let r = store.insert((19.into(), 0.into()), EntryContents::Data(&63, &[]));
-            assert_eq!(r, Ok((19.into(), (i + 1).into())))
-        }
-        let r: Result<Entry<u32>, _> = store.get((19.into(), ::std::u32::MAX.into()));
-        assert_eq!(r, Err(GetErr::NoValue(5.into())))
-    }
-
-    #[test]
-    fn test_1_column() {
-        let _ = env_logger::init();
-        let store = new_store(
-            vec![(3.into(), 1.into()), (3.into(), 2.into()),
-            (3.into(), 3.into())]
-        );
-        let horizon = HashMap::new();
-        let mut map = Map::new(store, horizon, 3.into());
-        map.put(0, 1);
-        map.put(1, 17);
-        map.put(32, 5);
-        assert_eq!(map.get(1), Some(17));
-        assert_eq!(*map.local_view.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
-        assert_eq!(map.get(0), Some(1));
-        assert_eq!(map.get(32), Some(5));
-    }
-
-    #[test]
-    fn test_1_column_ni() {
-        let _ = env_logger::init();
-        let store = new_store(
-            vec![(4.into(), 1.into()), (4.into(), 2.into()),
-                (4.into(), 3.into()), (5.into(), 1.into())]
-        );
-        let horizon = HashMap::new();
-        let map = Rc::new(RefCell::new(HashMap::new()));
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = HashMap::new();
-        let re = map.clone();
-        upcalls.insert(4.into(), Box::new(move |_, _, &MapEntry(k, v)| {
-            re.borrow_mut().insert(k, v);
-            true
-        }));
-        upcalls.insert(5.into(), Box::new(|_, _, _| false));
-
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        let e1 = log.append(4.into(), &MapEntry(0, 1), &*vec![]);
-        assert_eq!(e1, (4.into(), 1.into()));
-        let e2 = log.append(4.into(), &MapEntry(1, 17), &*vec![]);
-        assert_eq!(e2, (4.into(), 2.into()));
-        let last_index = log.append(4.into(), &MapEntry(32, 5), &*vec![]);
-        assert_eq!(last_index, (4.into(), 3.into()));
-        let en = log.append(5.into(), &MapEntry(0, 0), &*vec![last_index]);
-        assert_eq!(en, (5.into(), 1.into()));
-        log.play_foward(4.into());
-        assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
-    }
-
-    #[test]
-    fn test_deps() {
-        let _ = env_logger::init();
-        let store = new_store(
-            vec![(6.into(), 1.into()), (6.into(), 2.into()),
-                (6.into(), 3.into()), (7.into(), 1.into())]
-        );
-        let horizon = HashMap::new();
-        let map = Rc::new(RefCell::new(HashMap::new()));
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = HashMap::new();
-        let re = map.clone();
-        upcalls.insert(6.into(), Box::new(move |_, _, &MapEntry(k, v)| {
-            re.borrow_mut().insert(k, v);
-            true
-        }));
-        upcalls.insert(7.into(), Box::new(|_, _, _| false));
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        let e1 = log.append(6.into(), &MapEntry(0, 1), &*vec![]);
-        assert_eq!(e1, (6.into(), 1.into()));
-        let e2 = log.append(6.into(), &MapEntry(1, 17), &*vec![]);
-        assert_eq!(e2, (6.into(), 2.into()));
-        let last_index = log.append(6.into(), &MapEntry(32, 5), &*vec![]);
-        assert_eq!(last_index, (6.into(), 3.into()));
-        let en = log.append(7.into(), &MapEntry(0, 0), &*vec![last_index]);
-        assert_eq!(en, (7.into(), 1.into()));
-        log.play_foward(7.into());
-        assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
-    }
-
-    #[test]
-    fn test_order() {
-        let _ = env_logger::init();
-        let store = new_store(
-            (0..5).map(|i| (20.into(), i.into()))
-                .chain((0..21).map(|i| (21.into(), i.into())))
-                .chain((0..22).map(|i| (22.into(), i.into())))
-                .collect());
-        let horizon = HashMap::new();
-        let list: Rc<RefCell<Vec<i32>>> = Default::default();
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
-        for i in 20..23 {
-            let l = list.clone();
-            upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
-                true
-            }));
-        }
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        log.append(22.into(), &4, &[]);
-        log.append(20.into(), &2, &[]);
-        log.append(21.into(), &3, &[]);
-        log.multiappend(&[20.into(),21.into(),22.into()], &-1, &[]);
-        log.play_foward(20.into());
-        assert_eq!(&**list.borrow(), &[2,3,4,-1,-1,-1][..]);
-    }
-
-    #[test]
-    fn test_dorder() {
-        let _ = env_logger::init();
-        let store = new_store(
-            (0..5).map(|i| (23.into(), i.into()))
-                .chain((0..5).map(|i| (24.into(), i.into())))
-                .chain((0..5).map(|i| (25.into(), i.into())))
-                .collect());
-        let horizon = HashMap::new();
-        let list: Rc<RefCell<Vec<i32>>> = Default::default();
-        let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
-        for i in 23..26 {
-            let l = list.clone();
-            upcalls.insert(i.into(), Box::new(move |_,_,&v| { l.borrow_mut().push(v);
-                true
-            }));
-        }
-        let mut log = FuzzyLog::new(store, horizon, upcalls);
-        log.append(24.into(), &4, &[]);
-        log.append(23.into(), &2, &[]);
-        log.append(25.into(), &3, &[]);
-        log.dependent_multiappend(&[23.into()], &[24.into(),25.into()], &-1, &[]);
-        log.play_foward(23.into());
-        assert_eq!(&**list.borrow(), &[2,4,3,-1,][..]);
-    }
-
-} // End mod test

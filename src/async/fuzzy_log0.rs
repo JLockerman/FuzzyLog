@@ -13,7 +13,7 @@ use bit_set::BitSet;
 use mio;
 
 use packets::*;
-use async::tcp::AsyncStoreClient;
+use async::store::AsyncStoreClient;
 use self::FromStore::*;
 use self::FromClient::*;
 
@@ -63,6 +63,7 @@ struct PerChain {
     found_but_unused_multiappends: HashMap<Uuid, entry>,
     outstanding_snapshots: u32,
     is_being_read: Option<IsRead>,
+    is_interesting: bool,
 }
 
 type IsRead = Rc<()>;
@@ -123,7 +124,7 @@ impl ThreadLog {
             blocked_multiappends: Default::default(),
             ready_reads: ready_reads,
             finished_writes: finished_writes,
-            per_chains: interesting_chains.into_iter().map(|c| (c, PerChain::new(c))).collect(),
+            per_chains: interesting_chains.into_iter().map(|c| (c, PerChain::interesting(c))).collect(),
             to_return: Default::default(),
             no_longer_blocked: Default::default(),
             cache: BufferCache::new(),
@@ -262,7 +263,8 @@ impl ThreadLog {
                     MultiSearch::InProgress | MultiSearch::EarlySentinel => {}
                     MultiSearch::BeyondHorizon(..) => {
                         //TODO better ooo reads
-                        self.per_chains.get_mut(&read_loc.0).expect("boring chain")
+                        self.per_chains.entry(read_loc.0)
+                            .or_insert_with(|| PerChain::new(read_loc.0))
                             .overread_at(read_loc.1);
                     }
                     MultiSearch::Finished(msg) => {
@@ -513,7 +515,8 @@ impl ThreadLog {
         //self.found_multi_part(read_loc.0, read_loc.1, was_blind_search);
         if was_blind_search {
             trace!("FUZZY finished blind seach for {:?}", read_loc);
-            let pc = self.per_chains.get_mut(&read_loc.0).expect("tried reading boring chain");
+            let pc = self.per_chains.entry(read_loc.0)
+                .or_insert_with(|| PerChain::new(read_loc.0));
             pc.decrement_multi_search();
         }
 
@@ -532,7 +535,8 @@ impl ThreadLog {
     fn fetch_multi_parts(&mut self, id: &Uuid, chain: order, index: entry) -> Option<entry> {
         //TODO argh, no-alloc
         let (unblocked, early_sentinel) = {
-            let pc = self.per_chains.get_mut(&chain).expect("tried reading boring chain");
+            let pc = self.per_chains.entry(chain)
+                .or_insert_with(|| PerChain::new(chain));
 
             let early_sentinel = pc.take_early_sentinel(&id);
             let potential_new_horizon = match early_sentinel {
@@ -568,7 +572,7 @@ impl ThreadLog {
     fn continue_fetch_if_needed(&mut self, chain: order) -> bool {
         //TODO num_to_fetch
         let (num_to_fetch, unblocked) = {
-            let pc = self.per_chains.get_mut(&chain).expect("boring chain");
+            let pc = self.per_chains.entry(chain).or_insert_with(|| PerChain::new(chain));
             let num_to_fetch = pc.num_to_fetch();
             if num_to_fetch == 0 && pc.is_searching_for_multi() && pc.outstanding_reads == 0 {
                 trace!("FUZZY {:?} updating horizon due to multi search", chain);
@@ -610,7 +614,8 @@ impl ThreadLog {
         debug_assert!(bytes_as_entry(&val).locs().len() == 1);
         trace!("FUZZY trying to return read @ {:?}", loc);
         let (o, i) = loc;
-        {
+
+        let is_interesting = {
             let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
             if !pc.is_within_snapshot(i) {
                 trace!("FUZZY blocking read @ {:?}, waiting for snapshot", loc);
@@ -620,10 +625,13 @@ impl ThreadLog {
 
             trace!("QQQQQ setting returned {:?}", (o, i));
             pc.set_returned(i);
+            pc.is_interesting
         };
         trace!("FUZZY returning read @ {:?}", loc);
-        //FIXME first_buffered?
-        self.ready_reads.send(val).expect("client hung up");
+        if is_interesting {
+            //FIXME first_buffered?
+            self.ready_reads.send(val).expect("client hung up");
+        }
         true
     }
 
@@ -634,7 +642,7 @@ impl ThreadLog {
     //     messages are flushed to the client, as this would remove the intermidate allocation
     //     and it may be a bit nicer
     fn return_entry(&mut self, val: Vec<u8>) -> Option<Vec<OrderIndex>> {
-        let locs = {
+        let (locs, is_interesting) = {
             let mut should_block_on = None;
             {
                 let locs = bytes_as_entry(&val).locs();
@@ -653,6 +661,7 @@ impl ThreadLog {
                 pc.block_on_snapshot(val);
                 return None
             }
+            let mut is_interesting = false;
             let locs = bytes_as_entry(&val).locs();
             for &(o, i) in locs.into_iter() {
                 if o == order::from(0) { continue }
@@ -660,16 +669,19 @@ impl ThreadLog {
                 let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
                 debug_assert!(pc.is_within_snapshot(i));
                 pc.set_returned(i);
+                is_interesting |= pc.is_interesting;
             }
             //TODO no-alloc
             //     a better solution might be to have this function push onto a temporary
             //     VecDeque who's head is used to unblock further entries, and is then sent
             //     to the client
-            locs.to_vec()
+            (locs.to_vec(), is_interesting)
         };
         trace!("FUZZY returning read @ {:?}", locs);
-        //FIXME first_buffered?
-        self.ready_reads.send(val).expect("client hung up");
+        if is_interesting {
+            //FIXME first_buffered?
+            self.ready_reads.send(val).expect("client hung up");
+        }
         Some(locs)
     }
 
@@ -742,7 +754,14 @@ impl PerChain {
             found_but_unused_multiappends: Default::default(),
             outstanding_snapshots: 0,
             is_being_read: None,
+            is_interesting: false,
         }
+    }
+
+    fn interesting(chain: order) -> Self {
+        let mut s = Self::new(chain);
+        s.is_interesting = true;
+        s
     }
 
     fn set_returned(&mut self, index: entry) {
@@ -1057,7 +1076,7 @@ mod tests {
     use packets::*;
     use super::*;
     use super::FromClient::*;
-    use async::tcp::AsyncTcpStore;
+    use async::store::AsyncTcpStore;
 
     use std::collections::HashMap;
     use std::{mem, thread};
@@ -1436,7 +1455,31 @@ mod tests {
         assert_eq!(lh.get_next(), None);
     }
 
+    #[test]
+    pub fn test_multi_boring() {
+        let _ = env_logger::init();
+        trace!("TEST multi");
+
+        let _columns = &[order::from(58), order::from(59), order::from(60)];
+        let interesting_columns = vec![58.into(), 59.into()];
+        let mut lh = new_thread_log::<i64>(interesting_columns);
+        //1. even if one of the columns is boring we can still read the multi
+        let _ = lh.multiappend(&[58.into(), 60.into()], &0xfeed, &[]);
+        //2. transitives are obeyed beyond boring columns
+        let _ = lh.multiappend(&[59.into(), 60.into()], &0xbad , &[]);
+        let _ = lh.append(60.into(), &-1 , &[]);
+        let _ = lh.multiappend(&[58.into(), 60.into()], &0xdeed, &[]);
+        lh.snapshot(58.into());
+        assert_eq!(lh.get_next(), Some((&0xfeed, &[(58.into(), 1.into()),
+            (60.into(), 1.into())][..])));
+        assert_eq!(lh.get_next(), Some((&0xbad, &[(59.into(), 1.into()),
+            (60.into(), 2.into())][..])));
+        assert_eq!(lh.get_next(), Some((&0xdeed, &[(58.into(), 2.into()),
+            (60.into(), 4.into())][..])));
+    }
+
     //TODO test append after prefetch but before read
+    //TODO test UDP
 
     #[allow(non_upper_case_globals)]
     const lock_str: &'static str = "0.0.0.0:13389";
@@ -1456,7 +1499,7 @@ mod tests {
             let mut event_loop = EventLoop::new().unwrap();
             let to_store = event_loop.channel();
             *tsm.lock().unwrap() = Some(to_store);
-            let mut store = AsyncTcpStore::new(lock_str.parse().unwrap(),
+            let mut store = AsyncTcpStore::tcp(lock_str.parse().unwrap(),
                 addr_strs.into_iter().map(|s| s.parse().unwrap()),
                 client, &mut event_loop).expect("");
                 event_loop.run(&mut store).expect("should never return");
