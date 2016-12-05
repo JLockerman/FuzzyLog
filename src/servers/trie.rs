@@ -82,24 +82,9 @@ impl AllocPtr<u8> {
         unsafe { mem::zeroed() }
     }
 
-    fn append<V>(&mut self, data: &V) -> *const u8
+    fn append<V>(&mut self, data: &V) -> *mut u8
     where V: Storeable {
         let storage_size = data.size(); // FIXME
-        //if self.alloc_rem < storage_size {
-        //    if storage_size > LEVEL_BYTES {
-        //        let mut storage = Vec::with_capacity(storage_size);
-        //        unsafe { storage.extend_from_slice(data.ref_to_slice()) };
-        //        return &mut unsafe { (*Box::into_raw(storage.into_boxed_slice()))[0] }
-        //    }
-        //    self.ptr = unsafe { Box::into_raw(Box::new([0; LEVEL_BYTES])) };
-        //    //TODO
-        //    self.alloc_rem = LEVEL_BYTES;
-        //}
-        //let (append_to, rem) = unsafe {&mut *self.ptr}.split_at_mut(storage_size);
-        //self.ptr = rem;
-        //let append_to = &mut (*append_to)[0];
-        ////TODO storage_size * mem::size_of::<V>()?
-        //self.alloc_rem -= storage_size;
         let append_to = self.prep_append(storage_size);
         //safe do to: if self.alloc_rem < storage_size {..} at first line of fn prep_append
         unsafe { ptr::copy_nonoverlapping(data.ref_to_bytes(), append_to, storage_size) };
@@ -179,6 +164,33 @@ pub struct entry_pointer_and_index {
     pub index: u32,
 }
 
+//TODO wildly unsafe
+#[must_use]
+#[repr(C)]
+pub struct AppendSlot<V> {
+    trie_entry: *mut *const u8,
+    data_ptr: *mut u8,
+    data_size: usize,
+    _pd: PhantomData<*mut V>,
+}
+
+unsafe impl<V> Send for AppendSlot<V> where V: Sync {}
+
+impl<V> AppendSlot<V> {
+    pub unsafe fn finish_append(self, data: &V) -> *mut u8 {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
+        let storage_size = data.size(); // FIXME
+        assert_eq!(data_size, storage_size);
+        unsafe { ptr::copy_nonoverlapping(data.ref_to_bytes(), data_ptr, storage_size) };
+        //*trie_entry = data_ptr;
+        let trie_entry: *mut AtomicPtr<u8> = mem::transmute(trie_entry);
+        //TODO mem barrier ordering
+        (*trie_entry).store(data_ptr, Ordering::Release);
+        data_ptr
+    }
+}
+
 impl<V> Trie<V>
 where V: Storeable {
     pub fn new() -> Self {
@@ -192,8 +204,20 @@ where V: Storeable {
     }
 
     fn _append(&mut self, data: &V) -> (u32, &mut u8) {
+        let val_ptr = self.root.alloc.append(data);
+        let (entry, _) = unsafe { self.prep_append(val_ptr) };
+        (entry, unsafe {val_ptr.as_mut().unwrap()})
+    }
+
+    unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<V> {
+        let val_ptr: *mut u8 = self.root.alloc.prep_append(size);
+        let (index, trie_entry) = self.prep_append(ptr::null());
+        AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
+            _pd: Default::default()}
+    }
+
+    unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (u32, &mut *const u8) {
         let root: &mut RootTable<_> =&mut *self.root;
-        let val_ptr = root.alloc.append(data);
         let next_entry = root.next_entry;
         if next_entry & 0x3FFFFFFF == 0 {
             debug_assert!(root.l1.cannot_append());
@@ -217,10 +241,8 @@ where V: Storeable {
             root.l3 = unsafe {Shortcut::new(&mut new_chunk.as_mut().unwrap()[..])};
         }
         // fill val
-        root.l3.append(val_ptr);
         root.next_entry += 1;
-        let val_ptr = val_ptr as *mut u8;
-        (next_entry, unsafe {val_ptr.as_mut().unwrap()})
+        (next_entry, root.l3.append(val_ptr))
     }
 
     #[cfg(FALSE)]
@@ -543,6 +565,42 @@ pub mod test {
         assert!(t.get(1).is_none());
         assert!(t.get(0xffff).is_none());
         assert_eq!(t.get(0x0).unwrap(), &5);
+    }
+
+    #[test]
+    pub fn multi_part_insert() {
+        unsafe {
+            let mut t = Trie::new();
+            assert!(t.get(0).is_none());
+            assert_eq!(t.len(), 0);
+            let slot0 = t.partial_append(mem::size_of::<i64>());
+            assert!(t.get(0).is_none());
+            assert_eq!(t.len(), 1);
+            let slot1 = t.partial_append(mem::size_of::<i64>());
+            assert!(t.get(0).is_none());
+            assert!(t.get(1).is_none());
+            assert_eq!(t.len(), 2);
+            let slot2 = t.partial_append(mem::size_of::<i64>());
+            assert!(t.get(0).is_none());
+            assert!(t.get(1).is_none());
+            assert!(t.get(2).is_none());
+            assert_eq!(t.len(), 3);
+            slot1.finish_append(&32i64);
+            assert!(t.get(0).is_none());
+            assert_eq!(t.get(1), Some(&32));
+            assert!(t.get(2).is_none());
+            assert_eq!(t.len(), 3);
+            slot0.finish_append(&1);
+            assert_eq!(t.get(0), Some(&1));
+            assert_eq!(t.get(1), Some(&32));
+            assert!(t.get(2).is_none());
+            assert_eq!(t.len(), 3);
+            slot2.finish_append(&-7);
+            assert_eq!(t.get(0), Some(&1));
+            assert_eq!(t.get(1), Some(&32));
+            assert_eq!(t.get(2), Some(&-7));
+            assert_eq!(t.len(), 3);
+        }
     }
 
     pub mod from_hash_map {

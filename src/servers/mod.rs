@@ -52,13 +52,19 @@ impl ServerLog {
                         return true
                 }
 
-                assert!(self._seen_ids.insert(val.id));
-                assert!(self.last_lock == self.last_unlock + 1 || self.last_lock == 0,
-                    "SERVER {:?} l {:?} == ul {:?} + 1",
-                    self.this_server_num, self.last_lock, self.last_unlock);
-                assert!(self.last_lock == val.lock_num(),
-                    "SERVER {:?} l {:?} == vl {:?}",
-                    self.this_server_num, self.last_lock, val.lock_num());
+                debug_assert!(self._seen_ids.insert(val.id));
+                if kind.contains(EntryKind::TakeLock) {
+                    assert!(self.last_lock == self.last_unlock + 1,
+                        "SERVER {:?} lock: {:?} == unlock {:?} + 1",
+                        self.this_server_num, self.last_lock, self.last_unlock);
+                    assert!(self.last_lock == val.lock_num(),
+                        "SERVER {:?} lock {:?} == valock {:?}",
+                        self.this_server_num, self.last_lock, val.lock_num());
+
+                } else {
+                    assert!(val.lock_num() == 0 && self.last_lock == self.last_unlock);
+                }
+
                 let mut sentinel_start_index = None;
                 {
                     val.kind.insert(EntryKind::ReadSuccess);
