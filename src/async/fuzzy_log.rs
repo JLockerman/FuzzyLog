@@ -4,6 +4,7 @@ use std::{self, iter, mem};
 use std::collections::{HashMap, VecDeque};
 use std::collections::hash_map;
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::u32;
@@ -57,16 +58,32 @@ struct PerChain {
     //TODO is this necessary first_buffered: entry,
     last_returned_to_client: entry,
     blocked_on_new_snapshot: Option<Vec<u8>>,
-    //FIXME this must be a counter
-    num_multiappends_searching_for: usize,
     //TODO this is where is might be nice to have a more structured id format
     found_but_unused_multiappends: HashMap<Uuid, entry>,
-    outstanding_snapshots: u32,
-    is_being_read: Option<IsRead>,
+    is_being_read: Option<ReadState>,
     is_interesting: bool,
 }
 
-type IsRead = Rc<()>;
+struct ReadState {
+    outstanding_snapshots: u32,
+    num_multiappends_searching_for: usize,
+    being_read: IsRead,
+}
+
+impl ReadState {
+    fn new(being_read: &IsRead) -> Self {
+        ReadState {
+            outstanding_snapshots: 0,
+            num_multiappends_searching_for: 0,
+            being_read: being_read.clone(),
+        }
+    }
+}
+
+type IsRead = Rc<ReadHandle>;
+
+#[derive(Debug)]
+struct ReadHandle;
 
 struct MultiSearchState {
     val: Vec<u8>,
@@ -106,7 +123,6 @@ struct BufferCache {
     //     avg_alloced: usize,
 }
 
-
 impl ThreadLog {
 
     //TODO
@@ -128,7 +144,7 @@ impl ThreadLog {
             to_return: Default::default(),
             no_longer_blocked: Default::default(),
             cache: BufferCache::new(),
-            chains_currently_being_read: Default::default(),
+            chains_currently_being_read: Rc::new(ReadHandle),
             num_snapshots: 0,
         }
     }
@@ -150,6 +166,7 @@ impl ThreadLog {
     fn handle_from_client(&mut self, msg: FromClient) -> bool {
         match msg {
             SnapshotAndPrefetch(chain) => {
+                trace!("FUZZY snapshot");
                 self.num_snapshots = self.num_snapshots.saturating_add(1);
                 self.fetch_snapshot(chain);
                 self.prefetch(chain);
@@ -190,10 +207,7 @@ impl ThreadLog {
         //TODO how much to fetch
         let num_to_fetch = {
             let pc = &mut self.per_chains.get_mut(&chain).expect("boring server read");
-            if pc.is_being_read.is_none() {
-                pc.is_being_read = Some(self.chains_currently_being_read.clone());
-            };
-            pc.outstanding_snapshots += 1;
+            pc.increment_outstanding_snapshots(&self.chains_currently_being_read);
             let num_to_fetch = pc.num_to_fetch();
             let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
             let currently_buffering = pc.currently_buffering();
@@ -234,7 +248,7 @@ impl ThreadLog {
                         debug_assert!(!e.kind.contains(EntryKind::ReadSuccess));
                         let new_horizon = e.dependencies()[0].1;
                         trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
-                        s.outstanding_snapshots -= 1;
+                        s.decrement_outstanding_snapshots();
                         s.update_horizon(new_horizon)
                     });
                     if let Some(val) = unblocked {
@@ -285,20 +299,29 @@ impl ThreadLog {
         let finished_server = self.continue_fetch_if_needed(read_loc.0);
         if finished_server {
             trace!("FUZZY finished reading {:?}", read_loc.0);
-            self.per_chains.get_mut(&read_loc.0).map(|pc| pc.is_being_read = None);
+
+            self.per_chains.get_mut(&read_loc.0).map(|pc| {
+                debug_assert!(pc.is_finished());
+                trace!("FUZZY chain {:?} is finished", pc.chain);
+                pc.is_being_read = None
+            });
             if self.finshed_reading() {
                 trace!("FUZZY finished reading all chains");
-                //FIXME store the number of outstanding snapshots so we can return an end marker
-                //      for each
                 //FIXME add is_snapshoting to PerChain so this doesn't race?
                 trace!("FUZZY finished reading");
                 //TODO do we need a better system?
                 let num_completeds = mem::replace(&mut self.num_snapshots, 0);
-                assert!(num_completeds > 0);
+                //assert!(num_completeds > 0);
                 for _ in 0..num_completeds {
                     let _ = self.ready_reads.send(vec![]);
                 }
             }
+        }
+        else {
+            //#[cfg(debug_assertions)]
+            //self.per_chains.get(&read_loc.0).map(|pc| {
+            //    trace!("chain {:?} not finished, " pc.outstanding_reads, pc.last_returned)
+            //});
         }
     }
 
@@ -554,7 +577,7 @@ impl ThreadLog {
                 //FIXME How does this interact with cached reads?
                 (None, early_sentinel)
             } else {
-                pc.increment_multi_search();
+                pc.increment_multi_search(&self.chains_currently_being_read);
                 trace!("RRRRR blind search {:?}", chain);
                 (None, None)
             }
@@ -574,6 +597,7 @@ impl ThreadLog {
         let (num_to_fetch, unblocked) = {
             let pc = self.per_chains.entry(chain).or_insert_with(|| PerChain::new(chain));
             let num_to_fetch = pc.num_to_fetch();
+            //TODO should fetch == number of multis searching for
             if num_to_fetch == 0 && pc.is_searching_for_multi() && pc.outstanding_reads == 0 {
                 trace!("FUZZY {:?} updating horizon due to multi search", chain);
                 (1, pc.increment_horizon())
@@ -689,18 +713,17 @@ impl ThreadLog {
         let next = {
             let per_chain = &mut self.per_chains.get_mut(&chain)
                 .expect("fetching uninteresting chain");
-            //TODO this is no a great place for this?
-            //TODO maybe a bitmask instead?
-            if per_chain.is_being_read.is_none() {
-                trace!("RRRRR {:?} is now being read", chain);
-                per_chain.is_being_read = Some(self.chains_currently_being_read.clone());
-            };
+            //assert!(per_chain.last_read_sent_to_server < per_chain.last_snapshot,
+            //    "last_read_sent_to_server {:?} >= {:?} last_snapshot @ fetch_next",
+            //    per_chain.last_read_sent_to_server, per_chain.last_snapshot,
+            //);
             per_chain.last_read_sent_to_server = per_chain.last_read_sent_to_server + 1;
-            per_chain.outstanding_reads += 1;
+            per_chain.increment_outstanding_reads(&self.chains_currently_being_read);
             per_chain.last_read_sent_to_server
         };
         let packet = self.make_read_packet(chain, next);
-        self.to_store.send(packet).expect("store hung up")
+
+        self.to_store.send(packet).expect("store hung up");
     }
 
     fn make_read_packet(&mut self, chain: order, index: entry) -> Vec<u8> {
@@ -720,12 +743,17 @@ impl ThreadLog {
         debug_assert_eq!({
             let mut currently_being_read = 0;
             for (_, pc) in self.per_chains.iter() {
+                assert_eq!(pc.is_finished(), !pc.is_being_read.is_some());
                 if !pc.is_finished() {
                     currently_being_read += 1
                 }
                 //still_reading |= pc.has_outstanding_reads()
             }
             // !still_reading == (self.servers_currently_being_read == 0)
+            if finished != (currently_being_read == 0) {
+                panic!("currently_being_read == {:?} @ finish {:?}",
+                currently_being_read, finished);
+            }
             currently_being_read == 0
         }, finished);
 
@@ -750,9 +778,7 @@ impl PerChain {
             outstanding_reads: 0,
             last_returned_to_client: 0.into(),
             blocked_on_new_snapshot: None,
-            num_multiappends_searching_for: 0,
             found_but_unused_multiappends: Default::default(),
-            outstanding_snapshots: 0,
             is_being_read: None,
             is_interesting: false,
         }
@@ -770,17 +796,85 @@ impl PerChain {
         assert!(index <= self.last_snapshot);
         trace!("QQQQQ returning {:?}", (self.chain, index));
         self.last_returned_to_client = index;
+        if self.is_finished() {
+            trace!("QQQQQ {:?} is finished", self.chain);
+            self.is_being_read = None
+        }
     }
 
     fn overread_at(&mut self, index: entry) {
         // The conditional is needed because sends we sent before reseting
         // last_read_sent_to_server race future calls to this function
-        if self.last_read_sent_to_server > index
+        if self.last_read_sent_to_server >= index
             && self.last_read_sent_to_server > self.last_returned_to_client {
             trace!("FUZZY resetting read loc for {:?} from {:?} to {:?}",
-                self.chain, self.last_read_sent_to_server, index);
-            self.last_read_sent_to_server = index - 1
+                self.chain, self.last_read_sent_to_server, index - 1);
+            self.last_read_sent_to_server = index - 1;
         }
+    }
+
+    fn increment_outstanding_snapshots(&mut self, is_being_read: &IsRead) -> u32 {
+        match &mut self.is_being_read {
+            &mut Some(ReadState {ref mut outstanding_snapshots, ..} ) => {
+                //TODO saturating arith
+                *outstanding_snapshots = *outstanding_snapshots + 1;
+                *outstanding_snapshots
+            }
+            r @ &mut None => {
+                let mut read_state = ReadState::new(is_being_read);
+                read_state.outstanding_snapshots += 1;
+                let outstanding_snapshots = read_state.outstanding_snapshots;
+                *r = Some(read_state);
+                outstanding_snapshots
+
+            }
+        }
+    }
+
+    fn decrement_outstanding_snapshots(&mut self) -> u32 {
+        self.is_being_read.as_mut().map(|&mut ReadState {ref mut outstanding_snapshots, ..}|{
+            //TODO saturating arith
+            *outstanding_snapshots = *outstanding_snapshots - 1;
+            *outstanding_snapshots
+            //TODO should this set is_being_read to None when last_returned == last snap?
+        }).expect("tried to decerement snapshots on a chain not being read")
+    }
+
+    fn increment_multi_search(&mut self, is_being_read: &IsRead) {
+        let searching = match &mut self.is_being_read {
+            &mut Some(ReadState {ref mut num_multiappends_searching_for, ..} ) => {
+                //TODO saturating arith
+                *num_multiappends_searching_for = *num_multiappends_searching_for + 1;
+                *num_multiappends_searching_for
+            }
+            r @ &mut None => {
+                let mut read_state = ReadState::new(is_being_read);
+                read_state.num_multiappends_searching_for += 1;
+                let num_multiappends_searching_for = read_state.num_multiappends_searching_for;
+                *r = Some(read_state);
+                num_multiappends_searching_for
+            }
+        };
+        trace!("QQQQQ {:?} + now searching for {:?} multis", self.chain, searching);
+    }
+
+    fn decrement_multi_search(&mut self) {
+        let num_search = self.is_being_read.as_mut().map(|&mut ReadState {ref mut num_multiappends_searching_for, ..}| {
+            debug_assert!(*num_multiappends_searching_for > 0);
+            //TODO saturating arith
+            *num_multiappends_searching_for = *num_multiappends_searching_for - 1;
+            *num_multiappends_searching_for
+            //TODO should this set is_being_read to None when last_returned == last snap?
+        }).expect("tried to decrement multi_search in a chain not being read");
+        trace!("QQQQQ {:?} - now searching for {:?} multis",
+            self.chain, num_search);
+    }
+
+    fn increment_outstanding_reads(&mut self, is_being_read: &IsRead) {
+        if self.is_being_read.is_none() {
+            self.is_being_read = Some(ReadState::new(is_being_read));
+        }
+        self.outstanding_reads += 1;
     }
 
     fn can_return(&self, index: entry) -> bool {
@@ -803,7 +897,8 @@ impl PerChain {
     }
 
     fn is_searching_for_multi(&self) -> bool {
-        self.num_multiappends_searching_for > 0
+        self.is_being_read.as_ref().map(|br|
+            br.num_multiappends_searching_for > 0).unwrap_or(false)
     }
 
     fn increment_horizon(&mut self) -> Option<Vec<u8>> {
@@ -815,6 +910,10 @@ impl PerChain {
         if self.last_snapshot < new_horizon {
             trace!("FUZZY update horizon {:?}", (self.chain, new_horizon));
             self.last_snapshot = new_horizon;
+            if self.last_read_sent_to_server > new_horizon {
+                //see also fn overread_at
+                self.last_read_sent_to_server = new_horizon;
+            }
             if entry_is_unblocked(&self.blocked_on_new_snapshot, self.chain, new_horizon) {
                 trace!("FUZZY unblocked entry");
                 return mem::replace(&mut self.blocked_on_new_snapshot, None)
@@ -848,22 +947,26 @@ impl PerChain {
     }
 
     fn num_to_fetch(&self) -> u32 {
+        use std::cmp::min;
+        //TODO
+        const MAX_PIPELINED: u32 = 1000;
         //TODO switch to saturating sub?
         assert!(self.last_returned_to_client <= self.last_snapshot,
             "FUZZY returned value early. {:?} should be less than {:?}",
             self.last_returned_to_client, self.last_snapshot);
-        if self.last_read_sent_to_server <= self.last_snapshot {
-            (self.last_snapshot - self.last_read_sent_to_server.into()).into()
-
+        if self.last_read_sent_to_server < self.last_snapshot
+            && self.outstanding_reads < MAX_PIPELINED {
+            let needed_reads =
+                (self.last_snapshot - self.last_read_sent_to_server.into()).into();
+            let to_read = min(needed_reads, MAX_PIPELINED - self.outstanding_reads);
+            to_read
+            //std::cmp::min(
+            //    (self.last_snapshot - self.last_read_sent_to_server.into()).into(),
+            //    MAX_PIPELINED
+            //)
         } else {
             0
         }
-        /*
-        //FIXME this should be based on the number of requests outstanding from the server
-        //     only if the number of requests is zero do we read beyond the horizon
-        if self.num_multiappends_searching_for > 0 { 1 } else { 0 }
-        */
-
     }
 
     fn currently_buffering(&self) -> u32 {
@@ -872,19 +975,6 @@ impl PerChain {
             - self.last_returned_to_client.into();
         let currently_buffering: u32 = currently_buffering.into();
         currently_buffering
-    }
-
-    fn increment_multi_search(&mut self) {
-        self.num_multiappends_searching_for += 1;
-        trace!("QQQQQ {:?} + now searching for {:?} multis",
-            self.chain, self.num_multiappends_searching_for);
-    }
-
-    fn decrement_multi_search(&mut self) {
-        assert!(self.num_multiappends_searching_for > 0);
-        self.num_multiappends_searching_for -= 1;
-        trace!("QQQQQ {:?} - now searching for {:?} multis",
-            self.chain, self.num_multiappends_searching_for);
     }
 
     fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
@@ -902,14 +992,23 @@ impl PerChain {
     }
 
     fn has_outstanding_snapshots(&self) -> bool {
-        self.outstanding_snapshots > 0
+        self.is_being_read.as_ref().map(|&ReadState {outstanding_snapshots, ..}|
+            outstanding_snapshots > 0).unwrap_or(false)
+    }
+
+    fn finished_until_snapshot(&self) -> bool {
+        self.last_returned_to_client == self.last_snapshot
+            && !self.has_outstanding_snapshots()
     }
 
     fn is_finished(&self) -> bool {
         assert!(!(self.outstanding_reads == 0
-            && self.last_read_sent_to_server != self.last_snapshot));
-        !(self.has_outstanding_reads() || self.is_searching_for_multi()
-        || self.has_outstanding_snapshots())
+            && self.last_read_sent_to_server < self.last_snapshot),
+            "outstanding_reads {:?}, last_read_sent_to_server {:?}, last_snapshot {:?}",
+            self.outstanding_reads, self.last_read_sent_to_server, self.last_snapshot,
+        );
+        self.finished_until_snapshot()
+            && !(self.is_searching_for_multi() || self.has_outstanding_snapshots())
     }
 }
 
@@ -958,6 +1057,84 @@ impl<V> Drop for LogHandle<V> {
 //     over different writers very easily
 impl<V> LogHandle<V>
 where V: Storeable {
+
+    pub fn spawn_tcp_log<S, C>(
+        lock_server: SocketAddr,
+        chain_servers: S,
+        interesting_chains: C
+    )-> LogHandle<V>
+    where S: IntoIterator<Item=SocketAddr>,
+          C: IntoIterator<Item=order>,
+    {
+        //TODO this currently leaks the other threads, maybe store the handles so they get
+        //     collected when this dies?
+        use std::thread;
+        use std::sync::{Arc, Mutex};
+
+        let to_store_m = Arc::new(Mutex::new(None));
+        let tsm = to_store_m.clone();
+        let (to_log, from_outside) = mpsc::channel();
+        let client = to_log.clone();
+        let (ready_reads_s, ready_reads_r) = mpsc::channel();
+        let (finished_writes_s, finished_writes_r) = mpsc::channel();
+        let chain_servers = chain_servers.into_iter().collect();
+        let h = thread::spawn(move || {
+            run_store(lock_server, chain_servers, client, tsm)
+        });
+        mem::forget(h);
+
+        let to_store;
+        loop {
+            let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+            if let Some(s) = ts {
+                to_store = s;
+                break
+            }
+        }
+        let interesting_chains = interesting_chains.into_iter().collect();
+        let h = thread::spawn(move || {
+            run_log(to_store, from_outside, ready_reads_s, finished_writes_s,
+                interesting_chains)
+        });
+        mem::forget(h);
+
+        #[inline(never)]
+        fn run_store(
+            lock_server: SocketAddr,
+            chain_servers: Vec<SocketAddr>,
+            client: mpsc::Sender<Message>,
+            tsm: Arc<Mutex<Option<mio::Sender<Vec<u8>>>>>
+        ) {
+            let mut event_loop = mio::EventLoop::new().unwrap();
+            let to_store = event_loop.channel();
+            *tsm.lock().unwrap() = Some(to_store);
+            let mut store = ::async::store::AsyncTcpStore::tcp(
+                lock_server,
+                chain_servers,
+                client, &mut event_loop
+            ).expect("");
+            event_loop.run(&mut store).expect("should never return")
+        }
+
+        #[inline(never)]
+        fn run_log(
+            to_store: mio::Sender<Vec<u8>>,
+            from_outside: mpsc::Receiver<Message>,
+            ready_reads_s: mpsc::Sender<Vec<u8>>,
+            finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+            interesting_chains: Vec<order>,
+        ) {
+            let log = ThreadLog::new(
+                to_store, from_outside,
+                ready_reads_s,
+                finished_writes_s,
+                interesting_chains
+            );
+            log.run()
+        }
+
+        LogHandle::<V>::new(to_log, ready_reads_r, finished_writes_r)
+    }
 
     pub fn new(
         to_log: mpsc::Sender<Message>,
@@ -1269,7 +1446,7 @@ mod tests {
             }
 
             #[test]
-            pub fn test_multi() {
+            pub fn test_multi1() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
 
@@ -1497,36 +1674,10 @@ mod tests {
                 fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
                     start_tcp_servers();
 
-                    let to_store_m = Arc::new(Mutex::new(None));
-                    let tsm = to_store_m.clone();
-                    let (to_log, from_outside) = mpsc::channel();
-                    let client = to_log.clone();
-                    let (ready_reads_s, ready_reads_r) = mpsc::channel();
-                    let (finished_writes_s, finished_writes_r) = mpsc::channel();
-                    thread::spawn(move || {
-                        let mut event_loop = EventLoop::new().unwrap();
-                        let to_store = event_loop.channel();
-                        *tsm.lock().unwrap() = Some(to_store);
-                        let mut store = AsyncTcpStore::tcp(lock_str.parse().unwrap(),
-                            addr_strs.into_iter().map(|s| s.parse().unwrap()),
-                            client, &mut event_loop).expect("");
-                            event_loop.run(&mut store).expect("should never return");
-                    });
-                    let to_store;
-                    loop {
-                        let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
-                        if let Some(s) = ts {
-                            to_store = s;
-                            break
-                        }
-                    }
-                    thread::spawn(move || {
-                        let log = ThreadLog::new(to_store, from_outside, ready_reads_s, finished_writes_s,
-                            interesting_chains.into_iter());
-                        log.run()
-                    });
-
-                    LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+                    LogHandle::spawn_tcp_log(lock_str.parse().unwrap(),
+                        addr_strs.into_iter().map(|s| s.parse().unwrap()),
+                        interesting_chains.into_iter(),
+                    )
                 }
 
 
