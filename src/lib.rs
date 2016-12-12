@@ -41,6 +41,7 @@ pub mod servers;
 pub mod color_api;
 pub mod async;
 mod hash;
+mod buffer;
 
 #[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;

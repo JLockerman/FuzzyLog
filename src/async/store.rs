@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use packets::*;
+use buffer::Buffer;
 
 use hash::HashMap;
 
@@ -51,10 +52,6 @@ enum WriteState {
     ToLockServer(Vec<u8>, Vec<u8>),
     MultiServer(Rc<RefCell<Vec<u8>>>, Rc<HashMap<usize, u64>>),
     UnlockServer(Rc<RefCell<Vec<u8>>>, u64),
-}
-
-pub struct Buffer {
-    inner: Vec<u8>,
 }
 
 struct UdpConnection {
@@ -800,58 +797,6 @@ impl WriteState {
             s => panic!("invlaid clone multi on {:?}", s)
         }
 
-    }
-}
-
-impl Buffer {
-    fn new() -> Self {
-        Buffer { inner: Vec::new() }
-    }
-
-    fn ensure_capacity(&mut self, capacity: usize) {
-        if self.inner.capacity() < capacity {
-            let curr_cap = self.inner.capacity();
-            self.inner.reserve_exact(capacity - curr_cap);
-            unsafe { self.inner.set_len(capacity) }
-        }
-    }
-
-    fn get_lock_nums(&self) -> HashMap<usize, u64> {
-        self.entry()
-            .locs()
-            .into_iter()
-            .cloned()
-            .map(|(o, i)| {
-                let (o, i): (u32, u32) = ((o - 1).into(), i.into());
-                (o as usize, i as u64)
-            })
-            .collect()
-    }
-
-    fn entry(&self) -> &Entry<()> {
-        Entry::<()>::wrap_bytes(&self[..])
-    }
-}
-
-//FIXME impl AsRef for Buffer...
-impl ops::Index<ops::Range<usize>> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ops::Range<usize>) -> &Self::Output {
-        &self.inner[index]
-    }
-}
-
-impl ops::IndexMut<ops::Range<usize>> for Buffer {
-    fn index_mut(&mut self, index: ops::Range<usize>) -> &mut Self::Output {
-        //TODO should this ensure capacity?
-        &mut self.inner[index]
-    }
-}
-
-impl ops::Index<ops::RangeFull> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ops::RangeFull) -> &Self::Output {
-        &self.inner[index]
     }
 }
 

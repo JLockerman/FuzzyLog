@@ -16,6 +16,7 @@ use mio::tcp::*;
 use nix::sys::socket::setsockopt;
 use nix::sys::socket::sockopt::TcpNoDelay;
 
+use buffer::Buffer;
 
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
 
@@ -258,97 +259,5 @@ impl PerClient {
         let send_size = self.buffer.entry().entry_size() - self.sent_bytes;
         // trace!("SERVER server send size {}", send_size);
         self.stream.write(&self.buffer[self.sent_bytes..send_size])
-    }
-}
-
-//FIXME merge this buffer with the one in store and put in it's own mod
-pub struct Buffer {
-    inner: Vec<u8>,
-}
-
-impl Buffer {
-    fn new() -> Self {
-        Buffer { inner: vec![0u8; 8192] }
-    }
-
-    fn ensure_capacity(&mut self, capacity: usize) {
-        if self.inner.capacity() < capacity {
-            let curr_cap = self.inner.capacity();
-            self.inner.reserve_exact(capacity - curr_cap);
-            unsafe { self.inner.set_len(capacity) }
-        }
-    }
-
-    fn entry(&self) -> &Entry<()> {
-        Entry::<()>::wrap_bytes(&self[..])
-    }
-
-    fn entry_mut(&mut self) -> &mut Entry<()> {
-        debug_assert!(self.packet_fits());
-        Entry::<()>::wrap_bytes_mut(&mut self[..])
-    }
-
-    fn packet_fits(&self) -> bool {
-        self.inner.len() >= Entry::<()>::wrap_bytes(&self[..]).entry_size()
-    }
-}
-
-//FIXME impl AsRef for Buffer...
-impl ::std::ops::Index<::std::ops::Range<usize>> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ::std::ops::Range<usize>) -> &Self::Output {
-        &self.inner[index]
-    }
-}
-
-impl ::std::ops::IndexMut<::std::ops::Range<usize>> for Buffer {
-    fn index_mut(&mut self, index: ::std::ops::Range<usize>) -> &mut Self::Output {
-        //TODO should this ensure capacity?
-        self.ensure_capacity(index.end);
-        &mut self.inner[index]
-    }
-}
-
-impl ::std::ops::Index<::std::ops::RangeFrom<usize>> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ::std::ops::RangeFrom<usize>) -> &Self::Output {
-        &self.inner[index]
-    }
-}
-
-impl ::std::ops::IndexMut<::std::ops::RangeFrom<usize>> for Buffer {
-    fn index_mut(&mut self, index: ::std::ops::RangeFrom<usize>) -> &mut Self::Output {
-        //TODO should this ensure capacity?
-        self.ensure_capacity(index.start);
-        &mut self.inner[index]
-    }
-}
-
-impl ::std::ops::Index<::std::ops::RangeTo<usize>> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ::std::ops::RangeTo<usize>) -> &Self::Output {
-        &self.inner[index]
-    }
-}
-
-impl ::std::ops::IndexMut<::std::ops::RangeTo<usize>> for Buffer {
-    fn index_mut(&mut self, index: ::std::ops::RangeTo<usize>) -> &mut Self::Output {
-        //TODO should this ensure capacity?
-        self.ensure_capacity(index.end);
-        &mut self.inner[index]
-    }
-}
-
-impl ::std::ops::Index<::std::ops::RangeFull> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ::std::ops::RangeFull) -> &Self::Output {
-        &self.inner[index]
-    }
-}
-
-impl ::std::ops::IndexMut<::std::ops::RangeFull> for Buffer {
-    fn index_mut(&mut self, index: ::std::ops::RangeFull) -> &mut Self::Output {
-        //TODO should this ensure capacity?
-        &mut self.inner[index]
     }
 }
