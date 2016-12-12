@@ -7,7 +7,7 @@ extern crate env_logger;
 extern crate test;
 
 
-use mio::prelude::*;
+use mio::deprecated::{EventLoop, Handler as MioHandler, Sender as MioSender};
 use mio::tcp::*;
 
 use nix::sys::socket::setsockopt;
@@ -184,14 +184,15 @@ fn parse_args() -> Args {
 
 #[inline(never)]
 pub fn run_trivial_server(addr: SocketAddr, server_ready: &AtomicUsize) -> ! {
-    let mut event_loop = EventLoop::new().unwrap();
-    let server = Server::new(&addr, &mut event_loop);
-    if let Ok(mut server) = server {
-        server_ready.fetch_add(1, Ordering::Release);
-        let _ = event_loop.run(&mut server);
-        panic!("server should never return")
-    }
-    else { panic!("socket in use") }
+    //let mut event_loop = EventLoop::new().unwrap();
+    //let server = Server::new(&addr, &mut event_loop);
+    //if let Ok(mut server) = server {
+    //    server_ready.fetch_add(1, Ordering::Release);
+    //    event_loop.run(&mut server).expect("should never return");
+    //    panic!("server should never return")
+    //}
+    //else { panic!("socket in use") }
+    Server::run(&addr)
 }
 
 #[inline(never)]
@@ -209,7 +210,7 @@ pub fn run_server(addr: SocketAddr) -> ! {
 pub fn run_store(
     addr: SocketAddr,
     client: mpsc::Sender<Message>,
-    tsm: Arc<Mutex<Option<mio::Sender<Vec<u8>>>>>
+    tsm: Arc<Mutex<Option<MioSender<Vec<u8>>>>>
 ) {
     let mut event_loop = EventLoop::new().unwrap();
     let to_store = event_loop.channel();
@@ -222,7 +223,7 @@ pub fn run_store(
 
 #[inline(never)]
 pub fn run_log(
-    to_store: mio::Sender<Vec<u8>>,
+    to_store: MioSender<Vec<u8>>,
     from_outside: mpsc::Receiver<Message>,
     ready_reads_s: mpsc::Sender<Vec<u8>>,
     finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
@@ -346,13 +347,41 @@ impl Server {
     pub fn new(server_addr: &SocketAddr, event_loop: &mut EventLoop<Self>
     ) -> io::Result<Self> {
         let acceptor = try!(TcpListener::bind(server_addr));
-        try!(event_loop.register(&acceptor, mio::Token(0), mio::EventSet::readable(),
+        try!(event_loop.register(&acceptor, mio::Token(0), mio::Ready::readable(),
             mio::PollOpt::level()));
         Ok(Server { acceptor: acceptor, clients: HashMap::new(), next_token: 1})
     }
+
+    pub fn run(server_addr: &SocketAddr) -> ! {
+        use mio;
+        let poll = mio::Poll::new().unwrap();
+        let acceptor = TcpListener::bind(server_addr).unwrap();
+        let _ = poll.register(&acceptor,
+            mio::Token(0),
+            mio::Ready::readable(),
+            mio::PollOpt::level()).unwrap();
+        let mut events = mio::Events::with_capacity(127);
+        loop {
+            poll.poll(&mut events, None).unwrap();
+            for event in events.iter() {
+                if let mio::Token(0) = event.token() {
+                    match acceptor.accept() {
+                        Err(e) => panic!("error {}", e),
+                        Ok((socket, addr)) => {
+                            thread::spawn(move || {
+                                let _ = socket.set_keepalive_ms(Some(1000));
+                                let _ = socket.set_nodelay(true);
+                                PerClient::new(socket).run();
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
-impl mio::Handler for Server {
+impl MioHandler for Server {
     type Timeout = ();
     type Message = ();
 
@@ -360,30 +389,30 @@ impl mio::Handler for Server {
         &mut self,
         event_loop: &mut EventLoop<Self>,
         token: mio::Token,
-        events: mio::EventSet
+        events: mio::Ready
     ) {
         match token {
             LISTENER_TOKEN => {
                 assert!(events.is_readable());
                 match self.acceptor.accept() {
-                    Ok(None) => { }
                     Err(e) => panic!("error {}", e),
-                    Ok(Some((socket, _))) => {
+                    Ok((socket, addr)) => {
                         let next_client_id = self.next_token;
                         self.next_token += 1;
                         thread::spawn(move || {
-                            let _ = socket.set_keepalive(Some(1));
-                            let _ = setsockopt(socket.as_raw_fd(), TcpNoDelay, &true);
-                            //let _ = socket.set_tcp_nodelay(true);
+                            let _ = socket.set_keepalive_ms(Some(1000));
+                            //let _ = setsockopt(socket.as_raw_fd(), TcpNoDelay, &true);
+                            let _ = socket.set_nodelay(true);
                             let client_token = mio::Token(next_client_id);
                             let mut per_client = PerClient::new(socket);
                             let mut client_loop = EventLoop::new().unwrap();
                             client_loop.register(&per_client.stream,
                                     client_token,
-                                    mio::EventSet::readable() | mio::EventSet::error(),
+                                    mio::Ready::readable() | mio::Ready::error(),
                                     mio::PollOpt::edge() | mio::PollOpt::oneshot())
                             .expect("could not register client socket");
-                            let _ = client_loop.run(&mut per_client);
+                            let _ = client_loop.run(&mut per_client)
+                                .expect(" should never halt");
                         });
                         /*let _ = socket.set_keepalive(Some(1));
                         let _ = setsockopt(socket.as_raw_fd(), TcpNoDelay, &true);
@@ -396,7 +425,7 @@ impl mio::Handler for Server {
                         //TODO edge or level?
                         event_loop.register(client_socket,
                                 client_token,
-                                mio::EventSet::readable() | mio::EventSet::error(),
+                                mio::Ready::readable() | mio::Ready::error(),
                                 mio::PollOpt::edge() | mio::PollOpt::oneshot())
                         .expect("could not register client socket")*/
                     }
@@ -418,16 +447,16 @@ impl mio::Handler for Server {
                     else { (false, !client.is_reading) };
 
                 let next_interest = match (finished_read, finished_write) {
-                    (true, true) => mio::EventSet::readable(),
-                    (true, false) => mio::EventSet::writable(),
-                    (false, true) => mio::EventSet::readable(),
-                    (false, false) if needs_write => mio::EventSet::writable(),
-                    (false, false) => mio::EventSet::readable(),
+                    (true, true) => mio::Ready::readable(),
+                    (true, false) => mio::Ready::writable(),
+                    (false, true) => mio::Ready::readable(),
+                    (false, false) if needs_write => mio::Ready::writable(),
+                    (false, false) => mio::Ready::readable(),
                 };
                 event_loop.reregister(
                     &client.stream,
                     client_token,
-                    next_interest | mio::EventSet::error(),
+                    next_interest | mio::Ready::error(),
                     mio::PollOpt::edge() | mio::PollOpt::oneshot())
                 .expect("could not reregister client socket")
             }
@@ -435,7 +464,7 @@ impl mio::Handler for Server {
     }
 }
 
-impl mio::Handler for PerClient {
+impl MioHandler for PerClient {
     type Timeout = ();
     type Message = ();
 
@@ -443,10 +472,11 @@ impl mio::Handler for PerClient {
         &mut self,
         event_loop: &mut EventLoop<Self>,
         token: mio::Token,
-        events: mio::EventSet
+        events: mio::Ready
     ) {
+        print!("iter start");
         if events.is_error() {
-            return;
+            panic!("error {:?}", self.stream.take_error())
         }
 
         let finished_read =
@@ -458,16 +488,16 @@ impl mio::Handler for PerClient {
             else { (false, !self.is_reading) };
 
         let next_interest = match (finished_read, finished_write) {
-            (true, true) => mio::EventSet::readable(),
-            (true, false) => mio::EventSet::writable(),
-            (false, true) => mio::EventSet::readable(),
-            (false, false) if needs_write => mio::EventSet::writable(),
-            (false, false) => mio::EventSet::readable(),
+            (true, true) => mio::Ready::readable(),
+            (true, false) => mio::Ready::writable(),
+            (false, true) => mio::Ready::readable(),
+            (false, false) if needs_write => mio::Ready::writable(),
+            (false, false) => mio::Ready::readable(),
         };
         event_loop.reregister(
             &self.stream,
             token,
-            next_interest | mio::EventSet::error(),
+            next_interest | mio::Ready::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
         .expect("could not reregister client socket")
     }
@@ -481,6 +511,43 @@ impl PerClient {
             bytes_read: 0,
             bytes_written: 0,
             is_reading: true,
+        }
+    }
+
+    fn run(mut self) -> ! {
+        use mio;
+        let poll = mio::Poll::new().unwrap();
+        let _ = poll.register(&self.stream,
+            mio::Token(0),
+            mio::Ready::readable() | mio::Ready::error(),
+            mio::PollOpt::edge() | mio::PollOpt::oneshot()).unwrap();
+        let mut events = mio::Events::with_capacity(127);
+
+        loop {
+            poll.poll(&mut events, None).unwrap();
+            let event = events.get(0).unwrap();
+            let events = event.kind();
+            let finished_read =
+                if self.is_reading && events.is_readable() { self.read_packet() }
+                else { false };
+
+            let (finished_write, needs_write) =
+                if !self.is_reading && events.is_writable() { self.write_packet() }
+                else { (false, !self.is_reading) };
+
+            let next_interest = match (finished_read, finished_write) {
+                (true, true) => mio::Ready::readable(),
+                (true, false) => mio::Ready::writable(),
+                (false, true) => mio::Ready::readable(),
+                (false, false) if needs_write => mio::Ready::writable(),
+                (false, false) => mio::Ready::readable(),
+            };
+            poll.reregister(
+                &self.stream,
+                mio::Token(0),
+                next_interest | mio::Ready::error(),
+                mio::PollOpt::edge() | mio::PollOpt::oneshot())
+            .expect("could not reregister client socket")
         }
     }
 
