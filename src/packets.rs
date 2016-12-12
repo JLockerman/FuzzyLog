@@ -791,7 +791,9 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
                 + size_of::<OrderIndex>()
             }
         };
-        assert!(size <= 4096);
+        //FIXME
+        //assert!(size <= 4096);
+        assert!(size <= 8192);
         let mut buffer = Vec::with_capacity(size);
         unsafe {
             buffer.set_len(size);

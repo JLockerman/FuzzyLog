@@ -1665,6 +1665,18 @@ mod tests {
                     (60.into(), 4.into())][..])));
             }
 
+            #[test]
+            pub fn test_big() {
+                let _ = env_logger::init();
+                trace!("TEST multi");
+
+                let interesting_columns = vec![61.into()];
+                let mut lh = $new_thread_log(interesting_columns);
+                let _ = lh.append(61.into(), &[32u8; 6000], &[]);
+                lh.snapshot(61.into());
+                assert_eq!(lh.get_next(), Some((&[32u8; 6000], &[(61.into(), 1.into())][..])));
+            }
+
             //TODO test append after prefetch but before read
         );
         () => ( async_tests!(tcp); async_tests!(udp); );
