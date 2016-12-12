@@ -40,6 +40,7 @@ pub mod multitcp_store;
 pub mod servers;
 pub mod color_api;
 pub mod async;
+mod hash;
 
 #[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;

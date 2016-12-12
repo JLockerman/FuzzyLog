@@ -1,7 +1,7 @@
 
 //TODO use faster HashMap, HashSet
 use std::{self, iter, mem};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::collections::hash_map;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
@@ -17,6 +17,8 @@ use packets::*;
 use async::store::AsyncStoreClient;
 use self::FromStore::*;
 use self::FromClient::*;
+
+use hash::HashMap;
 
 const MAX_PREFETCH: u32 = 8;
 
@@ -790,6 +792,7 @@ impl PerChain {
         s
     }
 
+    #[inline(always)]
     fn set_returned(&mut self, index: entry) {
         assert!(self.next_return_is(index));
         assert!(index > self.last_returned_to_client);
@@ -870,11 +873,12 @@ impl PerChain {
             self.chain, num_search);
     }
 
+    #[inline(always)]
     fn increment_outstanding_reads(&mut self, is_being_read: &IsRead) {
+        self.outstanding_reads += 1;
         if self.is_being_read.is_none() {
             self.is_being_read = Some(ReadState::new(is_being_read));
         }
-        self.outstanding_reads += 1;
     }
 
     fn can_return(&self, index: entry) -> bool {

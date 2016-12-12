@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::{ops, mem};
 use std::net::SocketAddr;
@@ -7,6 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use packets::*;
+
+use hash::HashMap;
 
 use bit_set::BitSet;
 
@@ -91,8 +93,8 @@ where C: AsyncStoreClient {
         }
         let num_servers = servers.len();
         Ok(AsyncTcpStore {
-            sent_writes: HashMap::new(),
-            sent_reads: HashMap::new(),
+            sent_writes: Default::default(),
+            sent_reads: Default::default(),
             servers: servers,
             registered_for_write: BitSet::with_capacity(num_servers),
             needs_to_write: BitSet::with_capacity(num_servers),
@@ -126,8 +128,8 @@ where C: AsyncStoreClient {
         }
         let num_servers = servers.len();
         Ok(AsyncTcpStore {
-            sent_writes: HashMap::new(),
-            sent_reads: HashMap::new(),
+            sent_writes: Default::default(),
+            sent_reads: Default::default(),
             servers: servers,
             registered_for_write: BitSet::with_capacity(num_servers),
             needs_to_write: BitSet::with_capacity(num_servers),
@@ -695,6 +697,7 @@ where PerServer<S>: Connected {
                 }
                 //TODO multipart writes?
                 to_send.with_packet(|p| self.write_packet(p) );
+                trace!("CLIENT PerServer {:?} single written", token);
                 Some(to_send)
             }
         }

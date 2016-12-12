@@ -1,0 +1,19 @@
+[package]
+name = "trivial_server"
+version = "0.1.0"
+authors = ["J <joshua.lockerman@yale.edu>"]
+
+[dependencies]
+mio = "0.5"
+nix = "*"
+env_logger = "0.3"
+fuzzy_log = {path = "../.."}
+
+[profile.release]
+opt-level = 3
+debug = true
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = 'unwind'

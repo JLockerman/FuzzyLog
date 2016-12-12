@@ -1,10 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::rc::Rc;
 
 use prelude::*;
 
 use servers::trie::Trie;
+
+use hash::HashMap;
 
 pub mod tcp;
 pub mod udp;
@@ -30,7 +32,7 @@ impl ServerLog {
             "this_server_num <= total_servers, {:?} <= {:?}",
             this_server_num, total_servers);
         ServerLog {
-            log: HashMap::new(),
+            log: Default::default(),
             last_lock: 0,
             last_unlock: 0,
             _seen_ids: HashSet::new(),
