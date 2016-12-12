@@ -13,7 +13,7 @@ use hash::HashMap;
 use bit_set::BitSet;
 
 use mio;
-use mio::prelude::*;
+use mio::deprecated::{EventLoop, Handler as MioHandler};
 use mio::tcp::*;
 use mio::Token;
 use mio::udp::UdpSocket;
@@ -87,7 +87,7 @@ where C: AsyncStoreClient {
         servers.push(lock_server);
         for (i, server) in servers.iter().enumerate() {
             event_loop.register(server.connection(), Token(i),
-                mio::EventSet::readable() | mio::EventSet::error(),
+                mio::Ready::readable() | mio::Ready::error(),
                 mio::PollOpt::edge() | mio::PollOpt::oneshot())
                 .expect("could not reregister client socket")
         }
@@ -122,7 +122,7 @@ where C: AsyncStoreClient {
         servers.push(lock_server);
         for (i, server) in servers.iter().enumerate() {
             event_loop.register(server.connection(), Token(i),
-                mio::EventSet::readable() | mio::EventSet::error(),
+                mio::Ready::readable() | mio::Ready::error(),
                 mio::PollOpt::edge() | mio::PollOpt::oneshot())
                 .expect("could not reregister client socket")
         }
@@ -156,10 +156,17 @@ impl PerServer<TcpStream> {
 
 impl PerServer<UdpConnection> {
     fn udp(addr: SocketAddr) -> Result<Self, io::Error> {
+        use std::os::unix::io::FromRawFd;
+        use nix::sys::socket as nix;
+        let fd: i32 = try!(nix::socket(
+                nix::AddressFamily::Inet,
+                nix::SockType::Datagram,
+                nix::SOCK_NONBLOCK | nix::SOCK_CLOEXEC,
+                0));
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
             read_buffer: Buffer::new(), //TODO cap
-            stream: UdpConnection { socket: try!(UdpSocket::v4()), addr: addr },
+            stream: UdpConnection { socket: unsafe { UdpSocket::from_raw_fd(fd) }, addr: addr },
             bytes_handled: 0,
         })
     }
@@ -169,7 +176,7 @@ impl PerServer<UdpConnection> {
     }
 }
 
-impl<S, C> mio::Handler for AsyncTcpStore<S, C>
+impl<S, C> MioHandler for AsyncTcpStore<S, C>
 where PerServer<S>: Connected,
       C: AsyncStoreClient {
     type Timeout = ();
@@ -203,9 +210,9 @@ where PerServer<S>: Connected,
         self.regregister_writes(event_loop);
     }//End fn notify
 
-    fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: mio::EventSet) {
+    fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: mio::Ready) {
         //TODO should this be in a loop?
-        self.registered_for_write.remove(token.as_usize());
+        self.registered_for_write.remove(token.0);
         if events.is_readable() {
             let finished_packet = {
                 let server = self.server_for_token_mut(token);
@@ -254,10 +261,10 @@ where PerServer<S>: Connected,
         }
         let needs_to_write = self.server_for_token(token).needs_to_write();
         if needs_to_write {
-            self.needs_to_write.insert(token.as_usize());
+            self.needs_to_write.insert(token.0);
         }
         else {
-            self.reregister_for_read(event_loop, token.as_usize());
+            self.reregister_for_read(event_loop, token.0);
         }
         self.regregister_writes(event_loop)
     }//End fn ready
@@ -341,7 +348,7 @@ where PerServer<S>: Connected,
                 //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
                 for (i, &loc) in fill_from.into_iter().enumerate() {
                     if locs[i].0 != 0.into()
-                        && server_for_chain(loc.0, num_chain_servers) == server.as_usize() {
+                        && server_for_chain(loc.0, num_chain_servers) == server.0 {
                         assert!(loc.1 != 0.into());
                         locs[i] = loc;
                     }
@@ -456,7 +463,7 @@ where PerServer<S>: Connected,
         }.clone_bytes();
         let lock_server = self.lock_token();
         self.server_for_token_mut(lock_server).add_get_lock_nums(lock_req, msg);
-        self.needs_to_write.insert(lock_server.as_usize());
+        self.needs_to_write.insert(lock_server.0);
     }
 
     fn is_single_node_append(&self, msg: &[u8]) -> bool {
@@ -498,11 +505,11 @@ where PerServer<S>: Connected,
     }
 
     fn server_for_token(&self, token: Token) -> &PerServer<S> {
-        &self.servers[token.as_usize()]
+        &self.servers[token.0]
     }
 
     fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer<S> {
-        &mut self.servers[token.as_usize()]
+        &mut self.servers[token.0]
     }
 
     fn lock_token(&self) -> Token {
@@ -521,7 +528,7 @@ where PerServer<S>: Connected,
     fn reregister_for_read(&self, event_loop: &mut EventLoop<Self>, server: usize) {
         let stream = self.server_for_token(Token(server)).connection();
         event_loop.reregister(stream, Token(server),
-            mio::EventSet::readable() | mio::EventSet::error(),
+            mio::Ready::readable() | mio::Ready::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
             .expect("could not reregister client socket")
     }
@@ -529,7 +536,7 @@ where PerServer<S>: Connected,
     fn register_for_write(&self, event_loop: &mut EventLoop<Self>, server: usize) {
         let stream = self.server_for_token(Token(server)).connection();
         event_loop.reregister(stream, Token(server),
-            mio::EventSet::readable() | mio::EventSet::writable() | mio::EventSet::error(),
+            mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
             .expect("could not reregister client socket")
     }
@@ -631,7 +638,7 @@ where PerServer<S>: Connected {
                     assert!(kind.layout() == EntryLayout::Multiput
                         || kind.layout() == EntryLayout::Sentinel);
                     assert!(kind.contains(EntryKind::TakeLock));
-                    let lock_num = lock_nums.get(&token.as_usize())
+                    let lock_num = lock_nums.get(&token.0)
                         .expect("sending unlock for non-locked server");
                     let send_end = unsafe {
                         let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
@@ -853,5 +860,5 @@ fn server_for_chain(chain: order, num_servers: usize) -> usize {
 }
 
 fn is_server_for(chain: order, tok: Token, num_servers: usize) -> bool {
-    server_for_chain(chain, num_servers) == tok.as_usize()
+    server_for_chain(chain, num_servers) == tok.0
 }

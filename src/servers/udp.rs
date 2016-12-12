@@ -5,7 +5,7 @@ use std::mem;
 use std::net::SocketAddr;
 
 use mio;
-use mio::prelude::*;
+use mio::deprecated::{EventLoop, Handler as MioHandler};
 use mio::udp::UdpSocket;
 
 use servers::ServerLog;
@@ -18,14 +18,14 @@ pub struct Server {
     socket: UdpSocket,
 }
 
-impl mio::Handler for Server {
+impl MioHandler for Server {
     type Timeout = ();
     type Message = ();
 
     fn ready(&mut self,
              event_loop: &mut EventLoop<Self>,
              token: mio::Token,
-             events: mio::EventSet) {
+             events: mio::Ready) {
         match token {
             SOCKET_TOKEN => {
                 // trace!("SERVER got client event");
@@ -50,7 +50,7 @@ impl mio::Handler for Server {
                 };
                 event_loop.reregister(&self.socket,
                                       SOCKET_TOKEN,
-                                      mio::EventSet::readable() | mio::EventSet::error(),
+                                      mio::Ready::readable() | mio::Ready::error(),
                                       mio::PollOpt::edge() | mio::PollOpt::oneshot())
                           .expect("could not reregister client socket")
             }
@@ -61,7 +61,7 @@ impl mio::Handler for Server {
 
 impl Server {
     pub fn new(server_addr: &SocketAddr) -> Result<Self, ::std::io::Error> {
-        let socket = try!(UdpSocket::bound(&server_addr));
+        let socket = try!(UdpSocket::bind(&server_addr));
         Ok(Server {
             socket: socket,
             //TODO
@@ -73,7 +73,7 @@ impl Server {
     pub fn run(&mut self) -> ! {
         let mut event_loop = EventLoop::new().unwrap();
         event_loop.register(&self.socket, SOCKET_TOKEN,
-            mio::EventSet::readable() | mio::EventSet::error(),
+            mio::Ready::readable() | mio::Ready::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
             .expect("could not register server");
         let res = event_loop.run(self);

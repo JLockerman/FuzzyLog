@@ -65,7 +65,7 @@ pub mod c_binidings {
 
     use servers::tcp::Server;
 
-    use mio::EventLoop;
+    use mio::deprecated::EventLoop;
 
     //pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
     pub type DAG = DAGHandle<[u8], Box<Store<[u8]>>, LocalHorizon>;
@@ -196,7 +196,7 @@ pub mod c_binidings {
     #[no_mangle]
     pub extern "C" fn start_fuzzy_log_server_for_group(server_ip: *const c_char,
         server_number: u32, total_servers_in_group: u32) -> ! {
-        let mut event_loop = ::mio::EventLoop::new()
+        let mut event_loop = EventLoop::new()
             .expect("unable to start server loop");
         let mut server = start_server(&mut event_loop, server_ip, server_number,
             total_servers_in_group);
@@ -216,7 +216,7 @@ pub mod c_binidings {
                 (extend_lifetime(&server_started), &*server_ip)
             };
             let handle = ::std::thread::spawn(move || {
-                let mut event_loop = ::mio::EventLoop::new()
+                let mut event_loop = EventLoop::new()
                     .expect("unable to start server loop");
                 let mut server = start_server(&mut event_loop, server_ip, server_number,
                     total_servers_in_group);

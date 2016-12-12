@@ -16,7 +16,7 @@ log = "0.3"
 rand = "0.3"
 rustc-serialize = "0.3"
 time = "0.1"
-mio = "0.5"
+mio = "0.6"
 nix = "*"
 net2 = "0.2"
 

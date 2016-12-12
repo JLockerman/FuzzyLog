@@ -10,7 +10,7 @@ use std::env;
 
 use fuzzy_log::servers::tcp::Server;
 
-use mio::prelude::*;
+use mio::deprecated::EventLoop;
 
 const ADDR_STR: &'static str = "0.0.0.0:13265";
 

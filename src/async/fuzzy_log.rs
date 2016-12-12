@@ -12,6 +12,7 @@ use std::u32;
 use bit_set::BitSet;
 
 use mio;
+use mio::deprecated::{EventLoop, Sender as MioSender};
 
 use packets::*;
 use async::store::AsyncStoreClient;
@@ -25,7 +26,7 @@ const MAX_PREFETCH: u32 = 8;
 type ChainEntry = Rc<Vec<u8>>;
 
 pub struct ThreadLog {
-    to_store: mio::Sender<Vec<u8>>, //TODO send WriteState or other enum?
+    to_store: MioSender<Vec<u8>>, //TODO send WriteState or other enum?
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
     blocked_multiappends: HashMap<Uuid, MultiSearchState>,
@@ -128,7 +129,7 @@ struct BufferCache {
 impl ThreadLog {
 
     //TODO
-    pub fn new<I>(to_store: mio::Sender<Vec<u8>>,
+    pub fn new<I>(to_store: MioSender<Vec<u8>>,
         from_outside: mpsc::Receiver<Message>,
         ready_reads: mpsc::Sender<Vec<u8>>,
         finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
@@ -1107,9 +1108,9 @@ where V: Storeable {
             lock_server: SocketAddr,
             chain_servers: Vec<SocketAddr>,
             client: mpsc::Sender<Message>,
-            tsm: Arc<Mutex<Option<mio::Sender<Vec<u8>>>>>
+            tsm: Arc<Mutex<Option<MioSender<Vec<u8>>>>>
         ) {
-            let mut event_loop = mio::EventLoop::new().unwrap();
+            let mut event_loop = EventLoop::new().unwrap();
             let to_store = event_loop.channel();
             *tsm.lock().unwrap() = Some(to_store);
             let mut store = ::async::store::AsyncTcpStore::tcp(
@@ -1122,7 +1123,7 @@ where V: Storeable {
 
         #[inline(never)]
         fn run_log(
-            to_store: mio::Sender<Vec<u8>>,
+            to_store: MioSender<Vec<u8>>,
             from_outside: mpsc::Receiver<Message>,
             ready_reads_s: mpsc::Sender<Vec<u8>>,
             finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
@@ -1267,7 +1268,8 @@ mod tests {
             use std::{mem, thread};
             use std::sync::{mpsc, Arc, Mutex};
 
-            use mio::{self, EventLoop};
+            use mio;
+            use mio::deprecated::EventLoop;
 
             //TODO move to crate root under cfg...
             extern crate env_logger;
