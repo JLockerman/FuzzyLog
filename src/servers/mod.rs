@@ -41,6 +41,7 @@ impl ServerLog {
         }
     }
 
+    //FIXME pass buffer so it can be resized as needed
     fn handle_op(&mut self, val: &mut Entry<()>) -> bool {
         let kind = val.kind;
         match kind.layout() {

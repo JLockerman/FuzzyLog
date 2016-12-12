@@ -27,7 +27,7 @@ pub struct Server {
 
 struct PerClient {
     stream: TcpStream,
-    buffer: Box<Entry<()>>,
+    buffer: Buffer,
     sent_bytes: usize,
 }
 
@@ -112,8 +112,7 @@ impl MioHandler for Server {
                             trace!("SERVER {} dropping client {:?} due to panic {:?}",
                                 self.log.server_num(), client_token, cause);
                             trace!("SERVER {} had read {:?}",
-                                self.log.server_num(),
-                                &client.buffer.sized_bytes_mut()[..client.sent_bytes]);
+                                self.log.server_num(), &client.buffer[..client.sent_bytes]);
                             //TODO self.clients.remove(&client_token);
                             //client.sent_bytes = 0;
                             //event_loop.reregister(&client.stream, client_token,
@@ -127,7 +126,7 @@ impl MioHandler for Server {
                     if finished_read {
                         trace!("SERVER {} finished read from client {:?}",
                             self.log.server_num(), client_token);
-                        let need_to_respond = self.log.handle_op(&mut *client.buffer);
+                        let need_to_respond = self.log.handle_op(client.buffer.entry_mut());
                         //TODO
                         //if need_to_respond {
                         //    mio::Ready::writable()
@@ -188,7 +187,7 @@ impl PerClient {
     fn new(stream: TcpStream) -> Self {
         PerClient {
             stream: stream,
-            buffer: Box::new(unsafe { mem::zeroed() }),
+            buffer: Buffer::new(),
             sent_bytes: 0,
         }
     }
@@ -204,33 +203,33 @@ impl PerClient {
 
     fn try_read_packet(&mut self) -> io::Result<usize> {
         if self.sent_bytes < base_header_size() {
-            let read = try!(self.stream.read(&mut self.buffer.sized_bytes_mut()[self.sent_bytes..base_header_size()]));
+            let read = try!(self.stream.read(&mut
+                self.buffer[self.sent_bytes..base_header_size()]));
             self.sent_bytes += read;
             if self.sent_bytes < base_header_size() {
                 return Ok(1);
             }
         }
 
-        let header_size = self.buffer.header_size();
+        let header_size = self.buffer.entry().header_size();
         assert!(header_size >= base_header_size());
         if self.sent_bytes < header_size {
-            let read = try!(self.stream.read(&mut self.buffer
-                .sized_bytes_mut()[self.sent_bytes..header_size]));
+            let read = try!(self.stream.read(&mut self.buffer[self.sent_bytes..header_size]));
             self.sent_bytes += read;
             if self.sent_bytes < header_size {
                 return Ok(1);
             }
         }
 
-        let size = self.buffer.entry_size();
+        let size = self.buffer.entry().entry_size();
         if self.sent_bytes < size {
-            let read = try!(self.stream.read(&mut self.buffer
-                .sized_bytes_mut()[self.sent_bytes..size]));
+            let read = try!(self.stream.read(&mut self.buffer[self.sent_bytes..size]));
             self.sent_bytes += read;
             if self.sent_bytes < size {
                 return Ok(1);
             }
         }
+        debug_assert!(self.buffer.packet_fits());
         // assert!(payload_size >= header_size);
         Ok(0)
     }
@@ -240,13 +239,13 @@ impl PerClient {
             Ok(s) => {
                 //trace!("SERVER wrote {} bytes", s);
                 self.sent_bytes += s;
-                if self.sent_bytes >= self.buffer.entry_size() {
+                if self.sent_bytes >= self.buffer.entry().entry_size() {
                     trace!("SERVER finished write");
                     self.sent_bytes = 0;
                     let _ = self.stream.flush();
                     return true;
                 }
-                self.sent_bytes >= self.buffer.entry_size()
+                self.sent_bytes >= self.buffer.entry().entry_size()
             }
             Err(e) => {
                 trace!("SERVER write err {:?}", e);
@@ -256,9 +255,100 @@ impl PerClient {
     }
 
     fn try_send_packet(&mut self) -> io::Result<usize> {
-        let send_size = self.buffer.entry_size() - self.sent_bytes;
+        let send_size = self.buffer.entry().entry_size() - self.sent_bytes;
         // trace!("SERVER server send size {}", send_size);
-        self.stream
-            .write(&self.buffer.bytes()[self.sent_bytes..send_size])
+        self.stream.write(&self.buffer[self.sent_bytes..send_size])
+    }
+}
+
+//FIXME merge this buffer with the one in store and put in it's own mod
+pub struct Buffer {
+    inner: Vec<u8>,
+}
+
+impl Buffer {
+    fn new() -> Self {
+        Buffer { inner: vec![0u8; 8192] }
+    }
+
+    fn ensure_capacity(&mut self, capacity: usize) {
+        if self.inner.capacity() < capacity {
+            let curr_cap = self.inner.capacity();
+            self.inner.reserve_exact(capacity - curr_cap);
+            unsafe { self.inner.set_len(capacity) }
+        }
+    }
+
+    fn entry(&self) -> &Entry<()> {
+        Entry::<()>::wrap_bytes(&self[..])
+    }
+
+    fn entry_mut(&mut self) -> &mut Entry<()> {
+        debug_assert!(self.packet_fits());
+        Entry::<()>::wrap_bytes_mut(&mut self[..])
+    }
+
+    fn packet_fits(&self) -> bool {
+        self.inner.len() >= Entry::<()>::wrap_bytes(&self[..]).entry_size()
+    }
+}
+
+//FIXME impl AsRef for Buffer...
+impl ::std::ops::Index<::std::ops::Range<usize>> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ::std::ops::Range<usize>) -> &Self::Output {
+        &self.inner[index]
+    }
+}
+
+impl ::std::ops::IndexMut<::std::ops::Range<usize>> for Buffer {
+    fn index_mut(&mut self, index: ::std::ops::Range<usize>) -> &mut Self::Output {
+        //TODO should this ensure capacity?
+        self.ensure_capacity(index.end);
+        &mut self.inner[index]
+    }
+}
+
+impl ::std::ops::Index<::std::ops::RangeFrom<usize>> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ::std::ops::RangeFrom<usize>) -> &Self::Output {
+        &self.inner[index]
+    }
+}
+
+impl ::std::ops::IndexMut<::std::ops::RangeFrom<usize>> for Buffer {
+    fn index_mut(&mut self, index: ::std::ops::RangeFrom<usize>) -> &mut Self::Output {
+        //TODO should this ensure capacity?
+        self.ensure_capacity(index.start);
+        &mut self.inner[index]
+    }
+}
+
+impl ::std::ops::Index<::std::ops::RangeTo<usize>> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ::std::ops::RangeTo<usize>) -> &Self::Output {
+        &self.inner[index]
+    }
+}
+
+impl ::std::ops::IndexMut<::std::ops::RangeTo<usize>> for Buffer {
+    fn index_mut(&mut self, index: ::std::ops::RangeTo<usize>) -> &mut Self::Output {
+        //TODO should this ensure capacity?
+        self.ensure_capacity(index.end);
+        &mut self.inner[index]
+    }
+}
+
+impl ::std::ops::Index<::std::ops::RangeFull> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ::std::ops::RangeFull) -> &Self::Output {
+        &self.inner[index]
+    }
+}
+
+impl ::std::ops::IndexMut<::std::ops::RangeFull> for Buffer {
+    fn index_mut(&mut self, index: ::std::ops::RangeFull) -> &mut Self::Output {
+        //TODO should this ensure capacity?
+        &mut self.inner[index]
     }
 }
