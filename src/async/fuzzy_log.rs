@@ -171,8 +171,20 @@ impl ThreadLog {
             SnapshotAndPrefetch(chain) => {
                 trace!("FUZZY snapshot");
                 self.num_snapshots = self.num_snapshots.saturating_add(1);
-                self.fetch_snapshot(chain);
-                self.prefetch(chain);
+                //FIXME
+                if chain != 0.into() {
+                    self.fetch_snapshot(chain);
+                    self.prefetch(chain);
+                }
+                else {
+                    let chains: Vec<_> = self.per_chains.iter()
+                        .filter(|pc| pc.1.is_interesting)
+                        .map(|pc| pc.0.clone()).collect();
+                    for chain in chains {
+                        self.fetch_snapshot(chain);
+                        self.prefetch(chain);
+                    }
+                }
                 true
             }
             PerformAppend(msg) => {
@@ -1040,8 +1052,8 @@ impl AsyncStoreClient for mpsc::Sender<Message> {
 }
 
 
-pub struct LogHandle<V> {
-    _pd: PhantomData<V>,
+pub struct LogHandle<V: ?Sized> {
+    _pd: PhantomData<Box<V>>,
     num_snapshots: usize,
     to_log: mpsc::Sender<Message>,
     ready_reads: mpsc::Receiver<Vec<u8>>,
@@ -1050,24 +1062,21 @@ pub struct LogHandle<V> {
     curr_entry: Vec<u8>,
 }
 
-impl<V> Drop for LogHandle<V> {
+impl<V: ?Sized> Drop for LogHandle<V> {
     fn drop(&mut self) {
         let _ = self.to_log.send(Message::FromClient(Shutdown));
     }
 }
 
-//TODO I kinda get the feeling that this should send writes directly to the store without
-//     the AsyncLog getting in the middle
-//     Also, I think if I can send assosiated data with the wites I could do multiplexing
-//     over different writers very easily
-impl<V> LogHandle<V>
+impl<V> LogHandle<[V]>
 where V: Storeable {
 
-    pub fn spawn_tcp_log<S, C>(
+    //FIXME this should be unnecessary
+    pub fn spawn_tcp_log2<S, C>(
         lock_server: SocketAddr,
         chain_servers: S,
         interesting_chains: C
-    )-> LogHandle<V>
+    )-> Self
     where S: IntoIterator<Item=SocketAddr>,
           C: IntoIterator<Item=order>,
     {
@@ -1083,10 +1092,9 @@ where V: Storeable {
         let (ready_reads_s, ready_reads_r) = mpsc::channel();
         let (finished_writes_s, finished_writes_r) = mpsc::channel();
         let chain_servers = chain_servers.into_iter().collect();
-        let h = thread::spawn(move || {
+        thread::spawn(move || {
             run_store(lock_server, chain_servers, client, tsm)
         });
-        mem::forget(h);
 
         let to_store;
         loop {
@@ -1097,11 +1105,10 @@ where V: Storeable {
             }
         }
         let interesting_chains = interesting_chains.into_iter().collect();
-        let h = thread::spawn(move || {
+        thread::spawn(move || {
             run_log(to_store, from_outside, ready_reads_s, finished_writes_s,
                 interesting_chains)
         });
-        mem::forget(h);
 
         #[inline(never)]
         fn run_store(
@@ -1138,7 +1145,91 @@ where V: Storeable {
             log.run()
         }
 
-        LogHandle::<V>::new(to_log, ready_reads_r, finished_writes_r)
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+    }
+}
+
+//TODO I kinda get the feeling that this should send writes directly to the store without
+//     the AsyncLog getting in the middle
+//     Also, I think if I can send assosiated data with the wites I could do multiplexing
+//     over different writers very easily
+impl<V: ?Sized> LogHandle<V>
+where V: Storeable {
+
+    pub fn spawn_tcp_log<S, C>(
+        lock_server: SocketAddr,
+        chain_servers: S,
+        interesting_chains: C
+    )-> Self
+    where S: IntoIterator<Item=SocketAddr>,
+          C: IntoIterator<Item=order>,
+    {
+        //TODO this currently leaks the other threads, maybe store the handles so they get
+        //     collected when this dies?
+        use std::thread;
+        use std::sync::{Arc, Mutex};
+
+        let to_store_m = Arc::new(Mutex::new(None));
+        let tsm = to_store_m.clone();
+        let (to_log, from_outside) = mpsc::channel();
+        let client = to_log.clone();
+        let (ready_reads_s, ready_reads_r) = mpsc::channel();
+        let (finished_writes_s, finished_writes_r) = mpsc::channel();
+        let chain_servers = chain_servers.into_iter().collect();
+        thread::spawn(move || {
+            run_store(lock_server, chain_servers, client, tsm)
+        });
+
+        let to_store;
+        loop {
+            let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+            if let Some(s) = ts {
+                to_store = s;
+                break
+            }
+        }
+        let interesting_chains = interesting_chains.into_iter().collect();
+        thread::spawn(move || {
+            run_log(to_store, from_outside, ready_reads_s, finished_writes_s,
+                interesting_chains)
+        });
+
+        #[inline(never)]
+        fn run_store(
+            lock_server: SocketAddr,
+            chain_servers: Vec<SocketAddr>,
+            client: mpsc::Sender<Message>,
+            tsm: Arc<Mutex<Option<MioSender<Vec<u8>>>>>
+        ) {
+            let mut event_loop = EventLoop::new().unwrap();
+            let to_store = event_loop.channel();
+            *tsm.lock().unwrap() = Some(to_store);
+            let mut store = ::async::store::AsyncTcpStore::tcp(
+                lock_server,
+                chain_servers,
+                client, &mut event_loop
+            ).expect("");
+            event_loop.run(&mut store).expect("should never return")
+        }
+
+        #[inline(never)]
+        fn run_log(
+            to_store: MioSender<Vec<u8>>,
+            from_outside: mpsc::Receiver<Message>,
+            ready_reads_s: mpsc::Sender<Vec<u8>>,
+            finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+            interesting_chains: Vec<order>,
+        ) {
+            let log = ThreadLog::new(
+                to_store, from_outside,
+                ready_reads_s,
+                finished_writes_s,
+                interesting_chains
+            );
+            log.run()
+        }
+
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
     }
 
     pub fn new(
@@ -1159,6 +1250,12 @@ where V: Storeable {
     pub fn snapshot(&mut self, chain: order) {
         self.num_snapshots = self.num_snapshots.saturating_add(1);
         self.to_log.send(Message::FromClient(SnapshotAndPrefetch(chain)))
+            .unwrap();
+    }
+
+    pub fn take_snapshot(&mut self) {
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.to_log.send(Message::FromClient(SnapshotAndPrefetch(0.into())))
             .unwrap();
     }
 
@@ -1183,6 +1280,33 @@ where V: Storeable {
 
         let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
         Some((val, locs))
+    }
+
+    pub fn color_append(&mut self, data: &V, inhabits: &[order], depends_on: &[order]) {
+        //TODO get rid of gratuitous copies
+        assert!(inhabits.len() > 0);
+        let mut inhabits = inhabits.to_vec();
+        let mut depends_on = depends_on.to_vec();
+        trace!("color append");
+        trace!("inhabits   {:?}", inhabits);
+        trace!("depends_on {:?}", depends_on);
+        inhabits.sort();
+        depends_on.sort();
+        let no_snapshot = inhabits == depends_on || depends_on.len() == 0;
+        // if we're performing a single colour append we might be able fuzzy_log.append
+        // instead of multiappend
+        if depends_on.len() > 0 {
+            trace!("dependent append");
+            self.dependent_multiappend(&*inhabits, &*depends_on, data, &[]);
+        }
+        else if inhabits.len() == 1 {
+            trace!("single append");
+            self.append(inhabits[0].into(), data, &[]);
+        }
+        else {
+            trace!("multi  append");
+            self.multiappend(&*inhabits, data, &[]);
+        }
     }
 
     pub fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Vec<OrderIndex> {
@@ -1665,18 +1789,6 @@ mod tests {
                     (60.into(), 4.into())][..])));
             }
 
-            #[test]
-            pub fn test_big() {
-                let _ = env_logger::init();
-                trace!("TEST multi");
-
-                let interesting_columns = vec![61.into()];
-                let mut lh = $new_thread_log(interesting_columns);
-                let _ = lh.append(61.into(), &[32u8; 6000], &[]);
-                lh.snapshot(61.into());
-                assert_eq!(lh.get_next(), Some((&[32u8; 6000], &[(61.into(), 1.into())][..])));
-            }
-
             //TODO test append after prefetch but before read
         );
         () => ( async_tests!(tcp); async_tests!(udp); );
@@ -1689,6 +1801,25 @@ mod tests {
                 #[allow(non_upper_case_globals)]
                 const addr_strs: &'static [&'static str] = &["0.0.0.0:13390", "0.0.0.0:13391"];
 
+                //TODO move back up
+                #[test]
+                pub fn test_big() {
+                    let _ = env_logger::init();
+                    trace!("TEST multi");
+
+                    let interesting_columns = vec![61.into()];
+                    start_tcp_servers();
+                    let mut lh = LogHandle::spawn_tcp_log2(lock_str.parse().unwrap(),
+                        addr_strs.into_iter().map(|s| s.parse().unwrap()),
+                        interesting_columns.into_iter(),
+                    );
+                    let _ = lh.append(61.into(), &[32u8; 6000][..], &[]);
+                    lh.snapshot(61.into());
+                    assert_eq!(lh.get_next(), Some((&[32u8; 6000][..],
+                            &[(61.into(), 1.into())][..])));
+                }
+
+                //FIXME should be V: ?Sized
                 fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
                     start_tcp_servers();
 
