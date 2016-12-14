@@ -1814,9 +1814,13 @@ mod tests {
                         interesting_columns.into_iter(),
                     );
                     let _ = lh.append(61.into(), &[32u8; 6000][..], &[]);
+                    let _ = lh.append(61.into(), &[0x0fu8; 8000][..], &[]);
                     lh.snapshot(61.into());
                     assert_eq!(lh.get_next(), Some((&[32u8; 6000][..],
-                            &[(61.into(), 1.into())][..])));
+                        &[(61.into(), 1.into())][..])));
+                    assert_eq!(lh.get_next(), Some((&[0x0fu8; 8000][..],
+                        &[(61.into(), 2.into())][..])));
+                    assert_eq!(lh.get_next(), None);
                 }
 
                 //FIXME should be V: ?Sized
@@ -1840,26 +1844,28 @@ mod tests {
                     static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
                     for (i, &addr_str) in iter::once(&lock_str).chain(addr_strs.iter()).enumerate() {
-                        let handle = thread::spawn(move || {
-
-                            let addr = addr_str.parse().expect("invalid inet address");
-                            let mut event_loop = EventLoop::new().unwrap();
-                            let server = if i == 0 {
-                                Server::new(&addr, 0, 1, &mut event_loop)
-                            }
-                            else {
-                                Server::new(&addr, i as u32 -1, addr_strs.len() as u32,
-                                    &mut event_loop)
-                            };
-                            if let Ok(mut server) = server {
-                                SERVERS_READY.fetch_add(1, Ordering::Release);
+                        let addr = addr_str.parse().expect("invalid inet address");
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        if let Ok(acceptor) = acceptor {
+                            thread::spawn(move || {
                                 trace!("starting server");
-                                event_loop.run(&mut server).expect("server should never stop");
-                            }
+                                if i == 0 {
+                                    ::servers2::tcp::run(acceptor, 0, 1, 2, &SERVERS_READY)
+                                }
+                                else {
+                                    ::servers2::tcp::run(
+                                        acceptor,
+                                        i as u32 - 1,
+                                        addr_strs.len() as u32,
+                                        1,
+                                        &SERVERS_READY,
+                                    )
+                                }
+                            });
+                        }
+                        else {
                             trace!("server already started");
-                            return;
-                        });
-                        mem::forget(handle);
+                        }
                     }
 
                     while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}

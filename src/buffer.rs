@@ -1,4 +1,5 @@
-use packets::Entry;
+use storeables::Storeable;
+use packets::{Entry, EntryContents};
 use hash::HashMap;
 
 //FIXME merge this buffer with the one in store and put in it's own mod
@@ -15,12 +16,29 @@ impl Buffer {
         Buffer { inner: Vec::new() }
     }
 
+    pub fn fill_from_entry_contents<V>(&mut self, contents: EntryContents<V>) -> &mut Entry<V>
+    where V: Storeable {
+        contents.fill_vec(&mut self.inner)
+    }
+
     pub fn ensure_capacity(&mut self, capacity: usize) {
         if self.inner.capacity() < capacity {
             let curr_cap = self.inner.capacity();
             self.inner.reserve_exact(capacity - curr_cap);
             unsafe { self.inner.set_len(capacity) }
         }
+        else if self.inner.len() < capacity {
+            unsafe { self.inner.set_len(capacity) }
+        }
+    }
+
+    pub fn entry_slice(&self) -> &[u8] {
+        let size = self.entry_size();
+        &self[..size]
+    }
+
+    pub fn entry_size(&self) -> usize {
+        self.entry().entry_size()
     }
 
     pub fn entry(&self) -> &Entry<()> {

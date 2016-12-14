@@ -6,7 +6,7 @@ use std::slice;
 
 pub use uuid::Uuid;
 
-pub use storeables::Storeable;
+pub use storeables::{Storeable, UnStoreable};
 
 use self::EntryContents::*;
 
@@ -323,6 +323,15 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         entr
     }
 
+    pub unsafe fn wrap_byte(byte: &u8) -> &Self {
+        mem::transmute(byte)
+    }
+
+    pub unsafe fn wrap_mut(byte: &mut u8) -> &mut Self {
+        mem::transmute(byte)
+    }
+
+    //FIXME wow this is unsafe
     pub fn wrap_bytes(bytes: &[u8]) -> &Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
@@ -330,6 +339,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         }
     }
 
+    //FIXME wow this is unsafe
     pub fn wrap_bytes_mut(bytes: &mut [u8]) -> &mut Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
@@ -515,8 +525,9 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         }
     }
 
-    fn sentinel_entry_size(&self) -> usize {
-        assert!(self.kind & EntryKind::Layout == EntryKind::Sentinel);
+    pub fn sentinel_entry_size(&self) -> usize {
+        assert!(self.kind & EntryKind::Layout == EntryKind::Sentinel
+            || self.kind & EntryKind::Layout == EntryKind::Multiput);
         //TODO currently we treat a Sentinel like a multiappend with no data
         //     nor deps
         unsafe {
@@ -793,7 +804,7 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
         };
         //FIXME
         //assert!(size <= 4096);
-        assert!(size <= 8192);
+        //assert!(size <= 8192);
         let mut buffer = Vec::with_capacity(size);
         unsafe {
             buffer.set_len(size);

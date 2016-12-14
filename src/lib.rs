@@ -15,6 +15,7 @@ extern crate rusoto;
 //extern crate test;
 
 extern crate bit_set;
+extern crate deque;
 extern crate rustc_serialize;
 extern crate mio;
 extern crate nix;
@@ -23,6 +24,7 @@ extern crate time;
 extern crate rand;
 extern crate uuid;
 extern crate libc;
+extern crate lazycell;
 
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;
@@ -38,7 +40,7 @@ pub mod udp_store;
 pub mod tcp_store;
 pub mod multitcp_store;
 pub mod servers;
-//pub mod servers2;
+pub mod servers2;
 pub mod color_api;
 pub mod async;
 mod hash;
