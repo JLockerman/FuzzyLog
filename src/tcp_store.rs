@@ -359,7 +359,7 @@ pub mod t_test {
     use std::rc::Rc;
 
     use mio;
-    use mio::prelude::*;
+    use mio::deprecated::EventLoop;
     use mio::tcp::*;
 
     use nix::sys::socket::setsockopt;

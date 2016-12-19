@@ -1,19 +1,19 @@
 [package]
-name = "c_link"
+name = "trivial_server"
 version = "0.1.0"
-authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
+authors = ["J <joshua.lockerman@yale.edu>"]
 
 [dependencies]
+mio = "0.6"
+nix = "*"
+env_logger = "0.3"
 fuzzy_log = {path = "../.."}
-
-[lib]
-crate-type = ["staticlib"]
 
 [profile.release]
 opt-level = 3
 debug = true
 rpath = false
-lto = false
+lto = true
 debug-assertions = false
 codegen-units = 1
 panic = 'unwind'

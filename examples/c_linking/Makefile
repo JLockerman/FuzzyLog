@@ -18,7 +18,7 @@ C_SRC := start.c
 
 DELOS_RUST_LOC ?= ../..
 
-LINK_FLAGS += -L$(DELOS_RUST_LOC)/examples/c_linking/target/release -lc_link -pthread
+LINK_FLAGS += -L$(DELOS_RUST_LOC)/examples/c_linking/target/release -lc_link -lm -ldl -pthread
 
 CFLAGS += -O2 -std=gnu11
 WFLAGS += -Wall -Wextra -Wpointer-arith -Wundef -Wformat=2 -Wnested-externs

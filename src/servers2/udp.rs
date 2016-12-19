@@ -8,7 +8,7 @@ use mio;
 use mio::deprecated::{EventLoop, Handler as MioHandler};
 use mio::udp::UdpSocket;
 
-use servers::ServerLog;
+use servers2::ServerLog;
 
 const SOCKET_TOKEN: mio::Token = mio::Token(0);
 

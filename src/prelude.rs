@@ -21,6 +21,24 @@ pub trait Store<V: ?Sized> {
     //fn get_horizon(&mut self, chains: &mut [OrderIndex]);
 }
 
+impl<V: ?Sized> Store<V> for Box<Store<V>> {
+    fn insert(&mut self, key: OrderIndex, val: EntryContents<V>) -> InsertResult {
+        (**self).insert(key, val)
+    }
+
+    fn get(&mut self, key: OrderIndex) -> GetResult<Entry<V>> {
+        (**self).get(key)
+    }
+
+    fn multi_append(&mut self, chains: &[OrderIndex], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        (**self).multi_append(chains, data, deps)
+    }
+
+    fn dependent_multi_append(&mut self, chains: &[order], depends_on: &[order], data: &V, deps: &[OrderIndex]) -> InsertResult {
+        (**self).dependent_multi_append(chains, depends_on, data, deps)
+    }
+}
+
 pub type InsertResult = Result<OrderIndex, InsertErr>;
 pub type GetResult<T> = Result<T, GetErr>;
 
@@ -146,6 +164,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 self.update_local_horizon(column, index);
             }
             Sentinel(..) => {
+                //FIXME save the sentinel ID if we'll need it later
                 self.update_local_horizon(column, index);
             }
         }
@@ -180,7 +199,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
             trace!("searching for multiput {:?}\n\tat: {:?}", put_id, (column, index));
             let ent = self.store.get((column, index)).clone();
             let ent = match ent {
-                Err(GetErr::NoValue(..)) => panic!("invalid multiput."),
+                Err(GetErr::NoValue(..)) => panic!("invalid multiput @ {:?}.", (column, index)),
                 Ok(e) => e
             };
             self.play_deps(ent.dependencies());

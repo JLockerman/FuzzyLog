@@ -19,6 +19,8 @@ extern crate rusoto;
 //#[cfg(test)]
 //extern crate test;
 
+extern crate bit_set;
+extern crate deque;
 extern crate rustc_serialize;
 extern crate mio;
 extern crate nix;
@@ -28,6 +30,7 @@ extern crate toml;
 extern crate rand;
 extern crate uuid;
 extern crate libc;
+extern crate lazycell;
 
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;
@@ -43,7 +46,11 @@ pub mod udp_store;
 pub mod tcp_store;
 pub mod multitcp_store;
 pub mod servers;
+pub mod servers2;
 pub mod color_api;
+pub mod async;
+mod hash;
+mod buffer;
 
 #[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;
@@ -54,6 +61,7 @@ pub mod c_binidings {
     use local_store::LocalHorizon;
     //use tcp_store::TcpStore;
     use multitcp_store::TcpStore;
+    use async::fuzzy_log::LogHandle;
 
     use std::collections::HashMap;
     use std::{mem, ptr, slice};
@@ -68,9 +76,11 @@ pub mod c_binidings {
 
     use servers::tcp::Server;
 
-    use mio::EventLoop;
+    use mio::deprecated::EventLoop;
 
-    pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
+    //pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
+    //pub type DAG = DAGHandle<[u8], Box<Store<[u8]>>, LocalHorizon>;
+    pub type DAG = LogHandle<[u8]>;
     pub type ColorID = u32;
 
     #[repr(C)]
@@ -107,7 +117,8 @@ pub mod c_binidings {
             }
         };
         let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
-        Box::new(DAGHandle::new(TcpStore::new(lock_server_addr, &*server_addrs).unwrap(), LocalHorizon::new(), colors))
+        Box::new(LogHandle::spawn_tcp_log2(lock_server_addr, server_addrs.into_iter(),
+            colors.into_iter().cloned().map(order::from)))
     }
 
     #[no_mangle]
@@ -132,8 +143,8 @@ pub mod c_binidings {
             }
         };
         let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
-        Box::new(DAGHandle::new(TcpStore::new(lock_server_addr, &*server_addrs).unwrap(),
-            LocalHorizon::new(), colors))
+        Box::new(LogHandle::spawn_tcp_log2(lock_server_addr, server_addrs.into_iter(),
+            colors.into_iter().cloned().map(order::from)))
     }
 
     //NOTE currently can only use 31bits of return value
@@ -146,20 +157,22 @@ pub mod c_binidings {
         assert!(data_size <= 8000);
 
         let (dag, data, inhabits) = unsafe {
+            let s = slice::from_raw_parts((*inhabits).mycolors, (*inhabits).numcolors);
             (dag.as_mut().expect("need to provide a valid DAGHandle"),
                 slice::from_raw_parts(data, data_size),
-                slice::from_raw_parts((*inhabits).mycolors, (*inhabits).numcolors))
+                mem::transmute(s))
         };
-        let depends_on = unsafe {
+        let depends_on: &[order] = unsafe {
             if depends_on != ptr::null() {
                 assert!(colors_valid(depends_on));
-                slice::from_raw_parts((*depends_on).mycolors, (*depends_on).numcolors)
+                let s = slice::from_raw_parts((*depends_on).mycolors, (*depends_on).numcolors);
+                mem::transmute(s)
             }
             else {
                 &[]
             }
         };
-        dag.append(data, inhabits, depends_on);
+        dag.color_append(data, inhabits, depends_on);
         0
     }
 
@@ -181,16 +194,28 @@ pub mod c_binidings {
         let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
         let data_out = unsafe { slice::from_raw_parts_mut(data_out, 8000)};
         let data_read = unsafe {data_read.as_mut().expect("must provide valid data_out")};
-        let inhabited_colors = dag.get_next(data_out, data_read);
+        let val = dag.get_next();
         unsafe {
-            let numcolors = inhabited_colors.len();
-            let mut mycolors = ptr::null_mut();
-            if numcolors != 0 {
-                mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
-                ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
-            }
+            let (mycolors, numcolors) = match val {
+                Some((data, inhabited_colors)) => {
+                    *data_read = <[u8] as Storeable>::copy_to_mut(data, data_out);
+                    let numcolors = inhabited_colors.len();
+                    let mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
+                    let s = slice::from_raw_parts_mut(mycolors, numcolors);
+                    for i in 0..numcolors {
+                        let e: entry = inhabited_colors[i].1;
+                        s[i] = e.into();
+                    }
+                    //ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
+                    (mycolors, numcolors)
+                }
+                None => {
+                    (ptr::null_mut(), 0)
+                }
+            };
+
             ptr::write(inhabits_out, colors{ numcolors: numcolors, mycolors: mycolors});
-        };
+        }
         0
     }
 
@@ -227,8 +252,7 @@ pub mod c_binidings {
     #[no_mangle]
     pub extern "C" fn start_fuzzy_log_server_for_group(server_ip: *const c_char,
         server_number: u32, total_servers_in_group: u32) -> ! {
-        assert!(server_ip != ptr::null());
-        let mut event_loop = ::mio::EventLoop::new()
+        let mut event_loop = EventLoop::new()
             .expect("unable to start server loop");
         let server_ip = unsafe {
             CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
@@ -251,7 +275,7 @@ pub mod c_binidings {
                 extend_lifetime(&server_started)
             };
             let handle = ::std::thread::spawn(move || {
-                let mut event_loop = ::mio::EventLoop::new()
+                let mut event_loop = EventLoop::new()
                     .expect("unable to start server loop");
                 let mut server = Server::new(&ip_addr, server_number, total_servers_in_group, &mut event_loop)
                     .expect("unable to start server");

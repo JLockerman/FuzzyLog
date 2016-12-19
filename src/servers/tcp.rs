@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry::Vacant;
 use std::io::{self, Read, Write};
 use std::mem;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 
@@ -9,12 +10,13 @@ use prelude::*;
 use servers::ServerLog;
 
 use mio;
-use mio::prelude::*;
+use mio::deprecated::{EventLoop, Handler as MioHandler};
 use mio::tcp::*;
 
 use nix::sys::socket::setsockopt;
 use nix::sys::socket::sockopt::TcpNoDelay;
 
+use buffer::Buffer;
 
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
 
@@ -26,7 +28,7 @@ pub struct Server {
 
 struct PerClient {
     stream: TcpStream,
-    buffer: Box<Entry<()>>,
+    buffer: Buffer,
     sent_bytes: usize,
 }
 
@@ -35,7 +37,7 @@ impl Server {
         let acceptor = try!(TcpListener::bind(server_addr));
         try!(event_loop.register(&acceptor,
                                  mio::Token(0),
-                                 mio::EventSet::readable(),
+                                 mio::Ready::readable(),
                                  mio::PollOpt::level()));
         Ok(Server {
             log: ServerLog::new(this_server_num, total_chain_servers),
@@ -45,28 +47,27 @@ impl Server {
     }
 }
 
-impl mio::Handler for Server {
+impl MioHandler for Server {
     type Timeout = ();
     type Message = ();
 
     fn ready(&mut self,
              event_loop: &mut EventLoop<Self>,
              token: mio::Token,
-             events: mio::EventSet) {
+             events: mio::Ready) {
         match token {
             LISTENER_TOKEN => {
                 assert!(events.is_readable());
-                trace!("SERVER got accept");
+                trace!("SERVER {:?} got accept", self.log.server_num());
                 match self.acceptor.accept() {
-                    Ok(None) => trace!("SERVER false accept"),
                     Err(e) => panic!("error {}", e),
-                    Ok(Some((socket, addr))) => {
-                        let _ = socket.set_keepalive(Some(1));
-                        let _ = setsockopt(socket.as_raw_fd(), TcpNoDelay, &true);
-                        // let _ = socket.set_tcp_nodelay(true);
+                    Ok((socket, addr)) => {
+                        let _ = socket.set_keepalive_ms(Some(1000));
+                        let _ = socket.set_nodelay(true);
                         let next_client_id = self.clients.len() + 1;
                         let client_token = mio::Token(next_client_id);
-                        trace!("SERVER new client {:?}, {:?}", next_client_id, addr);
+                        trace!("SERVER {} new client {:?}, {:?}",
+                            self.log.server_num(), next_client_id, addr);
                         let client = PerClient::new(socket);
                         let client_socket = &match self.clients.entry(client_token) {
                                                  Vacant(v) => v.insert(client),
@@ -79,7 +80,7 @@ impl mio::Handler for Server {
                         //TODO edge or level?
                         event_loop.register(client_socket,
                                             client_token,
-                                            mio::EventSet::readable() | mio::EventSet::error(),
+                                            mio::Ready::readable() | mio::Ready::error(),
                                             mio::PollOpt::edge() | mio::PollOpt::oneshot())
                                   .expect("could not register client socket")
                     }
@@ -92,9 +93,10 @@ impl mio::Handler for Server {
                                   .get_mut(&client_token)
                                   .ok_or(::std::io::Error::new(::std::io::ErrorKind::Other,
                                                                "socket does not exist"))
-                                  .map(|s| s.stream.take_socket_error());
+                                  .map(|s| s.stream.take_error());
                     if err.is_err() {
-                        trace!("SERVER dropping client {:?} due to", client_token);
+                        trace!("SERVER {} dropping client {:?} due to",
+                            self.log.server_num(), client_token);
                         self.clients.remove(&client_token);
                     }
                     return;
@@ -102,49 +104,79 @@ impl mio::Handler for Server {
                 let client = self.clients.get_mut(&client_token).unwrap();
                 let next_interest = if events.is_readable() {
                     // trace!("SERVER gonna read from client");
-                    let finished_read = client.read_packet();
+
+                    let unwound = catch_unwind(AssertUnwindSafe(|| client.read_packet()));
+                    trace!("SERVER {} reading from client {:?}...",
+                        self.log.server_num(), client_token);
+                    let finished_read = match unwound {
+                        Err(cause) => {
+                            trace!("SERVER {} dropping client {:?} due to panic {:?}",
+                                self.log.server_num(), client_token, cause);
+                            trace!("SERVER {} had read {:?}",
+                                self.log.server_num(), &client.buffer[..client.sent_bytes]);
+                            //TODO self.clients.remove(&client_token);
+                            //client.sent_bytes = 0;
+                            //event_loop.reregister(&client.stream, client_token,
+                            //    mio::Ready::readable() | mio::Ready::error(),
+                            //    mio::PollOpt::edge() | mio::PollOpt::oneshot())
+                            //          .expect("could not reregister client socket");
+                            return
+                        }
+                        Ok(f) => f,
+                    };
                     if finished_read {
-                        trace!("SERVER finished read from client {:?}", client_token);
-                        let need_to_respond = self.log.handle_op(&mut *client.buffer);
+                        trace!("SERVER {} finished read from client {:?}",
+                            self.log.server_num(), client_token);
+                        let need_to_respond = self.log.handle_op(client.buffer.entry_mut());
                         //TODO
                         //if need_to_respond {
-                        //    mio::EventSet::writable()
+                        //    mio::Ready::writable()
                         //}
                         //else {
-                        //    mio::EventSet::readable()
+                        //    mio::Ready::readable()
                         //}
-                        mio::EventSet::writable()
+                        mio::Ready::writable()
                     } else {
                         // trace!("SERVER keep reading from client");
-                        mio::EventSet::readable()
+                        mio::Ready::readable()
                     }
                 } else if events.is_writable() {
                     //trace!("SERVER gonna write from client {:?}", client_token);
-                    let finished_write = client.write_packet();
+                    let unwound = catch_unwind(AssertUnwindSafe(|| client.write_packet()));
+                    let finished_write = match unwound {
+                        Err(cause) => {
+                            trace!("SERVER {} dropping client {:?} due to {:?}",
+                                self.log.server_num(), client_token, cause);
+                            //TODO self.clients.remove(&client_token);
+                            return
+                        }
+                        Ok(f) => f,
+                    };
                     if finished_write {
-                        trace!("SERVER finished write from client {:?}", client_token);
+                        trace!("SERVER {} finished write from client {:?}",
+                            self.log.server_num(), client_token);
                         //TODO is this, or setting options to edge needed?
                         //let finished_read = client.read_packet();
                         //if finished_read {
                         //    trace!("SERVER read after write");
                         //    let need_to_respond = self.log.handle_op(&mut *client.buffer);
-                        //    mio::EventSet::writable()
+                        //    mio::Ready::writable()
                         //}
                         //else {
                         //    trace!("SERVER wait for read");
-                        //    mio::EventSet::readable()
+                        //    mio::Ready::readable()
                         //}
-                        mio::EventSet::readable()
+                        mio::Ready::readable()
                     } else {
                         //trace!("SERVER keep writing from client {:?}", client_token);
-                        mio::EventSet::writable()
+                        mio::Ready::writable()
                     }
                 } else {
-                    panic!("invalid event {:?}", events);
+                    panic!("SERVER {} invalid event {:?}", self.log.server_num(), events);
                 };
                 event_loop.reregister(&client.stream,
                                       client_token,
-                                      next_interest | mio::EventSet::error(),
+                                      next_interest | mio::Ready::error(),
                                       mio::PollOpt::edge() | mio::PollOpt::oneshot())
                           .expect("could not reregister client socket")
             }
@@ -156,7 +188,7 @@ impl PerClient {
     fn new(stream: TcpStream) -> Self {
         PerClient {
             stream: stream,
-            buffer: Box::new(unsafe { mem::zeroed() }),
+            buffer: Buffer::new(),
             sent_bytes: 0,
         }
     }
@@ -172,33 +204,33 @@ impl PerClient {
 
     fn try_read_packet(&mut self) -> io::Result<usize> {
         if self.sent_bytes < base_header_size() {
-            let read = try!(self.stream.read(&mut self.buffer.sized_bytes_mut()[self.sent_bytes..base_header_size()]));
+            let read = try!(self.stream.read(&mut
+                self.buffer[self.sent_bytes..base_header_size()]));
             self.sent_bytes += read;
             if self.sent_bytes < base_header_size() {
                 return Ok(1);
             }
         }
 
-        let header_size = self.buffer.header_size();
+        let header_size = self.buffer.entry().header_size();
         assert!(header_size >= base_header_size());
         if self.sent_bytes < header_size {
-            let read = try!(self.stream.read(&mut self.buffer
-                .sized_bytes_mut()[self.sent_bytes..header_size]));
+            let read = try!(self.stream.read(&mut self.buffer[self.sent_bytes..header_size]));
             self.sent_bytes += read;
             if self.sent_bytes < header_size {
                 return Ok(1);
             }
         }
 
-        let size = self.buffer.entry_size();
+        let size = self.buffer.entry().entry_size();
         if self.sent_bytes < size {
-            let read = try!(self.stream.read(&mut self.buffer
-                .sized_bytes_mut()[self.sent_bytes..size]));
+            let read = try!(self.stream.read(&mut self.buffer[self.sent_bytes..size]));
             self.sent_bytes += read;
             if self.sent_bytes < size {
                 return Ok(1);
             }
         }
+        debug_assert!(self.buffer.packet_fits());
         // assert!(payload_size >= header_size);
         Ok(0)
     }
@@ -208,13 +240,13 @@ impl PerClient {
             Ok(s) => {
                 //trace!("SERVER wrote {} bytes", s);
                 self.sent_bytes += s;
-                if self.sent_bytes >= self.buffer.entry_size() {
+                if self.sent_bytes >= self.buffer.entry().entry_size() {
                     trace!("SERVER finished write");
                     self.sent_bytes = 0;
                     let _ = self.stream.flush();
                     return true;
                 }
-                self.sent_bytes >= self.buffer.entry_size()
+                self.sent_bytes >= self.buffer.entry().entry_size()
             }
             Err(e) => {
                 trace!("SERVER write err {:?}", e);
@@ -224,9 +256,8 @@ impl PerClient {
     }
 
     fn try_send_packet(&mut self) -> io::Result<usize> {
-        let send_size = self.buffer.entry_size() - self.sent_bytes;
+        let send_size = self.buffer.entry().entry_size() - self.sent_bytes;
         // trace!("SERVER server send size {}", send_size);
-        self.stream
-            .write(&self.buffer.bytes()[self.sent_bytes..send_size])
+        self.stream.write(&self.buffer[self.sent_bytes..send_size])
     }
 }

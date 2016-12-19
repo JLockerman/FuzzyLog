@@ -6,7 +6,7 @@ use std::slice;
 
 pub use uuid::Uuid;
 
-pub use storeables::Storeable;
+pub use storeables::{Storeable, UnStoreable};
 
 use self::EntryContents::*;
 
@@ -117,7 +117,7 @@ pub mod EntryKind {
                 Sentinel => EntryLayout::Sentinel,
                 Read => EntryLayout::Read,
                 Invalid => panic!("Empty Layout"),
-                v => unreachable!("{:?}", v),
+                _ => unreachable!("no layout {:x}", self.bits()),
             }
         }
 
@@ -323,6 +323,15 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         entr
     }
 
+    pub unsafe fn wrap_byte(byte: &u8) -> &Self {
+        mem::transmute(byte)
+    }
+
+    pub unsafe fn wrap_mut(byte: &mut u8) -> &mut Self {
+        mem::transmute(byte)
+    }
+
+    //FIXME wow this is unsafe
     pub fn wrap_bytes(bytes: &[u8]) -> &Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
@@ -330,6 +339,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         }
     }
 
+    //FIXME wow this is unsafe
     pub fn wrap_bytes_mut(bytes: &mut [u8]) -> &mut Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
@@ -459,7 +469,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
                 mem::size_of::<Entry<(), MultiFlex<()>>>()
             }
             EntryKind::Lock => mem::size_of::<Lock>(),
-            _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
+            _ => panic!("header_size: invalid layout {:x} {:?}", self.kind.bits(), self.kind),
         }
     }
 
@@ -515,8 +525,9 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
         }
     }
 
-    fn sentinel_entry_size(&self) -> usize {
-        assert!(self.kind & EntryKind::Layout == EntryKind::Sentinel);
+    pub fn sentinel_entry_size(&self) -> usize {
+        assert!(self.kind & EntryKind::Layout == EntryKind::Sentinel
+            || self.kind & EntryKind::Layout == EntryKind::Multiput);
         //TODO currently we treat a Sentinel like a multiappend with no data
         //     nor deps
         unsafe {
@@ -791,7 +802,9 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
                 + size_of::<OrderIndex>()
             }
         };
-        assert!(size <= 4096);
+        //FIXME
+        //assert!(size <= 4096);
+        //assert!(size <= 8192);
         let mut buffer = Vec::with_capacity(size);
         unsafe {
             buffer.set_len(size);
@@ -799,8 +812,43 @@ impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
         }
         buffer
     }
+
+    pub fn fill_vec<'s, 'a>(&'s self, vec: &'a mut Vec<u8>) -> &'a mut Entry<V> {
+        let size = match self {
+            &Data(data, deps) =>
+                mem::size_of::<Entry<(), DataFlex<()>>>()
+                 + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>()),
+            &Multiput{ data, columns, deps, ..} =>
+                mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>())
+                + (columns.len() * size_of::<OrderIndex>()),
+            &Sentinel(..) => {
+                //TODO currently we treat a Sentinel like a multiappend with no data
+                //     nor deps
+                mem::size_of::<Entry<(), MultiFlex<()>>>()
+                + size_of::<OrderIndex>()
+            }
+        };
+        if vec.capacity() < size {
+            let add_cap = size - vec.capacity();
+            vec.reserve_exact(add_cap)
+        }
+        unsafe {
+            vec.set_len(size);
+            let e = Entry::wrap_bytes_mut(&mut *vec);
+            self.fill_entry(e);
+            e
+        }
+    }
 }
 
+pub fn bytes_as_entry(bytes: &[u8]) -> &Entry<()> {
+    Entry::<()>::wrap_bytes(bytes)
+}
+
+pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> &mut Entry<()> {
+    Entry::<()>::wrap_bytes_mut(bytes)
+}
 
 ///////////////////////////////////////
 ///////////////////////////////////////

@@ -5,10 +5,13 @@ authors = ["J <joshua.lockerman@yale.edu>"]
 
 [dependencies]
 bitflags = "0.4"
+bit-set = "0.4.0"
 custom_derive = "0.1"
+deque = "0.3.1"
 grabbag_macros = "0.1"
 newtype_derive = "0.1"
 uuid = "0.1"
+lazycell = "0.5.0"
 libc = "0.2"
 linked-hash-map ="0.3.0"
 log = "0.3"
@@ -16,7 +19,7 @@ rand = "0.3"
 rustc-serialize = "0.3"
 time = "0.1"
 toml = "0.2"
-mio = "0.5"
+mio = "0.6"
 nix = "*"
 net2 = "0.2"
 
@@ -24,3 +27,12 @@ net2 = "0.2"
 
 [dev-dependencies]
 env_logger = "0.3"
+
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = 'abort'

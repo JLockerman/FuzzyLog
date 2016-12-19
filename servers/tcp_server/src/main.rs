@@ -10,7 +10,7 @@ use std::env;
 
 use fuzzy_log::servers::tcp::Server;
 
-use mio::prelude::*;
+use mio::deprecated::EventLoop;
 
 pub fn main() {
     let _ = env_logger::init();
