@@ -15,6 +15,45 @@ use mio::tcp::*;
 
 use buffer::Buffer;
 
+/*
+  GC with parrallel readers plan:
+    each worker will have a globally visible field
+      currently_reading
+    padded to a cache line to prevent false sharing
+    the GC core (which need not be the same as the index core)
+    has a globally visible field (per chain?)
+      greatest_collected
+    to read:
+      a worker first sets its currently_reading field to the loc it wants to read,
+      it then checks greatest_collected,
+      if greatest_collected >= currently_reading the entry is already gc'd and the worker returns the needed respose
+      otherwise it returns the found value
+    to gc:
+      the gcer first sets greatest_collected to the point it wants to collect,
+      then waits until none of the worker are reading a value in the collection range
+
+    this does not deadlock b/c if the worker sets its then the gcer its the worker will abort
+
+    this should be efficient b/c in normal operation the workers are just writing to a local value
+
+    for multi entry values store refcount before entry,
+    we want bit field which tells us where seq of entries end in allocator,
+    use to distinguis btwn single and multi entries...
+*/
+
+/*
+  better parrallelization plan:
+    each worker performs the reads for a burst of cliemt requests (say 8KB worth)
+    reads are done purely at the worker,
+    and the worker copies from the entry directly to the tcp stack
+    for writes, the requests and index from the server,
+    then emplaces it as it currently does.
+    it might pay to parrellelize the emplacement,
+    by having the index thread distribute the placement jobs round robin
+    (or other load balancing if we figure out one that works,
+     actually, dumping all of the to-copies in a work-stealing queue might actually work...)
+*/
+
 pub fn run(
     acceptor: TcpListener,
     this_server_num: u32,
@@ -22,15 +61,18 @@ pub fn run(
     num_workers: usize,
     ready: &AtomicUsize,
 ) -> ! {
-    use std::cmp::min;
+    use std::cmp::max;
 
     let (dist_to_workers, recv_from_dist) = spmc::channel();
     let (log_to_workers, recv_from_log) = spmc::channel();
     //TODO or sync channel?
     let (workers_to_log, recv_from_workers) = mpsc::channel();
     let (workers_to_dist, dist_from_workers) = mio_channel::channel();
-
-    for _ in 0..min(num_workers, 1) {
+    if num_workers == 0 {
+        warn!("SERVER {} started with 0 workers", this_server_num);
+    }
+    trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
+    for n in 0..max(num_workers, 1) {
         let from_dist = recv_from_dist.clone();
         let to_dist   = workers_to_dist.clone();
         let from_log  = recv_from_log.clone();
@@ -41,6 +83,7 @@ pub fn run(
                 to_dist,
                 from_log,
                 to_log,
+                n,
             )
         );
     }
@@ -142,10 +185,11 @@ fn run_worker(
     to_dist: mio_channel::Sender<(Buffer, TcpStream, mio::Token)>,
     from_log: spmc::Receiver<ToWorker<(TcpStream, mio::Token)>>,
     to_log: mpsc::Sender<(Buffer, (TcpStream, mio::Token))>,
+    worker_num: usize,
 ) -> ! {
     const FROM_DIST: mio::Token = mio::Token(0);
     const FROM_LOG: mio::Token = mio::Token(1);
-
+    trace!("WORKER {} start.", worker_num);
     let poll = mio::Poll::new().unwrap();
     let mut current_io: HashMap<_, _> = Default::default();
     poll.register(
@@ -168,10 +212,12 @@ fn run_worker(
         //  5. if no more work, poll
 
         poll.poll(&mut events, None).expect("worker poll failed");
-
+        let mut handled_event = false;
         'event: for event in events.iter() {
             if let hash_map::Entry::Occupied(mut o) = current_io.entry(event.token()) {
+                handled_event = true;
                 let next = {
+                    trace!("WORKER {} handling {:?}", worker_num, event.token());
                     let &mut (ref mut buffer, ref stream, ref mut size, _, io) = o.get_mut();
                     match io {
                         Io::Read => match recv_packet(buffer, stream, *size) {
@@ -202,31 +248,39 @@ fn run_worker(
             }
         }
 
-        'send: loop {
+        //'send: loop {
+        if !handled_event {
             match from_log.try_recv() {
-                None => break 'send,
-                Some(tw) => servers2::handle_to_worker(tw).map(|(buffer, (stream, tok))| {
-                    let continue_write = send_packet(&buffer, &stream, 0);
-                    if let Some(s) = continue_write {
-                        let _ = poll.register(
-                            &stream,
-                            tok,
-                            mio::Ready::writable() | mio::Ready::error(),
-                            mio::PollOpt::edge()
-                        );
-                        current_io.insert(tok, (buffer, stream, s, tok, Io::Write));
-                    }
-                    else {
-                        to_dist.send((buffer, stream, tok)).ok().unwrap()
-                    }
-                }),
+                None => {}//break 'send,
+                Some(tw) => {
+                    servers2::handle_to_worker(tw).map(|(buffer, (stream, tok))| {
+                        trace!("WORKER {} got send {:?} from log for.", worker_num, tok);
+                        let continue_write = send_packet(&buffer, &stream, 0);
+                        if let Some(s) = continue_write {
+                            let _ = poll.register(
+                                &stream,
+                                tok,
+                                mio::Ready::writable() | mio::Ready::error(),
+                                mio::PollOpt::edge()
+                            );
+                            current_io.insert(tok, (buffer, stream, s, tok, Io::Write));
+                        }
+                        else {
+                            to_dist.send((buffer, stream, tok)).ok().unwrap()
+                        }
+                    });
+                    //break 'send
+                    handled_event = true;
+                },
             };
         }
 
-        'recv: loop {
+        //'recv: loop {
+        if !handled_event {
             match from_dist.try_recv() {
-                None => break 'recv,
+                None => {}//break 'recv,
                 Some((mut buffer, stream, tok)) => {
+                    trace!("WORKER {} got recv {:?} from dist.", worker_num, tok);
                     let continue_read = recv_packet(&mut buffer, &stream, 0);
                     match continue_read {
                         RecvRes::Done => to_log.send((buffer, (stream, tok))).unwrap(),
@@ -241,6 +295,9 @@ fn run_worker(
                             current_io.insert(tok, (buffer, stream, read, tok, Io::Read));
                         }
                     }
+                    //TODO
+                    //break 'recv
+                    handled_event = true
                 },
             }
         }
