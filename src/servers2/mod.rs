@@ -35,7 +35,7 @@ where ToWorkers: DistributeToWorkers<T> {
     _pd: PhantomData<T>,
 }
 
-trait DistributeToWorkers<T: Send + Sync> {
+pub trait DistributeToWorkers<T: Send + Sync> {
     fn send_to_worker(&mut self, msg: ToWorker<T>);
 }
 
@@ -90,7 +90,9 @@ where ToWorkers: DistributeToWorkers<T> {
         }
     }
 
-    //FIXME pass buffer so it can be resized as needed
+
+    //FIXME pass buffer-slice so we can read batches
+    //TODO replace T with U and T: ReturnAs<U> so we don't have to send as much data
     fn handle_op(&mut self, mut buffer: BufferSlice, t: T) {
         let kind = buffer.entry().kind;
         match kind.layout() {
@@ -339,18 +341,26 @@ where ToWorkers: DistributeToWorkers<T> {
     }
 }
 
-fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>) -> Option<(Buffer, T)> {
+struct LogWorker {
+    id: usize,
+}
+
+fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
+-> Option<(Buffer, T)> {
     match msg {
-        Reply(buffer, t) => Some((buffer, t)),
+        Reply(buffer, t) => {
+            trace!("WORKER {} finish reply", worker_num);
+            Some((buffer, t))
+        },
 
         Write(buffer, slot, t) => unsafe {
-            trace!("WORKER finish write");
+            trace!("WORKER {} finish write", worker_num);
             slot.finish_append(buffer.entry());
             Some((buffer, t))
         },
 
         Read(read, mut buffer, t) => {
-            trace!("WORKER finish read");
+            trace!("WORKER {} finish read", worker_num);
             let bytes = read.bytes();
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
@@ -372,14 +382,14 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>) -> Option<(Buffer, T)> {
                 e.id = old_id;
                 e.kind = EntryKind::NoValue;
             }
-            trace!("WORKER finish empty read {:?}", old_loc);
+            trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
             Some((buffer, t))
         },
 
         MultiWrite(buffer, slot, marker) => {
-            trace!("WORKER finish multi part");
+            trace!("WORKER {} finish multi part", worker_num);
             unsafe { slot.finish_append(buffer.entry()) };
-            return_if_last(buffer, marker)
+            return_if_last(buffer, marker, worker_num)
         },
 
         SentinelWrite(buffer, slot, marker) => {
@@ -393,17 +403,22 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>) -> Option<(Buffer, T)> {
                     });
                 }
             };
-            return_if_last(buffer, marker)
+            return_if_last(buffer, marker, worker_num)
         },
     }
 }
 
-fn return_if_last<T: Send + Sync>(mut buffer: Arc<Buffer>, mut marker: Arc<(AtomicIsize, T)>)
+fn return_if_last<T: Send + Sync>(
+    mut buffer: Arc<Buffer>,
+    mut marker: Arc<(AtomicIsize, T)>,
+    worker_num: usize,
+)
 -> Option<(Buffer, T)> {
     let old = marker.0.fetch_sub(1, Ordering::AcqRel);
     if old == 1 {
         //FIXME I don't think this is needed...
         if marker.0.compare_and_swap(0, -1, Ordering::AcqRel) == 0 {
+            trace!("WORKER {} finish last part", worker_num);
             let marker_inner;
             let buffer_inner;
             loop {

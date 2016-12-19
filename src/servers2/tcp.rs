@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use prelude::*;
-use servers2::{self, spmc, ServerLog, ToWorker};
+use servers2::{self, spmc, ServerLog, ToWorker, DistributeToWorkers};
 use hash::HashMap;
 
 use mio;
@@ -64,7 +64,7 @@ pub fn run(
     use std::cmp::max;
 
     let (dist_to_workers, recv_from_dist) = spmc::channel();
-    let (log_to_workers, recv_from_log) = spmc::channel();
+    //let (log_to_workers, recv_from_log) = spmc::channel();
     //TODO or sync channel?
     let (workers_to_log, recv_from_workers) = mpsc::channel();
     let (workers_to_dist, dist_from_workers) = mio_channel::channel();
@@ -72,11 +72,13 @@ pub fn run(
         warn!("SERVER {} started with 0 workers", this_server_num);
     }
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
+    let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     for n in 0..max(num_workers, 1) {
         let from_dist = recv_from_dist.clone();
         let to_dist   = workers_to_dist.clone();
-        let from_log  = recv_from_log.clone();
+        //let from_log  = recv_from_log.clone();
         let to_log    = workers_to_log.clone();
+        let (to_worker, from_log) = spmc::channel();
         thread::spawn(move ||
             run_worker(
                 from_dist,
@@ -86,6 +88,7 @@ pub fn run(
                 n,
             )
         );
+        log_to_workers.push(to_worker);
     }
 
     thread::spawn(move || {
@@ -183,8 +186,8 @@ enum AfterWorker { SendToLog, SendToDist}
 fn run_worker(
     from_dist: spmc::Receiver<(Buffer, TcpStream, mio::Token)>,
     to_dist: mio_channel::Sender<(Buffer, TcpStream, mio::Token)>,
-    from_log: spmc::Receiver<ToWorker<(TcpStream, mio::Token)>>,
-    to_log: mpsc::Sender<(Buffer, (TcpStream, mio::Token))>,
+    from_log: spmc::Receiver<ToWorker<(usize, mio::Token)>>,
+    to_log: mpsc::Sender<(Buffer, (usize, mio::Token))>,
     worker_num: usize,
 ) -> ! {
     const FROM_DIST: mio::Token = mio::Token(0);
@@ -238,12 +241,23 @@ fn run_worker(
                         Io::ReadWrite => unimplemented!(),
                     }
                 };
-                let (buffer, stream, _, tok, _) = o.remove();
-                poll.deregister(&stream);
                 match next {
-                    AfterWorker::SendToLog => to_log.send((buffer, (stream, tok))).unwrap(),
-                    AfterWorker::SendToDist => to_dist.send((buffer, stream, tok))
-                        .ok().unwrap(),
+                    AfterWorker::SendToLog => {
+                        //TODO is ugly, fix
+                        let &mut (ref mut buff, ref mut stream, ref mut size, tok, ref mut io) =
+                            o.get_mut();
+                        let buffer = mem::replace(buff, Buffer::empty());
+                        *size = 0;
+                        *io = Io::Write;
+                        to_log.send((buffer, (worker_num, tok))).unwrap();
+                        poll.deregister(stream);
+                    },
+                    AfterWorker::SendToDist => {
+                        let (buffer, stream, _, tok, _) = o.remove();
+                        poll.deregister(&stream);
+                        trace!("WORKER {} finished burst from {:?}", worker_num, tok);
+                        to_dist.send((buffer, stream, tok)).ok().unwrap();
+                    },
                 }
             }
         }
@@ -253,8 +267,10 @@ fn run_worker(
             match from_log.try_recv() {
                 None => {}//break 'send,
                 Some(tw) => {
-                    servers2::handle_to_worker(tw).map(|(buffer, (stream, tok))| {
+                    servers2::handle_to_worker(tw, worker_num).map(|(buffer, (_, tok))| {
                         trace!("WORKER {} got send {:?} from log for.", worker_num, tok);
+                        //TODO this is ugly, use entry
+                        let (_, stream, _, _, _) = current_io.remove(&tok).unwrap();
                         let continue_write = send_packet(&buffer, &stream, 0);
                         if let Some(s) = continue_write {
                             let _ = poll.register(
@@ -266,6 +282,8 @@ fn run_worker(
                             current_io.insert(tok, (buffer, stream, s, tok, Io::Write));
                         }
                         else {
+                            //TODO this should not be needed
+                            poll.deregister(&stream);
                             to_dist.send((buffer, stream, tok)).ok().unwrap()
                         }
                     });
@@ -283,8 +301,8 @@ fn run_worker(
                     trace!("WORKER {} got recv {:?} from dist.", worker_num, tok);
                     let continue_read = recv_packet(&mut buffer, &stream, 0);
                     match continue_read {
-                        RecvRes::Done => to_log.send((buffer, (stream, tok))).unwrap(),
                         RecvRes::Error => to_dist.send((buffer, stream, tok)).ok().unwrap(),
+
                         RecvRes::NeedsMore(read) => {
                             let _ = poll.register(
                                 &stream,
@@ -292,7 +310,15 @@ fn run_worker(
                                 mio::Ready::readable() | mio::Ready::error(),
                                 mio::PollOpt::edge()
                             );
+                            trace!("WORKER {} continuing to recv from {:?}", worker_num, tok);
                             current_io.insert(tok, (buffer, stream, read, tok, Io::Read));
+                        }
+
+                        RecvRes::Done => {
+                            current_io.insert(tok, (Buffer::empty(), stream, 0, tok, Io::Write));
+                            trace!("WORKER {} finished recv from {:?} in one read",
+                                worker_num, tok);
+                            to_log.send((buffer, (worker_num, tok))).unwrap()
                         }
                     }
                     //TODO
@@ -376,4 +402,13 @@ fn get_next_token(token: &mut mio::Token) -> mio::Token {
     if next == 0 { *token = mio::Token(2) }
     else { *token = mio::Token(next) };
     *token
+}
+
+impl DistributeToWorkers<(usize, mio::Token)>
+for Vec<spmc::Sender<ToWorker<(usize, mio::Token)>>> {
+    fn send_to_worker(&mut self, msg: ToWorker<(usize, mio::Token)>) {
+        let (which_queue, token) = msg.get_associated_data();
+        trace!("SERVER   sending to worker {} {:?} ", which_queue, token);
+        self[which_queue].send(msg)
+    }
 }
