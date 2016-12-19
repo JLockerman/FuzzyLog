@@ -63,7 +63,7 @@ pub fn run(
 ) -> ! {
     use std::cmp::max;
 
-    let (dist_to_workers, recv_from_dist) = spmc::channel();
+    //let (dist_to_workers, recv_from_dist) = spmc::channel();
     //let (log_to_workers, recv_from_log) = spmc::channel();
     //TODO or sync channel?
     let (workers_to_log, recv_from_workers) = mpsc::channel();
@@ -73,12 +73,14 @@ pub fn run(
     }
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
+    let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     for n in 0..max(num_workers, 1) {
-        let from_dist = recv_from_dist.clone();
+        //let from_dist = recv_from_dist.clone();
         let to_dist   = workers_to_dist.clone();
         //let from_log  = recv_from_log.clone();
         let to_log    = workers_to_log.clone();
         let (to_worker, from_log) = spmc::channel();
+        let (dist_to_worker, from_dist) = spmc::channel();
         thread::spawn(move ||
             run_worker(
                 from_dist,
@@ -89,6 +91,7 @@ pub fn run(
             )
         );
         log_to_workers.push(to_worker);
+        dist_to_workers.push(dist_to_worker);
     }
 
     thread::spawn(move || {
@@ -116,6 +119,7 @@ pub fn run(
     let mut events = mio::Events::with_capacity(1023);
     let mut next_token = mio::Token(2);
     let mut buffer_cache = VecDeque::new();
+    let mut next_worker = 0;
     trace!("SERVER start server loop");
     loop {
         poll.poll(&mut events, None).unwrap();
@@ -145,7 +149,7 @@ pub fn run(
                     trace!("SERVER dist getting finished sockets");
                     while let Ok((buffer, socket, tok)) = dist_from_workers.try_recv() {
                         trace!("SERVER dist got {:?}", tok);
-                        buffer_cache.push_back(buffer);
+                        //buffer_cache.push_back(buffer);
                         poll.reregister(
                             &socket,
                             tok,
@@ -165,7 +169,12 @@ pub fn run(
                             //TODO should be min size ?
                             let buffer =
                                 buffer_cache.pop_back().unwrap_or(Buffer::empty());
-                            dist_to_workers.send((buffer, socket, recv_tok))
+                            //dist_to_workers.send((buffer, socket, recv_tok))
+                            dist_to_workers[next_worker].send((buffer, socket, recv_tok));
+                            next_worker = next_worker.wrapping_add(1);
+                            if next_worker >= dist_to_workers.len() {
+                                next_worker = 0;
+                            }
                         }
                     }
                 }

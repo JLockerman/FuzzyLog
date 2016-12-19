@@ -62,8 +62,10 @@ where V: Send {
             s @ Stolen::Abort | s @ Stolen::Data(..) => return s,
             s @ Stolen::Empty => {
                 if let Some(notifier) = self.notifier.borrow() {
-                    notifier.set_readiness(mio::Ready::readable()).unwrap();
-                    let _ = self.sleepers.send(self.notifier.clone());
+                    if !notifier.readiness().is_readable() {
+                        notifier.set_readiness(mio::Ready::none()).unwrap();
+                        let _ = self.sleepers.send(self.notifier.clone());
+                    }
                 }
                 return s
             },
