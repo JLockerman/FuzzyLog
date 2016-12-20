@@ -25,6 +25,7 @@ extern crate rand;
 extern crate uuid;
 extern crate libc;
 extern crate lazycell;
+extern crate env_logger;
 
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;
@@ -44,7 +45,8 @@ pub mod servers2;
 pub mod color_api;
 pub mod async;
 mod hash;
-mod buffer;
+//TODO only for testing, should be private
+pub mod buffer;
 
 #[cfg(feature = "dynamodb_tests")]
 pub mod dynamo_store;
@@ -94,6 +96,7 @@ pub mod c_binidings {
         assert!(num_chain_ips >= 1);
         assert!(color != ptr::null());
         assert!(colors_valid(color));
+        let _ = ::env_logger::init();
         let (lock_server_addr, server_addrs) = unsafe {
             let addrs = slice::from_raw_parts(chain_server_ips, num_chain_ips)
                 .into_iter().map(|&s|

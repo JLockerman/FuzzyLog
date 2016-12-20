@@ -213,7 +213,7 @@ where PerServer<S>: Connected,
         if events.is_readable() {
             let finished_packet = {
                 let server = self.server_for_token_mut(token);
-                //TODO incremental reads
+                //FIXME incremental reads
                 server.read_packet()
             };
             if let Some(packet) = finished_packet {
@@ -553,7 +553,7 @@ impl Connected for PerServer<TcpStream> {
             self.read_buffer.ensure_capacity(base_header_size());
             //TODO switch to read and async reads
             //self.bytes_handled +=
-            self.stream.read_exact(
+            blocking_read(&mut self.stream,
                 &mut self.read_buffer[self.bytes_handled..base_header_size()])
                 .expect("cannot read");
             self.bytes_handled += base_header_size();
@@ -563,7 +563,7 @@ impl Connected for PerServer<TcpStream> {
         if self.bytes_handled < header_size {
             self.read_buffer.ensure_capacity(header_size);
             //let read =
-            self.stream.read_exact(&mut self.read_buffer[self.bytes_handled..header_size])
+            blocking_read(&mut self.stream, &mut self.read_buffer[self.bytes_handled..header_size])
                 .expect("cannot read");
             self.bytes_handled = header_size;
         }
@@ -571,7 +571,7 @@ impl Connected for PerServer<TcpStream> {
         let size = self.read_buffer.entry().entry_size();
         if self.bytes_handled < size {
             self.read_buffer.ensure_capacity(size);
-            self.stream.read_exact(&mut self.read_buffer[self.bytes_handled..size])
+            blocking_read(&mut self.stream, &mut self.read_buffer[self.bytes_handled..size])
                 .expect("cannot read");
             self.bytes_handled = size;
         }
@@ -583,8 +583,34 @@ impl Connected for PerServer<TcpStream> {
 
     fn write_packet(&mut self, packet: &[u8]) {
         //TODO nonblocking writes
-        self.stream.write_all(packet).expect("cannot write");
+        blocking_write(&mut self.stream, packet).expect("cannot write");
     }
+}
+
+fn blocking_read<R: Read>(r: &mut R, buffer: &mut [u8]) -> io::Result<()> {
+    let out;
+    'recv: loop {
+        out = match r.read_exact(buffer) {
+            Err(e) => if let io::ErrorKind::WouldBlock = e.kind() { continue 'recv }
+                      else { Err(e) },
+            ok => ok,
+        };
+        break 'recv
+    }
+    out
+}
+
+fn blocking_write<W: Write>(w: &mut W, buffer: &[u8]) -> io::Result<()> {
+    let out;
+    'send: loop {
+        out = match w.write_all(buffer) {
+            Err(e) => if let io::ErrorKind::WouldBlock = e.kind() { continue 'send }
+                      else { Err(e) },
+            ok => ok,
+        };
+        break 'send
+    }
+    out
 }
 
 impl Connected for PerServer<UdpConnection> {

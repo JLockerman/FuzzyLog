@@ -21,11 +21,10 @@ time = "0.1"
 mio = "0.6"
 nix = "*"
 net2 = "0.2"
-
-
-
-[dev-dependencies]
 env_logger = "0.3"
+
+[features]
+no_trace = ["log/max_level_info"]
 
 [profile.release]
 opt-level = 3
