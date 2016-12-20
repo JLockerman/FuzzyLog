@@ -606,7 +606,7 @@ fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
     }
 }
 
-fn blocking_write<W: Write>(w: &mut W, buffer: &[u8]) -> io::Result<()> {
+fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     //like Write::write_all but doesn't die on WouldBlock
     'send: while !buffer.is_empty() {
         match w.write(buffer) {
