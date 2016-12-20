@@ -1,5 +1,5 @@
 [package]
-name = "trivial_server"
+name = "queue_bench"
 version = "0.1.0"
 authors = ["J <joshua.lockerman@yale.edu>"]
 
@@ -7,6 +7,7 @@ authors = ["J <joshua.lockerman@yale.edu>"]
 mio = "0.6"
 nix = "*"
 env_logger = "0.3"
+libc = "0.2"
 fuzzy_log = {path = "../.."}
 
 [profile.release]
