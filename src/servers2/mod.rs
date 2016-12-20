@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::slice;
 use std::sync::Arc;
@@ -17,12 +18,12 @@ use self::ToWorker::*;
 pub mod tcp;
 //pub mod udp;
 
-mod spmc;
+pub mod spmc;
 
 mod trie;
 
-struct ServerLog<T: Send + Sync> {
-    //log: HashMap<OrderIndex, Rc<Entry<()>>>,
+struct ServerLog<T: Send + Sync, ToWorkers>
+where ToWorkers: DistributeToWorkers<T> {
     log: HashMap<order, Trie<Entry<()>>>,
     //TODO per chain locks...
     last_lock: u64,
@@ -30,21 +31,47 @@ struct ServerLog<T: Send + Sync> {
     total_servers: u32,
     this_server_num: u32,
     _seen_ids: HashSet<Uuid>,
-    to_workers: spmc::Sender<ToWorker<T>>,
+    to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
+    _pd: PhantomData<T>,
 }
+
+pub trait DistributeToWorkers<T: Send + Sync> {
+    fn send_to_worker(&mut self, msg: ToWorker<T>);
+}
+
+impl<T: Send + Sync> DistributeToWorkers<T> for spmc::Sender<ToWorker<T>> {
+    fn send_to_worker(&mut self, msg: ToWorker<T>) {
+        self.send(msg)
+    }
+}
+
+//TODO
+pub type BufferSlice = Buffer;
 
 pub enum ToWorker<T: Send + Sync> {
-    Write(Buffer, AppendSlot<Entry<()>>, T),
-    MultiWrite(Arc<Buffer>, AppendSlot<Entry<()>>, Arc<(AtomicIsize, T)>, ),
-    SentinelWrite(Arc<Buffer>, AppendSlot<Entry<()>>, Arc<(AtomicIsize, T)>),
+    Write(BufferSlice, AppendSlot<Entry<()>>, T),
+    MultiWrite(Arc<BufferSlice>, AppendSlot<Entry<()>>, Arc<(AtomicIsize, T)>, ),
+    SentinelWrite(Arc<BufferSlice>, AppendSlot<Entry<()>>, Arc<(AtomicIsize, T)>),
     //FIXME we don't have a good way to make pointers send...
-    Read(&'static Entry<()>, Buffer, T),
-    EmptyRead(entry, Buffer, T),
-    Reply(Buffer, T),
+    Read(&'static Entry<()>, BufferSlice, T),
+    EmptyRead(entry, BufferSlice, T),
+    Reply(BufferSlice, T),
 }
 
-impl<T: Send + Sync> ServerLog<T> {
-    fn new(this_server_num: u32, total_servers: u32, to_workers: spmc::Sender<ToWorker<T>>)
+impl<T> ToWorker<T>
+where T: Copy + Send + Sync {
+    fn get_associated_data(&self) -> T {
+        match self {
+            &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
+            &MultiWrite(_, _, ref at) | &SentinelWrite(_, _, ref at) => at.1
+        }
+    }
+}
+
+impl<T: Send + Sync, ToWorkers> ServerLog<T, ToWorkers>
+where ToWorkers: DistributeToWorkers<T> {
+
+    fn new(this_server_num: u32, total_servers: u32, to_workers: ToWorkers)
      -> Self {
         //TODO
         //assert!(this_server_num > 0);
@@ -59,11 +86,14 @@ impl<T: Send + Sync> ServerLog<T> {
             this_server_num: this_server_num,
             total_servers: total_servers,
             to_workers: to_workers,
+            _pd: PhantomData
         }
     }
 
-    //FIXME pass buffer so it can be resized as needed
-    fn handle_op(&mut self, mut buffer: Buffer, t: T) {
+
+    //FIXME pass buffer-slice so we can read batches
+    //TODO replace T with U and T: ReturnAs<U> so we don't have to send as much data
+    fn handle_op(&mut self, mut buffer: BufferSlice, t: T) {
         let kind = buffer.entry().kind;
         match kind.layout() {
             EntryLayout::Multiput | EntryLayout::Sentinel => {
@@ -73,7 +103,7 @@ impl<T: Send + Sync> ServerLog<T> {
                 if !self.try_lock(buffer.entry().lock_num()) {
                     trace!("SERVER {:?} wrong lock {} @ ({},{})", self.this_server_num,
                         buffer.entry().lock_num(), self.last_lock, self.last_unlock);
-                        self.to_workers.send(Reply(buffer, t));
+                        self.to_workers.send_to_worker(Reply(buffer, t));
                         return
                 }
 
@@ -148,7 +178,7 @@ impl<T: Send + Sync> ServerLog<T> {
                         let slot = unsafe {
                             self.ensure_chain(chain).partial_append(val.entry_size())
                         };
-                        self.to_workers.send(MultiWrite(val.clone(), slot, marker.clone()));
+                        self.to_workers.send_to_worker(MultiWrite(val.clone(), slot, marker.clone()));
                     }
                     // trace!("SERVER {:?} appended at {:?}", loc);
                 }
@@ -165,7 +195,7 @@ impl<T: Send + Sync> ServerLog<T> {
                                         val.entry().sentinel_entry_size()
                                     )
                             };
-                            self.to_workers.send(
+                            self.to_workers.send_to_worker(
                                 SentinelWrite(val.clone(), slot, marker.clone())
                             );
                         }
@@ -187,21 +217,21 @@ impl<T: Send + Sync> ServerLog<T> {
                         trace!("SERVER {:?} Read Vacant chain {:?}",
                             self.this_server_num, chain);
                         match buffer.entry().kind {
-                            EntryKind::Read => self.to_workers.send(
+                            EntryKind::Read => self.to_workers.send_to_worker(
                                 EmptyRead(entry::from(0), buffer, t)),
                             _ => trace!("SERVER {:?} nop {:?}",
                                 self.this_server_num, buffer.entry().kind)
                         }
                     }
                     Some(log) => match log.get(index.into()) {
-                        None => self.to_workers.send(
+                        None => self.to_workers.send_to_worker(
                             EmptyRead(entry::from(log.len() - 1), buffer, t)),
                         Some(packet) => {
                             trace!("SERVER {:?} Read Occupied entry {:?} {:?}",
                                 self.this_server_num, (chain, index), packet.id);
                             //FIXME
                             let packet = unsafe { extend_lifetime(packet) };
-                            self.to_workers.send(Read(packet, buffer, t))
+                            self.to_workers.send_to_worker(Read(packet, buffer, t))
                         }
                     },
                 }
@@ -213,7 +243,7 @@ impl<T: Send + Sync> ServerLog<T> {
                 if !self.is_unlocked() {
                     trace!("SERVER {:?} {:?} > {:?}", self.this_server_num, self.last_lock, self.last_unlock);
                     trace!("SERVER {:?} append during lock", self.this_server_num);
-                    self.to_workers.send(Reply(buffer, t));
+                    self.to_workers.send_to_worker(Reply(buffer, t));
                     return
                 }
 
@@ -237,7 +267,7 @@ impl<T: Send + Sync> ServerLog<T> {
                     unsafe { log.partial_append(size) }
                 };
 
-                self.to_workers.send(Write(buffer, slot, t))
+                self.to_workers.send_to_worker(Write(buffer, slot, t))
             }
 
             EntryLayout::Lock => {
@@ -252,7 +282,7 @@ impl<T: Send + Sync> ServerLog<T> {
                     else {
                         unsafe { buffer.entry_mut().as_lock_entry_mut().lock = self.last_lock };
                     }
-                    self.to_workers.send(Reply(buffer, t))
+                    self.to_workers.send_to_worker(Reply(buffer, t))
                 }
                 else {
                     trace!("SERVER {:?} UnLock {:?}", self.this_server_num, self.last_lock);
@@ -261,7 +291,7 @@ impl<T: Send + Sync> ServerLog<T> {
                         buffer.entry_mut().kind.insert(EntryKind::ReadSuccess);
                         self.last_unlock = self.last_lock;
                     }
-                    self.to_workers.send(Reply(buffer, t))
+                    self.to_workers.send_to_worker(Reply(buffer, t))
                 }
             }
         }
@@ -311,18 +341,26 @@ impl<T: Send + Sync> ServerLog<T> {
     }
 }
 
-fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>) -> Option<(Buffer, T)> {
+struct LogWorker {
+    id: usize,
+}
+
+fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
+-> Option<(Buffer, T)> {
     match msg {
-        Reply(buffer, t) => Some((buffer, t)),
+        Reply(buffer, t) => {
+            trace!("WORKER {} finish reply", worker_num);
+            Some((buffer, t))
+        },
 
         Write(buffer, slot, t) => unsafe {
-            trace!("WORKER finish write");
+            trace!("WORKER {} finish write", worker_num);
             slot.finish_append(buffer.entry());
             Some((buffer, t))
         },
 
         Read(read, mut buffer, t) => {
-            trace!("WORKER finish read");
+            trace!("WORKER {} finish read", worker_num);
             let bytes = read.bytes();
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
@@ -344,14 +382,14 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>) -> Option<(Buffer, T)> {
                 e.id = old_id;
                 e.kind = EntryKind::NoValue;
             }
-            trace!("WORKER finish empty read {:?}", old_loc);
+            trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
             Some((buffer, t))
         },
 
         MultiWrite(buffer, slot, marker) => {
-            trace!("WORKER finish multi part");
+            trace!("WORKER {} finish multi part", worker_num);
             unsafe { slot.finish_append(buffer.entry()) };
-            return_if_last(buffer, marker)
+            return_if_last(buffer, marker, worker_num)
         },
 
         SentinelWrite(buffer, slot, marker) => {
@@ -365,17 +403,22 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>) -> Option<(Buffer, T)> {
                     });
                 }
             };
-            return_if_last(buffer, marker)
+            return_if_last(buffer, marker, worker_num)
         },
     }
 }
 
-fn return_if_last<T: Send + Sync>(mut buffer: Arc<Buffer>, mut marker: Arc<(AtomicIsize, T)>)
+fn return_if_last<T: Send + Sync>(
+    mut buffer: Arc<Buffer>,
+    mut marker: Arc<(AtomicIsize, T)>,
+    worker_num: usize,
+)
 -> Option<(Buffer, T)> {
     let old = marker.0.fetch_sub(1, Ordering::AcqRel);
     if old == 1 {
         //FIXME I don't think this is needed...
         if marker.0.compare_and_swap(0, -1, Ordering::AcqRel) == 0 {
+            trace!("WORKER {} finish last part", worker_num);
             let marker_inner;
             let buffer_inner;
             loop {

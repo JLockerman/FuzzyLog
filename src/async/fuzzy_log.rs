@@ -276,6 +276,7 @@ impl ThreadLog {
                 trace!("FUZZY read is single");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
                 //assert!(read_loc.1 >= pc.first_buffered);
+                //TODO check that read is needed?
                 //TODO no-alloc?
                 self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
                 let packet = Rc::new(msg);
@@ -640,7 +641,12 @@ impl ThreadLog {
 
     fn enqueue_packet(&mut self, loc: OrderIndex, packet: ChainEntry) {
         assert!(loc.1 > 1.into());
-        debug_assert!(self.per_chains.get(&loc.0).unwrap().last_returned_to_client < loc.1 - 1);
+        debug_assert!(self.per_chains.get(&loc.0).unwrap().last_returned_to_client
+            < loc.1 - 1,
+            "tried to enqueue non enqueable entry {:?}; last returned {:?}",
+            loc.1 - 1,
+            self.per_chains.get(&loc.0).unwrap().last_returned_to_client,
+        );
         let blocked_on = (loc.0, loc.1 - 1);
         trace!("FUZZY read @ {:?} blocked on prior {:?}", loc, blocked_on);
         //TODO no-alloc?
@@ -1399,6 +1405,7 @@ mod tests {
             extern crate env_logger;
 
             #[test]
+            #[inline(never)]
             fn test_get_none() {
                 let _ = env_logger::init();
                 let mut lh = $new_thread_log::<()>(vec![1.into()]);
@@ -1406,6 +1413,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             fn test_get_none2() {
                 let _ = env_logger::init();
                 let mut lh = $new_thread_log::<()>(vec![1.into()]);
@@ -1414,6 +1422,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_1_column() {
                 let _ = env_logger::init();
                 trace!("TEST 1 column");
@@ -1431,6 +1440,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_3_column() {
                 let _ = env_logger::init();
                 trace!("TEST 3 column");
@@ -1466,6 +1476,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_read_deps() {
                 let _ = env_logger::init();
                 trace!("TEST read deps");
@@ -1488,23 +1499,27 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_long() {
                 let _ = env_logger::init();
                 trace!("TEST long");
 
                 let mut lh = $new_thread_log::<i32>(vec![9.into()]);
                 for i in 0..19i32 {
+                    trace!("LONG append {}", i);
                     let _ = lh.append(9.into(), &i, &[]);
                 }
                 lh.snapshot(9.into());
                 for i in 0..19i32 {
                     let u = i as u32;
+                    trace!("LONG read {}", i);
                     assert_eq!(lh.get_next(), Some((&i,  &[(9.into(), (u + 1).into())][..])));
                 }
                 assert_eq!(lh.get_next(), None);
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_wide() {
                 let _ = env_logger::init();
                 trace!("TEST wide");
@@ -1528,6 +1543,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_append_after_fetch() {
                 let _ = env_logger::init();
                 trace!("TEST append after fetch");
@@ -1552,6 +1568,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_append_after_fetch_short() {
                 let _ = env_logger::init();
                 trace!("TEST append after fetch short");
@@ -1576,6 +1593,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_multi1() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
@@ -1599,6 +1617,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_multi_shingled() {
                 let _ = env_logger::init();
                 trace!("TEST multi shingled");
@@ -1622,6 +1641,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_multi_wide() {
                 let _ = env_logger::init();
                 trace!("TEST multi wide");
@@ -1648,6 +1668,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_multi_deep() {
                 let _ = env_logger::init();
                 trace!("TEST multi deep");
@@ -1666,6 +1687,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_dependent_multi() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
@@ -1701,6 +1723,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_dependent_multi_with_early_fetch() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
@@ -1741,6 +1764,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_dependent_multi_with_partial_early_fetch() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
@@ -1767,6 +1791,7 @@ mod tests {
             }
 
             #[test]
+            #[inline(never)]
             pub fn test_multi_boring() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
@@ -1803,6 +1828,7 @@ mod tests {
 
                 //TODO move back up
                 #[test]
+                #[inline(never)]
                 pub fn test_big() {
                     let _ = env_logger::init();
                     trace!("TEST multi");
