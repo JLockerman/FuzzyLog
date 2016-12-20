@@ -587,30 +587,37 @@ impl Connected for PerServer<TcpStream> {
     }
 }
 
-fn blocking_read<R: Read>(r: &mut R, buffer: &mut [u8]) -> io::Result<()> {
-    let out;
-    'recv: loop {
-        out = match r.read_exact(buffer) {
-            Err(e) => if let io::ErrorKind::WouldBlock = e.kind() { continue 'recv }
-                      else { Err(e) },
-            ok => ok,
-        };
-        break 'recv
+fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
+    //like Read::read_exact but doesn't die on WouldBlock
+    'recv: while !buffer.is_empty() {
+        match r.read(buffer) {
+            Ok(i) => { let tmp = buffer; buffer = &mut tmp[i..]; }
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue 'recv,
+                _ => { return Err(e) }
+            }
+        }
     }
-    out
+    if !buffer.is_empty() {
+        Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"))
+    }
+    else {
+        Ok(())
+    }
 }
 
 fn blocking_write<W: Write>(w: &mut W, buffer: &[u8]) -> io::Result<()> {
-    let out;
-    'send: loop {
-        out = match w.write_all(buffer) {
-            Err(e) => if let io::ErrorKind::WouldBlock = e.kind() { continue 'send }
-                      else { Err(e) },
-            ok => ok,
+    //like Write::write_all but doesn't die on WouldBlock
+    'send: while !buffer.is_empty() {
+        match w.write(buffer) {
+            Ok(i) => buffer = &buffer[i..],
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue 'send,
+                _ => { return Err(e) }
+            }
         };
-        break 'send
     }
-    out
+    Ok(())
 }
 
 impl Connected for PerServer<UdpConnection> {
