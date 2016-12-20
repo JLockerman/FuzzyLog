@@ -4,6 +4,8 @@
 #![allow(unused_must_use)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
+#![allow(unused_unsafe)]
+#![allow(dead_code)]
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
@@ -31,6 +33,7 @@ extern crate rand;
 extern crate uuid;
 extern crate libc;
 extern crate lazycell;
+extern crate env_logger;
 
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;
@@ -100,6 +103,7 @@ pub mod c_binidings {
         assert!(num_chain_ips >= 1);
         assert!(color != ptr::null());
         assert!(colors_valid(color));
+        let _ = ::env_logger::init();
         let (lock_server_addr, server_addrs) = unsafe {
             let addrs = slice::from_raw_parts(chain_server_ips, num_chain_ips)
                 .into_iter().map(|&s|
@@ -128,6 +132,7 @@ pub mod c_binidings {
         assert!(config_filename != ptr::null());
         assert!(color != ptr::null());
         assert!(colors_valid(color));
+        let _ = ::env_logger::init();
 
         let (lock_server_addr, chain_server_addrs) = read_config_file(config_filename);
         let (lock_server_addr, server_addrs) = {

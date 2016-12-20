@@ -22,10 +22,6 @@ toml = "0.2"
 mio = "0.6"
 nix = "*"
 net2 = "0.2"
-
-
-
-[dev-dependencies]
 env_logger = "0.3"
 
 [profile.release]
