@@ -1348,7 +1348,7 @@ where V: Storeable {
         data: &V,
         deps: &[OrderIndex])
     -> Vec<OrderIndex> {
-        assert!(depends_on.len() > 1);
+        assert!(depends_on.len() > 0);
         let mut mchains: Vec<_> = chains.into_iter()
             .map(|&c| (c, 0.into()))
             .chain(::std::iter::once((0.into(), 0.into())))
