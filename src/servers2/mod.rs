@@ -109,16 +109,20 @@ where ToWorkers: DistributeToWorkers<T> {
 
                 debug_assert!(self._seen_ids.insert(buffer.entry().id));
                 if kind.contains(EntryKind::TakeLock) {
-                    assert!(self.last_lock == self.last_unlock + 1,
-                        "SERVER {:?} lock: {:?} == unlock {:?} + 1",
-                        self.this_server_num, self.last_lock, self.last_unlock);
-                    assert!(self.last_lock == buffer.entry().lock_num(),
+                    debug_assert!(self.last_lock == buffer.entry().lock_num(),
                         "SERVER {:?} lock {:?} == valock {:?}",
                         self.this_server_num, self.last_lock, buffer.entry().lock_num());
+                    debug_assert!(self.last_lock == self.last_unlock + 1,
+                        "SERVER {:?} lock: {:?} == unlock {:?} + 1",
+                        self.this_server_num, self.last_lock, self.last_unlock);
 
                 } else {
-                    assert!(buffer.entry().lock_num() == 0
-                        && self.last_lock == self.last_unlock);
+                    debug_assert!(buffer.entry().lock_num() == 0
+                        && self.last_lock == self.last_unlock,
+                        "unlocked mutli failed; lock_num: {}, last_lock: {}, last_unlock: {} @ {:?}",
+                        buffer.entry().lock_num(), self.last_lock, self.last_unlock,
+                        buffer.entry().locs(),
+                    );
                 }
 
                 let mut sentinel_start_index = None;

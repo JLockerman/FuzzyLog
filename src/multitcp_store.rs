@@ -597,31 +597,33 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         }.clone_entry();
         // self.send_buffer.kind = EntryKind::Multiput;
         self.send_buffer.id = request_id.clone();
-        self.send_buffer.kind = self.send_buffer.kind | EntryKind::TakeLock;
         trace!("Tpacket {:#?}", self.send_buffer);
 
         trace!("D multi_append from {:?}", self.sockets[0].local_addr());
 
         let locked_chains = chains.into_iter().chain(depends_on.iter());
-        let indices =
+        let (indices, will_lock) =
             if self.is_single_node_append(locked_chains.cloned()) {
                 trace!("D single s");
+                self.send_buffer.kind.remove(EntryKind::TakeLock);
                 let mut h = HashMap::new();
                 let socket_id = self.socket_id(chains[0]);
                 h.insert((socket_id as u32).into(), 0.into());
-                h
+                (h, false)
             }
             else {
                 trace!("D multi s");
+                self.send_buffer.kind.insert(EntryKind::TakeLock);
                 let to_lock: Vec<OrderIndex> = chains.iter()
                     .chain(depends_on.iter())
                     .map(|&c| (c, 0.into()))
                     .collect();
                 trace!("tl {:?}", to_lock);
-                self.get_lock_inidices(&to_lock).into_iter().collect()
+                (self.get_lock_inidices(&to_lock).into_iter().collect(), true)
             };
 
         trace!("D locks {:?}", indices);
+        debug_assert!(self.send_buffer.kind.contains(EntryKind::TakeLock) == will_lock);
 
         let mut to_lock =
             if indices.len() > 1 {
@@ -637,6 +639,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         if to_lock.is_empty() {
             let socket_id: order = (self.socket_id(chains[0]) as u32).into();
             let lock_num = indices[&socket_id];
+            assert_eq!(lock_num, entry::from(0));
             self.emplace_multi_node(socket_id, lock_num);
         }
         else {
@@ -651,7 +654,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         }
 
         trace!("dma place sentinels");
-        self.send_buffer.kind = EntryKind::Sentinel | EntryKind::TakeLock;
+        self.send_buffer.kind.remove(EntryKind::Multiput);
+        self.send_buffer.kind.insert(EntryKind::Sentinel);
+        debug_assert!(self.send_buffer.kind.contains(EntryKind::TakeLock) == will_lock);
 
         for (socket_id, lock_num) in to_lock {
             self.emplace_multi_node(socket_id, lock_num);
@@ -670,7 +675,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                         trace!("D id {:?}", self.receive_buffer.id);
                         if self.receive_buffer.id == request_id {
                             if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
-                                self.send_buffer.kind = k.kind() | EntryKind::TakeLock;
+                                self.send_buffer.kind = k.kind();
+                                if will_lock { self.send_buffer.kind.insert(EntryKind::TakeLock) }
+                                else { self.send_buffer.kind.remove(EntryKind::TakeLock) }
                                 self.emplace_multi_node(socket_id, lock_num);
                                 continue 'receive
                             }
@@ -768,20 +775,21 @@ pub mod single_server_test {
     {
         static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
-        let handle = thread::spawn(move || {
+        let _ = thread::spawn(move || {
             const addr_str: &'static str = "0.0.0.0:13266";
             let addr = addr_str.parse().expect("invalid inet address");
-            let mut event_loop = EventLoop::new().unwrap();
-            let server = Server::new(&addr, 0, 1, &mut event_loop);
-            if let Ok(mut server) = server {
-                SERVERS_READY.fetch_add(1, Ordering::Release);
+            //let mut event_loop = EventLoop::new().unwrap();
+            //let server = Server::new(&addr, 0, 1, &mut event_loop);
+            let acceptor = mio::tcp::TcpListener::bind(&addr);
+            if let Ok(acceptor) = acceptor {
                 trace!("starting server");
-                event_loop.run(&mut server);
+                ::servers2::tcp::run(acceptor, 0, 1, 2, &SERVERS_READY)
+                //SERVERS_READY.fetch_add(1, Ordering::Release);
+                //event_loop.run(&mut server);
             }
             trace!("server already started");
             return;
         });
-        mem::forget(handle);
 
         while SERVERS_READY.load(Ordering::Acquire) < 1 {}
 
@@ -928,35 +936,30 @@ pub mod multi_server_test {
         static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
         const lock_addr_str: &'static str = "0.0.0.0:13271";
-        let handle = thread::spawn(move || {
+        let _ = thread::spawn(move || {
             let addr = lock_addr_str.parse().expect("invalid inet address");
-            let mut event_loop = EventLoop::new().unwrap();
-            let server = Server::new(&addr, 0, 1, &mut event_loop);
-            if let Ok(mut server) = server {
-                SERVERS_READY.fetch_add(1, Ordering::Release);
+            let acceptor = mio::tcp::TcpListener::bind(&addr);
+            if let Ok(acceptor) = acceptor {
                 trace!("starting server @ {:?}", addr);
-                event_loop.run(&mut server);
+                ::servers2::tcp::run(acceptor, 0, 1, 2, &SERVERS_READY)
             }
+            trace!("server @ {:?} already started", addr);
             return;
         });
-        mem::forget(handle);
 
         const addr_strs: &'static [&'static str] = &["0.0.0.0:13272", "0.0.0.0:13273"];
 
         for (i, addr) in addr_strs.iter().enumerate() {
-            let handle = thread::spawn(move || {
+            let _ = thread::spawn(move || {
                 let addr = addr.parse().expect("invalid inet address");
-                let mut event_loop = EventLoop::new().unwrap();
-                let server = Server::new(&addr, i as u32, 2, &mut event_loop);
-                if let Ok(mut server) = server {
+                let acceptor = mio::tcp::TcpListener::bind(&addr);
+                if let Ok(acceptor) = acceptor {
                     trace!("starting server @ {:?}", addr);
-                    SERVERS_READY.fetch_add(1, Ordering::Release);
-                    event_loop.run(&mut server);
+                    ::servers2::tcp::run(acceptor, 0, 1, 2, &SERVERS_READY)
                 }
                 trace!("server @ {:?} already started", addr);
                 return;
             });
-            mem::forget(handle);
         }
 
 
