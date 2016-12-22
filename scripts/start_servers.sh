@@ -32,7 +32,7 @@ start_servers () {
         # The options added to ssh causes it to resuse the connection for both
         # commands, thus only needing one login per server
         rsync -e "ssh -o \"ControlPath=~/.ssh/master$$\" -o \"ControlMaster=auto\" -o \"ControlPersist=10\"" -P --ignore-existing "$filename" "$username@$hostname:~"
-        ssh -o "ControlPath=~/.ssh/master$$" -o "ControlMaster=auto" -o "ControlPersist=10" "$username@$hostname" "chmod +x ./$filename && ./$filename $port $server_num $# &>/dev/null & echo Starting server $server_num on $hostname at port $port press control-c to continue"
+        ssh -o "ControlPath=~/.ssh/master$$" -o "ControlMaster=auto" -o "ControlPersist=10" "$username@$hostname" "chmod +x ./$filename && ./$filename $port -ig $server_num:$# &>/dev/null & echo Starting server $server_num on $hostname at port $port press control-c to continue"
         ((server_num+=1))
     }
 }
