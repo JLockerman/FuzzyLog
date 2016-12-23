@@ -71,7 +71,7 @@ impl<V> Storeable for [V] {
     }
 
     unsafe fn ref_to_bytes(&self) -> &u8 {
-        mem::transmute(&self[0])
+        mem::transmute(self.as_ptr())
     }
 
     unsafe fn ref_to_slice(&self) -> &[u8] {
@@ -94,13 +94,13 @@ impl<V> Storeable for [V] {
         let mut v = Vec::with_capacity(self.len());
         v.set_len(self.len());
         let mut b = v.into_boxed_slice();
-        ptr::copy_nonoverlapping(&self[0], &mut b[0], self.len());
+        ptr::copy_nonoverlapping(self.as_ptr(), b.as_mut_ptr(), self.len());
         b
     }
 
     unsafe fn copy_to_mut(&self, out: &mut Self) -> usize {
         let to_copy = ::std::cmp::min(self.len(), out.len());
-        ptr::copy(&self[0], &mut out[0], to_copy);
+        ptr::copy(self.as_ptr(), out.as_mut_ptr(), to_copy);
         to_copy * mem::size_of::<V>()
     }
 }

@@ -1157,7 +1157,7 @@ where V: Storeable {
 
 //TODO I kinda get the feeling that this should send writes directly to the store without
 //     the AsyncLog getting in the middle
-//     Also, I think if I can send assosiated data with the wites I could do multiplexing
+//     Also, I think if I can send associated data with the wites I could do multiplexing
 //     over different writers very easily
 impl<V: ?Sized> LogHandle<V>
 where V: Storeable {
@@ -1814,6 +1814,32 @@ mod tests {
                     (60.into(), 4.into())][..])));
             }
 
+            #[test]
+            #[inline(never)]
+            pub fn test_zero_sized() {
+                let _ = env_logger::init();
+                trace!("TEST no bytes");
+
+                let interesting_columns = vec![61.into(), 62.into()];
+                let mut lh = $new_thread_log::<()>(interesting_columns);
+                let _ = lh.append(61.into(), &(), &[]);
+                let _ = lh.multiappend(&[61.into(), 62.into()], &(), &[]);
+                let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
+                let _ = lh.color_append(&(), &[61.into()], &[]);
+                lh.snapshot(61.into());
+                assert_eq!(lh.get_next(),
+                    Some((&(), &[(61.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&(), &[(61.into(), 2.into()),
+                        (62.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&(), &[(61.into(), 3.into()),
+                        (0.into(), 0.into()), (62.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(),
+                    Some((&(), &[(61.into(), 4.into())][..])));
+                assert_eq!(lh.get_next(), None);
+            }
+
             //TODO test append after prefetch but before read
         );
         () => ( async_tests!(tcp); async_tests!(udp); );
@@ -1833,19 +1859,49 @@ mod tests {
                     let _ = env_logger::init();
                     trace!("TEST multi");
 
-                    let interesting_columns = vec![61.into()];
+                    let interesting_columns = vec![1_000_01.into()];
                     start_tcp_servers();
                     let mut lh = LogHandle::spawn_tcp_log2(lock_str.parse().unwrap(),
                         addr_strs.into_iter().map(|s| s.parse().unwrap()),
                         interesting_columns.into_iter(),
                     );
-                    let _ = lh.append(61.into(), &[32u8; 6000][..], &[]);
-                    let _ = lh.append(61.into(), &[0x0fu8; 8000][..], &[]);
-                    lh.snapshot(61.into());
+                    let _ = lh.append(1_000_01.into(), &[32u8; 6000][..], &[]);
+                    let _ = lh.append(1_000_01.into(), &[0x0fu8; 8000][..], &[]);
+                    lh.snapshot(1_000_01.into());
                     assert_eq!(lh.get_next(), Some((&[32u8; 6000][..],
-                        &[(61.into(), 1.into())][..])));
+                        &[(1_000_01.into(), 1.into())][..])));
                     assert_eq!(lh.get_next(), Some((&[0x0fu8; 8000][..],
-                        &[(61.into(), 2.into())][..])));
+                        &[(1_000_01.into(), 2.into())][..])));
+                    assert_eq!(lh.get_next(), None);
+                }
+
+                #[test]
+                #[inline(never)]
+                pub fn test_no_bytes() {
+                    let _ = env_logger::init();
+                    trace!("TEST no bytes");
+
+                    let interesting_columns = vec![1_000_02.into(), 1_000_03.into()];
+                    start_tcp_servers();
+                    let mut lh = LogHandle::<[u8]>::spawn_tcp_log2(lock_str.parse().unwrap(),
+                        addr_strs.into_iter().map(|s| s.parse().unwrap()),
+                        interesting_columns.into_iter(),
+                    );
+                    let _ = lh.append(1_000_02.into(), &[], &[]);
+                    let _ = lh.multiappend(&[1_000_02.into(), 1_000_03.into()], &[] , &[]);
+                    let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
+                    let _ = lh.color_append(&[], &[1_000_02.into()], &[]);
+                    lh.snapshot(1_000_02.into());
+                    assert_eq!(lh.get_next(),
+                        Some((&[][..], &[(1_000_02.into(), 1.into())][..])));
+                    assert_eq!(lh.get_next(),
+                        Some((&[][..], &[(1_000_02.into(), 2.into()),
+                            (1_000_03.into(), 1.into())][..])));
+                    assert_eq!(lh.get_next(),
+                        Some((&[][..], &[(1_000_02.into(), 3.into()),
+                            (0.into(), 0.into()), (1_000_03.into(), 2.into())][..])));
+                    assert_eq!(lh.get_next(),
+                        Some((&[][..], &[(1_000_02.into(), 4.into())][..])));
                     assert_eq!(lh.get_next(), None);
                 }
 
