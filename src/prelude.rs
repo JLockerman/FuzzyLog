@@ -89,7 +89,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
 
     pub fn try_append(&mut self, column: order, data: &V, deps: &[OrderIndex]) -> Option<OrderIndex> {
         let next_entry = self.horizon.get_horizon(column);
-        let insert_loc = (column, next_entry);
+        let insert_loc = OrderIndex(column, next_entry);
         trace!("append num deps: {:?}", deps.len());
         self.store.insert(insert_loc, Data(data, &*deps)).ok().map(|loc| {
             self.horizon.update_horizon(column, loc.1);
@@ -99,11 +99,11 @@ where V: Storeable, S: Store<V>, H: Horizon{
 
     fn append_entry(&mut self, column: order, ent: EntryContents<V>) -> OrderIndex {
         let mut inserted = false;
-        let mut insert_loc = (column, 0.into());
+        let mut insert_loc = OrderIndex(column, 0.into());
         let mut next_entry = self.horizon.get_horizon(column);
         while !inserted {
             next_entry = next_entry + 1; //TODO jump ahead
-            insert_loc = (column, next_entry);
+            insert_loc = OrderIndex(column, next_entry);
             inserted = match self.store.insert(insert_loc, ent.clone()) {
                 Err(..) => false,
                 Ok(loc) => {
@@ -117,9 +117,10 @@ where V: Storeable, S: Store<V>, H: Horizon{
     }
 
     pub fn multiappend(&mut self, columns: &[order], data: &V, deps: &[OrderIndex]) {
-        let columns: Vec<OrderIndex> = columns.into_iter().map(|i| (*i, 0.into())).collect();
+        let columns: Vec<OrderIndex> = columns.into_iter().map(|i|
+            OrderIndex(*i, 0.into())).collect();
         self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
-        for &(column, _) in &*columns {
+        for &OrderIndex(column, _) in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO
             self.horizon.update_horizon(column, next_entry); //TODO
         }
@@ -138,7 +139,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
 
     pub fn multiappend2(&mut self, columns: &mut [OrderIndex], data: &V, deps: &[OrderIndex]) {
         self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
-        for &(column, _) in &*columns {
+        for &OrderIndex(column, _) in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO
             self.horizon.update_horizon(column, next_entry); //TODO
         }
@@ -147,7 +148,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
     pub fn get_next_unseen(&mut self, column: order) -> Option<OrderIndex> {
         let index = self.local_horizon.get(&column).cloned().unwrap_or(0.into()) + 1;
         trace!("next unseen: {:?}", (column, index));
-        let ent = self.store.get((column, index)).clone();
+        let ent = self.store.get(OrderIndex(column, index)).clone();
         let ent = match ent { Err(GetErr::NoValue(..)) => return None, Ok(e) => e };
         self.play_deps(ent.dependencies());
         match ent.contents() {
@@ -159,7 +160,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
             }
             Data(data, deps) => {
                 trace!("found Data {:?}", deps);
-                self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &(column, index), data.clone())); //TODO clone
+                self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &OrderIndex(column, index), data.clone())); //TODO clone
                 self.update_local_horizon(column, index);
             }
             Sentinel(..) => {
@@ -167,12 +168,12 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 self.update_local_horizon(column, index);
             }
         }
-        Some((column, index))
+        Some(OrderIndex(column, index))
     }
 
     fn read_multiput(&mut self, data: &V, put_id: &Uuid, first_column: order, columns: &[OrderIndex]) {
 
-        for &(column, index) in columns { //TODO only relevent cols
+        for &OrderIndex(column, index) in columns { //TODO only relevent cols
             if (column, index) != (0.into(), 0.into()) && column != first_column {
                 trace!("play multiput {:?} for col {:?}", put_id, column);
                 self.play_until_multiput(column, put_id);
@@ -183,9 +184,9 @@ where V: Storeable, S: Store<V>, H: Horizon{
         //TODO multiple multiput returns here
         //XXX TODO note multiserver validation happens at the store layer?
         //TODO don't return for sentinels
-        'ret: for &(column, index) in columns {
+        'ret: for &OrderIndex(column, index) in columns {
             if (column, index) == (0.into(), 0.into()) { break 'ret }
-            self.upcalls.get(&column).map(|f| f(put_id, &(column, index), data));
+            self.upcalls.get(&column).map(|f| f(put_id, &OrderIndex(column, index), data));
         }
     }
 
@@ -196,7 +197,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
         'search: loop {
             let index = self.local_horizon.get(&column).cloned().unwrap_or(0.into()) + 1;
             trace!("searching for multiput {:?}\n\tat: {:?}", put_id, (column, index));
-            let ent = self.store.get((column, index)).clone();
+            let ent = self.store.get(OrderIndex(column, index)).clone();
             let ent = match ent {
                 Err(GetErr::NoValue(..)) => panic!("invalid multiput @ {:?}.", (column, index)),
                 Ok(e) => e
@@ -222,7 +223,8 @@ where V: Storeable, S: Store<V>, H: Horizon{
                 }
                 Data(data, _) => {
                     trace!("Data");
-                    self.upcalls.get(&column).map(|f| f(&Uuid::nil(), &(column, index), data)); //TODO clone
+                    self.upcalls.get(&column).map(|f|
+                        f(&Uuid::nil(), &OrderIndex(column, index), data)); //TODO clone
                     self.update_local_horizon(column, index);
                 }
             }
@@ -270,7 +272,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
         //TODO clean this a bit
         //TODO buffer the value if it actually exists?
         let end = ::std::u32::MAX.into();
-        let err = self.store.get((chain, end)).err().unwrap_or(GetErr::NoValue(end));
+        let err = self.store.get(OrderIndex(chain, end)).err().unwrap_or(GetErr::NoValue(end));
         let GetErr::NoValue(last_valid_entry) = err;
         //Zero is not a valid entry so if the store returns that the chain is empty
         if self.local_horizon.get(&chain)

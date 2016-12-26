@@ -55,11 +55,12 @@ impl Buffer {
     }
 
     pub fn get_lock_nums(&self) -> HashMap<usize, u64> {
+        use packets::OrderIndex;
         self.entry()
             .locs()
             .into_iter()
             .cloned()
-            .map(|(o, i)| {
+            .map(|OrderIndex(o, i)| {
                 let (o, i): (u32, u32) = ((o - 1).into(), i.into());
                 (o as usize, i as u64)
             })

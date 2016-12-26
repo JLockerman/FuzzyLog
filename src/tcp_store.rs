@@ -248,7 +248,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             let diff = sample_rtt - self.rtt;
                             self.dev = self.dev + (diff.abs() - self.dev) / 4;
                             self.rtt = self.rtt + (diff * 4 / 5);
-                            return Ok((0.into(), 0.into())); //TODO
+                            return Ok(OrderIndex(0.into(), 0.into())); //TODO
                         } else {
                             trace!("?? packet {:?}", self.receive_buffer);
                             continue 'receive;
@@ -270,9 +270,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         let request_id = Uuid::new_v4();
 
         let mchains: Vec<_> = chains.into_iter()
-            .map(|&c| (c, 0.into()))
-            .chain(::std::iter::once((0.into(), 0.into())))
-            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .map(|&c| OrderIndex(c, 0.into()))
+            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
             .collect();
 
         *self.send_buffer = EntryContents::Multiput {
@@ -303,7 +303,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             let diff = sample_rtt - self.rtt;
                             self.dev = self.dev + (diff.abs() - self.dev) / 4;
                             self.rtt = self.rtt + (diff * 4 / 5);
-                            return Ok((0.into(), 0.into())); //TODO
+                            return Ok(OrderIndex(0.into(), 0.into())); //TODO
                         } else {
                             trace!("?? packet {:?}", self.receive_buffer);
                             continue 'receive;

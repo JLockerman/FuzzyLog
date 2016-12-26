@@ -316,7 +316,7 @@ pub mod c_binidings {
             oi
         }
         else {
-            (0.into(), 0.into())
+            OrderIndex(0.into(), 0.into())
         }
     }
 

@@ -135,7 +135,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     //trace!("SERVER {:?} Horizon A {:?}", self.horizon);
                     //FIXME handle duplicates
                     'update_append_horizon: for i in 0..locs.len() {
-                        if locs[i] == (0.into(), 0.into()) {
+                        if locs[i] == OrderIndex(0.into(), 0.into()) {
                             sentinel_start_index = Some(i + 1);
                             break 'update_append_horizon
                         }
@@ -151,7 +151,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     }
                     if let Some(ssi) = sentinel_start_index {
                         for i in ssi..locs.len() {
-                            assert!(locs[i] != (0.into(), 0.into()));
+                            assert!(locs[i] != OrderIndex(0.into(), 0.into()));
                             let chain = locs[i].0;
                             if self.stores_chain(chain) {
                                 //FIXME handle duplicates
@@ -173,7 +173,7 @@ where ToWorkers: DistributeToWorkers<T> {
 
                 let marker = Arc::new((AtomicIsize::new(num_places), t));
                 let val = Arc::new(buffer);
-                'emplace: for &(chain, index) in val.entry().locs() {
+                'emplace: for &OrderIndex(chain, index) in val.entry().locs() {
                     if (chain, index) == (0.into(), 0.into()) {
                         break 'emplace
                     }
@@ -190,7 +190,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     //val.kind.remove(EntryKind::Multiput);
                     //val.kind.insert(EntryKind::Sentinel);
                     trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.entry().locs()[ssi..]);
-                    for &(chain, index) in &val.entry().locs()[ssi..] {
+                    for &OrderIndex(chain, index) in &val.entry().locs()[ssi..] {
                         if self.stores_chain(chain) {
                             assert!(index != entry::from(0));
                             let slot = unsafe {
@@ -213,7 +213,7 @@ where ToWorkers: DistributeToWorkers<T> {
 
             EntryLayout::Read => {
                 trace!("SERVER {:?} Read", self.this_server_num);
-                let (chain, index) = buffer.entry().locs()[0];
+                let OrderIndex(chain, index) = buffer.entry().locs()[0];
                 //TODO validate lock
                 //     this will come after per-chain locks
                 match self.log.get(&chain) {
@@ -382,7 +382,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                     || last_valid_loc < old_loc.1,
                     "{:?} >= {:?}", last_valid_loc, old_loc);
                 let e = buffer.fill_from_entry_contents(
-                    EntryContents::Data(&(), &[(chain, last_valid_loc)]));
+                    EntryContents::Data(&(), &[OrderIndex(chain, last_valid_loc)]));
                 e.id = old_id;
                 e.kind = EntryKind::NoValue;
             }

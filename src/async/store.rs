@@ -197,7 +197,7 @@ where PerServer<S>: Connected,
                 else {
                     let mut msg = msg;
                     Entry::<()>::wrap_bytes_mut(&mut msg).locs_mut().into_iter()
-                        .fold((), |_, &mut (_,ref mut i)| *i = 0.into());
+                        .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
                     self.add_get_lock_nums(msg);
                 };
             }
@@ -349,7 +349,7 @@ where PerServer<S>: Connected,
                         assert!(loc.1 != 0.into());
                         locs[i] = loc;
                     }
-                    if locs[i] == (0.into(), 0.into()) || locs[i].1 != 0.into() {
+                    if locs[i] == OrderIndex(0.into(), 0.into()) || locs[i].1 != 0.into() {
                         remaining -= 1;
                     }
                 }
@@ -467,7 +467,7 @@ where PerServer<S>: Connected,
         let mut single = true;
         let mut server_token = None;
         let locked_chains = Entry::<()>::wrap_bytes(&msg).locs()
-            .iter().cloned().filter(|&oi| oi != (0.into(), 0.into()));
+            .iter().cloned().filter(|&oi| oi != OrderIndex(0.into(), 0.into()));
         for c in locked_chains {
             if let Some(server_token) = server_token {
                 single &= self.server_for_chain(c.0) == server_token
@@ -483,16 +483,16 @@ where PerServer<S>: Connected,
         //assert is multi?
         Entry::<()>::wrap_bytes(msg).locs()
             .iter().cloned()
-            .filter(|&oi| oi != (0.into(), 0.into()))
+            .filter(|&oi| oi != OrderIndex(0.into(), 0.into()))
             .fold((0..self.servers.len())
                 .map(|_| false).collect::<Vec<_>>(),
-            |mut v, (o, _)| {
+            |mut v, OrderIndex(o, _)| {
                 v[self.server_for_chain(o)] = true;
                 v
             }).into_iter()
             .enumerate()
             .filter_map(|(i, present)|
-                if present { Some(((i as u32 + 1).into(), 0.into())) }
+                if present { Some(OrderIndex((i as u32 + 1).into(), 0.into())) }
                 else { None })
             .collect::<Vec<OrderIndex>>()
     }
@@ -674,7 +674,7 @@ where PerServer<S>: Connected {
                         let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
                         {
                             let is_data = e.locs().into_iter()
-                                .take_while(|&&oi| oi != (0.into(), 0.into()))
+                                .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
                                 .any(|oi| is_server_for(oi.0, token, num_servers));
                             let kind = &mut e.kind;
                             if is_data {

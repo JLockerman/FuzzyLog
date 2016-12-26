@@ -350,14 +350,15 @@ impl ThreadLog {
         let deps = entr.dependencies();
         let locs = entr.locs();
         trace!("FUZZY checking {:?} for blockers in {:?}", locs, deps);
-        for &(chain, index) in deps {
+        for &OrderIndex(chain, index) in deps {
             let blocker_already_returned = self.per_chains.get_mut(&chain)
                 .expect("read uninteresting chain")
                 .has_returned(index);
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", locs, (chain, index));
                 //TODO no-alloc?
-                let blocked = self.blockers.entry((chain, index)).or_insert_with(Vec::new);
+                let blocked = self.blockers.entry(OrderIndex(chain, index))
+                    .or_insert_with(Vec::new);
                 blocked.push(packet.clone());
             } else {
                 trace!("FUZZY read @ {:?} need not wait for {:?}", locs, (chain, index));
@@ -378,7 +379,7 @@ impl ThreadLog {
         //TODO num_to_fetch
         //FIXME only do if below last_snapshot?
         let deps = bytes_as_entry(packet).dependencies();
-        for &(chain, index) in deps {
+        for &OrderIndex(chain, index) in deps {
             let unblocked;
             let num_to_fetch: u32 = {
                 let pc = self.per_chains.get_mut(&chain)
@@ -470,7 +471,7 @@ impl ThreadLog {
             let id = entr.id;
             let locs = entr.locs();
             let num_pieces = locs.into_iter()
-                .filter(|&&(o, _)| o != order::from(0))
+                .filter(|&&OrderIndex(o, _)| o != order::from(0))
                 .count();
             trace!("FUZZY multi part read {:?} @ {:?}, {:?} pieces", id, locs, num_pieces);
             (id, num_pieces)
@@ -491,7 +492,7 @@ impl ThreadLog {
 
             let mut pieces_remaining = num_pieces;
             trace!("FUZZY first part of multi part read");
-            for &mut (o, ref mut i) in bytes_as_entry_mut(&mut msg).locs_mut() {
+            for &mut OrderIndex(o, ref mut i) in bytes_as_entry_mut(&mut msg).locs_mut() {
                 if o != order::from(0) {
                     trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
                     let early_sentinel = self.fetch_multi_parts(&id, o, *i);
@@ -535,7 +536,7 @@ impl ThreadLog {
                     let multi = found.get_mut();
                     let loc_ptr = bytes_as_entry_mut(&mut multi.val)
                         .locs_mut().into_iter()
-                        .find(|&&mut (o, _)| o == read_loc.0)
+                        .find(|&&mut OrderIndex(o, _)| o == read_loc.0)
                         .unwrap();
                     was_blind_search = loc_ptr.1 == entry::from(0);
                     *loc_ptr = read_loc;
@@ -647,7 +648,7 @@ impl ThreadLog {
             loc.1 - 1,
             self.per_chains.get(&loc.0).unwrap().last_returned_to_client,
         );
-        let blocked_on = (loc.0, loc.1 - 1);
+        let blocked_on = OrderIndex(loc.0, loc.1 - 1);
         trace!("FUZZY read @ {:?} blocked on prior {:?}", loc, blocked_on);
         //TODO no-alloc?
         let blocked = self.blockers.entry(blocked_on).or_insert_with(Vec::new);
@@ -658,7 +659,7 @@ impl ThreadLog {
         debug_assert!(bytes_as_entry(&val).locs()[0] == loc);
         debug_assert!(bytes_as_entry(&val).locs().len() == 1);
         trace!("FUZZY trying to return read @ {:?}", loc);
-        let (o, i) = loc;
+        let OrderIndex(o, i) = loc;
 
         let is_interesting = {
             let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
@@ -692,7 +693,7 @@ impl ThreadLog {
             {
                 let locs = bytes_as_entry(&val).locs();
                 trace!("FUZZY trying to return read from {:?}", locs);
-                for &(o, i) in locs.into_iter() {
+                for &OrderIndex(o, i) in locs.into_iter() {
                     if o == order::from(0) { continue }
                     let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
                     if !pc.is_within_snapshot(i) {
@@ -708,7 +709,7 @@ impl ThreadLog {
             }
             let mut is_interesting = false;
             let locs = bytes_as_entry(&val).locs();
-            for &(o, i) in locs.into_iter() {
+            for &OrderIndex(o, i) in locs.into_iter() {
                 if o == order::from(0) { continue }
                 trace!("QQQQ setting returned {:?}", (o, i));
                 let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
@@ -752,7 +753,7 @@ impl ThreadLog {
         {
             let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
             e.kind = EntryKind::Read;
-            e.locs_mut()[0] = (chain, index);
+            e.locs_mut()[0] = OrderIndex(chain, index);
         }
         buffer
     }
@@ -952,7 +953,7 @@ impl PerChain {
         fn entry_is_unblocked(val: &Option<Vec<u8>>, chain: order, new_horizon: entry) -> bool {
             val.as_ref().map_or(false, |v| {
                 let locs = bytes_as_entry(v).locs();
-                for &(o, i) in locs {
+                for &OrderIndex(o, i) in locs {
                     if o == chain && i <= new_horizon {
                         return true
                     }
@@ -964,7 +965,7 @@ impl PerChain {
 
     fn block_on_snapshot(&mut self, val: Vec<u8>) {
         debug_assert!(bytes_as_entry(&val).locs().into_iter()
-            .find(|&&(o, _)| o == self.chain).unwrap().1 == self.last_snapshot + 1);
+            .find(|&&OrderIndex(o, _)| o == self.chain).unwrap().1 == self.last_snapshot + 1);
         assert!(self.blocked_on_new_snapshot.is_none());
         self.blocked_on_new_snapshot = Some(val)
     }
@@ -1322,7 +1323,7 @@ where V: Storeable {
             //TODO I should make a better entry builder
             let e = bytes_as_entry_mut(&mut buffer);
             e.id = Uuid::new_v4();
-            e.locs_mut()[0] = (chain, 0.into());
+            e.locs_mut()[0] = OrderIndex(chain, 0.into());
         }
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         //TODO return buffers here and cache them?
@@ -1333,7 +1334,7 @@ where V: Storeable {
     -> Vec<OrderIndex> {
         //TODO no-alloc?
         assert!(chains.len() > 1);
-        let mut locs: Vec<_> = chains.into_iter().map(|&o| (o, 0.into())).collect();
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
         locs.sort();
         locs.dedup();
         let buffer = EntryContents::Multiput {
@@ -1356,9 +1357,9 @@ where V: Storeable {
     -> Vec<OrderIndex> {
         assert!(depends_on.len() > 0);
         let mut mchains: Vec<_> = chains.into_iter()
-            .map(|&c| (c, 0.into()))
-            .chain(::std::iter::once((0.into(), 0.into())))
-            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .map(|&c| OrderIndex(c, 0.into()))
+            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
             .collect();
         {
 
@@ -1368,10 +1369,11 @@ where V: Storeable {
         }
         //FIXME ensure there are no chains which are also in depends_on
         mchains.dedup();
-        assert!(mchains[chains.len()] == (0.into(), 0.into()));
-        debug_assert!(mchains[..chains.len()].iter().all(|&(o, _)| chains.contains(&o)));
+        assert!(mchains[chains.len()] == OrderIndex(0.into(), 0.into()));
+        debug_assert!(mchains[..chains.len()].iter()
+            .all(|&OrderIndex(o, _)| chains.contains(&o)));
         debug_assert!(mchains[(chains.len() + 1)..]
-            .iter().all(|&(o, _)| depends_on.contains(&o)));
+            .iter().all(|&OrderIndex(o, _)| depends_on.contains(&o)));
         let buffer = EntryContents::Multiput {
             data: data,
             uuid: &Uuid::new_v4(),
@@ -1432,10 +1434,10 @@ mod tests {
                 let _ = lh.append(3.into(), &32, &[]);
                 let _ = lh.append(3.into(), &-1, &[]);
                 lh.snapshot(3.into());
-                assert_eq!(lh.get_next(), Some((&1,  &[(3.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(), Some((&17, &[(3.into(), 2.into())][..])));
-                assert_eq!(lh.get_next(), Some((&32, &[(3.into(), 3.into())][..])));
-                assert_eq!(lh.get_next(), Some((&-1, &[(3.into(), 4.into())][..])));
+                assert_eq!(lh.get_next(), Some((&1,  &[OrderIndex(3.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&17, &[OrderIndex(3.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&32, &[OrderIndex(3.into(), 3.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-1, &[OrderIndex(3.into(), 4.into())][..])));
                 assert_eq!(lh.get_next(), None);
             }
 
@@ -1464,7 +1466,7 @@ mod tests {
                     assert!(next.is_some());
                     let (&n, ois) = next.unwrap();
                     assert_eq!(ois.len(), 1);
-                    let (o, i) = ois[0];
+                    let OrderIndex(o, i) = ois[0];
                     let off: u32 = (o - 4).into();
                     is[off as usize] = is[off as usize] + 1;
                     let i: u32 = i.into();
@@ -1484,17 +1486,17 @@ mod tests {
                 let mut lh = $new_thread_log::<i32>(vec![7.into(), 8.into()]);
 
                 let _ = lh.append(7.into(), &63,  &[]);
-                let _ = lh.append(8.into(), &-2,  &[(7.into(), 1.into())]);
+                let _ = lh.append(8.into(), &-2,  &[OrderIndex(7.into(), 1.into())]);
                 let _ = lh.append(8.into(), &-56, &[]);
-                let _ = lh.append(7.into(), &111, &[(8.into(), 2.into())]);
-                let _ = lh.append(8.into(), &0,   &[(7.into(), 2.into())]);
+                let _ = lh.append(7.into(), &111, &[OrderIndex(8.into(), 2.into())]);
+                let _ = lh.append(8.into(), &0,   &[OrderIndex(7.into(), 2.into())]);
                 lh.snapshot(8.into());
                 lh.snapshot(7.into());
-                assert_eq!(lh.get_next(), Some((&63,  &[(7.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(), Some((&-2,  &[(8.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(), Some((&-56, &[(8.into(), 2.into())][..])));
-                assert_eq!(lh.get_next(), Some((&111, &[(7.into(), 2.into())][..])));
-                assert_eq!(lh.get_next(), Some((&0,   &[(8.into(), 3.into())][..])));
+                assert_eq!(lh.get_next(), Some((&63,  &[OrderIndex(7.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-2,  &[OrderIndex(8.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-56, &[OrderIndex(8.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&111, &[OrderIndex(7.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0,   &[OrderIndex(8.into(), 3.into())][..])));
                 assert_eq!(lh.get_next(), None);
             }
 
@@ -1513,7 +1515,7 @@ mod tests {
                 for i in 0..19i32 {
                     let u = i as u32;
                     trace!("LONG read {}", i);
-                    assert_eq!(lh.get_next(), Some((&i,  &[(9.into(), (u + 1).into())][..])));
+                    assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(9.into(), (u + 1).into())][..])));
                 }
                 assert_eq!(lh.get_next(), None);
             }
@@ -1528,7 +1530,7 @@ mod tests {
                 let mut lh = $new_thread_log(interesting_chains.clone());
                 for &i in &interesting_chains {
                     if i > 10.into() {
-                        let _ = lh.append(i.into(), &i, &[(i - 1, 1.into())]);
+                        let _ = lh.append(i.into(), &i, &[OrderIndex(i - 1, 1.into())]);
                     }
                     else {
                         let _ = lh.append(i.into(), &i, &[]);
@@ -1537,7 +1539,7 @@ mod tests {
                 }
                 lh.snapshot(20.into());
                 for &i in &interesting_chains {
-                    assert_eq!(lh.get_next(), Some((&i,  &[(i, 1.into())][..])));
+                    assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(i, 1.into())][..])));
                 }
                 assert_eq!(lh.get_next(), None);
             }
@@ -1554,7 +1556,7 @@ mod tests {
                 }
                 lh.snapshot(21.into());
                 for i in 0u32..10 {
-                    assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
+                    assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
                 }
                 assert_eq!(lh.get_next(), None);
                 for i in 10u32..21 {
@@ -1562,7 +1564,7 @@ mod tests {
                 }
                 lh.snapshot(21.into());
                 for i in 10u32..21 {
-                    assert_eq!(lh.get_next(), Some((&i,  &[(21.into(), (i + 1).into())][..])));
+                    assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
                 }
                 assert_eq!(lh.get_next(), None);
             }
@@ -1579,7 +1581,7 @@ mod tests {
                 }
                 lh.snapshot(22.into());
                 for i in 0u32..2 {
-                    assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
+                    assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
                 }
                 assert_eq!(lh.get_next(), None);
                 for i in 2u32..4 {
@@ -1587,7 +1589,7 @@ mod tests {
                 }
                 lh.snapshot(22.into());
                 for i in 2u32..4 {
-                    assert_eq!(lh.get_next(), Some((&i,  &[(22.into(), (i + 1).into())][..])));
+                    assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
                 }
                 assert_eq!(lh.get_next(), None);
             }
@@ -1605,14 +1607,14 @@ mod tests {
                 let _ = lh.multiappend(&columns, &0xcad , &[]);
                 let _ = lh.multiappend(&columns, &13    , &[]);
                 lh.snapshot(24.into());
-                assert_eq!(lh.get_next(), Some((&0xfeed, &[(23.into(), 1.into()),
-                    (24.into(), 1.into()), (25.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(), Some((&0xbad , &[(23.into(), 2.into()),
-                    (24.into(), 2.into()), (25.into(), 2.into())][..])));
-                assert_eq!(lh.get_next(), Some((&0xcad , &[(23.into(), 3.into()),
-                    (24.into(), 3.into()), (25.into(), 3.into())][..])));
-                assert_eq!(lh.get_next(), Some((&13    , &[(23.into(), 4.into()),
-                    (24.into(), 4.into()), (25.into(), 4.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xfeed, &[OrderIndex(23.into(), 1.into()),
+                    OrderIndex(24.into(), 1.into()), OrderIndex(25.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xbad , &[OrderIndex(23.into(), 2.into()),
+                    OrderIndex(24.into(), 2.into()), OrderIndex(25.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xcad , &[OrderIndex(23.into(), 3.into()),
+                    OrderIndex(24.into(), 3.into()), OrderIndex(25.into(), 3.into())][..])));
+                assert_eq!(lh.get_next(), Some((&13    , &[OrderIndex(23.into(), 4.into()),
+                    OrderIndex(24.into(), 4.into()), OrderIndex(25.into(), 4.into())][..])));
                 assert_eq!(lh.get_next(), None);
             }
 
@@ -1630,13 +1632,13 @@ mod tests {
                 }
                 lh.snapshot(26.into());
                 assert_eq!(lh.get_next(),
-                    Some((&2, &[(29.into(), 1.into()), (30.into(), 1.into())][..])));
+                    Some((&2, &[OrderIndex(29.into(), 1.into()), OrderIndex(30.into(), 1.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&4, &[(28.into(), 1.into()), (29.into(), 2.into())][..])));
+                    Some((&4, &[OrderIndex(28.into(), 1.into()), OrderIndex(29.into(), 2.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&6, &[(27.into(), 1.into()), (28.into(), 2.into())][..])));
+                    Some((&6, &[OrderIndex(27.into(), 1.into()), OrderIndex(28.into(), 2.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&8, &[(26.into(), 1.into()), (27.into(), 2.into())][..])));
+                    Some((&8, &[OrderIndex(26.into(), 1.into()), OrderIndex(27.into(), 2.into())][..])));
                 assert_eq!(lh.get_next(), None);
             }
 
@@ -1654,15 +1656,15 @@ mod tests {
                 let _ = lh.multiappend(&columns, &0      , &[]);
                 let _ = lh.multiappend(&columns, &17     , &[]);
                 lh.snapshot(33.into());
-                let locs: Vec<_> = columns.iter().map(|&o| (o, 1.into())).collect();
+                let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 1.into())).collect();
                 assert_eq!(lh.get_next(), Some((&82352 , &locs[..])));
-                let locs: Vec<_> = columns.iter().map(|&o| (o, 2.into())).collect();
+                let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 2.into())).collect();
                 assert_eq!(lh.get_next(), Some((&018945, &locs[..])));
-                let locs: Vec<_> = columns.iter().map(|&o| (o, 3.into())).collect();
+                let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 3.into())).collect();
                 assert_eq!(lh.get_next(), Some((&119332, &locs[..])));
-                let locs: Vec<_> = columns.iter().map(|&o| (o, 4.into())).collect();
+                let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 4.into())).collect();
                 assert_eq!(lh.get_next(), Some((&0     , &locs[..])));
-                let locs: Vec<_> = columns.iter().map(|&o| (o, 5.into())).collect();
+                let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 5.into())).collect();
                 assert_eq!(lh.get_next(), Some((&17    , &locs[..])));
                 assert_eq!(lh.get_next(), None);
             }
@@ -1680,7 +1682,8 @@ mod tests {
                 }
                 lh.snapshot(48.into());
                 for i in 1..32 {
-                    let locs: Vec<_> = columns.iter().map(|&o| (o, i.into())).collect();
+                    let locs: Vec<_> = columns.iter()
+                        .map(|&o| OrderIndex(o, i.into())).collect();
                     assert_eq!(lh.get_next(), Some((&i , &locs[..])));
                 }
                 assert_eq!(lh.get_next(), None);
@@ -1701,9 +1704,9 @@ mod tests {
                 lh.snapshot(49.into());
                 {
                     let potential_vals: [_; 3] =
-                        [(22     , vec![(50.into(), 1.into())]),
-                         (11     , vec![(51.into(), 1.into())]),
-                         (0xf0000, vec![(49.into(), 1.into())])
+                        [(22     , vec![OrderIndex(50.into(), 1.into())]),
+                         (11     , vec![OrderIndex(51.into(), 1.into())]),
+                         (0xf0000, vec![OrderIndex(49.into(), 1.into())])
                         ];
                     let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
                     for _ in 0..3 {
@@ -1714,10 +1717,10 @@ mod tests {
                 }
                 assert_eq!(lh.get_next(),
                     Some((&0xbaaa,
-                        &[(49.into(), 2.into()),
-                          ( 0.into(), 0.into()),
-                          (50.into(), 2.into()),
-                          (51.into(), 2.into())
+                        &[OrderIndex(49.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(50.into(), 2.into()),
+                          OrderIndex(51.into(), 2.into())
                          ][..])));
                 assert_eq!(lh.get_next(), None);
             }
@@ -1738,8 +1741,8 @@ mod tests {
                 lh.snapshot(54.into());
                 {
                     let potential_vals =
-                        [(99999, vec![(52.into(), 1.into())]),
-                         (-99  , vec![(54.into(), 1.into())]),
+                        [(99999, vec![OrderIndex(52.into(), 1.into())]),
+                         (-99  , vec![OrderIndex(54.into(), 1.into())]),
                         ];
                     let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
                     for _ in 0..2 {
@@ -1752,13 +1755,13 @@ mod tests {
                     }
                 }
                 lh.snapshot(53.into());
-                assert_eq!(lh.get_next(), Some((&101, &[(53.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&101, &[OrderIndex(53.into(), 1.into())][..])));
                 assert_eq!(lh.get_next(),
                     Some((&-7777,
-                        &[(53.into(), 2.into()),
-                          ( 0.into(), 0.into()),
-                          (52.into(), 2.into()),
-                          (54.into(), 2.into())
+                        &[OrderIndex(53.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(52.into(), 2.into()),
+                          OrderIndex(54.into(), 2.into())
                          ][..])));
                 assert_eq!(lh.get_next(), None);
             }
@@ -1776,16 +1779,16 @@ mod tests {
                 let _ = lh.append(57.into(), &-99, &[]);
                 let _ = lh.dependent_multiappend(&[55.into()], &[56.into(), 57.into()], &-7777, &[]);
                 lh.snapshot(56.into());
-                assert_eq!(lh.get_next(), Some((&101, &[(56.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&101, &[OrderIndex(56.into(), 1.into())][..])));
                 lh.snapshot(55.into());
-                assert_eq!(lh.get_next(), Some((&99999, &[(55.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(), Some((&-99, &[(57.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&99999, &[OrderIndex(55.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&-99, &[OrderIndex(57.into(), 1.into())][..])));
                 assert_eq!(lh.get_next(),
                     Some((&-7777,
-                        &[(55.into(), 2.into()),
-                          ( 0.into(), 0.into()),
-                          (56.into(), 2.into()),
-                          (57.into(), 2.into())
+                        &[OrderIndex(55.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(56.into(), 2.into()),
+                          OrderIndex(57.into(), 2.into())
                          ][..])));
                 assert_eq!(lh.get_next(), None);
             }
@@ -1806,12 +1809,12 @@ mod tests {
                 let _ = lh.append(60.into(), &-1 , &[]);
                 let _ = lh.multiappend(&[58.into(), 60.into()], &0xdeed, &[]);
                 lh.snapshot(58.into());
-                assert_eq!(lh.get_next(), Some((&0xfeed, &[(58.into(), 1.into()),
-                    (60.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(), Some((&0xbad, &[(59.into(), 1.into()),
-                    (60.into(), 2.into())][..])));
-                assert_eq!(lh.get_next(), Some((&0xdeed, &[(58.into(), 2.into()),
-                    (60.into(), 4.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xfeed, &[OrderIndex(58.into(), 1.into()),
+                    OrderIndex(60.into(), 1.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xbad, &[OrderIndex(59.into(), 1.into()),
+                    OrderIndex(60.into(), 2.into())][..])));
+                assert_eq!(lh.get_next(), Some((&0xdeed, &[OrderIndex(58.into(), 2.into()),
+                    OrderIndex(60.into(), 4.into())][..])));
             }
 
             #[test]
@@ -1828,15 +1831,15 @@ mod tests {
                 let _ = lh.color_append(&(), &[61.into()], &[]);
                 lh.snapshot(61.into());
                 assert_eq!(lh.get_next(),
-                    Some((&(), &[(61.into(), 1.into())][..])));
+                    Some((&(), &[OrderIndex(61.into(), 1.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&(), &[(61.into(), 2.into()),
-                        (62.into(), 1.into())][..])));
+                    Some((&(), &[OrderIndex(61.into(), 2.into()),
+                        OrderIndex(62.into(), 1.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&(), &[(61.into(), 3.into()),
-                        (0.into(), 0.into()), (62.into(), 2.into())][..])));
+                    Some((&(), &[OrderIndex(61.into(), 3.into()),
+                        OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&(), &[(61.into(), 4.into())][..])));
+                    Some((&(), &[OrderIndex(61.into(), 4.into())][..])));
                 assert_eq!(lh.get_next(), None);
             }
 
@@ -1869,9 +1872,9 @@ mod tests {
                     let _ = lh.append(1_000_01.into(), &[0x0fu8; 8000][..], &[]);
                     lh.snapshot(1_000_01.into());
                     assert_eq!(lh.get_next(), Some((&[32u8; 6000][..],
-                        &[(1_000_01.into(), 1.into())][..])));
+                        &[OrderIndex(1_000_01.into(), 1.into())][..])));
                     assert_eq!(lh.get_next(), Some((&[0x0fu8; 8000][..],
-                        &[(1_000_01.into(), 2.into())][..])));
+                        &[OrderIndex(1_000_01.into(), 2.into())][..])));
                     assert_eq!(lh.get_next(), None);
                 }
 
@@ -1893,15 +1896,15 @@ mod tests {
                     let _ = lh.color_append(&[], &[1_000_02.into()], &[]);
                     lh.snapshot(1_000_02.into());
                     assert_eq!(lh.get_next(),
-                        Some((&[][..], &[(1_000_02.into(), 1.into())][..])));
+                        Some((&[][..], &[OrderIndex(1_000_02.into(), 1.into())][..])));
                     assert_eq!(lh.get_next(),
-                        Some((&[][..], &[(1_000_02.into(), 2.into()),
-                            (1_000_03.into(), 1.into())][..])));
+                        Some((&[][..], &[OrderIndex(1_000_02.into(), 2.into()),
+                            OrderIndex(1_000_03.into(), 1.into())][..])));
                     assert_eq!(lh.get_next(),
-                        Some((&[][..], &[(1_000_02.into(), 3.into()),
-                            (0.into(), 0.into()), (1_000_03.into(), 2.into())][..])));
+                        Some((&[][..], &[OrderIndex(1_000_02.into(), 3.into()),
+                            OrderIndex(0.into(), 0.into()), OrderIndex(1_000_03.into(), 2.into())][..])));
                     assert_eq!(lh.get_next(),
-                        Some((&[][..], &[(1_000_02.into(), 4.into())][..])));
+                        Some((&[][..], &[OrderIndex(1_000_02.into(), 4.into())][..])));
                     assert_eq!(lh.get_next(), None);
                 }
 

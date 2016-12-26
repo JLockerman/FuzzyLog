@@ -558,7 +558,7 @@ pub mod test {
 
     use std::mem;
 
-    use packets::Entry as Packet;
+    use packets::{Entry as Packet, OrderIndex};
 
     #[test]
     pub fn empty() {
@@ -572,10 +572,10 @@ pub mod test {
 
     #[test]
     pub fn append() {
-        let mut p = Data(&0, &[(5.into(), 6.into())]).clone_entry();
+        let mut p = Data(&0, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            unsafe { Data(&i, &[(5.into(), (i as u32).into())]).fill_entry(&mut p) }
+            unsafe { Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p) }
             assert_eq!(m.append(&p), i as u32);
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
@@ -583,7 +583,7 @@ pub mod test {
             for j in 0..i + 1 {
                 let r = m.get(j as u32);
                 assert_eq!(r.map(|e| e.contents()),
-                    Some(Data(&j, &[(5.into(), (j as u32).into())])));
+                    Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
             }
 
             for j in i + 1..1001 {
@@ -609,7 +609,7 @@ pub mod test {
 
     #[test]
     pub fn multi_part_insert() {
-        let mut p = Data(&32i64, &[(5.into(), 6.into())]).clone_entry();
+        let mut p = Data(&32i64, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         unsafe {
             let mut t = Trie::new();
             assert!(t.get(0).is_none());
@@ -629,25 +629,25 @@ pub mod test {
             slot1.finish_append(&p);
             assert!(t.get(0).is_none());
             assert_eq!(t.get(1).map(|e| e.contents()),
-                Some(Data(&32i64, &[(5.into(), 6.into())])));
+                Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&1, &[(5.into(), (7 as u32).into())]).fill_entry(&mut p);
+            Data(&1, &[OrderIndex(5.into(), (7 as u32).into())]).fill_entry(&mut p);
             slot0.finish_append(&p);
             assert_eq!(t.get(0).map(|e| e.contents()),
-                Some(Data(&1, &[(5.into(), (7 as u32).into())])));
+                Some(Data(&1, &[OrderIndex(5.into(), (7 as u32).into())])));
             assert_eq!(t.get(1).map(|e| e.contents()),
-                Some(Data(&32i64, &[(5.into(), 6.into())])));
+                Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&-7, &[(5.into(), (92 as u32).into())]).fill_entry(&mut p);
+            Data(&-7, &[OrderIndex(5.into(), (92 as u32).into())]).fill_entry(&mut p);
             slot2.finish_append(&p);
             assert_eq!(t.get(0).map(|e| e.contents()),
-                Some(Data(&1, &[(5.into(), (7 as u32).into())])));
+                Some(Data(&1, &[OrderIndex(5.into(), (7 as u32).into())])));
             assert_eq!(t.get(1).map(|e| e.contents()),
-                Some(Data(&32i64, &[(5.into(), 6.into())])));
+                Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert_eq!(t.get(2).map(|e| e.contents()),
-                Some(Data(&-7, &[(5.into(), (92 as u32).into())])));
+                Some(Data(&-7, &[OrderIndex(5.into(), (92 as u32).into())])));
             assert_eq!(t.len(), 3);
         }
     }

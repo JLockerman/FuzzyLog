@@ -118,7 +118,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
                             let diff = sample_rtt - self.rtt;
                             self.dev = self.dev + (diff.abs() - self.dev) / 4;
                             self.rtt = self.rtt + (diff * 4 / 5);
-                            return Ok((0.into(), 0.into())); //TODO
+                            return Ok(OrderIndex(0.into(), 0.into())); //TODO
                         } else {
                             // trace!("?? packet {:?}", self.receive_buffer);
                             continue 'receive;
@@ -141,11 +141,11 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
 
         self.send_buffer.kind.insert(EntryKind::TakeLock);
 
-        for &(socket_id, lock_num) in &*indices {
+        for &OrderIndex(socket_id, lock_num) in &*indices {
             self.emplace_multi_node(socket_id, lock_num)
         }
 
-        'validate: for &(socket_id, lock_num) in &*indices {
+        'validate: for &OrderIndex(socket_id, lock_num) in &*indices {
             'receive: loop {
                 self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
                 trace!("got packet from {:?}", <u32 as From<_>>::from(socket_id) as usize);
@@ -177,11 +177,11 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             }
         }
 
-        for &(socket_id, lock_num) in &*indices {
+        for &OrderIndex(socket_id, lock_num) in &*indices {
             self.unlock(socket_id, lock_num)
         }
 
-        return Ok((0.into(), 0.into()));
+        return Ok(OrderIndex(0.into(), 0.into()));
     }
 
     fn lock(&mut self, socket_id: order, lock_num: entry) {
@@ -227,7 +227,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         let send_buffer_size = self.send_buffer.entry_size() as usize;
         //TODO should be bitset?
         let mut nodes_to_lock: Vec<_> = (0..self.sockets.len()).map(|_| false).collect();
-        for &(o, _) in chains {
+        for &OrderIndex(o, _) in chains {
             nodes_to_lock[self.socket_id(o)] = true;
             trace!("{:?} => socket {:?}", o, self.socket_id(o));
         }
@@ -236,7 +236,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             .enumerate()
             .filter_map(|(i, present)|
                 if present {
-                    Some(((i as u32 + 1).into(), 0.into()))
+                    Some(OrderIndex((i as u32 + 1).into(), 0.into()))
                 } else {
                     None
                 })
@@ -264,8 +264,8 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
                         let locs = self.receive_buffer.locs();
                         assert_eq!(locs.len(), lock_chains.len());
                         for i in 0..locs.len() {
-                            let (soc, lock) = locs[i];
-                            lock_chains[i] = (soc - 1 , lock);
+                            let OrderIndex(soc, lock) = locs[i];
+                            lock_chains[i] = OrderIndex(soc - 1 , lock);
                         }
                         return lock_chains;
                     } else {
@@ -495,7 +495,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         self.send_buffer.id = request_id.clone();
         trace!("Tpacket {:#?}", self.send_buffer);
 
-        let single_node = self.is_single_node_append(chains.iter().map(|&(o, _)|  o));
+        let single_node = self.is_single_node_append(chains.iter().map(|&OrderIndex(o, _)|  o));
         let indices =
             if single_node {
                 trace!("M single");
@@ -506,7 +506,8 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
             }
             else {
                 self.send_buffer.kind.insert(EntryKind::TakeLock);
-                self.get_lock_inidices(&chains).into_iter().collect()
+                self.get_lock_inidices(&chains).into_iter()
+                    .map(|OrderIndex(o, i)| (o,i)).collect()
             };
         trace!("M locks {:?}", indices);
 
@@ -522,7 +523,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         for (&socket_id, &lock_num) in indices.iter() {
             self.emplace_multi_node(socket_id, lock_num);
             if to_lock.remove(&(socket_id, lock_num)) {
-                locked.insert((socket_id, lock_num));
+                locked.insert(OrderIndex(socket_id, lock_num));
             }
         }
         assert!(to_lock.is_empty());
@@ -560,13 +561,13 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
 
         trace!("M unlock");
 
-        for (socket_id, lock_num) in locked {
+        for OrderIndex(socket_id, lock_num) in locked {
             self.unlock(socket_id, lock_num)
         }
 
         trace!("M done unlock");
 
-        return Ok((0.into(), 0.into()));
+        return Ok(OrderIndex(0.into(), 0.into()));
 
         /////////////////
 
@@ -584,9 +585,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         let request_id = Uuid::new_v4();
 
         let mchains: Vec<_> = chains.into_iter()
-            .map(|&c| (c, 0.into()))
-            .chain(::std::iter::once((0.into(), 0.into())))
-            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .map(|&c| OrderIndex(c, 0.into()))
+            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
             .collect();
 
         *self.send_buffer = EntryContents::Multiput {
@@ -616,10 +617,11 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                 self.send_buffer.kind.insert(EntryKind::TakeLock);
                 let to_lock: Vec<OrderIndex> = chains.iter()
                     .chain(depends_on.iter())
-                    .map(|&c| (c, 0.into()))
+                    .map(|&c| OrderIndex(c, 0.into()))
                     .collect();
                 trace!("tl {:?}", to_lock);
-                (self.get_lock_inidices(&to_lock).into_iter().collect(), true)
+                (self.get_lock_inidices(&to_lock).into_iter()
+                    .map(|OrderIndex(o,i)| (o,i)).collect(), true)
             };
 
         trace!("D locks {:?}", indices);
@@ -648,7 +650,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                 let lock_num = indices[&socket_id];
                 if to_lock.remove(&(socket_id, lock_num)) {
                     self.emplace_multi_node(socket_id, lock_num);
-                    locked.insert((socket_id, lock_num));
+                    locked.insert(OrderIndex(socket_id, lock_num));
                 }
             }
         }
@@ -660,7 +662,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
 
         for (socket_id, lock_num) in to_lock {
             self.emplace_multi_node(socket_id, lock_num);
-            locked.insert((socket_id, lock_num));
+            locked.insert(OrderIndex(socket_id, lock_num));
         }
 
         'validate: for (&socket_id, &lock_num) in indices.iter() {
@@ -698,13 +700,13 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
 
         trace!("dma unlock");
 
-        for (socket_id, lock_num) in locked {
+        for OrderIndex(socket_id, lock_num) in locked {
             self.unlock(socket_id, lock_num)
         }
 
         trace!("done unlock");
 
-        return Ok((0.into(), 0.into()));
+        return Ok(OrderIndex(0.into(), 0.into()));
     }
 }
 
@@ -846,13 +848,13 @@ pub mod multi_server_test {
         upcalls.insert(57.into(), Box::new(|_, _, _| false));
         let mut log = FuzzyLog::new(store, horizon, upcalls);
         let e1 = log.append(56.into(), &(0, 1), &*vec![]);
-        assert_eq!(e1, (56.into(), 1.into()));
+        assert_eq!(e1, OrderIndex(56.into(), 1.into()));
         let e2 = log.append(56.into(), &(1, 17), &*vec![]);
-        assert_eq!(e2, (56.into(), 2.into()));
+        assert_eq!(e2, OrderIndex(56.into(), 2.into()));
         let last_index = log.append(56.into(), &(32, 5), &*vec![]);
-        assert_eq!(last_index, (56.into(), 3.into()));
+        assert_eq!(last_index, OrderIndex(56.into(), 3.into()));
         let en = log.append(57.into(), &(0, 0), &*vec![last_index]);
-        assert_eq!(en, (57.into(), 1.into()));
+        assert_eq!(en, OrderIndex(57.into(), 1.into()));
         log.play_foward(57.into());
         assert_eq!(*map.borrow(),
                    [(0, 1), (1, 17), (32, 5)].into_iter().cloned().collect());
