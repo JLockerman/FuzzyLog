@@ -2,12 +2,13 @@
 use prelude::*;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, LinkedList};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use linked_hash_map::LinkedHashMap;
 
 //TODO there is exactly one chain per colour.
+#[allow(non_camel_case_types)]
 pub type color = u32;
 
 //TODO is the 'static really necessary?

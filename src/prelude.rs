@@ -119,7 +119,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
     pub fn multiappend(&mut self, columns: &[order], data: &V, deps: &[OrderIndex]) {
         let columns: Vec<OrderIndex> = columns.into_iter().map(|i|
             OrderIndex(*i, 0.into())).collect();
-        self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
+        self.store.multi_append(&columns[..], data, &deps[..]).unwrap(); //TODO error handling
         for &OrderIndex(column, _) in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO
             self.horizon.update_horizon(column, next_entry); //TODO
@@ -129,7 +129,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
     pub fn dependent_multiappend(&mut self, columns: &[order],
         depends_on: &[order], data: &V, deps: &[OrderIndex]) {
         trace!("dappend: {:?}, {:?}, {:?}", columns, depends_on, deps);
-        self.store.dependent_multi_append(columns, depends_on, data, deps);
+        self.store.dependent_multi_append(columns, depends_on, data, deps).unwrap();
         //TODO
         for &column in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO
@@ -138,7 +138,7 @@ where V: Storeable, S: Store<V>, H: Horizon{
     }
 
     pub fn multiappend2(&mut self, columns: &mut [OrderIndex], data: &V, deps: &[OrderIndex]) {
-        self.store.multi_append(&columns[..], data, &deps[..]); //TODO error handling
+        self.store.multi_append(&columns[..], data, &deps[..]).unwrap(); //TODO error handling
         for &OrderIndex(column, _) in &*columns {
             let next_entry = self.horizon.get_horizon(column) + 1; //TODO
             self.horizon.update_horizon(column, next_entry); //TODO

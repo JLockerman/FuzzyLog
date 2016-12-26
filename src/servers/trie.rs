@@ -1,6 +1,6 @@
+#![allow(dead_code)]
 
 use std::{mem, ptr};
-use std::cell::RefCell;
 
 use std::marker::PhantomData;
 
@@ -78,6 +78,7 @@ struct AllocPtr<V> {
 
 impl AllocPtr<u8> {
 
+    #[cfg(False)]
     fn new() -> Self {
         unsafe { mem::zeroed() }
     }
@@ -98,7 +99,7 @@ impl AllocPtr<u8> {
                 unsafe { storage.set_len(storage_size) };
                 return &mut unsafe { (*Box::into_raw(storage.into_boxed_slice()))[0] }
             }
-            self.ptr = unsafe { Box::into_raw(Box::new([0; LEVEL_BYTES])) };
+            self.ptr = Box::into_raw(Box::new([0; LEVEL_BYTES]));
             //TODO
             self.alloc_rem = LEVEL_BYTES;
         }
@@ -157,13 +158,6 @@ macro_rules! entry {
     };
 }
 
-#[repr(C)]
-pub struct entry_pointer_and_index {
-    pub entry: *mut *mut u8,
-    pub ptr: *mut u8,
-    pub index: u32,
-}
-
 //TODO wildly unsafe
 #[must_use]
 #[repr(C)]
@@ -182,7 +176,7 @@ impl<V> AppendSlot<V> {
         let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
         let storage_size = data.size(); // FIXME
         assert_eq!(data_size, storage_size);
-        unsafe { ptr::copy_nonoverlapping(data.ref_to_bytes(), data_ptr, storage_size) };
+        ptr::copy_nonoverlapping(data.ref_to_bytes(), data_ptr, storage_size);
         //*trie_entry = data_ptr;
         let trie_entry: *mut AtomicPtr<u8> = mem::transmute(trie_entry);
         //TODO mem barrier ordering
@@ -209,9 +203,9 @@ where V: Storeable {
         (entry, unsafe {val_ptr.as_mut().unwrap()})
     }
 
-    unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<V> {
+    pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<V> {
         let val_ptr: *mut u8 = self.root.alloc.prep_append(size);
-        let (index, trie_entry) = self.prep_append(ptr::null());
+        let (_index, trie_entry) = self.prep_append(ptr::null());
         AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
             _pd: Default::default()}
     }
@@ -225,20 +219,20 @@ where V: Storeable {
             let index = (next_entry >> ROOT_SHIFT) & MASK;
             assert!(index < 4);
             let loc = &mut root.array[index as usize];
-            *loc = unsafe { Some(alloc_seg()) };
-            root.l1 = unsafe {Shortcut::new(&mut loc.as_mut().unwrap()[..])};
+            *loc = Some(alloc_seg());
+            root.l1 = Shortcut::new(&mut loc.as_mut().unwrap()[..]);
         }
         if next_entry & 0xfffff == 0 {
             debug_assert!(root.l2.cannot_append());
             // new l3
-            let new_chunk = root.l1.append(unsafe { Some(alloc_seg()) });
-            root.l2 = unsafe {Shortcut::new(&mut new_chunk.as_mut().unwrap()[..])};
+            let new_chunk = root.l1.append(Some(alloc_seg()));
+            root.l2 = Shortcut::new(&mut new_chunk.as_mut().unwrap()[..]);
         }
         if next_entry & 0x3ff == 0 {
             debug_assert!(root.l3.cannot_append());
             // new val
-            let new_chunk = root.l2.append(unsafe { Some(alloc_seg()) });
-            root.l3 = unsafe {Shortcut::new(&mut new_chunk.as_mut().unwrap()[..])};
+            let new_chunk = root.l2.append(Some(alloc_seg()));
+            root.l3 = Shortcut::new(&mut new_chunk.as_mut().unwrap()[..]);
         }
         // fill val
         root.next_entry += 1;
@@ -301,7 +295,7 @@ where V: UnStoreable {
             let l2 = index!(l1, k, 1);
             let l3 = index!(l2, k, 2);
             let val_ptr = index!(l3, k, 3);
-            let val_ptr = unsafe { val_ptr.as_ref() };
+            let val_ptr = val_ptr.as_ref();
             match val_ptr {
                 None => None,
                 Some(v) => {
@@ -333,7 +327,7 @@ where V: UnStoreable {
                 return Entry::Vacant(VacantEntry(k, Vacancy::Val(val_ptr)))
             }
             let val_ptr: *mut u8 = *val_ptr as *mut _;
-            let val = unsafe {<V as UnStoreable>::unstore_mut(&mut *val_ptr)};
+            let val = <V as UnStoreable>::unstore_mut(&mut *val_ptr);
             Entry::Occupied(OccupiedEntry(val))
         }
     }
@@ -361,7 +355,7 @@ impl<'a, V: 'a> Entry<'a, V> {
         match self {
             Occupied(e) => e.into_mut(),
             //FIXME
-            Vacant(e) => unsafe { e.insert_with(default, alloc_seg2()) },
+            Vacant(e) => e.insert_with(default, alloc_seg2()),
         }
     }
 
@@ -370,7 +364,7 @@ impl<'a, V: 'a> Entry<'a, V> {
         match self {
             Occupied(e) => e.insert_with(default),
             //FIXME
-            Vacant(e) => unsafe { e.insert_with(default, alloc_seg2()) },
+            Vacant(e) => e.insert_with(default, alloc_seg2()),
         }
     }
 }
@@ -447,7 +441,7 @@ macro_rules! fill_entry {
             let size = val.size();
             let val = &val as *const _ as *const u8;
             //FIXME bounds check
-            unsafe { ptr::copy_nonoverlapping(val, $val_loc, size) }
+            ptr::copy_nonoverlapping(val, $val_loc, size);
             let slot: &mut ValEdge = $slot;
             *slot = $val_loc;
             let slot: *mut V = (*slot) as *mut _;
@@ -493,7 +487,7 @@ impl<'a, V: 'a> VacantEntry<'a, V> {
                 L3(slot) => fill_entry!(slot, k, v, 3, val_loc),
                 Next(root) => {
                     let val = root._append(&v()).1;
-                    let size = <V as UnStoreable>::size_from_bytes(val);
+                    let _size = <V as UnStoreable>::size_from_bytes(val);
                     <V as UnStoreable>::unstore_mut(val)
                 }
             }
@@ -501,7 +495,7 @@ impl<'a, V: 'a> VacantEntry<'a, V> {
     }
 
     pub fn insert(self, v: V) -> &'a mut V {
-        unsafe { self.insert_with(|| v, alloc_seg2()) }
+        self.insert_with(|| v, alloc_seg2())
     }
 }
 

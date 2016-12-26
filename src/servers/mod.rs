@@ -1,6 +1,4 @@
 use std::collections::HashSet;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::rc::Rc;
 
 use prelude::*;
 
@@ -259,9 +257,7 @@ impl ServerLog {
 }
 
 fn empty_read(packet: &mut Entry<()>, last_loc: u32) {
-    let (old_id, old_loc) = unsafe {
-        (packet.id, packet.locs()[0])
-    };
+    let (old_id, old_loc) = (packet.id, packet.locs()[0]);
     let chain: order = old_loc.0;
     assert!(last_loc == 0 || entry::from(last_loc) < old_loc.1,
         "{:?} >= {:?}", last_loc, old_loc);

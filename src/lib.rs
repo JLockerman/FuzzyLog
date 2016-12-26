@@ -68,8 +68,6 @@ pub mod c_binidings {
 
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use color_api::*;
-
     use servers::tcp::Server;
 
     use mio::deprecated::EventLoop;

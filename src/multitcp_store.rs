@@ -27,7 +27,7 @@ pub struct TcpStore<V: ?Sized> {
     _pd: PhantomData<V>,
 }
 
-const SLEEP_NANOS: u32 = 8000; //TODO user settable
+//const SLEEP_NANOS: u32 = 8000; //TODO user settable
 const RTT: i64 = 80000;
 
 impl<V: Storeable + ?Sized> TcpStore<V> {
@@ -97,6 +97,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         <u32 as From<order>>::from(chain) as usize % self.sockets.len()
     }
 
+    #[cfg(False)]
     fn single_node_multiappend(&mut self, request_id: &Uuid, socket_id: usize) -> InsertResult {
         trace!("sn multi_append from {:?}", self.sockets[0].local_addr());
         // TODO find server
@@ -133,6 +134,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         }
     }
 
+    #[cfg(False)]
     fn multi_node_multiappend(&mut self, request_id: &Uuid, chains: &[OrderIndex]) -> InsertResult {
         trace!("mn multi_append from {:?}", self.sockets[0].local_addr());
 
@@ -184,6 +186,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         return Ok(OrderIndex(0.into(), 0.into()));
     }
 
+    #[cfg(False)]
     fn lock(&mut self, socket_id: order, lock_num: entry) {
         let lock = Lock {
             //TODO id?

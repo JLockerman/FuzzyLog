@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::Vacant;
 use std::io::{self, Read, Write};
-use std::mem;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::net::SocketAddr;
-use std::os::unix::io::AsRawFd;
 
 use prelude::*;
 use servers::ServerLog;
@@ -13,8 +11,6 @@ use mio;
 use mio::deprecated::{EventLoop, Handler as MioHandler};
 use mio::tcp::*;
 
-use nix::sys::socket::setsockopt;
-use nix::sys::socket::sockopt::TcpNoDelay;
 
 use buffer::Buffer;
 
@@ -127,7 +123,7 @@ impl MioHandler for Server {
                     if finished_read {
                         trace!("SERVER {} finished read from client {:?}",
                             self.log.server_num(), client_token);
-                        let need_to_respond = self.log.handle_op(client.buffer.entry_mut());
+                        let _need_to_respond = self.log.handle_op(client.buffer.entry_mut());
                         //TODO
                         //if need_to_respond {
                         //    mio::Ready::writable()

@@ -1,10 +1,9 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::{ops, mem};
+use std::mem;
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use packets::*;
 use buffer::Buffer;
@@ -643,7 +642,7 @@ impl Connected for PerServer<UdpConnection> {
 impl<S> PerServer<S>
 where PerServer<S>: Connected {
 
-    fn handle_redo(&mut self, failed: WriteState, kind: EntryKind::Kind) -> Option<WriteState> {
+    fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
         let to_ret = match &failed {
             f @ &WriteState::MultiServer(..) => Some(f.clone_multi()),
             _ => None,
@@ -724,8 +723,8 @@ where PerServer<S>: Connected {
             }
             Some(to_send @ ToLockServer(_, _)) | Some(to_send @ SingleServer(_)) => {
                 trace!("CLIENT PerServer {:?} single", token);
-                unsafe {
-                    let (l, s) = to_send.with_packet(|p| {
+                {
+                    let (l, _s) = to_send.with_packet(|p| {
                         let e = Entry::<()>::wrap_bytes(&*p);
                         (e.kind.layout(), e.entry_size())
                     });

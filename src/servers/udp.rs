@@ -38,7 +38,7 @@ impl MioHandler for Server {
                     //TODO currently we assume we read an entire packet
                     if let Some(addr) = self.read_packet() {
                         trace!("SERVER finished read from {:?}", addr);
-                        let need_to_respond = self.log.handle_op(&mut *self.buffer);
+                        let _need_to_respond = self.log.handle_op(&mut *self.buffer);
                         //TODO
                         //if need_to_respond {
                         self.write_packet(&addr);

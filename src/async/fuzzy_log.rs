@@ -9,9 +9,6 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::u32;
 
-use bit_set::BitSet;
-
-use mio;
 use mio::deprecated::{EventLoop, Sender as MioSender};
 
 use packets::*;
@@ -1299,7 +1296,7 @@ where V: Storeable {
         trace!("depends_on {:?}", depends_on);
         inhabits.sort();
         depends_on.sort();
-        let no_snapshot = inhabits == depends_on || depends_on.len() == 0;
+        let _no_snapshot = inhabits == depends_on || depends_on.len() == 0;
         // if we're performing a single colour append we might be able fuzzy_log.append
         // instead of multiappend
         if depends_on.len() > 0 {

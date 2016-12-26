@@ -11,7 +11,6 @@ use servers2::{self, spmc, ServerLog, ToWorker, DistributeToWorkers};
 use hash::HashMap;
 
 use mio;
-use mio::channel as mio_channel;
 use mio::tcp::*;
 
 use buffer::Buffer;
@@ -103,7 +102,7 @@ pub fn run(
         ACCEPT,
         mio::Ready::readable(),
         mio::PollOpt::level()
-    );
+    ).expect("cannot start server poll");
     /*poll.register(&dist_from_workers,
         FROM_WORKERS,
         mio::Ready::readable(),
@@ -160,7 +159,7 @@ pub fn run(
                         *receivers.get_mut(&tok).unwrap() = Some(socket)
                     }*/
                 },
-                recv_tok => {
+                _recv_tok => {
                     /*let recv = receivers.get_mut(&recv_tok).unwrap();
                     let recv = mem::replace(recv, None);
                     match recv {
@@ -190,10 +189,6 @@ enum Io { Log, Read, Write, ReadWrite }
 
 #[repr(u8)]
 enum IoBuffer { Log, Read(Buffer), Write(Buffer), ReadWrite(Buffer) }
-
-#[derive(Copy, Clone, Debug)]
-#[repr(u8)]
-enum AfterWorker { SendToLog, SendToDist}
 
 struct Worker {
     sleeping_io: HashMap<mio::Token, PerSocket>,
@@ -232,13 +227,13 @@ impl Worker {
             FROM_DIST,
             mio::Ready::readable(),
             mio::PollOpt::level()
-        );
+        ).expect("cannot pol from dist on worker");
         poll.register(
             &from_log,
             FROM_LOG,
             mio::Ready::readable(),
             mio::PollOpt::level()
-        );
+        ).expect("cannot pol from log on worker");
         Worker {
             sleeping_io: Default::default(),
             inner: WorkerInner {
@@ -260,7 +255,7 @@ impl Worker {
 
             'work: loop {
                 let ops_before_poll = self.inner.awake_io.len();
-                for i in 0..ops_before_poll {
+                for _ in 0..ops_before_poll {
                     let token = self.inner.awake_io.pop_front().unwrap();
                     if let HashEntry::Occupied(o) = self.sleeping_io.entry(token) {
                         self.inner.handle_burst(token, o.into_mut());
@@ -353,7 +348,7 @@ impl WorkerInner {
             }
 
             //FIXME remove from map
-            SendRes::Error => { self.poll.deregister(&socket_state.stream); }
+            SendRes::Error => { let _ = self.poll.deregister(&socket_state.stream); }
         }
     }
 
@@ -373,13 +368,13 @@ impl WorkerInner {
             RecvRes::Done =>  { self.send_to_log(token, socket_state); }
 
             //FIXME remove from map
-            RecvRes::Error => { self.poll.deregister(&socket_state.stream); }
+            RecvRes::Error => { let _ = self.poll.deregister(&socket_state.stream); }
         }
     }
 
     fn send_to_log(&mut self, token: mio::Token, socket_state: &mut PerSocket) {
         let buffer = socket_state.pre_send_to_log();
-        self.to_log.send((buffer, (self.worker_num, token)));
+        self.to_log.send((buffer, (self.worker_num, token))).unwrap();
     }
 }
 
@@ -473,7 +468,7 @@ fn send_packet(buffer: &Buffer, mut stream: &TcpStream, sent: usize) -> SendRes 
     let bytes_to_write = buffer.entry_slice().len();
     match stream.write(&buffer.entry_slice()[sent..]) {
        Ok(i) if (sent + i) < bytes_to_write => SendRes::NeedsMore(sent + i),
-       Ok(i) => SendRes::Done,
+       Ok(..) => SendRes::Done,
        Err(e) => if e.kind() == ErrorKind::WouldBlock { SendRes::NeedsMore(sent) }
                  else { SendRes::Error },
    }

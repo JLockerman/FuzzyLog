@@ -1,8 +1,5 @@
 use std::collections::HashSet;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::marker::PhantomData;
-use std::rc::Rc;
-use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
@@ -343,10 +340,6 @@ where ToWorkers: DistributeToWorkers<T> {
     fn server_num(&self) -> u32 {
         self.this_server_num
     }
-}
-
-struct LogWorker {
-    id: usize,
 }
 
 fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
