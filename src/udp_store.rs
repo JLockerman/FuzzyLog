@@ -374,11 +374,8 @@ impl<V: Storeable + ?Sized> Clone for UdpStore<V> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use prelude::*;
 
-    use std::collections::HashMap;
-    use std::collections::hash_map::Entry::{Occupied, Vacant};
-    use std::mem::{self, forget, transmute};
+    use std::mem::{self, forget};
     use std::net::UdpSocket;
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::thread::spawn;

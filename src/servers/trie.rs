@@ -541,7 +541,7 @@ pub mod test {
                 assert_eq!(r, Some(&j));
             }
 
-            for j in i + 1..1001 {
+            for j in i + 1..255 {
                 let r = m.get(j as u32);
                 assert_eq!(r, None);
             }

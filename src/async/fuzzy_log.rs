@@ -1390,15 +1390,8 @@ mod tests {
 
             use packets::*;
             use super::super::*;
-            use super::super::FromClient::*;
-            use async::store::AsyncTcpStore;
 
             use std::collections::HashMap;
-            use std::{mem, thread};
-            use std::sync::{mpsc, Arc, Mutex};
-
-            use mio;
-            use mio::deprecated::EventLoop;
 
             //TODO move to crate root under cfg...
             extern crate env_logger;
@@ -1921,7 +1914,7 @@ mod tests {
                     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
                     use std::{thread, iter};
 
-                    use servers::tcp::Server;
+                    use mio;
 
                     static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
@@ -1956,6 +1949,9 @@ mod tests {
         );
         (udp) => (
             mod udp {
+                use std::sync::{Arc, Mutex};
+                use std::thread;
+                use async::store::AsyncTcpStore;
                 async_tests!(test new_thread_log);
 
                 //TODO make UDP server multi server aware
@@ -1963,6 +1959,7 @@ mod tests {
                 //const lock_str: &'static str = "0.0.0.0:13393";
                 //#[allow(non_upper_case_globals)]
                 //const addr_strs: &'static [&'static str] = &["0.0.0.0:13394", "0.0.0.0:13395"];
+                #[allow(non_upper_case_globals)]
                 const addr_str: &'static str = "0.0.0.0:13393";
 
                 fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
@@ -2005,7 +2002,7 @@ mod tests {
                 fn start_udp_servers()
                 {
                     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
-                    use std::{thread, iter};
+                    use std::thread;
 
                     use servers::udp::Server;
 

@@ -561,8 +561,6 @@ pub mod test {
 
     use packets::EntryContents::Data;
 
-    use std::mem;
-
     use packets::{Entry as Packet, OrderIndex};
 
     #[test]
@@ -591,7 +589,7 @@ pub mod test {
                     Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
             }
 
-            for j in i + 1..1001 {
+            for j in i + 1..255 {
                 let r = m.get(j as u32);
                 assert_eq!(r, None);
             }

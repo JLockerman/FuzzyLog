@@ -752,27 +752,11 @@ impl<V: ?Sized> Drop for TcpStore<V> {
 #[cfg(test)]
 pub mod single_server_test {
     use super::*;
-    use prelude::*;
 
-    use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
-    use std::collections::HashMap;
-    use std::collections::hash_map::Entry::{Occupied, Vacant};
-    use std::io::{self, Read, Write};
-    use std::mem;
-    use std::net::SocketAddr;
-    use std::os::unix::io::AsRawFd;
     use std::thread;
-    use std::rc::Rc;
 
     use mio;
-    use mio::deprecated::EventLoop;
-    use mio::tcp::*;
-
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::TcpNoDelay;
-
-    use servers::tcp::Server;
 
     #[allow(non_upper_case_globals)]
     fn new_store<V: ::std::fmt::Debug + Storeable>(_: Vec<OrderIndex>) -> TcpStore<V>
@@ -814,27 +798,15 @@ pub mod single_server_test {
 #[cfg(test)]
 pub mod multi_server_test {
     use super::*;
-    use prelude::*;
 
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::collections::HashMap;
-    use std::collections::hash_map::Entry::{Occupied, Vacant};
-    use std::io::{self, Read, Write};
-    use std::mem;
     use std::net::SocketAddr;
-    use std::os::unix::io::AsRawFd;
     use std::thread;
     use std::rc::Rc;
 
     use mio;
-    use mio::deprecated::EventLoop;
-    use mio::tcp::*;
-
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::TcpNoDelay;
-
-    use servers::tcp::Server;
 
     #[test]
     fn multi_server_dep() {
@@ -940,6 +912,7 @@ pub mod multi_server_test {
     fn init_multi_servers<V: ?Sized + ::std::fmt::Debug + Storeable>() -> TcpStore<V> {
         static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
 
+        #[allow(non_upper_case_globals)]
         const lock_addr_str: &'static str = "0.0.0.0:13271";
         let _ = thread::spawn(move || {
             let addr = lock_addr_str.parse().expect("invalid inet address");
@@ -952,15 +925,18 @@ pub mod multi_server_test {
             return;
         });
 
+        #[allow(non_upper_case_globals)]
         const addr_strs: &'static [&'static str] = &["0.0.0.0:13272", "0.0.0.0:13273"];
 
         for (i, addr) in addr_strs.iter().enumerate() {
             let _ = thread::spawn(move || {
+                let i = i as u32;
+                let num_servers = addr_strs.len() as u32;
                 let addr = addr.parse().expect("invalid inet address");
                 let acceptor = mio::tcp::TcpListener::bind(&addr);
                 if let Ok(acceptor) = acceptor {
                     trace!("starting server @ {:?}", addr);
-                    ::servers2::tcp::run(acceptor, 0, 1, 2, &SERVERS_READY)
+                    ::servers2::tcp::run(acceptor, i, num_servers, 2, &SERVERS_READY)
                 }
                 trace!("server @ {:?} already started", addr);
                 return;

@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry as HashEntry;
 use std::collections::VecDeque;
-use std::io::{self, Read, Write, ErrorKind};
+use std::io::{Read, Write, ErrorKind};
 use std::{mem, thread};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};

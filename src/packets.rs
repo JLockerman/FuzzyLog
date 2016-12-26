@@ -862,7 +862,6 @@ pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> &mut Entry<()> {
 mod test {
 
     use super::*;
-    use super::EntryContents::*;
 
     use std::marker::PhantomData;
 

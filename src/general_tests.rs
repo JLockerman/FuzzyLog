@@ -531,7 +531,6 @@ macro_rules! general_tests {
                 log.play_until(OrderIndex(25.into(), 9.into()));
                 let mut last_multi_loc = None;
                 for i in 1..9 {
-                    use std::iter;
                     let multi_loc = list.borrow().iter().position(|l| l == &(25, i));
                     assert!(multi_loc.is_some(), "multi not found @ iter {:?}", i);
                     let multi_loc = multi_loc.unwrap();

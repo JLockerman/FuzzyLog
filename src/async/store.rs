@@ -354,7 +354,6 @@ where PerServer<S>: Connected,
                 }
                 remaining == 0
             }
-            unreachable!()
         }
         else {
             return true

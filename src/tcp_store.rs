@@ -345,24 +345,12 @@ impl<V: ?Sized> Drop for TcpStore<V> {
 #[cfg(test)]
 pub mod t_test {
     use super::*;
-    use prelude::*;
 
     use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT, Ordering};
-    use std::collections::HashMap;
-    use std::collections::hash_map::Entry::{Occupied, Vacant};
-    use std::io::{self, Read, Write};
     use std::mem;
-    use std::net::SocketAddr;
-    use std::os::unix::io::AsRawFd;
     use std::thread;
-    use std::rc::Rc;
 
-    use mio;
     use mio::deprecated::EventLoop;
-    use mio::tcp::*;
-
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::TcpNoDelay;
 
     use servers::tcp::Server;
 
@@ -384,7 +372,7 @@ pub mod t_test {
                 if let Ok(mut server) = server {
                     SERVERS_READY.fetch_add(1, Ordering::Release);
                     trace!("starting server");
-                    event_loop.run(&mut server);
+                    event_loop.run(&mut server).unwrap();
                 }
                 trace!("server already started");
                 return;
