@@ -345,6 +345,7 @@ impl<V: ?Sized> Drop for TcpStore<V> {
 #[cfg(test)]
 pub mod t_test {
     use super::*;
+    use prelude::*;
 
     use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT, Ordering};
     use std::mem;

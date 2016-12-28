@@ -954,7 +954,7 @@ mod test {
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex], cols: &[OrderIndex]) {
             let id = Uuid::new_v4();
-            let ent1 = Multiput{
+            let ent1 = EntryContents::Multiput{
             	data: &data,
                 uuid: &id,
                 deps: &deps,
@@ -979,7 +979,7 @@ mod test {
         test_((3334u64, 1231123), &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())]);
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex]) {
-            let ent1 = Data(&data, &deps);
+            let ent1 = EntryContents::Data(&data, &deps);
             let entr = Box::new(ent1.clone_entry());
             let ent2 = entr.contents();
             assert_eq!(ent1, ent2);

@@ -1952,6 +1952,11 @@ mod tests {
                 use std::sync::{Arc, Mutex};
                 use std::thread;
                 use async::store::AsyncTcpStore;
+                use std::sync::mpsc;
+                use std::mem;
+
+                use mio::deprecated::EventLoop;
+
                 async_tests!(test new_thread_log);
 
                 //TODO make UDP server multi server aware

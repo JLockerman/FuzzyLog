@@ -334,7 +334,7 @@ where PerServer<S>: Connected,
                     return true
                 }
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
-            }
+            };
 
             fn fill_locs(buf: &mut [u8], e: &Entry<()>,
                 server: Token, num_chain_servers: usize) -> bool {

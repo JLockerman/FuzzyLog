@@ -752,6 +752,7 @@ impl<V: ?Sized> Drop for TcpStore<V> {
 #[cfg(test)]
 pub mod single_server_test {
     use super::*;
+    use prelude::*;
 
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::thread;
@@ -798,6 +799,7 @@ pub mod single_server_test {
 #[cfg(test)]
 pub mod multi_server_test {
     use super::*;
+    use prelude::*;
 
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
