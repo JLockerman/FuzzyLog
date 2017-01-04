@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::u32;
 
-use mio::deprecated::{EventLoop, Sender as MioSender};
+use mio;
 
 use packets::*;
 use async::store::AsyncStoreClient;
@@ -23,7 +23,7 @@ const MAX_PREFETCH: u32 = 8;
 type ChainEntry = Rc<Vec<u8>>;
 
 pub struct ThreadLog {
-    to_store: MioSender<Vec<u8>>, //TODO send WriteState or other enum?
+    to_store: mio::channel::Sender<Vec<u8>>, //TODO send WriteState or other enum?
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
     blocked_multiappends: HashMap<Uuid, MultiSearchState>,
@@ -126,7 +126,7 @@ struct BufferCache {
 impl ThreadLog {
 
     //TODO
-    pub fn new<I>(to_store: MioSender<Vec<u8>>,
+    pub fn new<I>(to_store: mio::channel::Sender<Vec<u8>>,
         from_outside: mpsc::Receiver<Message>,
         ready_reads: mpsc::Sender<Vec<u8>>,
         finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
@@ -1119,22 +1119,21 @@ where V: Storeable {
             lock_server: SocketAddr,
             chain_servers: Vec<SocketAddr>,
             client: mpsc::Sender<Message>,
-            tsm: Arc<Mutex<Option<MioSender<Vec<u8>>>>>
+            tsm: Arc<Mutex<Option<mio::channel::Sender<Vec<u8>>>>>
         ) {
-            let mut event_loop = EventLoop::new().unwrap();
-            let to_store = event_loop.channel();
-            *tsm.lock().unwrap() = Some(to_store);
-            let mut store = ::async::store::AsyncTcpStore::tcp(
+            let mut event_loop = mio::Poll::new().unwrap();
+            let (store, to_store) = ::async::store::AsyncTcpStore::tcp(
                 lock_server,
                 chain_servers,
                 client, &mut event_loop
             ).expect("");
-            event_loop.run(&mut store).expect("should never return")
+            *tsm.lock().unwrap() = Some(to_store);
+            store.run(event_loop);
         }
 
         #[inline(never)]
         fn run_log(
-            to_store: MioSender<Vec<u8>>,
+            to_store: mio::channel::Sender<Vec<u8>>,
             from_outside: mpsc::Receiver<Message>,
             ready_reads_s: mpsc::Sender<Vec<u8>>,
             finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
@@ -1203,22 +1202,21 @@ where V: Storeable {
             lock_server: SocketAddr,
             chain_servers: Vec<SocketAddr>,
             client: mpsc::Sender<Message>,
-            tsm: Arc<Mutex<Option<MioSender<Vec<u8>>>>>
+            tsm: Arc<Mutex<Option<mio::channel::Sender<Vec<u8>>>>>
         ) {
-            let mut event_loop = EventLoop::new().unwrap();
-            let to_store = event_loop.channel();
-            *tsm.lock().unwrap() = Some(to_store);
-            let mut store = ::async::store::AsyncTcpStore::tcp(
+            let mut event_loop = mio::Poll::new().unwrap();
+            let (store, to_store) = ::async::store::AsyncTcpStore::tcp(
                 lock_server,
                 chain_servers,
                 client, &mut event_loop
             ).expect("");
-            event_loop.run(&mut store).expect("should never return")
+            *tsm.lock().unwrap() = Some(to_store);
+            store.run(event_loop)
         }
 
         #[inline(never)]
         fn run_log(
-            to_store: MioSender<Vec<u8>>,
+            to_store: mio::channel::Sender<Vec<u8>>,
             from_outside: mpsc::Receiver<Message>,
             ready_reads_s: mpsc::Sender<Vec<u8>>,
             finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
@@ -1955,7 +1953,7 @@ mod tests {
                 use std::sync::mpsc;
                 use std::mem;
 
-                use mio::deprecated::EventLoop;
+                use mio;
 
                 async_tests!(test new_thread_log);
 
@@ -1978,13 +1976,12 @@ mod tests {
                     let (ready_reads_s, ready_reads_r) = mpsc::channel();
                     let (finished_writes_s, finished_writes_r) = mpsc::channel();
                     thread::spawn(move || {
-                        let mut event_loop = EventLoop::new().unwrap();
-                        let to_store = event_loop.channel();
-                        *tsm.lock().unwrap() = Some(to_store);
-                        let mut store = AsyncTcpStore::udp(addr_str.parse().unwrap(),
+                        let mut event_loop = mio::Poll::new().unwrap();
+                        let (store, to_store) = AsyncTcpStore::udp(addr_str.parse().unwrap(),
                             iter::once(addr_str).map(|s| s.parse().unwrap()),
                             client, &mut event_loop).expect("");
-                            event_loop.run(&mut store).expect("should never return");
+                        *tsm.lock().unwrap() = Some(to_store);
+                        store.run(event_loop);
                     });
                     let to_store;
                     loop {
@@ -2020,10 +2017,9 @@ mod tests {
                             //let mut event_loop = EventLoop::new().unwrap();
                             let server = Server::new(&addr);
                             if let Ok(mut server) = server {
-                                SERVERS_READY.fetch_add(1, Ordering::Release);
                                 trace!("starting server");
                                 //event_loop.run(&mut server).expect("server should never stop");
-                                server.run()
+                                server.run(&SERVERS_READY)
                             }
                             trace!("server already started");
                             return;

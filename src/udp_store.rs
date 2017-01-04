@@ -381,7 +381,7 @@ mod test {
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::thread::spawn;
 
-    use servers::udp::Server;
+    use servers2::udp::Server;
     // use test::Bencher;
 
     // use mio::buf::{MutSliceBuf, SliceBuf};
@@ -401,8 +401,7 @@ mod test {
                 trace!("socket in use");
                 return;
             };
-            SERVERS_READY.fetch_add(1, Ordering::Release);
-            server.run()
+            server.run(&SERVERS_READY)
         });
         forget(handle);
 

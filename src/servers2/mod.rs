@@ -13,7 +13,7 @@ use hash::HashMap;
 use self::ToWorker::*;
 
 pub mod tcp;
-//pub mod udp;
+pub mod udp;
 
 pub mod spmc;
 
@@ -378,7 +378,9 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                     EntryContents::Data(&(), &[OrderIndex(chain, last_valid_loc)]));
                 e.id = old_id;
                 e.kind = EntryKind::NoValue;
+                //FIXME where do I sent loc to old loc?
             }
+            buffer.ensure_len();
             trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
             Some((buffer, t))
         },

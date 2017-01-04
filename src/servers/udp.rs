@@ -3,6 +3,7 @@ use prelude::*;
 
 use std::mem;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mio;
 use mio::deprecated::{EventLoop, Handler as MioHandler};
@@ -45,6 +46,9 @@ impl MioHandler for Server {
                         trace!("SERVER finished write to {:?}", addr);
                         //}
                     }
+                    else {
+                        trace!("SERVER null read");
+                    }
                 } else {
                     panic!("invalid event {:?}", events);
                 };
@@ -70,12 +74,14 @@ impl Server {
         })
     }
 
-    pub fn run(&mut self) -> ! {
+    pub fn run(&mut self, start_flag: &AtomicUsize) -> ! {
         let mut event_loop = EventLoop::new().unwrap();
         event_loop.register(&self.socket, SOCKET_TOKEN,
             mio::Ready::readable() | mio::Ready::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
             .expect("could not register server");
+        trace!("SERVER start.");
+        start_flag.fetch_add(1, Ordering::Release);
         let res = event_loop.run(self);
         panic!("Server stopped with {:?}", res)
     }
