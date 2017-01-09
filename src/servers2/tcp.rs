@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry as HashEntry;
 use std::collections::VecDeque;
-use std::io::{Read, Write, ErrorKind};
+use std::io::{self, Read, Write, ErrorKind};
 use std::{mem, thread};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,6 +54,24 @@ use buffer::Buffer;
      actually, dumping all of the to-copies in a work-stealing queue might actually work...)
 */
 
+/*
+  options for replication:
+    a. patition to-replica by chain,
+       each chain gets sent in order
+         + simple on replica,
+           can reuse normal appends
+         + paritioning over chains improves efficency even in single server case
+         - each chain has limited throughput
+           (at what point does this matter?)
+         - we need to store multis seperately b/c they might not be delivered in order
+           (but we want to do that anyway)
+         - making sure muti appends get sent in the correct order seems hard
+
+    b. store a trie of storage,
+       send (size, storage location) to replica,
+       use to detrimine location
+*/
+
 pub fn run(
     acceptor: TcpListener,
     this_server_num: u32,
@@ -63,6 +81,11 @@ pub fn run(
 ) -> ! {
     use std::cmp::max;
 
+    const ACCEPT: mio::Token = mio::Token(0);
+    const FROM_WORKERS: mio::Token = mio::Token(1);
+    const NEXT_SERVER: mio::Token = mio::Token(2);
+    const PREV_SERVER: mio::Token = mio::Token(3);
+
     //let (dist_to_workers, recv_from_dist) = spmc::channel();
     //let (log_to_workers, recv_from_log) = spmc::channel();
     //TODO or sync channel?
@@ -71,10 +94,48 @@ pub fn run(
     if num_workers == 0 {
         warn!("SERVER {} started with 0 workers", this_server_num);
     }
+    let num_workers = max(num_workers, 1);
+
+    let poll = mio::Poll::new().unwrap();
+    poll.register(&acceptor,
+        ACCEPT,
+        mio::Ready::readable(),
+        mio::PollOpt::level()
+    ).expect("cannot start server poll");
+    //TODO let next_server_ip: Option<_> = Some(panic!());
+    //TODO let mut admin_socket = None;
+    //TODO let mut other_sockets = Vec::new();
+    let mut events = mio::Events::with_capacity(1023);
+    /* TODO
+    while next_server_ip.is_some() && admin_socket.is_none() {
+        poll.poll(&mut events, None).unwrap();
+        for event in events.iter() {
+            match event.token() {
+                ACCEPT => {
+                    match acceptor.accept() {
+                        Err(e) => trace!("error {}", e),
+                        Ok((socket, addr)) => if Some(addr.ip()) != next_server_ip {
+                            other_sockets.push((socket, addr))
+                        } else {
+                            let _ = socket.set_keepalive_ms(Some(1000));
+                            //TODO benchmark
+                            let _ = socket.set_nodelay(true);
+                            next_server_ip = Some((addr.ip()));
+                            admin_socket = Some(socket)
+                        }
+                    }
+                }
+                _ => unreachable!()
+            }
+        }
+    }*/
+
+    //TODO let num_connections = negotiate_num_downstreams(&admin_socket);
+
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
-    for n in 0..max(num_workers, 1) {
+    for n in 0..num_workers {
         //let from_dist = recv_from_dist.clone();
         //let to_dist   = workers_to_dist.clone();
         //let from_log  = recv_from_log.clone();
@@ -95,23 +156,16 @@ pub fn run(
         }
     });
 
-    const ACCEPT: mio::Token = mio::Token(0);
-    const FROM_WORKERS: mio::Token = mio::Token(1);
-    let poll = mio::Poll::new().unwrap();
-    poll.register(&acceptor,
-        ACCEPT,
-        mio::Ready::readable(),
-        mio::PollOpt::level()
-    ).expect("cannot start server poll");
-    /*poll.register(&dist_from_workers,
+    /*FIXME poll.register(&dist_from_workers,
         FROM_WORKERS,
         mio::Ready::readable(),
         mio::PollOpt::level()
     );*/
     ready.fetch_add(1, Ordering::SeqCst);
     //let mut receivers: HashMap<_, _> = Default::default();
-    let mut events = mio::Events::with_capacity(1023);
-    let mut next_token = mio::Token(2);
+    //FIXME should be a single writer hashmap
+    let mut worker_for_client: HashMap<_, _> = Default::default();
+    let mut next_token = mio::Token(10);
     //let mut buffer_cache = VecDeque::new();
     let mut next_worker = 0;
     trace!("SERVER start server loop");
@@ -138,6 +192,7 @@ pub fn run(
                             receivers.insert(tok, Some(socket));*/
                             let buffer = Buffer::empty();
                             dist_to_workers[next_worker].send((tok, buffer, socket));
+                            worker_for_client.insert(addr, next_worker);
                             next_worker = next_worker.wrapping_add(1);
                             if next_worker >= dist_to_workers.len() {
                                 next_worker = 0;
@@ -183,6 +238,41 @@ pub fn run(
     }
 }
 
+#[cfg(TODO)]
+fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> usize {
+    use std::cmp::min;
+    if let Some(ref mut socket) = socket.as_mut() {
+        let mut negotiations_done = false;
+        let num_other_threads = [0u8; 2];
+        blocking_read(socket, &mut num_other_threads).expect("downstream failed");
+        let num_other_threads = unsafe { mem::transmute(num_other_threads) };
+        let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
+        blocking_write(socket, &to_write).expect("downstream failed");
+        min(num_other_threads, num_workers)
+    }
+}
+
+#[cfg(TODO)]
+fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
+    //like Read::read_exact but doesn't die on WouldBlock
+    'recv: while !buffer.is_empty() {
+        match r.read(buffer) {
+            Ok(i) => { let tmp = buffer; buffer = &mut tmp[i..]; }
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue 'recv,
+                _ => { return Err(e) }
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
+            "failed to fill whole buffer"))
+    }
+    else {
+        return Ok(())
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 enum Io { Log, Read, Write, ReadWrite }
@@ -192,6 +282,8 @@ enum IoBuffer { Log, Read(Buffer), Write(Buffer), ReadWrite(Buffer) }
 
 struct Worker {
     sleeping_io: HashMap<mio::Token, PerSocket>,
+    pre_server_socket: Option<PerSocket>,
+    next_server_socket: Option<PerSocket>,
     inner: WorkerInner,
 }
 
@@ -201,6 +293,8 @@ struct WorkerInner {
     from_log: spmc::Receiver<ToWorker<(usize, mio::Token)>>,
     to_log: mpsc::Sender<(Buffer, (usize, mio::Token))>,
     worker_num: usize,
+    is_replica: bool,
+    is_last_server: bool,
     poll: mio::Poll,
 }
 
@@ -208,6 +302,7 @@ struct PerSocket {
     buffer: IoBuffer,
     stream: TcpStream,
     bytes_handled: usize,
+    is_from_server: bool,
 }
 
 const FROM_DIST: mio::Token = mio::Token(0);
@@ -236,6 +331,9 @@ impl Worker {
         ).expect("cannot pol from log on worker");
         Worker {
             sleeping_io: Default::default(),
+            //TODO
+            next_server_socket: None,
+            pre_server_socket: None,
             inner: WorkerInner {
                 awake_io: Default::default(),
                 from_dist: from_dist,
@@ -243,6 +341,9 @@ impl Worker {
                 to_log: to_log,
                 poll: poll,
                 worker_num: worker_num,
+                //TODO
+                is_replica: false,
+                is_last_server: true,
             }
         }
     }
@@ -384,6 +485,8 @@ impl PerSocket {
             buffer: IoBuffer::Read(buffer),
             stream: stream,
             bytes_handled: 0,
+            //TODO
+            is_from_server: false,
         }
     }
 

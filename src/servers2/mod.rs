@@ -18,6 +18,7 @@ pub mod udp;
 pub mod spmc;
 
 mod trie;
+mod byte_trie;
 
 struct ServerLog<T: Send + Sync, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
@@ -141,7 +142,8 @@ where ToWorkers: DistributeToWorkers<T> {
                             //FIXME handle duplicates
                             let next_entry = self.ensure_chain(chain).len();
                             assert!(next_entry > 0);
-                            let next_entry = entry::from(next_entry);
+                            //FIXME 64b entries
+                            let next_entry = entry::from(next_entry as u32);
                             locs[i].1 = next_entry;
                             num_places += 1;
                         }
@@ -154,7 +156,8 @@ where ToWorkers: DistributeToWorkers<T> {
                                 //FIXME handle duplicates
                                 let next_entry = self.ensure_chain(chain).len();
                                 assert!(next_entry > 0);
-                                let next_entry = entry::from(next_entry);
+                                //FIXME 64b entries
+                                let next_entry = entry::from(next_entry as u32);
                                 locs[i].1 = next_entry;
                                 num_places += 1;
                             }
@@ -224,9 +227,10 @@ where ToWorkers: DistributeToWorkers<T> {
                                 self.this_server_num, buffer.entry().kind)
                         }
                     }
-                    Some(log) => match log.get(index.into()) {
+                    Some(log) => match log.get(u32::from(index) as u64) {
                         None => self.to_workers.send_to_worker(
-                            EmptyRead(entry::from(log.len() - 1), buffer, t)),
+                            //FIXME needs 64 entries
+                            EmptyRead(entry::from((log.len() - 1) as u32), buffer, t)),
                         Some(packet) => {
                             trace!("SERVER {:?} Read Occupied entry {:?} {:?}",
                                 self.this_server_num, (chain, index), packet.id);
@@ -262,7 +266,8 @@ where ToWorkers: DistributeToWorkers<T> {
                     val.kind.insert(EntryKind::ReadSuccess);
                     let size = val.entry_size();
                     let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
-                    l.1 = entry::from(index);
+                    //FIXME 64b entries
+                    l.1 = entry::from(index as u32);
                     trace!("SERVER {:?} Writing entry {:?}",
                         this_server_num, (chain, index));
                     unsafe { log.partial_append(size) }
@@ -339,6 +344,131 @@ where ToWorkers: DistributeToWorkers<T> {
 
     fn server_num(&self) -> u32 {
         self.this_server_num
+    }
+
+    fn handle_replication(&mut self, mut buffer: BufferSlice, t: T) {
+        let kind = buffer.entry().kind;
+        match kind.layout() {
+            EntryLayout::Multiput | EntryLayout::Sentinel => {
+                trace!("SERVER {:?} replicate multiput", self.this_server_num);
+
+                debug_assert!(self._seen_ids.insert(buffer.entry().id));
+                //FIXME this needs to be aware of locks...
+                //      but I think only unlocks, the primary
+                //      will ensure that locks happen in order
+
+                let mut sentinel_start_index = None;
+                let mut num_places = 0;
+                {
+                    let val = buffer.entry_mut();
+                    let locs = val.locs_mut();
+                    //FIXME handle duplicates
+                    'update_append_horizon: for i in 0..locs.len() {
+                        if locs[i] == OrderIndex(0.into(), 0.into()) {
+                            sentinel_start_index = Some(i + 1);
+                            break 'update_append_horizon
+                        }
+                        let chain = locs[i].0;
+                        if self.stores_chain(chain) { num_places += 1 }
+                    }
+                    if let Some(ssi) = sentinel_start_index {
+                        for i in ssi..locs.len() {
+                            assert!(locs[i] != OrderIndex(0.into(), 0.into()));
+                            let chain = locs[i].0;
+                            if self.stores_chain(chain) { num_places += 1 }
+                        }
+                    }
+                    trace!("SERVER {:?} rep locs {:?}", self.this_server_num, locs);
+                    trace!("SERVER {:?} rep ssi {:?}",
+                        self.this_server_num, sentinel_start_index);
+                }
+
+                trace!("SERVER {:?} rep at {:?}",
+                    self.this_server_num, buffer.entry().locs());
+
+                let marker = Arc::new((AtomicIsize::new(num_places), t));
+                let val = Arc::new(buffer);
+                'emplace: for &OrderIndex(chain, index) in val.entry().locs() {
+                    if (chain, index) == (0.into(), 0.into()) {
+                        break 'emplace
+                    }
+                    if self.stores_chain(chain) {
+                        assert!(index != entry::from(0));
+                        let slot = unsafe {
+                            self.ensure_chain(chain)
+                                .partial_insert(u32::from(index) as u64, val.entry_size())
+                        };
+                        self.to_workers.send_to_worker(MultiWrite(val.clone(), slot, marker.clone()));
+                    }
+                }
+                if let Some(ssi) = sentinel_start_index {
+                    trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.entry().locs()[ssi..]);
+                    for &OrderIndex(chain, index) in &val.entry().locs()[ssi..] {
+                        if self.stores_chain(chain) {
+                            assert!(index != entry::from(0));
+                            let size = val.entry().sentinel_entry_size();
+                            let slot = unsafe {
+                                self.ensure_chain(chain)
+                                    .partial_insert(u32::from(index) as u64, size)
+                            };
+                            self.to_workers.send_to_worker(
+                                SentinelWrite(val.clone(), slot, marker.clone())
+                            );
+                        }
+                    }
+                    return
+                }
+            }
+
+            EntryLayout::Data => {
+                trace!("SERVER {:?} Append", self.this_server_num);
+                //FIXME locks
+
+                let loc = buffer.entry().locs()[0];
+                debug_assert!(self.stores_chain(loc.0),
+                    "tried to rep {:?} at server {:?} of {:?}",
+                    loc, self.this_server_num, self.total_servers);
+
+                let this_server_num = self.this_server_num;
+                let slot = {
+                    let log = self.ensure_chain(loc.0);
+                    let size = buffer.entry_size();
+                    trace!("SERVER {:?} replicating entry {:?}",
+                        this_server_num, loc);
+                    unsafe { log.partial_insert(u32::from(loc.1) as u64, size) }
+                };
+
+                self.to_workers.send_to_worker(Write(buffer, slot, t))
+            }
+
+            EntryLayout::Lock => {
+                //FIXME
+                trace!("SERVER {:?} Lock", self.this_server_num);
+                let lock_num = unsafe { buffer.entry().as_lock_entry().lock };
+                if kind.is_taking_lock() {
+                    trace!("SERVER {:?} TakeLock {:?}", self.this_server_num, self.last_lock);
+                    let acquired_loc = self.try_lock(lock_num);
+                    if acquired_loc {
+                        buffer.entry_mut().kind.insert(EntryKind::ReadSuccess);
+                    }
+                    else {
+                        unsafe { buffer.entry_mut().as_lock_entry_mut().lock = self.last_lock };
+                    }
+                    self.to_workers.send_to_worker(Reply(buffer, t))
+                }
+                else {
+                    trace!("SERVER {:?} UnLock {:?}", self.this_server_num, self.last_lock);
+                    if lock_num == self.last_lock {
+                        trace!("SERVER {:?} Success", self.this_server_num);
+                        buffer.entry_mut().kind.insert(EntryKind::ReadSuccess);
+                        self.last_unlock = self.last_lock;
+                    }
+                    self.to_workers.send_to_worker(Reply(buffer, t))
+                }
+            }
+
+            _ => unreachable!(),
+        }
     }
 }
 
