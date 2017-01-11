@@ -5,6 +5,9 @@ use std::marker::PhantomData;
 
 use storeables::Storeable;
 use packets::Entry as Packet;
+
+use servers2::byte_trie::Trie as Alloc;
+
 //XXX UGH this is going to be wildly unsafe...
 
 
@@ -15,32 +18,23 @@ pub struct Trie<V> {
 
 type RootEdge<V> = Box<RootTable<V>>;
 
+//TODO it would be nice to intersperse the shortcuts of the two tries
+//     but it is to annoying to code.
 struct RootTable<V> {
     l6: Shortcut<ValEdge>,
-    storage_l6: Shortcut<ValEdge>,
     next_entry: u64,
-    stored_bytes: u64,
-
-    alloc: AllocPtr<u8>,
+    alloc: AllocPtr,
     l5: Shortcut<L6Edge>,
-    storage_l5: Shortcut<L6Edge>,
-
     l4: Shortcut<L5Edge>,
-    storage_l4: Shortcut<L5Edge>,
-
     l3: Shortcut<L4Edge>,
-    storage_l3: Shortcut<L4Edge>,
-
     l2: Shortcut<L3Edge>,
-    storage_l2: Shortcut<L3Edge>,
-
     l1: Shortcut<L2Edge>,
-    storage_l1: Shortcut<L2Edge>,
-
     array: [L1Edge; 16],
-    storage_root: [L1Edge; 16],
     _pd: PhantomData<V>,
 }
+
+pub type ByteLoc = u64;
+pub type TrieIndex = u64;
 
 //Remaining Address => 60 Bits
 type L1Edge = Option<Box<[L2Edge; ARRAY_SIZE]>>;
@@ -122,47 +116,47 @@ impl<V> P<[V; ARRAY_SIZE]> {
     }
 }*/
 
-struct AllocPtr<V> {
-    ptr: *mut [V],
-    alloc_rem: usize, //should be ptrdiff_t?
+struct AllocPtr {
+    alloc: Alloc,
 }
 
-impl AllocPtr<u8> {
+impl AllocPtr {
 
     #[allow(dead_code)]
     fn new() -> Self {
-        unsafe { mem::zeroed() }
+        AllocPtr { alloc: Alloc::new() }
     }
 
-    fn append<V>(&mut self, data: &Packet<V>) -> *mut u8
+    fn append<V>(&mut self, data: &Packet<V>) -> (*mut u8, ByteLoc)
     where V: Storeable {
         let bytes = data.bytes();
         let storage_size = bytes.len(); // FIXME
-        let append_to = self.prep_append(storage_size);
+        let (append_to, loc) = self.prep_append(storage_size);
         //safe do to: if self.alloc_rem < storage_size {..} at first line of fn prep_append
-        unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), append_to, storage_size);
-        }
-        append_to
+        append_to.copy_from_slice(bytes);
+        (append_to.as_mut_ptr(), loc)
     }
 
-    fn prep_append(&mut self, storage_size: usize) -> *mut u8 {
-        if self.alloc_rem < storage_size {
-            if storage_size > LEVEL_BYTES {
-                let mut storage = Vec::with_capacity(storage_size);
-                unsafe { storage.set_len(storage_size) };
-                return &mut unsafe { (*Box::into_raw(storage.into_boxed_slice()))[0] }
-            }
-            self.ptr = Box::into_raw(Box::new([0; LEVEL_BYTES]));
-            //TODO
-            self.alloc_rem = LEVEL_BYTES;
+    fn prep_append(&mut self, storage_size: usize) -> (&mut [u8], ByteLoc) {
+        if storage_size <= LEVEL_BYTES / 2 {
+                self.alloc.append(storage_size)
         }
-        let (append_to, rem) = unsafe {&mut *self.ptr}.split_at_mut(storage_size);
-        self.ptr = rem;
-        let append_to = &mut (*append_to)[0];
-        //TODO storage_size * mem::size_of::<V>()?
-        self.alloc_rem -= storage_size;
-        append_to
+        else {
+            let mut storage = Vec::with_capacity(storage_size);
+            let ptr = unsafe {
+                storage.set_len(storage_size);
+                &mut *Box::into_raw(storage.into_boxed_slice())
+            };
+            (ptr, ::std::u64::MAX)
+        }
+    }
+
+    unsafe fn alloc_at(&mut self, start: ByteLoc, size: usize) -> *mut u8 {
+        self.alloc.append_at(start, size).as_mut_ptr()
+    }
+
+    unsafe fn get_mut(&mut self, loc: ByteLoc, size: usize) -> *mut u8 {
+        self.alloc.get_mut(loc, size).unwrap().as_mut_ptr()
     }
 }
 
@@ -174,6 +168,19 @@ macro_rules! index {
             match *$array {
                 None => return None,
                 Some(ref ptr) => &(**ptr)[index],
+            }
+        }
+    };
+}
+
+macro_rules! index_mut {
+    ($array:ident, $k:expr, $depth:expr) => {
+        {
+            let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            assert!(index < ARRAY_SIZE, "index: {}", index);
+            match *$array {
+                None => return None,
+                Some(ref mut ptr) => &mut (**ptr)[index],
             }
         }
     };
@@ -290,34 +297,95 @@ impl<V> Trie<Packet<V>>
 where V: Storeable {
     pub fn new() -> Self {
         unsafe {
-            Trie { root: Box::new(mem::zeroed()) }
+            //FIXME gratuitously unsafe
+            let mut t = Trie { root: Box::new(mem::zeroed()) };
+            ::std::ptr::write(&mut t.root.alloc, AllocPtr::new());
+            t
         }
     }
 
-    pub fn append(&mut self, data: &Packet<V>) -> u64 {
+    pub fn append(&mut self, data: &Packet<V>) -> TrieIndex {
         self._append(data).0
     }
 
-    fn _append(&mut self, data: &Packet<V>) -> (u64, &mut u8) {
-        let val_ptr = self.root.alloc.append(data);
+    fn _append(&mut self, data: &Packet<V>) -> (TrieIndex, &mut u8) {
+        let (val_ptr, loc) = self.root.alloc.append(data);
         let (entry, _) = unsafe { self.prep_append(val_ptr) };
         (entry, unsafe {val_ptr.as_mut().unwrap()})
     }
 
-    #[cfg(TODO)]
-    fn partial_append_at(&mut self, key: u32, storage_start: usize, storage_size: usize)
-    -> *mut u8 {
-        unimplemented!()
+    pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
+    -> AppendSlot<Packet<V>> {
+        use std::cmp::Ordering::*;
+        match key.cmp(&self.root.next_entry) {
+            Equal => self.partial_append(storage_size),
+            Less => self.get_append_slot(key, storage_start, storage_size),
+            Greater => {
+                //TODO
+                let trie_entry: *mut *const u8;
+                loop {
+                    let (index, tentry) = self.prep_append(ptr::null());
+                    if index == key {
+                        trie_entry = tentry;
+                        break
+                    }
+                }
+                let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
+                AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: storage_size,
+                    _pd: Default::default()}
+            }
+        }
     }
 
     pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet<V>> {
-        let val_ptr: *mut u8 = self.root.alloc.prep_append(size);
+        let val_ptr: *mut u8 = {
+            let (val_ptr, loc) = self.root.alloc.prep_append(size);
+            val_ptr.as_mut_ptr()
+        };
         let (_index, trie_entry) = self.prep_append(ptr::null());
         AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
             _pd: Default::default()}
     }
 
-    unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (u64, &mut *const u8) {
+    #[cfg(FALSE)]
+    pub unsafe fn append_at_with_storage(
+        &mut self,
+        key: TrieIndex,
+        //TODO what type?
+        storage: *mut [u8],
+    ) -> AppendSlot<Packet<V>> {
+        let trie_entry = self.prep_append_at(key, ptr::null());
+        let size = (*storage).len();
+        let storage = (*storage).as_mut_ptr();
+        AppendSlot {
+            trie_entry: trie_entry,
+            data_ptr: storage,
+            data_size: storage_size,
+            _pd: PhantomData
+        }
+    }
+
+    pub unsafe fn prep_append_at(&mut self, key: TrieIndex, val_ptr: *const u8) -> *mut *const u8 {
+        use std::cmp::Ordering::*;
+        match key.cmp(&self.root.next_entry) {
+            Equal => self.prep_append(val_ptr).1,
+            Less => self.get_entry_at(key).unwrap(),
+            Greater => {
+                //TODO
+                let trie_entry: *mut *const u8;
+                loop {
+                    let (index, tentry) = self.prep_append(ptr::null());
+                    if index == key {
+                        trie_entry = tentry;
+                        break
+                    }
+                }
+                trie_entry
+            }
+        }
+    }
+
+    pub unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (TrieIndex, &mut *const u8) {
         let root: &mut RootTable<_> =&mut *self.root;
         let next_entry = root.next_entry;
         //if we're out of address space there's nothing we can do...
@@ -366,6 +434,30 @@ where V: Storeable {
         (next_entry, root.l6.append(val_ptr))
     }
 
+    fn get_append_slot(&mut self, k: TrieIndex,  storage_start: ByteLoc, size: usize)
+    -> AppendSlot<Packet<V>> {
+        unsafe {
+            let trie_entry: *mut *const u8 = self.get_entry_at(k).unwrap();
+            //TODO these should be interleaved...
+            let data_ptr = self.root.alloc.get_mut(storage_start, size);
+            AppendSlot { trie_entry: trie_entry, data_ptr: data_ptr, data_size: size,
+                _pd: Default::default()}
+        }
+    }
+
+    #[inline]
+    fn get_entry_at(&mut self, k: TrieIndex) -> Option<&mut *const u8> {
+        let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
+        let l1 = &mut self.root.array[root_index];
+        let l2 = index_mut!(l1, k, 1);
+        let l3 = index_mut!(l2, k, 2);
+        let l4 = index_mut!(l3, k, 3);
+        let l5 = index_mut!(l4, k, 4);
+        let l6 = index_mut!(l5, k, 5);
+        Some(index_mut!(l6, k, 6))
+    }
+
+    #[cfg(FALSE)]
     pub unsafe fn partial_insert(&mut self, k: u64, size: usize) -> AppendSlot<Packet<V>> {
         let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
         //assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
@@ -751,7 +843,7 @@ pub mod test {
             unsafe { Data(&i, &[OrderIndex(7.into(), (i as u32).into())]).fill_entry(&mut p) }
             unsafe {
                 let size = p.entry_size();
-                let slot = m.partial_insert(i as u64, size);
+                let slot = m.partial_append_at(i as u64, i as u64 * size as u64, size);
                 slot.finish_append(&p);
             }
             // println!("{:#?}", m);
@@ -829,6 +921,49 @@ pub mod test {
         }
     }
 
+    #[test]
+    pub fn even_more_append() {
+        let mut p = Data(&32u64, &[OrderIndex(5.into(), 6.into())]).clone_entry();
+        let entry_size = p.entry_size();
+        let mut m = Trie::new();
+        for i in 0..0x18000u64 {
+            assert_eq!(m.len(), i);
+            unsafe { Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p) }
+            assert_eq!(m.append(&p), i);
+            //println!("{:#?}", m);
+            //println!("{:#?}", i);
+            if i > 0 {
+                assert_eq!(m.get(i - 1).map(|e| e.contents()),
+                    Some(Data(&(i - 1), &[OrderIndex(5.into(), ((i-1) as u32).into())])));
+            }
+            if i >= 3 {
+                assert_eq!(m.get(i - 3).map(|e| e.contents()),
+                    Some(Data(&(i - 3), &[OrderIndex(5.into(), ((i-3) as u32).into())])));
+            }
+            if i >= 1000 {
+                assert_eq!(m.get(i - 1000).map(|e| e.contents()),
+                    Some(Data(&(i - 1000), &[OrderIndex(5.into(), ((i-1000) as u32).into())])));
+            }
+            assert_eq!(m.get(i).map(|e| e.contents()),
+                Some(Data(&i, &[OrderIndex(5.into(), (i as u32).into())])));
+            assert_eq!(m.get(i + 1), None);
+            assert_eq!(m.len(), i + 1);
+        }
+
+        assert_eq!(m.len(), 0x18000u64);
+
+        for j in 0..0x18000u64 {
+            assert_eq!(m.get(j).map(|e| e.contents()),
+                Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
+        }
+
+        assert_eq!(m.len(), 0x18000u64);
+
+        for j in 0x18000..0x28000u64 {
+            assert_eq!(m.get(j), None);
+        }
+    }
+
     #[cfg(TODO)]
     pub mod from_hash_map {
         use super::super::*;
@@ -856,7 +991,7 @@ pub mod test {
         #[test]
         pub fn even_more_append() {
             let mut m = Trie::new();
-            for i in 0..0x18000 {
+            for i in 0..0x18000u64 {
                 assert_eq!(m.append(&i), i);
                 //println!("{:#?}", m);
                 //println!("{:#?}", i);
@@ -873,12 +1008,12 @@ pub mod test {
                 assert_eq!(m.get(i + 1), None);
             }
 
-            for j in 0..0x18000 {
+            for j in 0..0x18000u64 {
                 let r = m.get(j);
                 assert_eq!(r, Some(&j));
             }
 
-            for j in 0x18000..0x28000 {
+            for j in 0x18000..0x28000u64 {
                 let r = m.get(j);
                 assert_eq!(r, None);
             }
