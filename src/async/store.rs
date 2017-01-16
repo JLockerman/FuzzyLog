@@ -44,6 +44,7 @@ pub struct PerServer<Socket> {
     bytes_sent: usize,
     currently_sending: Option<WriteState>,
     got_new_message: bool,
+    //FIXME receiver: SocketAddr,
 }
 
 #[derive(Debug)]
@@ -63,7 +64,10 @@ pub trait Connected {
     type Connection: mio::Evented;
     fn connection(&self) -> &Self::Connection;
     fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error>;
-    fn write_packet(&mut self, packet: &[u8]) -> bool;
+    fn send_packet(&mut self, packet: &[u8]) -> bool;
+    fn send_read_packet(&mut self, packet: &[u8]) -> bool {
+        self.send_packet(packet)
+    }
 }
 
 //TODO rename to AsyncStore
@@ -548,7 +552,7 @@ where PerServer<S>: Connected,
         Entry::<()>::wrap_bytes(msg).locs()
             .iter().cloned()
             .filter(|&oi| oi != OrderIndex(0.into(), 0.into()))
-            .fold((0..self.servers.len())
+            .fold((0..self.num_chain_servers)
                 .map(|_| false).collect::<Vec<_>>(),
             |mut v, OrderIndex(o, _)| {
                 v[self.server_for_chain(o)] = true;
@@ -637,7 +641,7 @@ impl Connected for PerServer<TcpStream> {
         Ok(Some(buff))
     }
 
-    fn write_packet(&mut self, packet: &[u8]) -> bool {
+    fn send_packet(&mut self, packet: &[u8]) -> bool {
         use std::io::ErrorKind;
 
         match self.stream.write(&packet[self.bytes_sent..]) {
@@ -675,7 +679,7 @@ impl Connected for PerServer<UdpConnection> {
         Ok(None)
     }
 
-    fn write_packet(&mut self, packet: &[u8]) -> bool {
+    fn send_packet(&mut self, packet: &[u8]) -> bool {
         let addr = &self.stream.addr;
         //FIXME handle WouldBlock and number of bytes read
         let sent = self.stream.socket.send_to(packet, addr).expect("cannot write");
@@ -705,7 +709,7 @@ where PerServer<S>: Connected {
 
         let send_in_progress = mem::replace(&mut self.currently_sending, None);
         if let Some(currently_sending) = send_in_progress {
-            let finished = currently_sending.with_packet(|p| self.write_packet(p) );
+            let finished = currently_sending.with_packet(|p| self.send_packet(p) );
             if finished {
                 return Some(currently_sending)
             }
@@ -760,7 +764,7 @@ where PerServer<S>: Connected {
                     //Since sentinels have a different size than multis, we need to truncate
                     //for those sends
                     //self.stream.write_all(&ts[..send_end]).expect("cannot write");
-                    self.write_packet(&ts[..send_end])
+                    self.send_packet(&ts[..send_end])
                 };
                 if finished {
                     Some(MultiServer(to_send, lock_nums))
@@ -785,7 +789,7 @@ where PerServer<S>: Connected {
                         assert_eq!(e.entry_size(), tslen);
                     }
                     trace!("CLIENT willsend {:?}", &*ts);
-                    self.write_packet(&*ts)
+                    self.send_packet(&*ts)
                 };
                 if finished {
                     Some(UnlockServer(to_send, lock_num))
@@ -808,7 +812,13 @@ where PerServer<S>: Connected {
                         || l == EntryLayout::Read)
                 }
                 //TODO multipart writes?
-                let finished = to_send.with_packet(|p| self.write_packet(p) );
+                let finished = if to_send.is_read() {
+                    to_send.with_packet(|p| self.send_read_packet(p))
+                }
+                else {
+                    to_send.with_packet(|p| self.send_packet(p))
+                };
+                
                 trace!("CLIENT PerServer {:?} single written", token);
                 if finished {
                     Some(to_send)
@@ -878,6 +888,14 @@ impl WriteState {
         }
     }
 
+    fn is_read(&self) -> bool {
+        match self {
+            &WriteState::SingleServer(ref vec) =>
+                Entry::<()>::wrap_bytes(&vec[..]).kind.layout() == EntryLayout::Read,
+            _ => false,
+        }
+    }
+
     fn id(&self) -> Uuid {
         let mut id = unsafe { mem::uninitialized() };
         self.with_packet(|p| {
@@ -903,6 +921,7 @@ impl WriteState {
         });
         loc
     }
+
     fn clone_multi(&self) -> WriteState {
         use self::WriteState::*;
         match self {

@@ -361,9 +361,6 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
 #[repr(u8)]
 enum Io { Log, Read, Write, ReadWrite }
 
-#[repr(u8)]
-enum IoBuffer { Log, Read(Buffer), Write(Buffer), ReadWrite(Buffer) }
-
 struct Worker {
     clients: HashMap<mio::Token, PerSocket>,
     inner: WorkerInner,
@@ -867,6 +864,7 @@ impl PerSocket {
 
             &mut Client {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending, ref mut being_read, ..} => {
                 //TODO if being_written is empty try to send immdiately, place remainder
+                //TODO the big buffer itself may be premature, check if sending directly works...
                 if being_written.capacity() - being_written.len() >= to_write.entry_size() {
                     being_written.extend_from_slice(to_write.entry_slice())
                 } else {
@@ -893,22 +891,6 @@ impl PerSocket {
         match self {
             &Downstream {ref stream, ..} | &Client {ref stream, ..} | &Upstream {ref stream, ..} =>
                 stream,
-        }
-    }
-}
-
-impl IoBuffer {
-    fn send_buffer(&self) -> &Buffer {
-        match self {
-            &IoBuffer::Write(ref buffer) => buffer,
-            _ => unreachable!(),
-        }
-    }
-
-    fn recv_buffer(&mut self) -> &mut Buffer {
-        match self {
-            &mut IoBuffer::Read(ref mut buffer) => buffer,
-            _ => unreachable!(),
         }
     }
 }
