@@ -2,7 +2,7 @@ use storeables::Storeable;
 use packets::{Entry, EntryContents};
 use hash::HashMap;
 
-//FIXME merge this buffer with the one in store and put in it's own mod
+#[derive(Debug)]
 pub struct Buffer {
     inner: Vec<u8>,
 }

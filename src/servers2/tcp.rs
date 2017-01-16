@@ -2,13 +2,14 @@ use std::collections::hash_map::Entry as HashEntry;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write, ErrorKind};
 use std::{mem, thread};
+use std::net::IpAddr;
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prelude::*;
 use servers2::{self, spmc, ServerLog, ToWorker, DistributeToWorkers};
-use hash::HashMap;
+use hash::{HashMap, FxHasher};
 
 use mio;
 use mio::tcp::*;
@@ -94,20 +95,33 @@ pub fn run(
     if num_workers == 0 {
         warn!("SERVER {} started with 0 workers", this_server_num);
     }
+
+    let is_unreplicated = if true/*TODO upstream_ip.is_none() && downstream_ip.is_none()*/ {
+        warn!("SERVER {} started without replication", this_server_num);
+        true
+    } else {
+        false
+    };
+
     let num_workers = max(num_workers, 1);
 
+    
     let poll = mio::Poll::new().unwrap();
     poll.register(&acceptor,
         ACCEPT,
         mio::Ready::readable(),
         mio::PollOpt::level()
     ).expect("cannot start server poll");
-    //TODO let next_server_ip: Option<_> = Some(panic!());
-    //TODO let mut admin_socket = None;
-    //TODO let mut other_sockets = Vec::new();
     let mut events = mio::Events::with_capacity(1023);
-    /* TODO
-    while next_server_ip.is_some() && admin_socket.is_none() {
+
+    //let next_server_ip: Option<_> = Some(panic!());
+    //let prev_server_ip: Option<_> = Some(panic!());
+    let next_server_ip: Option<_> = None;
+    let prev_server_ip: Option<_> = None;
+    let mut downstream_admin_socket = None;
+    let mut upstream_admin_socket = None;
+    let mut other_sockets = Vec::new();
+    while next_server_ip.is_some() && downstream_admin_socket.is_none() {
         poll.poll(&mut events, None).unwrap();
         for event in events.iter() {
             match event.token() {
@@ -120,18 +134,36 @@ pub fn run(
                             let _ = socket.set_keepalive_ms(Some(1000));
                             //TODO benchmark
                             let _ = socket.set_nodelay(true);
-                            next_server_ip = Some((addr.ip()));
-                            admin_socket = Some(socket)
+                            downstream_admin_socket = Some(socket)
                         }
                     }
                 }
                 _ => unreachable!()
             }
         }
-    }*/
+    }
 
-    //TODO let num_connections = negotiate_num_downstreams(&admin_socket);
+    if let Some(ip) = prev_server_ip {
+        upstream_admin_socket = Some(TcpStream::connect(ip).expect("cannot connect upstream"));
+    }
 
+    /*TODO
+    let num_downstream = negotiate_num_downstreams(&admin_socket);
+    let num_upstream = negotiate_num_downstreams(&admin_socket);
+    handle connections...
+    let donwstream: Vec<_> = ...
+    let upstream: Vec<_> = ...
+    */
+
+    let mut downstream = vec![]; // TODO Vec::with_capacity(num_downstream);
+    let mut upstream = vec![]; // TODO Vec::with_capacity(num_ipstream);
+
+    downstream_admin_socket.take().map(|s| downstream.push(s));
+    upstream_admin_socket.take().map(|s| upstream.push(s));
+    let num_downstream = downstream.len();
+    let num_upstream = upstream.len();
+
+    trace!("SERVER {} {} up, {} down.", this_server_num, num_upstream, num_downstream);
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
@@ -139,11 +171,22 @@ pub fn run(
         //let from_dist = recv_from_dist.clone();
         //let to_dist   = workers_to_dist.clone();
         //let from_log  = recv_from_log.clone();
-        let to_log    = workers_to_log.clone();
+        let to_log = workers_to_log.clone();
         let (to_worker, from_log) = spmc::channel();
         let (dist_to_worker, from_dist) = spmc::channel();
+        let upstream = upstream.pop();
+        let downstream = downstream.pop();
         thread::spawn(move ||
-            Worker::new(from_dist, from_log, to_log, n).run()
+            Worker::new(
+                from_dist,
+                from_log,
+                to_log,
+                upstream,
+                downstream,
+                num_downstream,
+                is_unreplicated,
+                n,
+            ).run()
         );
         log_to_workers.push(to_worker);
         dist_to_workers.push(dist_to_worker);
@@ -167,7 +210,7 @@ pub fn run(
     let mut worker_for_client: HashMap<_, _> = Default::default();
     let mut next_token = mio::Token(10);
     //let mut buffer_cache = VecDeque::new();
-    let mut next_worker = 0;
+    let mut next_worker = 0usize;
     trace!("SERVER start server loop");
     loop {
         poll.poll(&mut events, None).unwrap();
@@ -191,12 +234,18 @@ pub fn run(
                             );
                             receivers.insert(tok, Some(socket));*/
                             let buffer = Buffer::empty();
-                            dist_to_workers[next_worker].send((tok, buffer, socket));
-                            worker_for_client.insert(addr, next_worker);
-                            next_worker = next_worker.wrapping_add(1);
-                            if next_worker >= dist_to_workers.len() {
-                                next_worker = 0;
-                            }
+                            let worker = if is_unreplicated {
+                                let worker = next_worker;
+                                next_worker = next_worker.wrapping_add(1);
+                                if next_worker >= dist_to_workers.len() {
+                                    next_worker = 0;
+                                }
+                                next_worker
+                            } else {
+                                worker_for_ip(addr.ip(), num_workers as u64)
+                            };
+                            dist_to_workers[worker].send((tok, buffer, socket));
+                            worker_for_client.insert(addr, worker);
                         }
                     }
                 }
@@ -238,21 +287,36 @@ pub fn run(
     }
 }
 
-#[cfg(TODO)]
-fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> usize {
+fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> u16 {
     use std::cmp::min;
     if let Some(ref mut socket) = socket.as_mut() {
-        let mut negotiations_done = false;
-        let num_other_threads = [0u8; 2];
+        let mut num_other_threads = [0u8; 2];
         blocking_read(socket, &mut num_other_threads).expect("downstream failed");
         let num_other_threads = unsafe { mem::transmute(num_other_threads) };
         let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
         blocking_write(socket, &to_write).expect("downstream failed");
         min(num_other_threads, num_workers)
     }
+    else {
+        0
+    }
 }
 
-#[cfg(TODO)]
+fn negotiate_num_upstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> u16 {
+    use std::cmp::min;
+    if let Some(ref mut socket) = socket.as_mut() {
+        let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
+        blocking_write(socket, &to_write).expect("upstream failed");
+        let mut num_other_threads = [0u8; 2];
+        blocking_read(socket, &mut num_other_threads).expect("upstream failed");
+        let num_other_threads = unsafe { mem::transmute(num_other_threads) };
+        min(num_other_threads, num_workers)
+    }
+    else {
+        0
+    }
+}
+
 fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
     //like Read::read_exact but doesn't die on WouldBlock
     'recv: while !buffer.is_empty() {
@@ -273,6 +337,26 @@ fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
     }
 }
 
+fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
+    //like Write::write_all but doesn't die on WouldBlock
+    'recv: while !buffer.is_empty() {
+        match w.write(buffer) {
+            Ok(i) => { let tmp = buffer; buffer = &tmp[i..]; }
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue 'recv,
+                _ => { return Err(e) }
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::WriteZero,
+            "failed to fill whole buffer"))
+    }
+    else {
+        return Ok(())
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 enum Io { Log, Read, Write, ReadWrite }
@@ -281,9 +365,7 @@ enum Io { Log, Read, Write, ReadWrite }
 enum IoBuffer { Log, Read(Buffer), Write(Buffer), ReadWrite(Buffer) }
 
 struct Worker {
-    sleeping_io: HashMap<mio::Token, PerSocket>,
-    pre_server_socket: Option<PerSocket>,
-    next_server_socket: Option<PerSocket>,
+    clients: HashMap<mio::Token, PerSocket>,
     inner: WorkerInner,
 }
 
@@ -293,20 +375,98 @@ struct WorkerInner {
     from_log: spmc::Receiver<ToWorker<(usize, mio::Token)>>,
     to_log: mpsc::Sender<(Buffer, (usize, mio::Token))>,
     worker_num: usize,
-    is_replica: bool,
-    is_last_server: bool,
+    downstream_workers: usize,
     poll: mio::Poll,
+    is_unreplicated: bool,
 }
 
+/*
 struct PerSocket {
     buffer: IoBuffer,
     stream: TcpStream,
     bytes_handled: usize,
     is_from_server: bool,
 }
+*/
 
+#[derive(Debug)]
+enum PerSocket {
+    Upstream {
+        being_read: Buffer,
+        bytes_read: usize,
+        stream: TcpStream,
+    },
+    Downstream {
+        being_written: Vec<u8>,
+        bytes_written: usize,
+        stream: TcpStream,
+        pending: VecDeque<Vec<u8>>,
+    },
+    //FIXME Client should be divided into reader and writer?
+    Client {
+        being_read: Buffer,
+        bytes_read: usize,
+        stream: TcpStream,
+        being_written: Vec<u8>,
+        bytes_written: usize,
+        pending: VecDeque<Vec<u8>>,
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PerSocketKind {
+    Upstream,
+    Downstream,
+    Client,
+}
+/*
+struct Upstream {
+    being_read: Buffer,
+    stream: TcpStream,
+    bytes_handled: usize,
+}
+
+struct Downstream {
+    being_written: Vec<u8>,
+    bytes_written: usize,
+    stream: TcpStream,
+    pending: VecDeque<Vec<u8>>,
+}
+
+struct Client {
+    being_read: Buffer,
+    bytes_read: usize,
+    being_written: Vec<u8>,
+    bytes_written: usize,
+    stream: TcpStream,
+    pending: VecDeque<Vec<u8>>,
+}
+*/
 const FROM_DIST: mio::Token = mio::Token(0);
 const FROM_LOG: mio::Token = mio::Token(1);
+// we don't really need to special case this;
+// all writes are bascially the same,
+// but it's convenient for all workers to be in the same token space
+const UPSTREAM: mio::Token = mio::Token(2);
+const DOWNSTREAM: mio::Token = mio::Token(3);
+
+// It's convenient to share a single token-space among all workers so any worker
+// can determine who is responsible for a client
+const FIRST_CLIENT_TOKEN: mio::Token = mio::Token(10);
+
+/*
+State machine:
+  1. on receive from network:
+       - write:
+           a. lookup next hop
+                + if client, lookup client handler (hashmap ip -> (thread num, Token))
+                + if server lookup server handler  (either mod num downstream, magic in above map, or self)
+           b. send to log thread with next net hop set (parrallel writes on ooo?)
+       - read: send to log thread with next hop = me (TODO parallel lookup)
+  2. on receive from log: do work
+       + if next hop has write space send to next hop
+       + else enqueue, wait for current burst to be sent
+*/
 
 impl Worker {
 
@@ -314,6 +474,10 @@ impl Worker {
         from_dist: spmc::Receiver<(mio::Token, Buffer, TcpStream)>,
         from_log: spmc::Receiver<ToWorker<(usize, mio::Token)>>,
         to_log: mpsc::Sender<(Buffer, (usize, mio::Token))>,
+        upstream: Option<TcpStream>,
+        downstream: Option<TcpStream>,
+        downstream_workers: usize,
+        is_unreplicated: bool,
         worker_num: usize
     ) -> Self {
         let poll = mio::Poll::new().unwrap();
@@ -329,11 +493,31 @@ impl Worker {
             mio::Ready::readable(),
             mio::PollOpt::level()
         ).expect("cannot pol from log on worker");
+        let mut clients: HashMap<_, _> = Default::default();
+        if let Some(up) = upstream {
+            assert!(!is_unreplicated);
+            poll.register(
+                &up,
+                UPSTREAM,
+                mio::Ready::readable(),
+                mio::PollOpt::edge()
+            ).expect("cannot pol from dist on worker");
+            let ps = PerSocket::upstream(up);
+            clients.insert(UPSTREAM, ps);
+        }
+        if let Some(down) = downstream {
+            assert!(!is_unreplicated);
+            poll.register(
+                &down,
+                DOWNSTREAM,
+                mio::Ready::readable(),
+                mio::PollOpt::edge()
+            ).expect("cannot pol from dist on worker");
+            let ps = PerSocket::downstream(down);
+            clients.insert(DOWNSTREAM, ps);
+        }
         Worker {
-            sleeping_io: Default::default(),
-            //TODO
-            next_server_socket: None,
-            pre_server_socket: None,
+            clients: clients,
             inner: WorkerInner {
                 awake_io: Default::default(),
                 from_dist: from_dist,
@@ -341,9 +525,8 @@ impl Worker {
                 to_log: to_log,
                 poll: poll,
                 worker_num: worker_num,
-                //TODO
-                is_replica: false,
-                is_last_server: true,
+                is_unreplicated: is_unreplicated,
+                downstream_workers: downstream_workers,
             }
         }
     }
@@ -358,7 +541,7 @@ impl Worker {
                 let ops_before_poll = self.inner.awake_io.len();
                 for _ in 0..ops_before_poll {
                     let token = self.inner.awake_io.pop_front().unwrap();
-                    if let HashEntry::Occupied(o) = self.sleeping_io.entry(token) {
+                    if let HashEntry::Occupied(o) = self.clients.entry(token) {
                         self.inner.handle_burst(token, o.into_mut());
                     }
                 }
@@ -380,10 +563,8 @@ impl Worker {
                     let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
                     if let Some((buffer, (_, tok))) = to_send {
                         //TODO
-                        let state = self.sleeping_io.get_mut(&tok).unwrap();
-                        debug_assert_eq!(state.io(), Io::Log);
-                        state.post_recv_from_log(buffer);
-                        self.inner.send_packet(tok, state);
+                        self.clients.get_mut(&tok).unwrap().add_send(buffer.entry_slice());
+                        self.inner.awake_io.push_back(tok);
                     }
                 }
                 continue 'event
@@ -397,16 +578,17 @@ impl Worker {
                         mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                         mio::PollOpt::edge()
                     ).unwrap();
-                    //self.sleeping_io.insert(tok, PerSocket::new(buffer, stream));
+                    //self.clients.insert(tok, PerSocket::new(buffer, stream));
                     //TODO assert unique?
                     let state =
-                        self.sleeping_io.entry(tok).or_insert(PerSocket::new(buffer, stream));
+                        self.clients.entry(tok).or_insert(PerSocket::client(buffer, stream));
                     self.inner.recv_packet(tok, state);
                 }
                 continue 'event
             }
 
-            if let HashEntry::Occupied(o) = self.sleeping_io.entry(token) {
+            if let HashEntry::Occupied(o) = self.clients.entry(token) {
+                //TODO check token read/write
                 let state = o.into_mut();
                 self.inner.handle_burst(token, state)
             }
@@ -421,35 +603,33 @@ impl WorkerInner {
         token: mio::Token,
         socket_state: &mut PerSocket
     ) {
-        match socket_state.io() {
-            Io::Read => self.recv_packet(token, socket_state),
-            Io::Write => self.send_packet(token, socket_state),
-            Io::Log => {/* It looks like this should be a no-op */},
-            Io::ReadWrite => unimplemented!(),
+        use self::PerSocket::*;
+        let (send, recv) = match socket_state {
+            &mut Upstream {..} => (false, true),
+            &mut Downstream {..} => (true, false),
+            &mut Client {..} => (true, true),
+        };
+        if send {
+            //FIXME need to disinguish btwn to client and to upstream
+            self.send_burst(token, socket_state)
+        }
+        if recv {
+            //FIXME need to disinguish btwn from client and from upstream
+            self.recv_packet(token, socket_state)
         }
     }
 
     //TODO these functions should return Result so we can remove from map
-    fn send_packet(
+    fn send_burst(
         &mut self,
         token: mio::Token,
         socket_state: &mut PerSocket
     ) {
-        match send_packet(
-            socket_state.buffer.send_buffer(),
-            &socket_state.stream,
-            socket_state.bytes_handled,
-        ) {
-            SendRes::NeedsMore(handled) => socket_state.continue_write(handled),
-
-            //TODO or immediately recv
-            SendRes::Done => {
-                socket_state.finish_write();
-                self.awake_io.push_back(token);
-            }
-
-            //FIXME remove from map
-            SendRes::Error => { let _ = self.poll.deregister(&socket_state.stream); }
+        match socket_state.send_burst() {
+            Ok(true) => self.awake_io.push_back(token),
+            Ok(false) => {},
+            //FIXME remove from map, log
+            Err(..) => { let _ = self.poll.deregister(socket_state.stream()); }
         }
     }
 
@@ -458,89 +638,180 @@ impl WorkerInner {
         token: mio::Token,
         socket_state: &mut PerSocket
     ) {
-        match recv_packet(
-            socket_state.buffer.recv_buffer(),
-            &socket_state.stream,
-            socket_state.bytes_handled,
-        ) {
-            RecvRes::NeedsMore(handled) => socket_state.continue_read(handled),
-
-            //TODO send to log
-            RecvRes::Done =>  { self.send_to_log(token, socket_state); }
-
-            //FIXME remove from map
-            RecvRes::Error => { let _ = self.poll.deregister(&socket_state.stream); }
+        let socket_kind = socket_state.kind();
+        let packet = socket_state.recv_packet();
+        match packet {
+            //FIXME remove from map, log
+            Err(..) => { let _ = self.poll.deregister(socket_state.stream()); },
+            Ok(None) => {},
+            Ok(Some(packet)) => {
+                //FIXME which token handles the next hop is more complicated...
+                let next_hop = self.next_hop(token, socket_kind);
+                //FIXME needs worker num and IP addr...
+                self.send_to_log(packet, token, socket_state)
+            }
         }
     }
 
-    fn send_to_log(&mut self, token: mio::Token, socket_state: &mut PerSocket) {
-        let buffer = socket_state.pre_send_to_log();
+    fn next_hop(&self, token: mio::Token, socket_kind: PerSocketKind) -> mio::Token {
+        //FIXME might need IP addr...
+        if self.is_unreplicated {
+            return token
+        }
+        //FIXME which token handles the next hop is more complicated...
+        unimplemented!()
+    }
+
+    fn send_to_log(&mut self, buffer: Buffer, token: mio::Token, socket_state: &mut PerSocket) {
         self.to_log.send((buffer, (self.worker_num, token))).unwrap();
     }
 }
 
+type ShouldContinue = bool;
+
+const WRITE_BUFFER_SIZE: usize = 4000000;
+
 impl PerSocket {
-    fn new(buffer: Buffer, stream: TcpStream) -> Self {
-        PerSocket {
-            buffer: IoBuffer::Read(buffer),
+    /*
+    Upstream {
+        being_read: Buffer,
+        bytes_read: usize,
+        stream: TcpStream,
+    },
+    Downstream {
+        being_written: Vec<u8>,
+        bytes_written: usize,
+        stream: TcpStream,
+        pending: VecDeque<Vec<u8>>,
+    },
+    Client {
+        being_read: Buffer,
+        bytes_read: usize,
+        stream: TcpStream,
+        being_written: Vec<u8>,
+        bytes_written: usize,
+        pending: VecDeque<Vec<u8>>,
+    }
+    */
+    fn client(buffer: Buffer, stream: TcpStream) -> Self {
+        PerSocket::Client {
+            being_read: buffer,
+            bytes_read: 0,
             stream: stream,
-            bytes_handled: 0,
-            //TODO
-            is_from_server: false,
+            being_written: Vec::with_capacity(WRITE_BUFFER_SIZE),
+            bytes_written: 0,
+            pending: Default::default(),
         }
     }
 
-    fn io(&self) -> Io {
-        match self.buffer {
-            IoBuffer::Log => Io::Log,
-            IoBuffer::Read(..) => Io::Read,
-            IoBuffer::Write(..) => Io::Write,
-            IoBuffer::ReadWrite(..) => Io::ReadWrite,
+    fn upstream(stream: TcpStream) -> Self {
+        PerSocket::Upstream {
+            being_read: Buffer::empty(),
+            bytes_read: 0,
+            stream: stream,
         }
     }
 
-    fn continue_write(&mut self, bytes_handled: usize) {
-        self.bytes_handled = bytes_handled;
-        let old = mem::replace(&mut self.buffer, IoBuffer::Log);
-        match old {
-            IoBuffer::Write(buffer) => self.buffer = IoBuffer::Write(buffer),
+    fn downstream(stream: TcpStream) -> Self {
+        PerSocket::Downstream {
+            being_written: Vec::with_capacity(WRITE_BUFFER_SIZE),
+            bytes_written: 0,
+            pending: Default::default(),
+            stream: stream,
+        }
+    }
+
+    fn kind(&self) -> PerSocketKind {
+        match self {
+            &PerSocket::Upstream{..} => PerSocketKind::Upstream,
+            &PerSocket::Downstream{..} => PerSocketKind::Downstream,
+            &PerSocket::Client{..} => PerSocketKind::Client,
+        }
+    }
+
+    //TODO recv burst
+    fn recv_packet(&mut self) -> Result<Option<Buffer>, ()> {
+        use self::PerSocket::*;
+        match self {
+            &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream}
+            | &mut Client {ref mut being_read, ref mut bytes_read, ref stream, ..} => {
+                match recv_packet(being_read, stream, *bytes_read) {
+                    //TODO send to log
+                    RecvRes::Done => Ok(Some(mem::replace(being_read, Buffer::empty()))),
+                    //FIXME remove from map
+                    RecvRes::Error => Err(()),
+
+                    RecvRes::NeedsMore(total_read) => {
+                        *bytes_read = total_read;
+                        Ok(None)
+                    },
+                }
+            }
             _ => unreachable!()
         }
     }
 
-    fn finish_write(&mut self) {
-        self.bytes_handled = 0;
-        let old = mem::replace(&mut self.buffer, IoBuffer::Log);
-        match old {
-            IoBuffer::Write(buffer) => self.buffer = IoBuffer::Read(buffer),
+    fn send_burst(&mut self) -> Result<ShouldContinue, ()> {
+        use self::PerSocket::*;
+        match self {
+            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending}
+            | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ..} => {
+                let to_write = being_written.len();
+                match stream.write(&being_written[*bytes_written..]) {
+                    Err(e) => if e.kind() == ErrorKind::WouldBlock { Ok(false) }
+                        else { Err(()) },
+                    Ok(i) if (*bytes_written + i) < to_write => {
+                        *bytes_written = *bytes_written + i;
+                        Ok(false)
+                    },
+                    Ok(..) => {
+                        //Done with burst check if more bursts to be sent
+                        being_written.clear();
+                        if let Some(buffer) = pending.pop_front() {
+                            let old_buffer = mem::replace(being_written, buffer);
+                            //TODO
+                            if old_buffer.capacity() > WRITE_BUFFER_SIZE / 4 {
+                                pending.push_back(old_buffer)
+                            }
+                        }
+                        Ok(true)
+                    },
+                }
+            },
             _ => unreachable!()
         }
     }
 
-    fn continue_read(&mut self, bytes_handled: usize) {
-        self.bytes_handled = bytes_handled;
-        let old = mem::replace(&mut self.buffer, IoBuffer::Log);
-        match old {
-            IoBuffer::Read(buffer) => self.buffer = IoBuffer::Read(buffer),
+    fn add_send(&mut self, to_write: &[u8]) {
+        //TODO Is there some maximum size at which we shouldn't buffer?
+        //TODO can we simply write directly from the trie?
+        use self::PerSocket::*;
+        match self {
+            &mut Downstream {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending}
+            | &mut Client {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending, ..} => {
+                if being_written.capacity() - being_written.len() >= to_write.len() {
+                   being_written.extend_from_slice(to_write)
+                } else {
+                    let placed = if let Some(buffer) = pending.back_mut() {
+                        if buffer.capacity() - buffer.len() >= to_write.len() {
+                            buffer.extend_from_slice(to_write);
+                            true
+                        } else { false }
+                    } else { false };
+                    if !placed {
+                        pending.push_back(to_write.to_vec())
+                    }
+                }
+            },
             _ => unreachable!()
-        }
+        }        
     }
 
-    fn pre_send_to_log(&mut self) -> Buffer {
-        self.bytes_handled = 0;
-        let old = mem::replace(&mut self.buffer, IoBuffer::Log);
-        match old {
-            IoBuffer::Read(buffer) => { self.buffer = IoBuffer::Log; buffer }
-            _ => unreachable!()
-        }
-    }
-
-    fn post_recv_from_log(&mut self, buffer: Buffer) {
-        self.bytes_handled = 0;
-        let old = mem::replace(&mut self.buffer, IoBuffer::Log);
-        match old {
-            IoBuffer::Log => self.buffer = IoBuffer::Write(buffer),
-            _ => unreachable!()
+    fn stream(&self) -> &TcpStream {
+        use self::PerSocket::*;
+        match self {
+            &Downstream {ref stream, ..} | &Client {ref stream, ..} | &Upstream {ref stream, ..} =>
+                stream,
         }
     }
 }
@@ -646,4 +917,11 @@ for Vec<spmc::Sender<ToWorker<(usize, mio::Token)>>> {
         trace!("SERVER   sending to worker {} {:?} ", which_queue, token);
         self[which_queue].send(msg)
     }
+}
+
+fn worker_for_ip(ip: IpAddr, num_workers: u64) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher: FxHasher = Default::default();
+    ip.hash(&mut hasher);
+    (hasher.finish() % num_workers) as usize
 }
