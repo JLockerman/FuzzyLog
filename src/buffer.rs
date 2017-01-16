@@ -83,6 +83,10 @@ impl Buffer {
             })
             .collect()
     }
+
+    pub fn buffer_len(&self) -> usize {
+        self.inner.len()
+    }
 }
 
 

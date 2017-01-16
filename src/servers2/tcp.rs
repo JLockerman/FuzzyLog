@@ -392,7 +392,7 @@ struct PerSocket {
 #[derive(Debug)]
 enum PerSocket {
     Upstream {
-        being_read: Buffer,
+        being_read: VecDeque<Buffer>,
         bytes_read: usize,
         stream: TcpStream,
     },
@@ -404,12 +404,13 @@ enum PerSocket {
     },
     //FIXME Client should be divided into reader and writer?
     Client {
-        being_read: Buffer,
+        being_read: VecDeque<Buffer>,
         bytes_read: usize,
         stream: TcpStream,
         being_written: Vec<u8>,
         bytes_written: usize,
         pending: VecDeque<Vec<u8>>,
+
     }
 }
 
@@ -454,6 +455,8 @@ const DOWNSTREAM: mio::Token = mio::Token(3);
 // can determine who is responsible for a client
 const FIRST_CLIENT_TOKEN: mio::Token = mio::Token(10);
 
+const NUMBER_READ_BUFFERS: usize = 5;
+
 /*
 State machine:
   1. on receive from network:
@@ -466,6 +469,7 @@ State machine:
   2. on receive from log: do work
        + if next hop has write space send to next hop
        + else enqueue, wait for current burst to be sent
+       + send buffer back to original owner
 */
 
 impl Worker {
@@ -562,8 +566,10 @@ impl Worker {
                 if let Some(log_work) = self.inner.from_log.try_recv() {
                     let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
                     if let Some((buffer, (_, tok))) = to_send {
+                        trace!("WORKER {} recv from log.", self.inner.worker_num);
                         //TODO
-                        self.clients.get_mut(&tok).unwrap().add_send(buffer.entry_slice());
+                        self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
+                        //TODO replace with wake function
                         self.inner.awake_io.push_back(tok);
                     }
                 }
@@ -580,6 +586,7 @@ impl Worker {
                     ).unwrap();
                     //self.clients.insert(tok, PerSocket::new(buffer, stream));
                     //TODO assert unique?
+                    trace!("WORKER {} recv from dist.", self.inner.worker_num);
                     let state =
                         self.clients.entry(tok).or_insert(PerSocket::client(buffer, stream));
                     self.inner.recv_packet(tok, state);
@@ -610,10 +617,12 @@ impl WorkerInner {
             &mut Client {..} => (true, true),
         };
         if send {
+            trace!("WORKER {} will try to send.", self.worker_num);
             //FIXME need to disinguish btwn to client and to upstream
             self.send_burst(token, socket_state)
         }
         if recv {
+            trace!("WORKER {} will try to recv.", self.worker_num);
             //FIXME need to disinguish btwn from client and from upstream
             self.recv_packet(token, socket_state)
         }
@@ -626,6 +635,7 @@ impl WorkerInner {
         socket_state: &mut PerSocket
     ) {
         match socket_state.send_burst() {
+            //TODO replace with wake function
             Ok(true) => self.awake_io.push_back(token),
             Ok(false) => {},
             //FIXME remove from map, log
@@ -645,10 +655,12 @@ impl WorkerInner {
             Err(..) => { let _ = self.poll.deregister(socket_state.stream()); },
             Ok(None) => {},
             Ok(Some(packet)) => {
+                trace!("WORKER {} finished recv", self.worker_num);
                 //FIXME which token handles the next hop is more complicated...
                 let next_hop = self.next_hop(token, socket_kind);
                 //FIXME needs worker num and IP addr...
-                self.send_to_log(packet, token, socket_state)
+                self.send_to_log(packet, token, socket_state);
+                self.awake_io.push_back(token)
             }
         }
     }
@@ -663,13 +675,14 @@ impl WorkerInner {
     }
 
     fn send_to_log(&mut self, buffer: Buffer, token: mio::Token, socket_state: &mut PerSocket) {
+        trace!("WORKER {} send to log", self.worker_num);
         self.to_log.send((buffer, (self.worker_num, token))).unwrap();
     }
 }
 
 type ShouldContinue = bool;
 
-const WRITE_BUFFER_SIZE: usize = 4000000;
+const WRITE_BUFFER_SIZE: usize = 40000;
 
 impl PerSocket {
     /*
@@ -695,7 +708,7 @@ impl PerSocket {
     */
     fn client(buffer: Buffer, stream: TcpStream) -> Self {
         PerSocket::Client {
-            being_read: buffer,
+            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::new()).collect(),
             bytes_read: 0,
             stream: stream,
             being_written: Vec::with_capacity(WRITE_BUFFER_SIZE),
@@ -706,7 +719,7 @@ impl PerSocket {
 
     fn upstream(stream: TcpStream) -> Self {
         PerSocket::Upstream {
-            being_read: Buffer::empty(),
+            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::new()).collect(),
             bytes_read: 0,
             stream: stream,
         }
@@ -732,19 +745,32 @@ impl PerSocket {
     //TODO recv burst
     fn recv_packet(&mut self) -> Result<Option<Buffer>, ()> {
         use self::PerSocket::*;
+        trace!("SOCKET try recv");
         match self {
             &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream}
             | &mut Client {ref mut being_read, ref mut bytes_read, ref stream, ..} => {
-                match recv_packet(being_read, stream, *bytes_read) {
-                    //TODO send to log
-                    RecvRes::Done => Ok(Some(mem::replace(being_read, Buffer::empty()))),
-                    //FIXME remove from map
-                    RecvRes::Error => Err(()),
+                if let Some(mut read_buffer) = being_read.pop_front() {
+                    trace!("SOCKET recv actual");
+                    let recv = recv_packet(&mut read_buffer, stream, *bytes_read);
+                    match recv {
+                        //TODO send to log
+                        RecvRes::Done => Ok(Some(read_buffer)),
+                        //FIXME remove from map
+                        RecvRes::Error => {
+                            being_read.push_front(read_buffer);
+                            Err(())
+                        },
 
-                    RecvRes::NeedsMore(total_read) => {
-                        *bytes_read = total_read;
-                        Ok(None)
-                    },
+                        RecvRes::NeedsMore(total_read) => {
+                            *bytes_read = total_read;
+                            being_read.push_front(read_buffer);
+                            Ok(None)
+                        },
+                    }
+                }
+                else {
+                    trace!("SOCKET recv no buffer");
+                    Ok(None)
                 }
             }
             _ => unreachable!()
@@ -756,7 +782,12 @@ impl PerSocket {
         match self {
             &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending}
             | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ..} => {
+                trace!("SOCKET send actual.");
                 let to_write = being_written.len();
+                if to_write == 0 {
+                    trace!("SOCKET empty write.");
+                    return Ok(false)
+                }
                 match stream.write(&being_written[*bytes_written..]) {
                     Err(e) => if e.kind() == ErrorKind::WouldBlock { Ok(false) }
                         else { Err(()) },
@@ -765,6 +796,7 @@ impl PerSocket {
                         Ok(false)
                     },
                     Ok(..) => {
+                        trace!("SOCKET finished sending burst.");
                         //Done with burst check if more bursts to be sent
                         being_written.clear();
                         if let Some(buffer) = pending.pop_front() {
@@ -786,11 +818,13 @@ impl PerSocket {
         //TODO Is there some maximum size at which we shouldn't buffer?
         //TODO can we simply write directly from the trie?
         use self::PerSocket::*;
+        trace!("SOCKET add send");
         match self {
             &mut Downstream {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending}
             | &mut Client {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending, ..} => {
+                //TODO if being_written is empty try to send immdiately, place remainder
                 if being_written.capacity() - being_written.len() >= to_write.len() {
-                   being_written.extend_from_slice(to_write)
+                    being_written.extend_from_slice(to_write)
                 } else {
                     let placed = if let Some(buffer) = pending.back_mut() {
                         if buffer.capacity() - buffer.len() >= to_write.len() {
@@ -802,6 +836,53 @@ impl PerSocket {
                         pending.push_back(to_write.to_vec())
                     }
                 }
+            },
+            _ => unreachable!()
+        }        
+    }
+
+    fn add_send_buffer(&mut self, to_write: Buffer) {
+        //TODO Is there some maximum size at which we shouldn't buffer?
+        //TODO can we simply write directly from the trie?
+        use self::PerSocket::*;
+        trace!("SOCKET add send_b");
+        match self {
+            &mut Downstream {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending} => {
+                //TODO if being_written is empty try to send immdiately, place remainder
+                if being_written.capacity() - being_written.len() >= to_write.entry_size() {
+                    being_written.extend_from_slice(to_write.entry_slice())
+                } else {
+                    let placed = if let Some(buffer) = pending.back_mut() {
+                        if buffer.capacity() - buffer.len() >= to_write.entry_size() {
+                            buffer.extend_from_slice(to_write.entry_slice());
+                            true
+                        } else { false }
+                    } else { false };
+                    if !placed {
+                        pending.push_back(to_write.entry_slice().to_vec())
+                    }
+                }
+                unimplemented!()
+            }
+
+            &mut Client {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending, ref mut being_read, ..} => {
+                //TODO if being_written is empty try to send immdiately, place remainder
+                if being_written.capacity() - being_written.len() >= to_write.entry_size() {
+                    being_written.extend_from_slice(to_write.entry_slice())
+                } else {
+                    let placed = if let Some(buffer) = pending.back_mut() {
+                        if buffer.capacity() - buffer.len() >= to_write.entry_size() {
+                            buffer.extend_from_slice(to_write.entry_slice());
+                            true
+                        } else { false }
+                    } else { false };
+                    if !placed {
+                        pending.push_back(to_write.entry_slice().to_vec())
+                    }
+                }
+                //FIXME make sure the buffer goes to the right worker
+                trace!("SOCKET re-add buffer");
+                being_read.push_back(to_write);
             },
             _ => unreachable!()
         }        
