@@ -280,6 +280,7 @@ fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
                     e.kind = EntryKind::Read;
                     e.locs_mut()[0] = OrderIndex(5.into(), 3.into());
                 }
+                buffer.extend_from_slice(&[0xfu8; 6]);
                 for _ in 0..3000001 {
                     let _ = black_box(stream.write_all(&mut buffer));
                 }
@@ -298,15 +299,15 @@ fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
                 let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
             }
             let _ = black_box(stream.read_exact(&mut buffer));
-            for _ in 0..1000000 {
+            for _ in 0..1000000u64 {
                 black_box(stream.read_exact(&mut buffer)).unwrap();
             }
             let start = Instant::now();
-            for _ in 0..1000000 {
+            for _ in 0..1000000u64 {
                 black_box(stream.read_exact(&mut buffer)).unwrap();
             }
             let time = start.elapsed();
-            for _ in 0..1000000 {
+            for _ in 0..1000000u64 {
                 black_box(stream.read_exact(&mut buffer)).unwrap();
             }
             let s = time.as_secs() as f64 + (time.subsec_nanos() as f64 * 10.0f64.powi(-9));

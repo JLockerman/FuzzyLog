@@ -226,11 +226,11 @@ impl RootTable {
                     end_byte
                 );*/
                 let new_start = round_up_to_next(start_byte, LEVEL_BYTES as u64);
-                println!(
-                    "byte_trie cannot append {}B @ {}.",
-                    size, start_byte
-                );
-                println!("          filling in remaining {}.", (new_start - start_byte) as usize);
+                //println!(
+                //    "byte_trie cannot append {}B @ {}.",
+                //    size, start_byte
+                //);
+                //println!("          filling in remaining {}.", (new_start - start_byte) as usize);
                 self.append((new_start - start_byte) as usize);
                 //self.stored_bytes += new_start - start_byte;
                 start_byte = new_start

@@ -44,7 +44,7 @@ pub struct PerServer<Socket> {
     bytes_sent: usize,
     currently_sending: Option<WriteState>,
     got_new_message: bool,
-    //FIXME receiver: SocketAddr,
+    receiver: [u8; 6], // [u8; 4] for ipv4 addr, [u8; 2] socket
 }
 
 #[derive(Debug)]
@@ -65,9 +65,6 @@ pub trait Connected {
     fn connection(&self) -> &Self::Connection;
     fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error>;
     fn send_packet(&mut self, packet: &[u8]) -> bool;
-    fn send_read_packet(&mut self, packet: &[u8]) -> bool {
-        self.send_packet(packet)
-    }
 }
 
 //TODO rename to AsyncStore
@@ -164,6 +161,8 @@ impl PerServer<TcpStream> {
             bytes_sent: 0,
             currently_sending: None,
             got_new_message: false,
+            //FIXME
+            receiver: [0xff; 6],
         })
     }
 
@@ -189,6 +188,7 @@ impl PerServer<UdpConnection> {
             bytes_sent: 0,
             currently_sending: None,
             got_new_message: false,
+            receiver: [0; 6],
         })
     }
 
@@ -643,17 +643,54 @@ impl Connected for PerServer<TcpStream> {
 
     fn send_packet(&mut self, packet: &[u8]) -> bool {
         use std::io::ErrorKind;
-
-        match self.stream.write(&packet[self.bytes_sent..]) {
-            Ok(i) => self.bytes_sent += i,
-            Err(e) => match e.kind() {
-                ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {}
-                _ => panic!("CLIENT send error {}", e),
+        //let is_write = Entry::<()>::wrap_bytes(packet).kind.layout().is_write();
+        trace!("CLIENT continue send {}/{} bytes.", self.bytes_sent, packet.len());
+        debug_assert!({
+            let e = Entry::<()>::wrap_bytes(packet);
+            if e.kind.layout() == EntryLayout::Read {
+                e.data_bytes == 0 && e.dependency_bytes == 0
+            } else { true }
+        });
+        debug_assert_eq!(
+            Entry::<()>::wrap_bytes(packet).entry_size(),
+            packet.len()
+        );
+        if packet.len() == 0 { return true }
+        if self.bytes_sent < packet.len() {
+            match self.stream.write(&packet[self.bytes_sent..]) {
+                Ok(i) => self.bytes_sent += i,
+                Err(e) => match e.kind() {
+                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {}
+                    _ => panic!("CLIENT send error {}", e),
+                }
             }
         }
-        let finished = self.bytes_sent >= packet.len();
-        if finished { self.bytes_sent = 0 };
-        finished
+        let packet_len = packet.len();
+        let finished = self.bytes_sent >= packet_len;
+        if finished {
+            //TODO if is_write
+            debug_assert_eq!(self.receiver.len(), 6);
+            let receiver_sent = self.bytes_sent - packet.len();
+            debug_assert!(receiver_sent <= self.receiver.len());
+            //match self.stream.write(&self.receiver[receiver_sent..0]) {
+            match self.stream.write(&self.receiver[receiver_sent..]) {
+                Ok(i) => self.bytes_sent += i,
+                Err(e) => match e.kind() {
+                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {}
+                    _ => panic!("CLIENT send error {}", e),
+                }
+            }
+            //let finished_ip = self.bytes_sent >= packet.len() + self.receiver.len();
+            let finished_ip = self.bytes_sent >= (packet_len + self.receiver.len());
+            if finished_ip {
+                debug_assert_eq!(self.bytes_sent, packet_len + self.receiver.len());
+                trace!("CLIENT sent {}/{} bytes.", self.bytes_sent, packet.len());
+                self.bytes_sent = 0
+            }
+            finished && finished_ip
+        } else {
+            false
+        }
     }
 }
 
@@ -813,12 +850,12 @@ where PerServer<S>: Connected {
                 }
                 //TODO multipart writes?
                 let finished = if to_send.is_read() {
-                    to_send.with_packet(|p| self.send_read_packet(p))
+                    to_send.with_packet(|p| self.send_packet(p))
                 }
                 else {
                     to_send.with_packet(|p| self.send_packet(p))
                 };
-                
+
                 trace!("CLIENT PerServer {:?} single written", token);
                 if finished {
                     Some(to_send)

@@ -109,6 +109,13 @@ pub mod EntryKind {
                 &EntryLayout::Read => Read,
             }
         }
+
+        pub fn is_write(&self) -> bool {
+            match self {
+                &EntryLayout::Data | &EntryLayout::Multiput | &EntryLayout::Sentinel => true,
+                _ => false,
+            }
+        }
     }
 
     impl Kind {

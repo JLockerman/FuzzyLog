@@ -751,6 +751,8 @@ impl ThreadLog {
             let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
             e.kind = EntryKind::Read;
             e.locs_mut()[0] = OrderIndex(chain, index);
+            debug_assert_eq!(e.data_bytes, 0);
+            debug_assert_eq!(e.dependency_bytes, 0);
         }
         buffer
     }

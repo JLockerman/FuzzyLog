@@ -105,7 +105,7 @@ pub fn run(
 
     let num_workers = max(num_workers, 1);
 
-    
+
     let poll = mio::Poll::new().unwrap();
     poll.register(&acceptor,
         ACCEPT,
@@ -751,9 +751,13 @@ impl PerSocket {
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read);
                     match recv {
                         //TODO send to log
-                        RecvRes::Done => Ok(Some(read_buffer)),
+                        RecvRes::Done => {
+                            *bytes_read = 0;
+                            Ok(Some(read_buffer))
+                        },
                         //FIXME remove from map
                         RecvRes::Error => {
+                            *bytes_read = 0;
                             being_read.push_front(read_buffer);
                             Err(())
                         },
@@ -796,6 +800,7 @@ impl PerSocket {
                         trace!("SOCKET finished sending burst.");
                         //Done with burst check if more bursts to be sent
                         being_written.clear();
+                        *bytes_written = 0;
                         if let Some(buffer) = pending.pop_front() {
                             let old_buffer = mem::replace(being_written, buffer);
                             //TODO
@@ -835,7 +840,7 @@ impl PerSocket {
                 }
             },
             _ => unreachable!()
-        }        
+        }
     }
 
     fn add_send_buffer(&mut self, to_write: Buffer) {
@@ -883,7 +888,7 @@ impl PerSocket {
                 being_read.push_back(to_write);
             },
             _ => unreachable!()
-        }        
+        }
     }
 
     fn stream(&self) -> &TcpStream {
@@ -921,7 +926,7 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize) -> 
     let bhs = base_header_size();
     if read < bhs {
         let r = stream.read(&mut buffer[read..bhs])
-            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(read) } else { Err(e) } )
+            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else { Err(e) } )
             .ok();
         match r {
             Some(i) => read += i,
@@ -931,12 +936,15 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize) -> 
             return RecvRes::NeedsMore(read)
         }
     }
-
-    let header_size = buffer.entry().header_size();
+    trace!("WORKER recved {} bytes.", read);
+    let (header_size, is_write) = {
+        let e = buffer.entry();
+        (e.header_size(), e.kind.layout().is_write())
+    };
     assert!(header_size >= base_header_size());
     if read < header_size {
         let r = stream.read(&mut buffer[read..header_size])
-            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(read) } else { Err(e) } )
+            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else { Err(e) } )
             .ok();
         match r {
             Some(i) => read += i,
@@ -947,13 +955,21 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize) -> 
         }
     }
 
-    let size = buffer.entry().entry_size();
+    let size = buffer.entry().entry_size() + 6;//TODO if is_write { 6 } else { 0 };
+    //let size = buffer.entry_size() + 6;
+    debug_assert!(read <= size);
     if read < size {
         let r = stream.read(&mut buffer[read..size])
-            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(read) } else { Err(e) } )
+            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else { Err(e) } )
             .ok();
         match r {
-            Some(i) => read += i,
+            Some(i) => {
+                debug_assert!(i <= (size - read),
+                    "read {} wanted to read {}: {} - {}",
+                    i, (size - read), size, read
+                );
+                read += i
+            },
             None => return RecvRes::Error,
         }
         if read < size {
@@ -962,8 +978,12 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize) -> 
     }
     debug_assert!(buffer.packet_fits());
     // assert!(payload_size >= header_size);
-    trace!("WORKER finished recv");
-    RecvRes::Done
+    trace!("WORKER finished recv {} bytes.", read);
+    debug_assert_eq!(
+        read, buffer.entry_size() + 6,//TODO if is_write { 6 } else { 0 },
+        "entry_size {}", buffer.entry().entry_size()
+    );
+    RecvRes::Done //TODO ( if is_read { Some((receive_addr)) } else { None } )
 }
 
 fn get_next_token(token: &mut mio::Token) -> mio::Token {

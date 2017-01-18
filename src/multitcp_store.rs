@@ -90,6 +90,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         self.sockets[socket_id]
             .write_all(&self.send_buffer.bytes()[..send_size])
             .expect("cannot send");
+        self.sockets[socket_id].write_all(&[0u8; 6]).expect("cannot send");
         // self.socket.flush();
     }
 
@@ -195,9 +196,9 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             kind: EntryKind::Lock | EntryKind::TakeLock,
             lock: <u32 as From<_>>::from(lock_num) as u64,
         };
-        self.sockets[<u32 as From<_>>::from(socket_id) as usize]
-            .write_all(lock.bytes())
-            .expect("cannot send");
+        let socket_id = <u32 as From<_>>::from(socket_id) as usize;
+        self.sockets[socket_id].write_all(lock.bytes()).expect("cannot send");
+        self.socket[socket_id].write_all(&[0u8; 6]).expect("cannot send");
     }
 
     fn unlock(&mut self, socket_id: order, lock_num: entry) {
@@ -208,9 +209,9 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
             kind: EntryKind::Lock,
             lock: <u32 as From<_>>::from(lock_num) as u64,
         };
-        self.sockets[<u32 as From<_>>::from(socket_id) as usize]
-            .write_all(lock.bytes())
-            .expect("cannot send");
+        let socket_id = <u32 as From<_>>::from(socket_id) as usize;
+        self.sockets[socket_id].write_all(lock.bytes()).expect("cannot send");
+        self.sockets[socket_id].write_all(&[0u8; 6]).expect("cannot send");
     }
 
     fn emplace_multi_node(&mut self, socket_id: order, lock_num: entry) {
@@ -254,6 +255,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
                            }
                            .clone_bytes();
         self.lock_socket.write_all(&lock_request[..]).expect("cannot send");
+        self.lock_socket.write_all(&[0u8; 6]).expect("cannot send");
         'receive: loop {
             self.read_lockserver_packet();
             trace!("got packet");

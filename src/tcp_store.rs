@@ -73,6 +73,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         self.socket
             .write_all(&self.send_buffer.bytes()[..send_size])
             .expect("cannot send");
+        //self.socket.write_all(&[0u8; 6]).expect("cannot send");
         //self.socket.flush();
     }
 }
