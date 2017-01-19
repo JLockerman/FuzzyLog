@@ -10,6 +10,7 @@ use std::time::Duration;
 use prelude::*;
 use servers2::{self, spmc, ServerLog, ToWorker, DistributeToWorkers};
 use hash::{HashMap, FxHasher};
+use socket_addr::Ipv4SocketAddr;
 
 use mio;
 use mio::tcp::*;
@@ -73,6 +74,33 @@ use buffer::Buffer;
        use to detrimine location
 */
 
+//Dist tokens
+const ACCEPT: mio::Token = mio::Token(0);
+const FROM_WORKERS: mio::Token = mio::Token(1);
+const DIST_FROM_LOG: mio::Token = mio::Token(2);
+
+//Worker tokens
+const FROM_DIST: mio::Token = mio::Token(0);
+const FROM_LOG: mio::Token = mio::Token(1);
+// we don't really need to special case this;
+// all writes are bascially the same,
+// but it's convenient for all workers to be in the same token space
+const UPSTREAM: mio::Token = mio::Token(2);
+const DOWNSTREAM: mio::Token = mio::Token(3);
+
+// It's convenient to share a single token-space among all workers so any worker
+// can determine who is responsible for a client
+const FIRST_CLIENT_TOKEN: mio::Token = mio::Token(10);
+
+const NUMBER_READ_BUFFERS: usize = 5;
+
+type WorkerNum = usize;
+
+enum DistToWorker {
+    NewClient(mio::Token, TcpStream),
+    Downstream(ToWorker<(usize, mio::Token, Ipv4SocketAddr)>),
+}
+
 pub fn run(
     acceptor: TcpListener,
     this_server_num: u32,
@@ -81,11 +109,6 @@ pub fn run(
     ready: &AtomicUsize,
 ) -> ! {
     use std::cmp::max;
-
-    const ACCEPT: mio::Token = mio::Token(0);
-    const FROM_WORKERS: mio::Token = mio::Token(1);
-    const NEXT_SERVER: mio::Token = mio::Token(2);
-    const PREV_SERVER: mio::Token = mio::Token(3);
 
     //let (dist_to_workers, recv_from_dist) = spmc::channel();
     //let (log_to_workers, recv_from_log) = spmc::channel();
@@ -162,6 +185,7 @@ pub fn run(
     upstream_admin_socket.take().map(|s| upstream.push(s));
     let num_downstream = downstream.len();
     let num_upstream = upstream.len();
+    let (log_to_dist, dist_from_log) = spmc::channel();
 
     trace!("SERVER {} {} up, {} down.", this_server_num, num_upstream, num_downstream);
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
@@ -184,6 +208,7 @@ pub fn run(
                 upstream,
                 downstream,
                 num_downstream,
+                num_workers,
                 is_unreplicated,
                 n,
             ).run()
@@ -191,6 +216,15 @@ pub fn run(
         log_to_workers.push(to_worker);
         dist_to_workers.push(dist_to_worker);
     }
+
+    log_to_workers.push(log_to_dist);
+
+    poll.register(
+        &dist_from_log,
+        DIST_FROM_LOG,
+        mio::Ready::readable(),
+        mio::PollOpt::level()
+    ).expect("cannot pol from log on dist");
 
     thread::spawn(move || {
         let mut log = ServerLog::new(this_server_num, total_chain_servers, log_to_workers);
@@ -244,8 +278,9 @@ pub fn run(
                             } else {
                                 worker_for_ip(addr.ip(), num_workers as u64)
                             };
-                            dist_to_workers[worker].send((tok, buffer, socket));
-                            worker_for_client.insert(addr, worker);
+                            dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
+                            worker_for_client.insert(
+                                Ipv4SocketAddr::from_socket_addr(addr), worker);
                         }
                     }
                 }
@@ -262,6 +297,15 @@ pub fn run(
                         );
                         *receivers.get_mut(&tok).unwrap() = Some(socket)
                     }*/
+                },
+                DIST_FROM_LOG => {
+                    //FIXME handle copleting work on original thread, only do send on DOWNSTREAM
+                    let packet = dist_from_log.try_recv();
+                    if let Some(to_worker) = packet {
+                        let (_, _, addr) = to_worker.get_associated_data();
+                        let worker = worker_for_client.get(&addr).cloned().unwrap();
+                        dist_to_workers[worker].send(DistToWorker::Downstream(to_worker))
+                    }
                 },
                 _recv_tok => {
                     /*let recv = receivers.get_mut(&recv_tok).unwrap();
@@ -368,13 +412,16 @@ struct Worker {
 
 struct WorkerInner {
     awake_io: VecDeque<mio::Token>,
-    from_dist: spmc::Receiver<(mio::Token, Buffer, TcpStream)>,
-    from_log: spmc::Receiver<ToWorker<(usize, mio::Token)>>,
-    to_log: mpsc::Sender<(Buffer, (usize, mio::Token))>,
-    worker_num: usize,
-    downstream_workers: usize,
+    from_dist: spmc::Receiver<DistToWorker>,
+    from_log: spmc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+    to_log: mpsc::Sender<(Buffer, (WorkerNum, mio::Token, Ipv4SocketAddr))>,
+    ip_to_worker: HashMap<Ipv4SocketAddr, (WorkerNum, mio::Token)>,
+    worker_num: WorkerNum,
+    downstream_workers: WorkerNum,
+    num_workers: WorkerNum,
     poll: mio::Poll,
     is_unreplicated: bool,
+    has_downstream: bool,
 }
 
 /*
@@ -440,19 +487,6 @@ struct Client {
     pending: VecDeque<Vec<u8>>,
 }
 */
-const FROM_DIST: mio::Token = mio::Token(0);
-const FROM_LOG: mio::Token = mio::Token(1);
-// we don't really need to special case this;
-// all writes are bascially the same,
-// but it's convenient for all workers to be in the same token space
-const UPSTREAM: mio::Token = mio::Token(2);
-const DOWNSTREAM: mio::Token = mio::Token(3);
-
-// It's convenient to share a single token-space among all workers so any worker
-// can determine who is responsible for a client
-const FIRST_CLIENT_TOKEN: mio::Token = mio::Token(10);
-
-const NUMBER_READ_BUFFERS: usize = 5;
 
 /*
 State machine:
@@ -472,15 +506,17 @@ State machine:
 impl Worker {
 
     fn new(
-        from_dist: spmc::Receiver<(mio::Token, Buffer, TcpStream)>,
-        from_log: spmc::Receiver<ToWorker<(usize, mio::Token)>>,
-        to_log: mpsc::Sender<(Buffer, (usize, mio::Token))>,
+        from_dist: spmc::Receiver<DistToWorker>,
+        from_log: spmc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+        to_log: mpsc::Sender<(Buffer, (WorkerNum, mio::Token, Ipv4SocketAddr))>,
         upstream: Option<TcpStream>,
         downstream: Option<TcpStream>,
         downstream_workers: usize,
+        num_workers: usize,
         is_unreplicated: bool,
-        worker_num: usize
+        worker_num: WorkerNum,
     ) -> Self {
+        assert!(downstream_workers <= num_workers);
         let poll = mio::Poll::new().unwrap();
         poll.register(
             &from_dist,
@@ -506,6 +542,7 @@ impl Worker {
             let ps = PerSocket::upstream(up);
             clients.insert(UPSTREAM, ps);
         }
+        let mut has_downstream = false;
         if let Some(down) = downstream {
             assert!(!is_unreplicated);
             poll.register(
@@ -516,6 +553,7 @@ impl Worker {
             ).expect("cannot pol from dist on worker");
             let ps = PerSocket::downstream(down);
             clients.insert(DOWNSTREAM, ps);
+            has_downstream = true;
         }
         Worker {
             clients: clients,
@@ -524,10 +562,13 @@ impl Worker {
                 from_dist: from_dist,
                 from_log: from_log,
                 to_log: to_log,
+                ip_to_worker: Default::default(),
                 poll: poll,
                 worker_num: worker_num,
                 is_unreplicated: is_unreplicated,
                 downstream_workers: downstream_workers,
+                num_workers: num_workers,
+                has_downstream: has_downstream,
             }
         }
     }
@@ -562,9 +603,13 @@ impl Worker {
             if token == FROM_LOG {
                 if let Some(log_work) = self.inner.from_log.try_recv() {
                     let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
-                    if let Some((buffer, (_, tok))) = to_send {
+                    if let Some((mut buffer, (_, tok, src_addr))) = to_send {
                         trace!("WORKER {} recv from log.", self.inner.worker_num);
-                        //TODO
+                        //FIXME send addr if downstream
+                        if tok == DOWNSTREAM {
+                            let size = buffer.entry_size();
+                            buffer[size..6].copy_from_slice(src_addr.bytes());
+                        }
                         self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
                         //TODO replace with wake function
                         self.inner.awake_io.push_back(tok);
@@ -574,19 +619,37 @@ impl Worker {
             }
 
             if token == FROM_DIST {
-                if let Some((tok, buffer, stream)) = self.inner.from_dist.try_recv() {
-                    self.inner.poll.register(
-                        &stream,
-                        tok,
-                        mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
-                        mio::PollOpt::edge()
-                    ).unwrap();
-                    //self.clients.insert(tok, PerSocket::new(buffer, stream));
-                    //TODO assert unique?
-                    trace!("WORKER {} recv from dist.", self.inner.worker_num);
-                    let state =
-                        self.clients.entry(tok).or_insert(PerSocket::client(buffer, stream));
-                    self.inner.recv_packet(tok, state);
+                match self.inner.from_dist.try_recv() {
+                    None => {},
+                    Some(DistToWorker::NewClient(tok, stream)) => {
+                        self.inner.poll.register(
+                            &stream,
+                            tok,
+                            mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
+                            mio::PollOpt::edge()
+                        ).unwrap();
+                        //self.clients.insert(tok, PerSocket::new(buffer, stream));
+                        //TODO assert unique?
+                        trace!("WORKER {} recv from dist.", self.inner.worker_num);
+                        let buffer = Buffer::empty();
+                        let state =
+                            self.clients.entry(tok).or_insert(PerSocket::client(buffer, stream));
+                        self.inner.recv_packet(tok, state);
+                    },
+                    Some(DistToWorker::Downstream(to_worker)) => {
+                        let to_send = servers2::handle_to_worker(to_worker,
+                            self.inner.worker_num);
+                            if let Some((mut buffer, (_, tok, src_addr))) = to_send {
+                                trace!("WORKER {} recv work from dist.", self.inner.worker_num);
+                                if tok == DOWNSTREAM {
+                                    let size = buffer.entry_size();
+                                    buffer[size..6].copy_from_slice(src_addr.bytes());
+                                }
+                                self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
+                                //TODO replace with wake function
+                                self.inner.awake_io.push_back(tok);
+                            }
+                    },
                 }
                 continue 'event
             }
@@ -651,29 +714,56 @@ impl WorkerInner {
             //FIXME remove from map, log
             Err(..) => { let _ = self.poll.deregister(socket_state.stream()); },
             Ok(None) => {},
-            Ok(Some(packet)) => {
+            Ok(Some((packet, src_addr))) => {
                 trace!("WORKER {} finished recv", self.worker_num);
                 //FIXME which token handles the next hop is more complicated...
-                let next_hop = self.next_hop(token, socket_kind);
+                let next_hop = self.next_hop(token, src_addr, socket_kind);
                 //FIXME needs worker num and IP addr...
-                self.send_to_log(packet, token, socket_state);
+                self.send_to_log(packet, token, src_addr, socket_state);
                 self.awake_io.push_back(token)
             }
         }
     }
 
-    fn next_hop(&self, token: mio::Token, socket_kind: PerSocketKind) -> mio::Token {
-        //FIXME might need IP addr...
+    fn next_hop(
+        &self,
+        token: mio::Token,
+        src_addr: Ipv4SocketAddr,
+        socket_kind: PerSocketKind
+    ) -> (usize, mio::Token) {
+        //TODO specialize based on read/write sockets?
         if self.is_unreplicated {
-            return token
+            return (self.worker_num, token)
         }
-        //FIXME which token handles the next hop is more complicated...
-        unimplemented!()
+        else if self.downstream_workers == 0 { //if self.is_end_of_chain
+            return match self.worker_and_token_for_addr(src_addr) {
+                Some(worker_and_token) => worker_and_token,
+                None => (self.num_workers, DIST_FROM_LOG),
+            }
+        }
+        else if self.has_downstream {
+            return (self.worker_num, DOWNSTREAM)
+        }
+        else {
+            //TODO actually balance this
+            return (self.worker_num % self.downstream_workers, DOWNSTREAM)
+        }
     }
 
-    fn send_to_log(&mut self, buffer: Buffer, token: mio::Token, socket_state: &mut PerSocket) {
+    fn worker_and_token_for_addr(&self, addr: Ipv4SocketAddr)
+    -> Option<(WorkerNum, mio::Token)> {
+        self.ip_to_worker.get(&addr).cloned()
+    }
+
+    fn send_to_log(
+        &mut self,
+        buffer: Buffer,
+        token: mio::Token,
+        src_addr: Ipv4SocketAddr,
+        socket_state: &mut PerSocket
+    ) {
         trace!("WORKER {} send to log", self.worker_num);
-        self.to_log.send((buffer, (self.worker_num, token))).unwrap();
+        self.to_log.send((buffer, (self.worker_num, token, src_addr))).unwrap();
     }
 }
 
@@ -740,7 +830,7 @@ impl PerSocket {
     }
 
     //TODO recv burst
-    fn recv_packet(&mut self) -> Result<Option<Buffer>, ()> {
+    fn recv_packet(&mut self) -> Result<Option<(Buffer, Ipv4SocketAddr)>, ()> {
         use self::PerSocket::*;
         trace!("SOCKET try recv");
         match self {
@@ -751,9 +841,9 @@ impl PerSocket {
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read);
                     match recv {
                         //TODO send to log
-                        RecvRes::Done => {
+                        RecvRes::Done(src_addr) => {
                             *bytes_read = 0;
-                            Ok(Some(read_buffer))
+                            Ok(Some((read_buffer, src_addr)))
                         },
                         //FIXME remove from map
                         RecvRes::Error => {
@@ -850,6 +940,7 @@ impl PerSocket {
         trace!("SOCKET add send_b");
         match self {
             &mut Downstream {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending} => {
+                //FIXME send src_addr
                 //TODO if being_written is empty try to send immdiately, place remainder
                 if being_written.capacity() - being_written.len() >= to_write.entry_size() {
                     being_written.extend_from_slice(to_write.entry_slice())
@@ -917,7 +1008,7 @@ fn send_packet(buffer: &Buffer, mut stream: &TcpStream, sent: usize) -> SendRes 
 }
 
 enum RecvRes {
-    Done,
+    Done(Ipv4SocketAddr),
     Error,
     NeedsMore(usize),
 }
@@ -983,7 +1074,8 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize) -> 
         read, buffer.entry_size() + 6,//TODO if is_write { 6 } else { 0 },
         "entry_size {}", buffer.entry().entry_size()
     );
-    RecvRes::Done //TODO ( if is_read { Some((receive_addr)) } else { None } )
+    let src_addr = Ipv4SocketAddr::from_slice(&buffer[read-6..read]);
+    RecvRes::Done(src_addr) //TODO ( if is_read { Some((receive_addr)) } else { None } )
 }
 
 fn get_next_token(token: &mut mio::Token) -> mio::Token {
@@ -993,10 +1085,10 @@ fn get_next_token(token: &mut mio::Token) -> mio::Token {
     *token
 }
 
-impl DistributeToWorkers<(usize, mio::Token)>
-for Vec<spmc::Sender<ToWorker<(usize, mio::Token)>>> {
-    fn send_to_worker(&mut self, msg: ToWorker<(usize, mio::Token)>) {
-        let (which_queue, token) = msg.get_associated_data();
+impl DistributeToWorkers<(usize, mio::Token, Ipv4SocketAddr)>
+for Vec<spmc::Sender<ToWorker<(usize, mio::Token, Ipv4SocketAddr)>>> {
+    fn send_to_worker(&mut self, msg: ToWorker<(usize, mio::Token, Ipv4SocketAddr)>) {
+        let (which_queue, token, _) = msg.get_associated_data();
         trace!("SERVER   sending to worker {} {:?} ", which_queue, token);
         self[which_queue].send(msg)
     }

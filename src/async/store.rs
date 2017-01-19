@@ -10,6 +10,7 @@ use packets::*;
 use buffer::Buffer;
 
 use hash::HashMap;
+use socket_addr::Ipv4SocketAddr;
 
 use mio;
 use mio::tcp::*;
@@ -44,7 +45,7 @@ pub struct PerServer<Socket> {
     bytes_sent: usize,
     currently_sending: Option<WriteState>,
     got_new_message: bool,
-    receiver: [u8; 6], // [u8; 4] for ipv4 addr, [u8; 2] socket
+    receiver: Ipv4SocketAddr,
 }
 
 #[derive(Debug)]
@@ -153,16 +154,18 @@ where C: AsyncStoreClient {
 
 impl PerServer<TcpStream> {
     fn tcp(addr: SocketAddr) -> Result<Self, io::Error> {
+        let stream = try!(TcpStream::connect(&addr));
+        let local_addr = try!(stream.local_addr());
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
             read_buffer: Buffer::new(), //TODO cap
-            stream: try!(TcpStream::connect(&addr)),
+            stream: stream,
             bytes_read: 0,
             bytes_sent: 0,
             currently_sending: None,
             got_new_message: false,
             //FIXME
-            receiver: [0xff; 6],
+            receiver: Ipv4SocketAddr::from_socket_addr(local_addr),
         })
     }
 
@@ -188,7 +191,7 @@ impl PerServer<UdpConnection> {
             bytes_sent: 0,
             currently_sending: None,
             got_new_message: false,
-            receiver: [0; 6],
+            receiver: Ipv4SocketAddr::nil(),
         })
     }
 
@@ -669,11 +672,11 @@ impl Connected for PerServer<TcpStream> {
         let finished = self.bytes_sent >= packet_len;
         if finished {
             //TODO if is_write
-            debug_assert_eq!(self.receiver.len(), 6);
+            debug_assert_eq!(self.receiver.bytes().len(), 6);
             let receiver_sent = self.bytes_sent - packet.len();
-            debug_assert!(receiver_sent <= self.receiver.len());
+            debug_assert!(receiver_sent <= self.receiver.bytes().len());
             //match self.stream.write(&self.receiver[receiver_sent..0]) {
-            match self.stream.write(&self.receiver[receiver_sent..]) {
+            match self.stream.write(&self.receiver.bytes()[receiver_sent..]) {
                 Ok(i) => self.bytes_sent += i,
                 Err(e) => match e.kind() {
                     ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {}
@@ -681,9 +684,9 @@ impl Connected for PerServer<TcpStream> {
                 }
             }
             //let finished_ip = self.bytes_sent >= packet.len() + self.receiver.len();
-            let finished_ip = self.bytes_sent >= (packet_len + self.receiver.len());
+            let finished_ip = self.bytes_sent >= (packet_len + self.receiver.bytes().len());
             if finished_ip {
-                debug_assert_eq!(self.bytes_sent, packet_len + self.receiver.len());
+                debug_assert_eq!(self.bytes_sent, packet_len + self.receiver.bytes().len());
                 trace!("CLIENT sent {}/{} bytes.", self.bytes_sent, packet.len());
                 self.bytes_sent = 0
             }

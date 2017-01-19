@@ -45,11 +45,9 @@ pub mod servers2;
 pub mod color_api;
 pub mod async;
 mod hash;
+mod socket_addr;
 //TODO only for testing, should be private
 pub mod buffer;
-
-#[cfg(feature = "dynamodb_tests")]
-pub mod dynamo_store;
 
 pub mod c_binidings {
 
