@@ -18,7 +18,7 @@ pub mod udp;
 
 pub mod spmc;
 
-//TODO remove `pub`, it only exists for testing purposes 
+//TODO remove `pub`, it only exists for testing purposes
 pub mod trie;
 pub mod byte_trie;
 
@@ -71,6 +71,20 @@ pub enum WhichMulti {
     Data,
     Senti,
     Both,
+}
+
+impl<T> ToWorker<T>
+where T: Send + Sync {
+    fn edit_associated_data<F>(&mut self, f: F)
+    where F: FnOnce(&mut T) {
+        match self {
+            &mut Write(_, _, ref mut t) | &mut Read(_, _, ref mut t)
+            | &mut EmptyRead(_, _, ref mut t) | &mut Reply(_, ref mut t)
+            | &mut MultiReplica{ref mut t, ..} => f(t),
+            &mut MultiWrite(_, _, ref mut at) | &mut SentinelWrite(_, _, ref mut at) =>
+                { Arc::get_mut(at).map(|t| f(&mut t.1)); },
+        }
+    }
 }
 
 impl<T> ToWorker<T>
@@ -517,17 +531,18 @@ where ToWorkers: DistributeToWorkers<T> {
 }
 
 fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
--> Option<(Buffer, T)> {
+-> Option<(Buffer, T, u64)> {
     match msg {
         Reply(buffer, t) => {
             trace!("WORKER {} finish reply", worker_num);
-            Some((buffer, t))
+            Some((buffer, t, 0))
         },
 
         Write(buffer, slot, t) => unsafe {
             trace!("WORKER {} finish write", worker_num);
+            let loc = slot.loc();
             slot.finish_append(buffer.entry());
-            Some((buffer, t))
+            Some((buffer, t, loc))
         },
 
         Read(read, mut buffer, t) => {
@@ -535,7 +550,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             let bytes = read.bytes();
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
-            Some((buffer, t))
+            Some((buffer, t, 0))
         },
 
         EmptyRead(last_valid_loc, mut buffer, t) => {
@@ -556,7 +571,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             }
             buffer.ensure_len();
             trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
-            Some((buffer, t))
+            Some((buffer, t, 0))
         },
 
         MultiWrite(buffer, slot, marker) => {
@@ -605,7 +620,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 remaining_places.to_vec()
             };
 
-            if remaining_senti_places.len() == 0 { return Some((buffer, t)) }
+            if remaining_senti_places.len() == 0 { return Some((buffer, t, 0)) }
             {
                 let e = buffer.entry();
                 let b = e.bytes();
@@ -618,7 +633,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                     (*trie_entry).store(senti_storage, Ordering::Release);
                 }
             }
-            Some((buffer, t))
+            Some((buffer, t, 0))
         },
     }
 }
@@ -628,7 +643,7 @@ fn return_if_last<T: Send + Sync>(
     mut marker: Arc<(AtomicIsize, T)>,
     worker_num: usize,
 )
--> Option<(Buffer, T)> {
+-> Option<(Buffer, T, u64)> {
     let old = marker.0.fetch_sub(1, Ordering::AcqRel);
     if old == 1 {
         //FIXME I don't think this is needed...
@@ -648,7 +663,7 @@ fn return_if_last<T: Send + Sync>(
                     Err(a) => buffer = a,
                 }
             }
-            return Some((buffer_inner, marker_inner.1))
+            return Some((buffer_inner, marker_inner.1, 0))
         }
     }
     return None

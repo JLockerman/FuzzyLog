@@ -244,6 +244,7 @@ pub struct AppendSlot<V> {
     trie_entry: *mut *const u8,
     data_ptr: *mut u8,
     data_size: usize,
+    storage_loc: ByteLoc,
     _pd: PhantomData<*mut V>,
 }
 
@@ -291,6 +292,10 @@ where V: Storeable {
         (*trie_entry).store(data_ptr, Ordering::Release);
         wrote
     }
+
+    pub fn loc(&self) -> ByteLoc {
+        self.storage_loc
+    }
 }
 
 impl<V> Trie<Packet<V>>
@@ -309,7 +314,7 @@ where V: Storeable {
     }
 
     fn _append(&mut self, data: &Packet<V>) -> (TrieIndex, &mut u8) {
-        let (val_ptr, loc) = self.root.alloc.append(data);
+        let (val_ptr, _) = self.root.alloc.append(data);
         let (entry, _) = unsafe { self.prep_append(val_ptr) };
         (entry, unsafe {val_ptr.as_mut().unwrap()})
     }
@@ -331,20 +336,20 @@ where V: Storeable {
                     }
                 }
                 let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
-                AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: storage_size,
+                AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: storage_size, storage_loc: storage_start,
                     _pd: Default::default()}
             }
         }
     }
 
     pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet<V>> {
-        let val_ptr: *mut u8 = {
+        let (val_ptr, loc): (*mut u8, ByteLoc) = {
             let (val_ptr, loc) = self.root.alloc.prep_append(size);
-            val_ptr.as_mut_ptr()
+            (val_ptr.as_mut_ptr(), loc)
         };
         let (_index, trie_entry) = self.prep_append(ptr::null());
         AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
-            _pd: Default::default()}
+            storage_loc: loc, _pd: Default::default()}
     }
 
     #[cfg(FALSE)]
@@ -434,14 +439,14 @@ where V: Storeable {
         (next_entry, root.l6.append(val_ptr))
     }
 
-    fn get_append_slot(&mut self, k: TrieIndex,  storage_start: ByteLoc, size: usize)
+    fn get_append_slot(&mut self, k: TrieIndex, storage_start: ByteLoc, size: usize)
     -> AppendSlot<Packet<V>> {
         unsafe {
             let trie_entry: *mut *const u8 = self.get_entry_at(k).unwrap();
             //TODO these should be interleaved...
             let data_ptr = self.root.alloc.get_mut(storage_start, size);
             AppendSlot { trie_entry: trie_entry, data_ptr: data_ptr, data_size: size,
-                _pd: Default::default()}
+                storage_loc: storage_start, _pd: Default::default()}
         }
     }
 

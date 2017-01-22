@@ -2,7 +2,7 @@ use storeables::Storeable;
 use packets::{Entry, EntryContents};
 use hash::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Buffer {
     inner: Vec<u8>,
 }

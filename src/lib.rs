@@ -15,6 +15,7 @@ extern crate rusoto;
 //extern crate test;
 
 extern crate bit_set;
+extern crate byteorder;
 extern crate deque;
 extern crate rustc_serialize;
 extern crate mio;

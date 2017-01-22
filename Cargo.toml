@@ -6,6 +6,7 @@ authors = ["J <joshua.lockerman@yale.edu>"]
 [dependencies]
 bitflags = "0.4"
 bit-set = "0.4.0"
+byteorder = "1"
 custom_derive = "0.1"
 deque = "0.3.1"
 grabbag_macros = "0.1"
