@@ -5,15 +5,39 @@ use hash::HashMap;
 #[derive(Debug, Clone)]
 pub struct Buffer {
     inner: Vec<u8>,
+    #[cfg(debug_assertions)]
+    no_drop: bool,
 }
 
 impl Buffer {
+    #[cfg(debug_assertions)]
+    pub fn new() -> Self {
+        Buffer { inner: vec![0u8; 8192], no_drop: false }
+    }
+
+    #[cfg(not(debug_assertions))]
     pub fn new() -> Self {
         Buffer { inner: vec![0u8; 8192] }
     }
 
+    #[cfg(debug_assertions)]
     pub fn empty() -> Self {
-        Buffer { inner: Vec::new() }
+        Buffer { inner: Vec::new(), no_drop: false }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn empty() -> Self {
+        Buffer { inner: Vec::new(), }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn no_drop() -> Self {
+        Buffer { inner: Vec::new(), no_drop: true }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn no_drop() -> Self {
+        Buffer { inner: Vec::new(), no_drop: true }
     }
 
     pub fn fill_from_entry_contents<V>(&mut self, contents: EntryContents<V>) -> &mut Entry<V>
@@ -89,6 +113,15 @@ impl Buffer {
     }
 }
 
+#[cfg(debug_assertions)]
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        if self.no_drop {
+            panic!("Dropped NoDropBuffer.")
+        }
+    }
+}
+
 
 //FIXME impl AsRef for Buffer...
 impl ::std::ops::Index<::std::ops::Range<usize>> for Buffer {
@@ -152,5 +185,35 @@ impl ::std::ops::IndexMut<::std::ops::RangeFull> for Buffer {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         //TODO should this ensure capacity?
         &mut self.inner[index]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NoDropBuffer {
+    inner: Buffer,
+}
+
+impl NoDropBuffer {
+    pub fn empty() -> Self {
+        NoDropBuffer { inner: Buffer::empty() }
+    }
+}
+
+impl ::std::ops::Deref for NoDropBuffer {
+    type Target = Buffer;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ::std::ops::DerefMut for NoDropBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Drop for NoDropBuffer {
+    fn drop(&mut self) {
+        panic!("Dropped NoDropBuffer.")
     }
 }

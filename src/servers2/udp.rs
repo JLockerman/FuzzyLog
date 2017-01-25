@@ -45,11 +45,27 @@ impl MioHandler for Server {
                     if let Some(addr) = self.read_packet() {
                         trace!("SERVER finished read from {:?}", addr);
                         let buff = mem::replace(&mut self.buffer, Buffer::empty());
-                        self.log.handle_op(buff, ());
+                        let storage = match buff.entry().kind.layout() {
+                            EntryLayout::Multiput | EntryLayout::Sentinel => {
+                                let (size, senti_size) = {
+                                    let e = buff.entry();
+                                    (e.entry_size(), e.sentinel_entry_size())
+                                };
+                                unsafe {
+                                    let mut m = Vec::with_capacity(size);
+                                    let mut s = Vec::with_capacity(senti_size);
+                                    m.set_len(size);
+                                    s.set_len(senti_size);
+                                    Some(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
+                                }
+                            }
+                            _ => None,
+                        };
+                        self.log.handle_op(buff, storage, ());
                         let to_pop = self.from_log.borrow().len();
                         for _ in 0..to_pop {
                             let wrk = self.from_log.borrow_mut().pop_front().unwrap();
-                            if let Some((buffer, _, _)) = servers2::handle_to_worker(wrk, 0) {
+                            if let Some((buffer, ..)) = servers2::handle_to_worker(wrk, 0) {
                                 mem::replace(&mut self.buffer, buffer);
                                 self.write_packet(&addr);
                                 trace!("SERVER finished write to {:?}", addr);

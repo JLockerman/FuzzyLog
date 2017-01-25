@@ -36,6 +36,11 @@ use buffer::Buffer;
       the gcer first sets greatest_collected to the point it wants to collect,
       then waits until none of the worker are reading a value in the collection range
 
+      we don't worry about gc during write (that seems like a silly scenario),
+      so we can send the log's copy downstream and don't have to worry about returning buffers.
+      during reads, the worker which receives the read req is the one which sends,
+      so the above scheme will work
+
     this does not deadlock b/c if the worker sets its then the gcer its the worker will abort
 
     this should be efficient b/c in normal operation the workers are just writing to a local value
@@ -74,6 +79,14 @@ use buffer::Buffer;
     b. store a trie of storage,
        send (size, storage location) to replica,
        use to detrimine location
+
+  Hole filling for parrallel replication:
+    if read sees hole before horizon, and before lock:
+    send fill_hole to head of chain
+      if chain has hole => failure to replicate,
+        fill hole down chain
+      else write in progress,
+        read again
 */
 
 //Dist tokens
@@ -100,11 +113,19 @@ type WorkerNum = usize;
 
 enum DistToWorker {
     NewClient(mio::Token, TcpStream),
-    ToClient(ToWorker<(usize, mio::Token, Ipv4SocketAddr)>),
+    //ToClient(ToWorker<(usize, mio::Token, Ipv4SocketAddr)>),
+    ToClient(mio::Token, &'static [u8], Ipv4SocketAddr, u64),
+}
+
+//FIXME we should use something more accurate than &static [u8],
+enum WorkerToDist {
+    Downstream(WorkerNum, Ipv4SocketAddr, &'static [u8], u64),
+    ToClient(Ipv4SocketAddr, &'static [u8]),
 }
 
 enum ToLog<T> {
-    New(Buffer, T),
+    //TODO test different layouts.
+    New(Buffer, Option<Box<(Box<[u8]>, Box<[u8]>)>>, T),
     Replication(ToReplicate, T)
 }
 
@@ -133,7 +154,7 @@ pub fn run_with_replication(
     //let (log_to_workers, recv_from_log) = spmc::channel();
     //TODO or sync channel?
     let (workers_to_log, recv_from_workers) = mpsc::channel();
-    //let (workers_to_dist, dist_from_workers) = mio_channel::channel();
+    let (workers_to_dist, dist_from_workers) = mio::channel::channel();
     if num_workers == 0 {
         warn!("SERVER {} started with 0 workers.", this_server_num);
     }
@@ -164,7 +185,7 @@ pub fn run_with_replication(
     let mut upstream_admin_socket = None;
     let mut other_sockets = Vec::new();
     while next_server_ip.is_some() && downstream_admin_socket.is_none() {
-        trace!("SERVER {} waiting for downstream.", this_server_num);
+        trace!("SERVER {} waiting for downstream {:?}.", this_server_num, next_server);
         poll.poll(&mut events, None).unwrap();
         for event in events.iter() {
             match event.token() {
@@ -172,6 +193,7 @@ pub fn run_with_replication(
                     match acceptor.accept() {
                         Err(e) => trace!("error {}", e),
                         Ok((socket, addr)) => if Some(addr.ip()) != next_server_ip {
+                            trace!("SERVER got other connection {:?}", addr);
                             other_sockets.push((socket, addr))
                         } else {
                             trace!("SERVER {} connected downstream.", this_server_num);
@@ -188,7 +210,7 @@ pub fn run_with_replication(
     }
 
     if let Some(ref ip) = prev_server_ip {
-        trace!("SERVER {} waiting for upstream.", this_server_num);
+        trace!("SERVER {} waiting for upstream {:?}.", this_server_num, prev_server_ip);
         upstream_admin_socket = Some(TcpStream::connect(ip).expect("cannot connect upstream"));
         trace!("SERVER {} connected upstream.", this_server_num);
     }
@@ -216,7 +238,7 @@ pub fn run_with_replication(
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     for n in 0..num_workers {
         //let from_dist = recv_from_dist.clone();
-        //let to_dist   = workers_to_dist.clone();
+        let to_dist   = workers_to_dist.clone();
         //let from_log  = recv_from_log.clone();
         let to_log = workers_to_log.clone();
         let (to_worker, from_log) = spmc::channel();
@@ -226,6 +248,7 @@ pub fn run_with_replication(
         thread::spawn(move ||
             Worker::new(
                 from_dist,
+                to_dist,
                 from_log,
                 to_log,
                 upstream,
@@ -239,6 +262,7 @@ pub fn run_with_replication(
         log_to_workers.push(to_worker);
         dist_to_workers.push(dist_to_worker);
     }
+    assert_eq!(dist_to_workers.len(), num_workers);
 
     log_to_workers.push(log_to_dist);
 
@@ -253,18 +277,18 @@ pub fn run_with_replication(
         let mut log = ServerLog::new(this_server_num, total_chain_servers, log_to_workers);
         for to_log in recv_from_workers.iter() {
             match to_log {
-                ToLog::New(buffer, st) => log.handle_op(buffer, st),
+                ToLog::New(buffer, storage, st) => log.handle_op(buffer, storage, st),
                 ToLog::Replication(tr, st) => log.handle_replication(tr, st),
             }
 
         }
     });
 
-    /*FIXME poll.register(&dist_from_workers,
+    poll.register(&dist_from_workers,
         FROM_WORKERS,
         mio::Ready::readable(),
         mio::PollOpt::level()
-    );*/
+    ).unwrap();
     ready.fetch_add(1, Ordering::SeqCst);
     //let mut receivers: HashMap<_, _> = Default::default();
     //FIXME should be a single writer hashmap
@@ -312,7 +336,27 @@ pub fn run_with_replication(
                     }
                 }
                 FROM_WORKERS => {
-                    trace!("SERVER dist getting finished sockets");
+                    trace!("SERVER dist getting finished work");
+                    let packet = dist_from_workers.try_recv();
+                    if let Ok(to_worker) = packet {
+                        let (worker, token, buffer, addr, storage_loc) = match to_worker {
+                            WorkerToDist::Downstream(worker, addr, buffer, storage_loc) => {
+                                trace!("DIST {} downstream worker for {} is {}.",
+                                    this_server_num, addr, worker);
+                                (worker, DOWNSTREAM, buffer, addr, storage_loc)
+                            },
+
+                            WorkerToDist::ToClient(addr, buffer) => {
+                                trace!("DIST {} looking for worker for {}.",
+                                    this_server_num, addr);
+                                let (worker, token) = worker_for_client[&addr].clone();
+                                (worker, token, buffer, addr, 0)
+                            }
+                        };
+                        dist_to_workers[worker].send(
+                            DistToWorker::ToClient(token, buffer, addr, storage_loc))
+
+                    }
                     /*while let Ok((buffer, socket, tok)) = dist_from_workers.try_recv() {
                         trace!("SERVER dist got {:?}", tok);
                         //buffer_cache.push_back(buffer);
@@ -326,15 +370,15 @@ pub fn run_with_replication(
                     }*/
                 },
                 DIST_FROM_LOG => {
-                    //FIXME handle copleting work on original thread, only do send on DOWNSTREAM
-                    let packet = dist_from_log.try_recv();
+                    //FIXME handle completing work on original thread, only do send on DOWNSTREAM
+                    /*let packet = dist_from_log.try_recv();
                     if let Some(mut to_worker) = packet {
                         let (_, _, addr) = to_worker.get_associated_data();
                         trace!("DIST {} looking for worker for {}.", this_server_num, addr);
                         let (worker, token) = worker_for_client[&addr].clone();
                         to_worker.edit_associated_data(|t| t.1 = token);
                         dist_to_workers[worker].send(DistToWorker::ToClient(to_worker))
-                    }
+                    }*/
                 },
                 _recv_tok => {
                     /*let recv = receivers.get_mut(&recv_tok).unwrap();
@@ -438,6 +482,7 @@ struct Worker {
 struct WorkerInner {
     awake_io: VecDeque<mio::Token>,
     from_dist: spmc::Receiver<DistToWorker>,
+    to_dist: mio::channel::Sender<WorkerToDist>,
     from_log: spmc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
     to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
     ip_to_worker: HashMap<Ipv4SocketAddr, (WorkerNum, mio::Token)>,
@@ -532,6 +577,7 @@ impl Worker {
 
     fn new(
         from_dist: spmc::Receiver<DistToWorker>,
+        to_dist: mio::channel::Sender<WorkerToDist>,
         from_log: spmc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
         to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
         upstream: Option<TcpStream>,
@@ -585,6 +631,7 @@ impl Worker {
             inner: WorkerInner {
                 awake_io: Default::default(),
                 from_dist: from_dist,
+                to_dist: to_dist,
                 from_log: from_log,
                 to_log: to_log,
                 ip_to_worker: Default::default(),
@@ -628,21 +675,56 @@ impl Worker {
             if token == FROM_LOG {
                 if let Some(log_work) = self.inner.from_log.try_recv() {
                     let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
-                    if let Some((mut buffer, (_, tok, src_addr), storage_loc)) = to_send {
+                    if let Some((buffer, bytes, (wk, token, src_addr), storage_loc)) = to_send {
                         trace!("WORKER {} recv from log for {}.",
                             self.inner.worker_num, src_addr);
-                        //FIXME send addr if downstream
-                        if tok == DOWNSTREAM {
-                            let size = buffer.entry_size();
-                            let ip_size = mem::size_of::<Ipv4SocketAddr>();
-                            buffer[size..size+ip_size].copy_from_slice(src_addr.bytes());
-                            debug_assert_eq!(Ipv4SocketAddr::from_slice(&buffer[size..size+ip_size]),
-                                src_addr
-                            );
-                            let end = size+ip_size + mem::size_of::<u64>();
-                            LittleEndian::write_u64(&mut buffer[size+ip_size..end], storage_loc);
+                        debug_assert_eq!(wk, self.inner.worker_num);
+                        let worker_tok = if src_addr != Ipv4SocketAddr::nil() {
+                            self.inner.next_hop(token, src_addr)
+                        } else {
+                            Some((self.inner.worker_num, token))
+                        };
+                        let (worker, tok) = match worker_tok {
+                            None => {
+                                self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
+                                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                                continue 'event
+                            }
+                            Some((ref worker, ref tok))
+                            if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
+                                self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
+                                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                                continue 'event
+                            }
+                            Some((worker, tok)) => {
+                                (worker, tok)
+                            }
+                        };
+                        if worker != self.inner.worker_num {
+                            assert_eq!(tok, DOWNSTREAM);
+                            self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
+                            self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                            continue 'event
                         }
-                        self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
+                        if tok == DOWNSTREAM {
+                            {
+                                let client = self.clients.get_mut(&tok).unwrap();
+                                client.add_downstream_send(bytes);
+                                client.add_downstream_send(src_addr.bytes());
+                                let mut storage_log_bytes: [u8; 8] = [0; 8];
+                                LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                                client.add_downstream_send(&storage_log_bytes);
+                            }
+                            self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                            self.inner.awake_io.push_back(token);
+                        }
+                        else {
+                            //self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
+                            self.clients.get_mut(&tok).unwrap()
+                                .add_downstream_send(buffer.entry_slice());
+                            self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                            self.inner.awake_io.push_back(token);
+                        }
                         //TODO replace with wake function
                         self.inner.awake_io.push_back(tok);
                     }
@@ -663,27 +745,39 @@ impl Worker {
                         //self.clients.insert(tok, PerSocket::new(buffer, stream));
                         //TODO assert unique?
                         trace!("WORKER {} recv from dist.", self.inner.worker_num);
-                        let buffer = Buffer::empty();
+                        let client_addr = Ipv4SocketAddr::from_socket_addr(stream.peer_addr().unwrap());
+                        self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
                         let state =
-                            self.clients.entry(tok).or_insert(PerSocket::client(buffer, stream));
+                            self.clients.entry(tok).or_insert(PerSocket::client(stream));
                         self.inner.recv_packet(tok, state);
                     },
-                    Some(DistToWorker::ToClient(to_worker)) => {
-                        let to_send = servers2::handle_to_worker(to_worker,
-                            self.inner.worker_num);
-                            if let Some((buffer, (_, tok, src_addr), _)) = to_send {
-                                debug_assert_eq!(
-                                    Ipv4SocketAddr::from_socket_addr(
-                                            self.clients[&tok].stream().peer_addr().unwrap()
-                                    ),
-                                    src_addr
-                                );
-                                trace!("WORKER {} recv work from dist for {}.", self.inner.worker_num, src_addr);
-                                assert!(tok >= FIRST_CLIENT_TOKEN);
-                                self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
-                                //TODO replace with wake function
-                                self.inner.awake_io.push_back(tok);
-                            }
+                    Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
+                        trace!("WORKER {} recv downstream from dist for {}.",
+                            self.inner.worker_num, src_addr);
+                        {
+                            let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
+                            client.add_downstream_send(buffer);
+                            client.add_downstream_send(src_addr.bytes());
+                            let mut storage_log_bytes: [u8; 8] = [0; 8];
+                            LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                            client.add_downstream_send(&storage_log_bytes)
+                        }
+                        //TODO replace with wake function
+                        self.inner.awake_io.push_back(DOWNSTREAM);
+                    }
+                    Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
+                        debug_assert_eq!(
+                            Ipv4SocketAddr::from_socket_addr(
+                                    self.clients[&tok].stream().peer_addr().unwrap()
+                            ),
+                            src_addr
+                        );
+                        debug_assert_eq!(storage_loc, 0);
+                        trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
+                        assert!(tok >= FIRST_CLIENT_TOKEN);
+                        self.clients.get_mut(&tok).unwrap().add_downstream_send(buffer);
+                        //TODO replace with wake function
+                        self.inner.awake_io.push_back(tok);
                     },
                 }
                 continue 'event
@@ -751,19 +845,15 @@ impl WorkerInner {
             RecvPacket::Pending => {},
             RecvPacket::FromClient(packet, src_addr) => {
                 trace!("WORKER {} finished recv from client.", self.worker_num);
-                //FIXME which token handles the next hop is more complicated...
-                let (worker, token) = if src_addr != Ipv4SocketAddr::nil() {
-                    self.next_hop(token, src_addr, socket_kind)
-                } else {
-                    (self.worker_num, token)
-                };
+                let worker = self.worker_num;
                 self.send_to_log(packet, worker, token, src_addr);
                 self.awake_io.push_back(token)
             }
             RecvPacket::FromUpstream(packet, src_addr, storage_loc) => {
                 trace!("WORKER {} finished recv from up.", self.worker_num);
-                let (worker, work_tok) = self.next_hop(token, src_addr, socket_kind);
-                self.send_replication_to_log(packet, storage_loc, worker, work_tok, src_addr);
+                //let (worker, work_tok) = self.next_hop(token, src_addr, socket_kind);
+                let worker = self.worker_num;
+                self.send_replication_to_log(packet, storage_loc, worker, token, src_addr);
                 self.awake_io.push_back(token)
             }
         }
@@ -773,24 +863,31 @@ impl WorkerInner {
         &self,
         token: mio::Token,
         src_addr: Ipv4SocketAddr,
-        socket_kind: PerSocketKind
-    ) -> (usize, mio::Token) {
+    ) -> Option<(usize, mio::Token)> {
         //TODO specialize based on read/write sockets?
         if self.is_unreplicated {
-            return (self.worker_num, token)
+            trace!("WORKER {} is unreplicated.", self.worker_num);
+            return Some((self.worker_num, token))
         }
         else if self.downstream_workers == 0 { //if self.is_end_of_chain
+            trace!("WORKER {} is end of chain.", self.worker_num);
             return match self.worker_and_token_for_addr(src_addr) {
-                Some(worker_and_token) => worker_and_token,
-                None => (self.num_workers, DOWNSTREAM),
+                Some(worker_and_token) => {
+                    trace!("WORKER {} send to_client to {:?}",
+                        self.worker_num, worker_and_token);
+                    Some(worker_and_token)
+                },
+                None => None,
             }
         }
         else if self.has_downstream {
-            return (self.worker_num, DOWNSTREAM)
+            return Some((self.worker_num, DOWNSTREAM))
         }
         else {
+            trace!("WORKER {} send DOWNSTREAM to {}",
+                self.worker_num, self.worker_num % self.downstream_workers);
             //TODO actually balance this
-            return (self.worker_num % self.downstream_workers, DOWNSTREAM)
+            return Some((self.worker_num % self.downstream_workers, DOWNSTREAM))
         }
     }
 
@@ -807,8 +904,24 @@ impl WorkerInner {
         src_addr: Ipv4SocketAddr,
     ) {
         trace!("WORKER {} send to log", self.worker_num);
-        //FIXME replicate...
-        let to_send = ToLog::New(buffer, (worker_num, token, src_addr));
+        let kind = buffer.entry().kind.layout();
+        let storage = match kind {
+            EntryLayout::Multiput | EntryLayout::Sentinel => {
+                let (size, senti_size) = {
+                    let e = buffer.entry();
+                    (e.entry_size(), e.sentinel_entry_size())
+                };
+                unsafe {
+                    let mut m = Vec::with_capacity(size);
+                    let mut s = Vec::with_capacity(senti_size);
+                    m.set_len(size);
+                    s.set_len(senti_size);
+                    Some(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
+                }
+            }
+            _ => None,
+        };
+        let to_send = ToLog::New(buffer, storage, (worker_num, token, src_addr));
         self.to_log.send(to_send).unwrap();
     }
 
@@ -885,9 +998,9 @@ impl PerSocket {
         pending: VecDeque<Vec<u8>>,
     }
     */
-    fn client(buffer: Buffer, stream: TcpStream) -> Self {
+    fn client(stream: TcpStream) -> Self {
         PerSocket::Client {
-            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::new()).collect(),
+            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::no_drop()).collect(),
             bytes_read: 0,
             stream: stream,
             being_written: Vec::with_capacity(WRITE_BUFFER_SIZE),
@@ -898,7 +1011,7 @@ impl PerSocket {
 
     fn upstream(stream: TcpStream) -> Self {
         PerSocket::Upstream {
-            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::new()).collect(),
+            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::no_drop()).collect(),
             bytes_read: 0,
             stream: stream,
         }
@@ -943,6 +1056,7 @@ impl PerSocket {
                         //FIXME remove from map
                         RecvRes::Error => {
                             *bytes_read = 0;
+                            trace!("error; returned buffer now @ {}", being_read.len());
                             being_read.push_front(read_buffer);
                             RecvPacket::Err
                         },
@@ -955,7 +1069,7 @@ impl PerSocket {
                     }
                 }
                 else {
-                    trace!("SOCKET recv no buffer");
+                    trace!("SOCKET Upstream recv no buffer");
                     RecvPacket::Pending
                 }
             }
@@ -973,6 +1087,7 @@ impl PerSocket {
                         //FIXME remove from map
                         RecvRes::Error => {
                             *bytes_read = 0;
+                            trace!("error; returned buffer now @ {}", being_read.len());
                             being_read.push_front(read_buffer);
                             RecvPacket::Err
                         },
@@ -985,7 +1100,7 @@ impl PerSocket {
                     }
                 }
                 else {
-                    trace!("SOCKET recv no buffer");
+                    trace!("SOCKET Client recv no buffer");
                     RecvPacket::Pending
                 }
             }
@@ -1018,9 +1133,11 @@ impl PerSocket {
                         being_written.clear();
                         *bytes_written = 0;
                         if let Some(buffer) = pending.pop_front() {
+                            trace!("SOCKET swap buffer.");
                             let old_buffer = mem::replace(being_written, buffer);
                             //TODO
-                            if old_buffer.capacity() > WRITE_BUFFER_SIZE / 4 {
+                            if old_buffer.capacity() > WRITE_BUFFER_SIZE / 4
+                            || pending.is_empty() {
                                 pending.push_back(old_buffer)
                             }
                         }
@@ -1032,29 +1149,32 @@ impl PerSocket {
         }
     }
 
-    fn add_send(&mut self, to_write: &[u8]) {
+    fn add_downstream_send(&mut self, to_write: &[u8]) {
         //TODO Is there some maximum size at which we shouldn't buffer?
         //TODO can we simply write directly from the trie?
         use self::PerSocket::*;
-        trace!("SOCKET add send");
+        trace!("SOCKET add downstream send");
         match self {
-            &mut Downstream {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending}
-            | &mut Client {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending, ..} => {
+            &mut Downstream {ref mut being_written, ref mut pending, ..}
+            | &mut Client {ref mut being_written, ref mut pending, ..} => {
+                trace!("SOCKET send down {}B", to_write.len());
+                //FIXME send src_addr
                 //TODO if being_written is empty try to send immdiately, place remainder
                 if being_written.capacity() - being_written.len() >= to_write.len() {
                     being_written.extend_from_slice(to_write)
                 } else {
                     let placed = if let Some(buffer) = pending.back_mut() {
-                        if buffer.capacity() - buffer.len() >= to_write.len() {
-                            buffer.extend_from_slice(to_write);
+                        if buffer.capacity() - buffer.len() >= to_write.len()
+                        || buffer.capacity() < WRITE_BUFFER_SIZE {
+                            buffer.extend_from_slice(&to_write[..]);
                             true
                         } else { false }
                     } else { false };
                     if !placed {
-                        pending.push_back(to_write.to_vec())
+                        pending.push_back(to_write[..].to_vec())
                     }
                 }
-            },
+            }
             _ => unreachable!()
         }
     }
@@ -1065,29 +1185,7 @@ impl PerSocket {
         use self::PerSocket::*;
         trace!("SOCKET add send_b");
         match self {
-            &mut Downstream {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending} => {
-                let write_len = to_write.entry_size() + mem::size_of::<Ipv4SocketAddr>() + mem::size_of::<u64>();
-                trace!("SOCKET send to replica {}B", write_len);
-                debug_assert!(to_write.buffer_len() >= write_len);
-                //FIXME send src_addr
-                //TODO if being_written is empty try to send immdiately, place remainder
-                if being_written.capacity() - being_written.len() >= write_len {
-                    being_written.extend_from_slice(&to_write[..write_len])
-                } else {
-                    let placed = if let Some(buffer) = pending.back_mut() {
-                        if buffer.capacity() - buffer.len() >= write_len {
-                            buffer.extend_from_slice(&to_write[..write_len]);
-                            true
-                        } else { false }
-                    } else { false };
-                    if !placed {
-                        pending.push_back(to_write[..write_len].to_vec())
-                    }
-                }
-                //FIXME send back buffer
-            }
-
-            &mut Client {ref mut being_written, ref mut bytes_written, ref stream, ref mut pending, ref mut being_read, ..} => {
+            &mut Client {ref mut being_written, ref mut pending, ref mut being_read, ..} => {
                 //TODO if being_written is empty try to send immdiately, place remainder
                 //TODO the big buffer itself may be premature, check if sending directly works...
                 trace!("SOCKET send to client {}B", to_write.entry_size());
@@ -1095,7 +1193,8 @@ impl PerSocket {
                     being_written.extend_from_slice(to_write.entry_slice())
                 } else {
                     let placed = if let Some(buffer) = pending.back_mut() {
-                        if buffer.capacity() - buffer.len() >= to_write.entry_size() {
+                        if buffer.capacity() - buffer.len() >= to_write.entry_size()
+                        || buffer.capacity() < WRITE_BUFFER_SIZE {
                             buffer.extend_from_slice(to_write.entry_slice());
                             true
                         } else { false }
@@ -1105,10 +1204,24 @@ impl PerSocket {
                     }
                 }
                 //FIXME make sure the buffer goes to the right worker
-                trace!("SOCKET re-add buffer");
                 being_read.push_back(to_write);
+                trace!("SOCKET re-add buffer, now @ {}", being_read.len());
+                debug_assert!(being_read.len() <= NUMBER_READ_BUFFERS);
             },
             _ => unreachable!()
+        }
+    }
+
+    fn return_buffer(&mut self, buffer: Buffer) {
+        use self::PerSocket::*;
+        match self {
+            &mut Client {ref mut being_read, ..}
+            | &mut Upstream {ref mut being_read, ..} => {
+                being_read.push_back(buffer);
+                trace!("returned buffer now @ {}", being_read.len());
+                debug_assert!(being_read.len() <= NUMBER_READ_BUFFERS);
+            },
+            _ => unreachable!(),
         }
     }
 
@@ -1376,6 +1489,32 @@ mod tests {
         assert_eq!(buffer.entry().locs()[0], OrderIndex(2.into(), 1.into()));
         assert_eq!(Entry::<u64>::wrap_bytes(&buffer[..]).contents(), EntryContents::Data(&92, &[]));
     }
+
+    #[test]
+    fn test_empty_read() {
+        let _ = env_logger::init();
+        trace!("TCP test write_read");
+        start_servers(basic_addr, &BASIC_SERVER_READY);
+        trace!("TCP test write_read start");
+        let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
+        let mut buffer = Buffer::empty();
+        buffer.fill_from_entry_contents(EntryContents::Data(&(),
+            &[OrderIndex(0.into(), 0.into())]));
+        buffer.fill_from_entry_contents(EntryContents::Data(&(), &[]));
+        buffer.ensure_len();
+        {
+            buffer.entry_mut().locs_mut()[0] = OrderIndex(0.into(), 1.into());
+            buffer.entry_mut().kind = EntryKind::Read;
+        }
+        stream.write_all(buffer.entry_slice()).unwrap();
+        stream.write_all(&[0; 6]).unwrap();
+        buffer[..].iter_mut().fold((), |_, i| *i = 0);
+        stream.read_exact(&mut buffer[..]).unwrap();
+        assert!(!buffer.entry().kind.contains(EntryKind::ReadSuccess));
+        assert_eq!(Entry::<()>::wrap_bytes(&buffer[..]).dependencies(), &[OrderIndex(0.into(), 0.into())]);
+    }
+
+    //FIXME add empty read tests
 
     fn start_servers<'a, 'b>(addr_strs: &'a [&'b str], server_ready: &'static AtomicUsize) {
         use std::{thread, iter};

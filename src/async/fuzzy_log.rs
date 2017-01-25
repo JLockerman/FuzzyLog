@@ -480,6 +480,7 @@ impl ThreadLog {
         }
 
         let is_later_piece = self.blocked_multiappends.contains_key(&id);
+        let mut omsg = None;
         if !is_later_piece && !is_sentinel {
             //FIXME I'm not sure if this is right
             if !self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1) {
@@ -522,7 +523,7 @@ impl ThreadLog {
                 .add_early_sentinel(id, read_loc.1);
             return MultiSearch::EarlySentinel
         }
-        else { trace!("FUZZY later part of multi part read"); }
+        else { omsg = Some(msg); trace!("FUZZY later part of multi part read"); }
 
         debug_assert!(self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1));
 
@@ -531,6 +532,10 @@ impl ThreadLog {
             if let hash_map::Entry::Occupied(mut found) = self.blocked_multiappends.entry(id) {
                 let finished = {
                     let multi = found.get_mut();
+                    //FIXME ensure this only happens if debug assertions
+                    if let (Some(msg), false) = (omsg, is_sentinel) {
+                        unsafe { debug_assert_eq!(data_bytes(&multi.val), data_bytes(&msg)) }
+                    }
                     let loc_ptr = bytes_as_entry_mut(&mut multi.val)
                         .locs_mut().into_iter()
                         .find(|&&mut OrderIndex(o, _)| o == read_loc.0)
@@ -1160,6 +1165,29 @@ where V: Storeable {
 //     over different writers very easily
 impl<V: ?Sized> LogHandle<V>
 where V: Storeable {
+
+    pub fn with_store<C, F>(
+        interesting_chains: C,
+        store_builder: F,
+    ) -> Self
+    where C: IntoIterator<Item=order>,
+          F: FnOnce(mpsc::Sender<Message>) -> mio::channel::Sender<Vec<u8>> {
+        let (to_log, from_outside) = mpsc::channel();
+        let to_store = store_builder(to_log.clone());
+        let (ready_reads_s, ready_reads_r) = mpsc::channel();
+        let interesting_chains: Vec<_> = interesting_chains.into_iter().collect();
+        let (finished_writes_s, finished_writes_r) = mpsc::channel();
+        ::std::thread::spawn(move || {
+            ThreadLog::new(
+                to_store, from_outside,
+                ready_reads_s,
+                finished_writes_s,
+                interesting_chains
+            ).run()
+        });
+
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+    }
 
     pub fn spawn_tcp_log<S, C>(
         lock_server: SocketAddr,
@@ -1835,7 +1863,7 @@ mod tests {
 
             //TODO test append after prefetch but before read
         );
-        () => ( async_tests!(tcp); async_tests!(udp); );
+        () => ( async_tests!(tcp); async_tests!(udp); async_tests!(rtcp); );
         (tcp) => (
             mod tcp {
                 async_tests!(test new_thread_log);
@@ -1947,6 +1975,89 @@ mod tests {
                 }
             }
         );
+        (rtcp) => {
+            mod rtcp {
+                use std::sync::{Arc, Mutex};
+                use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+                use std::thread;
+                use async::store::AsyncTcpStore;
+                use std::sync::mpsc;
+                use std::mem;
+                use std::net::SocketAddr;
+
+                use mio;
+
+                async_tests!(test new_thread_log);
+
+                fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                    start_tcp_servers();
+
+                    LogHandle::with_store(interesting_chains.into_iter(), |client| {
+                        let client: ::std::sync::mpsc::Sender<Message> = client;
+                        let to_store_m = Arc::new(Mutex::new(None));
+                        let tsm = to_store_m.clone();
+                        #[allow(non_upper_case_globals)]
+                        thread::spawn(move || {
+                            const addr_str1: &'static str = "127.0.0.1:13395";
+                            const addr_str2: &'static str = "127.0.0.1:13396";
+                            let addrs: (SocketAddr, SocketAddr) = (addr_str1.parse().unwrap(), addr_str2.parse().unwrap());
+                            let mut event_loop = mio::Poll::new().unwrap();
+                            trace!("RTCP make store");
+                            let (store, to_store) = ::async::store::AsyncTcpStore::replicated_tcp(
+                                None::<SocketAddr>,
+                                ::std::iter::once::<(SocketAddr, SocketAddr)>(addrs),
+                                client, &mut event_loop
+                            ).expect("");
+                            *tsm.lock().unwrap() = Some(to_store);
+                            trace!("RTCP store setup");
+                            store.run(event_loop)
+                        });
+                        let to_store;
+                        loop {
+                            let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                            if let Some(s) = ts {
+                                to_store = s;
+                                break
+                            }
+                        }
+                        to_store
+                    })
+                }
+
+                fn start_tcp_servers() {
+                    use std::net::{IpAddr, Ipv4Addr};
+                    const addr_strs: &'static [&'static str] = &[&"0.0.0.0:13395", &"0.0.0.0:13396"];
+
+                    static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+                    let local_host = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+                    for i in 0..addr_strs.len() {
+                        let prev_server: Option<SocketAddr> =
+                            if i > 0 { Some(addr_strs[i-1]) } else { None }
+                            .map(|s| s.parse().unwrap());
+                        let prev_server = prev_server.map(|mut s| {s.set_ip(local_host); s});
+                        let next_server: Option<SocketAddr> = addr_strs.get(i+1)
+                            .map(|s| s.parse().unwrap());
+                        let next_server = next_server.map(|mut s| {s.set_ip(local_host); s});
+                        let next_server = next_server.map(|s| s.ip());
+                        let addr = addr_strs[i].parse().unwrap();
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        if let Ok(acceptor) = acceptor {
+                            thread::spawn(move || {
+                                trace!("starting replica server {}", i);
+                                ::servers2::tcp::run_with_replication(acceptor, 0, 1,
+                                    prev_server, next_server,
+                                    1, &SERVERS_READY)
+                            });
+                        }
+                        else {
+                            trace!("server already started @ {}", addr_strs[i]);
+                        }
+                    }
+
+                    while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() {}
+                }
+            }
+        };
         (udp) => (
             mod udp {
                 use std::sync::{Arc, Mutex};

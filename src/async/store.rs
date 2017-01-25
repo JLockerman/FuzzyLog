@@ -32,9 +32,11 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     sent_writes: HashMap<Uuid, WriteState>,
     sent_reads: HashMap<OrderIndex, Vec<u8>>,
     num_chain_servers: usize,
+    lock_token: Token,
     //FIXME change to spsc::Receiver<Buffer?>
     from_client: mio::channel::Receiver<Vec<u8>>,
     client: C,
+    is_unreplicated: bool,
 }
 
 pub struct PerServer<Socket> {
@@ -85,6 +87,7 @@ where C: AsyncStoreClient {
         let num_chain_servers = servers.len();
         let lock_server = try!(PerServer::tcp(lock_server));
         //TODO if let Some(lock_server) = lock_server...
+        let lock_token = Token(servers.len());
         servers.push(lock_server);
         for (i, server) in servers.iter().enumerate() {
             event_loop.register(server.connection(), Token(i),
@@ -104,9 +107,70 @@ where C: AsyncStoreClient {
             sent_reads: Default::default(),
             servers: servers,
             num_chain_servers: num_chain_servers,
+            lock_token: lock_token,
             client: client,
             awake_io: Default::default(),
             from_client: from_client,
+            is_unreplicated: true,
+        }, to_store))
+    }
+
+    pub fn replicated_tcp<I>(
+        lock_server: Option<SocketAddr>,
+        chain_servers: I,
+        client: C,
+        event_loop: &mut mio::Poll
+    ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    where I: IntoIterator<Item=(SocketAddr, SocketAddr)>
+    {
+        //TODO assert no duplicates
+        let (write_servers, read_servers): (Vec<_>, Vec<_>) =
+            chain_servers.into_iter().unzip();
+        let mut servers = try!(write_servers
+            .into_iter()
+            .map(PerServer::tcp)
+            .collect::<Result<Vec<_>, _>>());
+        let read_servers = try!(read_servers
+                .into_iter()
+                .map(PerServer::tcp)
+                .collect::<Result<Vec<_>, _>>());
+        let num_chain_servers = servers.len();
+        assert_eq!(num_chain_servers, read_servers.len());
+        servers.extend(read_servers.into_iter());
+
+        let lock_token = if let Some(lock_server) = lock_server {
+            let lock_server = try!(PerServer::tcp(lock_server));
+            servers.push(lock_server);
+            Token(servers.len() - 1)
+        } else { Token(servers.len() + 1) };
+        //TODO if let Some(lock_server) = lock_server...
+        for (i, server) in servers.iter().enumerate() {
+            event_loop.register(server.connection(), Token(i),
+                mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
+                mio::PollOpt::edge())
+                .expect("could not reregister client socket")
+        }
+        for i in 0..num_chain_servers {
+            let receiver = servers[i+num_chain_servers].receiver;
+            servers[i].receiver = receiver;
+        }
+        let from_client_token = Token(servers.len());
+        let (to_store, from_client) = mio::channel::channel();
+        event_loop.register(&from_client,
+            from_client_token,
+            mio::Ready::readable() | mio::Ready::error(),
+            mio::PollOpt::level()
+        ).expect("could not reregister client channel");
+        Ok((AsyncTcpStore {
+            sent_writes: Default::default(),
+            sent_reads: Default::default(),
+            servers: servers,
+            num_chain_servers: num_chain_servers,
+            lock_token: lock_token,
+            client: client,
+            awake_io: Default::default(),
+            from_client: from_client,
+            is_unreplicated: false,
         }, to_store))
     }
 }
@@ -126,6 +190,7 @@ where C: AsyncStoreClient {
         let num_chain_servers = servers.len();
         let lock_server = try!(PerServer::udp(lock_server));
         //TODO if let Some(lock_server) = lock_server...
+        let lock_token = Token(servers.len());
         servers.push(lock_server);
         for (i, server) in servers.iter().enumerate() {
             event_loop.register(server.connection(), Token(i),
@@ -146,8 +211,10 @@ where C: AsyncStoreClient {
             awake_io: Default::default(),
             servers: servers,
             num_chain_servers: num_chain_servers,
+            lock_token: lock_token,
             client: client,
             from_client: from_client,
+            is_unreplicated: true,
         }, to_store))
     }
 }
@@ -164,7 +231,6 @@ impl PerServer<TcpStream> {
             bytes_sent: 0,
             currently_sending: None,
             got_new_message: false,
-            //FIXME
             receiver: Ipv4SocketAddr::from_socket_addr(local_addr),
         })
     }
@@ -204,6 +270,7 @@ impl<S, C> AsyncTcpStore<S, C>
 where PerServer<S>: Connected,
       C: AsyncStoreClient {
     pub fn run(mut self, poll: mio::Poll) -> ! {
+        trace!("CLIENT start.");
         let mut events = mio::Events::with_capacity(1024);
         loop {
             poll.poll(&mut events, None).expect("worker poll failed");
@@ -248,16 +315,22 @@ where PerServer<S>: Connected,
         };
         let new_msg_kind = Entry::<()>::wrap_bytes(&msg).kind.layout();
         match new_msg_kind {
-            EntryLayout::Read | EntryLayout::Data => {
+            EntryLayout::Read => {
                 let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
-                let s = self.server_for_chain(loc);
+                let s = self.read_server_for_chain(loc);
+                //TODO if writeable write?
+                self.add_single_server_send(s, msg);
+            }
+            EntryLayout::Data => {
+                let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
+                let s = self.write_server_for_chain(loc);
                 //TODO if writeable write?
                 self.add_single_server_send(s, msg);
             }
             EntryLayout::Multiput => {
                 if self.is_single_node_append(&msg) {
                     let chain = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
-                    let s = self.server_for_chain(chain);
+                    let s = self.write_server_for_chain(chain);
                     self.add_single_server_send(s, msg);
                 }
                 else {
@@ -425,7 +498,7 @@ where PerServer<S>: Connected,
                 //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
                 for (i, &loc) in fill_from.into_iter().enumerate() {
                     if locs[i].0 != 0.into()
-                        && server_for_chain(loc.0, num_chain_servers) == server.0 {
+                        && write_server_for_chain(loc.0, num_chain_servers) == server.0 {//should be read_server_for_chain
                         assert!(loc.1 != 0.into(), "zero index for {:?}", loc.0);
                         locs[i] = loc;
                     }
@@ -541,10 +614,10 @@ where PerServer<S>: Connected,
             .iter().cloned().filter(|&oi| oi != OrderIndex(0.into(), 0.into()));
         for c in locked_chains {
             if let Some(server_token) = server_token {
-                single &= self.server_for_chain(c.0) == server_token
+                single &= self.write_server_for_chain(c.0) == server_token
             }
             else {
-                server_token = Some(self.server_for_chain(c.0))
+                server_token = Some(self.write_server_for_chain(c.0))
             }
         }
         single
@@ -555,10 +628,10 @@ where PerServer<S>: Connected,
         Entry::<()>::wrap_bytes(msg).locs()
             .iter().cloned()
             .filter(|&oi| oi != OrderIndex(0.into(), 0.into()))
-            .fold((0..self.num_chain_servers)
+            .fold((0..self.num_chain_servers) //FIXME ?
                 .map(|_| false).collect::<Vec<_>>(),
             |mut v, OrderIndex(o, _)| {
-                v[self.server_for_chain(o)] = true;
+                v[self.write_server_for_chain(o)] = true;
                 v
             }).into_iter()
             .enumerate()
@@ -568,8 +641,17 @@ where PerServer<S>: Connected,
             .collect::<Vec<OrderIndex>>()
     }
 
-    fn server_for_chain(&self, chain: order) -> usize {
-        server_for_chain(chain, self.num_chain_servers)
+    fn read_server_for_chain(&self, chain: order) -> usize {
+        if self.is_unreplicated {
+            write_server_for_chain(chain, self.num_chain_servers)
+        }
+        else {
+            read_server_for_chain(chain, self.num_chain_servers)
+        }
+    }
+
+    fn write_server_for_chain(&self, chain: order) -> usize {
+        write_server_for_chain(chain, self.num_chain_servers)
     }
 
     fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer<S> {
@@ -577,7 +659,9 @@ where PerServer<S>: Connected,
     }
 
     fn lock_token(&self) -> Token {
-        Token(self.num_chain_servers)
+        debug_assert!(self.num_chain_servers < self.servers.len());
+        //Token(self.num_chain_servers * 2)
+        self.lock_token
     }
 
 } // end impl AsyncStore
@@ -638,6 +722,7 @@ impl Connected for PerServer<TcpStream> {
             }
         }
         debug_assert!(self.read_buffer.packet_fits());
+        debug_assert_eq!(self.bytes_read, self.read_buffer.entry_size());
         trace!("CLIENT finished recv");
         self.bytes_read = 0;
         let buff = mem::replace(&mut self.read_buffer, Buffer::new());
@@ -778,7 +863,7 @@ where PerServer<S>: Connected {
                         {
                             let is_data = e.locs().into_iter()
                                 .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
-                                .any(|oi| is_server_for(oi.0, token, num_servers));
+                                .any(|oi| is_write_server_for(oi.0, token, num_servers));
                             let kind = &mut e.kind;
                             if is_data {
                                 kind.remove(EntryKind::Lock);
@@ -972,10 +1057,15 @@ impl WriteState {
     }
 }
 
-fn server_for_chain(chain: order, num_servers: usize) -> usize {
+fn write_server_for_chain(chain: order, num_servers: usize) -> usize {
     <u32 as From<order>>::from(chain) as usize % num_servers
 }
 
-fn is_server_for(chain: order, tok: Token, num_servers: usize) -> bool {
-    server_for_chain(chain, num_servers) == tok.0
+fn read_server_for_chain(chain: order, num_servers: usize) -> usize {
+    //(<u32 as From<order>>::from(chain) as usize % (num_servers)  + 1) * 2
+    <u32 as From<order>>::from(chain) as usize % (num_servers) + num_servers
+}
+
+fn is_write_server_for(chain: order, tok: Token, num_servers: usize) -> bool {
+    write_server_for_chain(chain, num_servers) == tok.0
 }

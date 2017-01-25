@@ -55,6 +55,8 @@ pub enum ToWorker<T: Send + Sync> {
     //TODO replace MultiWrite and SentinelWrite with:
     MultiReplica {
         buffer: BufferSlice,
+        //multi_storage: *mut u8,
+        //senti_storage: *mut u8,
         multi_storage: *mut u8,
         senti_storage: *mut u8,
         t: T,
@@ -133,8 +135,9 @@ where ToWorkers: DistributeToWorkers<T> {
 
 
     //FIXME pass buffer-slice so we can read batches
+    //FIXME we don't want the log thread free'ing, return storage on lock failure?
     //TODO replace T with U and T: ReturnAs<U> so we don't have to send as much data
-    fn handle_op(&mut self, mut buffer: BufferSlice, t: T) {
+    fn handle_op(&mut self, mut buffer: BufferSlice, storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>, t: T) {
         let kind = buffer.entry().kind;
         match kind.layout() {
             EntryLayout::Multiput | EntryLayout::Sentinel => {
@@ -173,7 +176,6 @@ where ToWorkers: DistributeToWorkers<T> {
                     val.kind.insert(EntryKind::ReadSuccess);
                     let locs = val.locs_mut();
                     //TODO select only relevent chains
-                    //trace!("SERVER {:?} Horizon A {:?}", self.horizon);
                     //FIXME handle duplicates
                     'update_append_horizon: for i in 0..locs.len() {
                         if locs[i] == OrderIndex(0.into(), 0.into()) {
@@ -188,7 +190,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             //FIXME 64b entries
                             let next_entry = entry::from(next_entry as u32);
                             locs[i].1 = next_entry;
-                            num_places += 1;
+                            num_places += 1
                         }
                     }
                     if let Some(ssi) = sentinel_start_index {
@@ -202,11 +204,10 @@ where ToWorkers: DistributeToWorkers<T> {
                                 //FIXME 64b entries
                                 let next_entry = entry::from(next_entry as u32);
                                 locs[i].1 = next_entry;
-                                num_places += 1;
+                                num_places += 1
                             }
                         }
                     }
-                    //trace!("SERVER {:?} Horizon B {:?}", self.horizon);
                     trace!("SERVER {:?} locs {:?}", self.this_server_num, locs);
                     trace!("SERVER {:?} ssi {:?}", self.this_server_num, sentinel_start_index);
                 }
@@ -214,45 +215,59 @@ where ToWorkers: DistributeToWorkers<T> {
                 trace!("SERVER {:?} appending at {:?}",
                     self.this_server_num, buffer.entry().locs());
 
-                let marker = Arc::new((AtomicIsize::new(num_places), t));
-                let val = Arc::new(buffer);
-                'emplace: for &OrderIndex(chain, index) in val.entry().locs() {
+                let (multi_storage, senti_storage) = *storage.unwrap();
+                let multi_storage = unsafe {
+                    debug_assert_eq!(multi_storage.len(), buffer.entry_size());
+                    (*Box::into_raw(multi_storage)).as_mut_ptr()
+                };
+                trace!("multi_storage @ {:?}", multi_storage);
+                let senti_storage = unsafe {
+                    debug_assert_eq!(senti_storage.len(), buffer.entry().sentinel_entry_size());
+                    (*Box::into_raw(senti_storage)).as_mut_ptr()
+                };
+                //LOGIC sentinal storage must contain at least 64b
+                //      (128b with 64b entry address space)
+                //      thus has at least enough storage for 1 ptr per entry
+                let mut next_ptr_storage = senti_storage as *mut *mut *const u8;
+                'emplace: for &OrderIndex(chain, index) in buffer.entry().locs() {
                     if (chain, index) == (0.into(), 0.into()) {
                         break 'emplace
                     }
                     if self.stores_chain(chain) {
                         assert!(index != entry::from(0));
-                        let slot = unsafe {
-                            self.ensure_chain(chain).partial_append(val.entry_size())
+                        unsafe {
+                            let ptr = self.ensure_chain(chain).prep_append(ptr::null()).1;
+                            *next_ptr_storage = ptr;
+                            next_ptr_storage = next_ptr_storage.offset(1);
                         };
-                        self.to_workers.send_to_worker(MultiWrite(val.clone(), slot, marker.clone()));
                     }
-                    // trace!("SERVER {:?} appended at {:?}", loc);
                 }
                 if let Some(ssi) = sentinel_start_index {
-                    //val.kind.remove(EntryKind::Multiput);
-                    //val.kind.insert(EntryKind::Sentinel);
-                    trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.entry().locs()[ssi..]);
-                    for &OrderIndex(chain, index) in &val.entry().locs()[ssi..] {
+                    trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &buffer.entry().locs()[ssi..]);
+                    for &OrderIndex(chain, index) in &buffer.entry().locs()[ssi..] {
                         if self.stores_chain(chain) {
                             assert!(index != entry::from(0));
-                            let slot = unsafe {
-                                self.ensure_chain(chain)
-                                    .partial_append(
-                                        val.entry().sentinel_entry_size()
-                                    )
+                            unsafe {
+                                let ptr = self.ensure_chain(chain).prep_append(ptr::null()).1;
+                                *next_ptr_storage = ptr;
+                                next_ptr_storage = next_ptr_storage.offset(1);
                             };
-                            self.to_workers.send_to_worker(
-                                SentinelWrite(val.clone(), slot, marker.clone())
-                            );
                         }
-                        // trace!("SERVER {:?} appended at {:?}", loc);
                     }
-                    return
-                    //val.kind.remove(EntryKind::Sentinel);
-                    //val.kind.insert(EntryKind::Multiput);
                 }
-            }
+
+                self.to_workers.send_to_worker(
+                    MultiReplica {
+                        buffer: buffer,
+                        multi_storage: multi_storage,
+                        senti_storage: senti_storage,
+                        t: t,
+                        num_places: num_places,
+                    }
+                );
+            },
+
+            /////////////////////////////////////////////////
 
             EntryLayout::Read => {
                 trace!("SERVER {:?} Read", self.this_server_num);
@@ -284,6 +299,8 @@ where ToWorkers: DistributeToWorkers<T> {
                     },
                 }
             }
+
+            /////////////////////////////////////////////////
 
             EntryLayout::Data => {
                 trace!("SERVER {:?} Append", self.this_server_num);
@@ -319,6 +336,8 @@ where ToWorkers: DistributeToWorkers<T> {
                 self.to_workers.send_to_worker(Write(buffer, slot, t))
             }
 
+            /////////////////////////////////////////////////
+
             EntryLayout::Lock => {
                 trace!("SERVER {:?} Lock", self.this_server_num);
                 let lock_num = unsafe { buffer.entry().as_lock_entry().lock };
@@ -345,6 +364,8 @@ where ToWorkers: DistributeToWorkers<T> {
             }
         }
     }
+
+    /////////////////////////////////////////////////
 
     fn stores_chain(&self, chain: order) -> bool {
         chain % self.total_servers == self.this_server_num.into()
@@ -531,26 +552,27 @@ where ToWorkers: DistributeToWorkers<T> {
 }
 
 fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
--> Option<(Buffer, T, u64)> {
+-> Option<(Buffer, &'static [u8], T, u64)> {
     match msg {
         Reply(buffer, t) => {
             trace!("WORKER {} finish reply", worker_num);
-            Some((buffer, t, 0))
+            Some((buffer, &[], t, 0))
         },
 
         Write(buffer, slot, t) => unsafe {
             trace!("WORKER {} finish write", worker_num);
             let loc = slot.loc();
-            slot.finish_append(buffer.entry());
-            Some((buffer, t, loc))
+            let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
+            Some((buffer, ret, t, loc))
         },
 
         Read(read, mut buffer, t) => {
             trace!("WORKER {} finish read", worker_num);
             let bytes = read.bytes();
+            //FIXME needless copy
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
-            Some((buffer, t, 0))
+            Some((buffer, bytes, t, 0))
         },
 
         EmptyRead(last_valid_loc, mut buffer, t) => {
@@ -560,9 +582,10 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             };
             {
                 let chain: order = old_loc.0;
-                debug_assert!(last_valid_loc == 0.into()
-                    || last_valid_loc < old_loc.1,
-                    "{:?} >= {:?}", last_valid_loc, old_loc);
+                //TODO so this assersion is not valid do to parrallel placement
+                //debug_assert!(last_valid_loc == 0.into()
+                //    || last_valid_loc < old_loc.1,
+                //    "{:?} >= {:?}", last_valid_loc, old_loc);
                 let e = buffer.fill_from_entry_contents(
                     EntryContents::Data(&(), &[OrderIndex(chain, last_valid_loc)]));
                 e.id = old_id;
@@ -571,42 +594,50 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             }
             buffer.ensure_len();
             trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
-            Some((buffer, t, 0))
+            Some((buffer, &[], t, 0))
         },
 
         MultiWrite(buffer, slot, marker) => {
             trace!("WORKER {} finish multi part", worker_num);
-            unsafe { slot.finish_append(buffer.entry()) };
-            return_if_last(buffer, marker, worker_num)
+            let ret = unsafe { extend_lifetime(slot.finish_append(buffer.entry()).bytes()) };
+            return_if_last(buffer, marker, worker_num).map(|(b, t, l)| (b, ret, t, l))
         },
 
         SentinelWrite(buffer, slot, marker) => {
             trace!("WORKER finish sentinel part");
-            {
+            let ret = {
                 let e = buffer.entry();
                 unsafe {
-                    slot.finish_append_with(e, |e| {
+                    let ret = slot.finish_append_with(e, |e| {
                         e.kind.remove(EntryKind::Multiput);
                         e.kind.insert(EntryKind::Sentinel);
-                    });
+                    }).bytes();
+                    extend_lifetime(ret)
                 }
             };
-            return_if_last(buffer, marker, worker_num)
+            return_if_last(buffer, marker, worker_num).map(|(b, t, l)| (b, ret, t, l))
         },
         MultiReplica {
             buffer, multi_storage, senti_storage, t, num_places,
         } => unsafe {
-            let remaining_senti_places = {
+            let (remaining_senti_places, len) = {
                 let e = buffer.entry();
                 let b = e.bytes();
+                let len = b.len();
+                trace!("place multi_storage @ {:?}, len {}", multi_storage, b.len());
                 ptr::copy_nonoverlapping(b.as_ptr(), multi_storage, b.len());
                 let places: &[*mut *const u8] = slice::from_raw_parts(
                    senti_storage as *const _, num_places
                 );
-                let mut sentinel_start = 0;
+                trace!("multi places {:?}, locs {:?}", places, e.locs());
+                debug_assert!(places.len() <= e.locs().len());
+                //alt let mut sentinel_start = places.len();
+                let mut sentinel_start = None;
                 for i in 0..num_places {
-                    sentinel_start = i;
+
                     if e.locs()[i] == OrderIndex(0.into(), 0.into()) {
+                        //alt sentinel_start = i;
+                        sentinel_start = Some(i);
                         break
                     }
 
@@ -614,26 +645,42 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                     //TODO mem barrier ordering
                     (*trie_entry).store(multi_storage, Ordering::Release);
                 }
-                let remaining_places = &places[sentinel_start..];
+                let remaining_places = if let Some(i) = sentinel_start {
+                    &places[i..]
+                }
+                else {
+                    &[]
+                };
                 // we finished with the first portion,
                 // if there is a second, we'll need auxiliary memory
-                remaining_places.to_vec()
+                (remaining_places.to_vec(), len)
             };
-
-            if remaining_senti_places.len() == 0 { return Some((buffer, t, 0)) }
-            {
+            let ret = slice::from_raw_parts(multi_storage, len);
+            //TODO is re right for sentinel only writes?
+            if remaining_senti_places.len() == 0 {
+                return Some((buffer, ret, t, 0))
+            }
+            else {
                 let e = buffer.entry();
+                let len = e.sentinel_entry_size();
+                trace!("place senti_storage @ {:?}, len {}", senti_storage, len);
                 let b = e.bytes();
-                ptr::copy_nonoverlapping(b.as_ptr(), multi_storage, b.len());
-                ptr::copy_nonoverlapping(b.as_ptr(), senti_storage, b.len());
+                ptr::copy_nonoverlapping(b.as_ptr(), senti_storage, len);
+                {
+                    let e = Entry::<()>::wrap_mut(&mut *senti_storage);
+                    e.kind.remove(EntryKind::Multiput);
+                    e.kind.insert(EntryKind::Sentinel);
+                }
                 for place in remaining_senti_places {
                     let _: *mut *const u8 = place;
                     let trie_entry: *mut AtomicPtr<u8> = mem::transmute(place);
                     //TODO mem barrier ordering
                     (*trie_entry).store(senti_storage, Ordering::Release);
                 }
+
             }
-            Some((buffer, t, 0))
+            //TODO is re right for sentinel only writes?
+            Some((buffer, ret, t, 0))
         },
     }
 }

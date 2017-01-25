@@ -345,7 +345,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
     pub fn wrap_bytes(bytes: &[u8]) -> &Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
-            mem::transmute(&bytes[0])
+            mem::transmute(bytes.as_ptr())
         }
     }
 
@@ -353,7 +353,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
     pub fn wrap_bytes_mut(bytes: &mut [u8]) -> &mut Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
-            mem::transmute(&mut bytes[0])
+            mem::transmute(bytes.as_mut_ptr())
         }
     }
 
@@ -858,6 +858,13 @@ pub fn bytes_as_entry(bytes: &[u8]) -> &Entry<()> {
 
 pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> &mut Entry<()> {
     Entry::<()>::wrap_bytes_mut(bytes)
+}
+
+pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
+    match Entry::<[u8]>::wrap_bytes(bytes).contents() {
+        EntryContents::Data(data, ..) | EntryContents::Multiput{data, ..} => data,
+        EntryContents::Sentinel(..) => &[],
+    }
 }
 
 ///////////////////////////////////////
