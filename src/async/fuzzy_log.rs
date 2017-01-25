@@ -67,7 +67,7 @@ struct PerChain {
 struct ReadState {
     outstanding_snapshots: u32,
     num_multiappends_searching_for: usize,
-    being_read: IsRead,
+    _being_read: IsRead,
 }
 
 impl ReadState {
@@ -75,7 +75,7 @@ impl ReadState {
         ReadState {
             outstanding_snapshots: 0,
             num_multiappends_searching_for: 0,
-            being_read: being_read.clone(),
+            _being_read: being_read.clone(),
         }
     }
 }
@@ -363,10 +363,11 @@ impl ThreadLog {
         }
         for &loc in locs {
             if loc.0 == order::from(0) { continue }
-            let is_next_in_chain = self.per_chains.get(&loc.0)
-                .expect("fetching uninteresting chain")
-                .next_return_is(loc.1);
-            if !is_next_in_chain {
+            let (is_next_in_chain, needs_to_be_returned) = {
+                let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
+                (pc.next_return_is(loc.1), !pc.has_returned(loc.1))
+            };
+            if !is_next_in_chain && needs_to_be_returned {
                 self.enqueue_packet(loc, packet.clone());
             }
         }
@@ -665,6 +666,11 @@ impl ThreadLog {
 
         let is_interesting = {
             let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
+
+            if pc.has_returned(i) {
+                return false
+            }
+
             if !pc.is_within_snapshot(i) {
                 trace!("FUZZY blocking read @ {:?}, waiting for snapshot", loc);
                 pc.block_on_snapshot(val);
@@ -698,6 +704,7 @@ impl ThreadLog {
                 for &OrderIndex(o, i) in locs.into_iter() {
                     if o == order::from(0) { continue }
                     let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
+                    if pc.has_returned(i) { return None }
                     if !pc.is_within_snapshot(i) {
                         trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
                         should_block_on = Some(o);
@@ -841,7 +848,7 @@ impl PerChain {
     }
 
     fn increment_outstanding_snapshots(&mut self, is_being_read: &IsRead) -> u32 {
-        match &mut self.is_being_read {
+        let out = match &mut self.is_being_read {
             &mut Some(ReadState {ref mut outstanding_snapshots, ..} ) => {
                 //TODO saturating arith
                 *outstanding_snapshots = *outstanding_snapshots + 1;
@@ -855,7 +862,9 @@ impl PerChain {
                 outstanding_snapshots
 
             }
-        }
+        };
+        debug_assert!(self.is_being_read.is_some());
+        out
     }
 
     fn decrement_outstanding_snapshots(&mut self) -> u32 {
@@ -909,13 +918,14 @@ impl PerChain {
         self.next_return_is(index) && self.is_within_snapshot(index)
     }
 
-    fn has_returned(&mut self, index: entry) -> bool {
+    fn has_returned(&self, index: entry) -> bool {
         trace!{"QQQQQ last return for {:?}: {:?}", self.chain, self.last_returned_to_client};
         index <= self.last_returned_to_client
     }
 
     fn next_return_is(&self, index: entry) -> bool {
-        trace!("QQQQQ next return for {:?}: {:?}", self.chain, self.last_returned_to_client + 1);
+        trace!("QQQQQ check {:?} next return for {:?}: {:?}",
+            index, self.chain, self.last_returned_to_client + 1);
         index == self.last_returned_to_client + 1
     }
 

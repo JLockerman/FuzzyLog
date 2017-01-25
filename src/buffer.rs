@@ -37,7 +37,7 @@ impl Buffer {
 
     #[cfg(not(debug_assertions))]
     pub fn no_drop() -> Self {
-        Buffer { inner: Vec::new(), no_drop: true }
+        Buffer { inner: Vec::new() }
     }
 
     pub fn fill_from_entry_contents<V>(&mut self, contents: EntryContents<V>) -> &mut Entry<V>
