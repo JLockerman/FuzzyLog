@@ -79,6 +79,7 @@ pub mod EntryKind {
             const Layout = Data.bits | Multiput.bits | Sentinel.bits,
 
             const TakeLock = 0x8,
+            const Unlock = 0x10,
 
             const ReadSuccess = 0x80,
 
