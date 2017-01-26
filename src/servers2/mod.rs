@@ -161,8 +161,6 @@ where ToWorkers: DistributeToWorkers<T> {
                 }
 
                 trace!("SERVER {:?} multiput", self.this_server_num);
-
-                debug_assert!(self._seen_ids.insert(buffer.entry().id));
                 /*if kind.contains(EntryKind::TakeLock) {
                     debug_assert!(self.last_lock == buffer.entry().lock_num(),
                         "SERVER {:?} lock {:?} == valock {:?}",
@@ -184,7 +182,6 @@ where ToWorkers: DistributeToWorkers<T> {
                 let mut num_places = 0;
                 let lock_failed = {
                     let val = buffer.entry_mut();
-                    val.kind.insert(EntryKind::ReadSuccess);
                     let locs = val.locs_mut();
                     //FIXME handle duplicates
                     let mut lock_failed = false;
@@ -256,6 +253,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     self.to_workers.send_to_worker(Reply(buffer, t));
                     return
                 }
+                debug_assert!(self._seen_ids.insert(buffer.entry().id));
 
                 trace!("SERVER {:?} appending at {:?}",
                     self.this_server_num, buffer.entry().locs());
@@ -274,41 +272,45 @@ where ToWorkers: DistributeToWorkers<T> {
                 //      (128b with 64b entry address space)
                 //      thus has at least enough storage for 1 ptr per entry
                 let mut next_ptr_storage = senti_storage as *mut *mut *const u8;
-                'emplace: for &OrderIndex(chain, index) in buffer.entry().locs() {
-                    if (chain, index) == (0.into(), 0.into()) {
-                        break 'emplace
-                    }
-                    if self.stores_chain(chain) {
-                        assert!(index != entry::from(0));
-                        unsafe {
-                            let ptr = {
-                                let chain = self.ensure_chain(chain);
-                                if kind.contains(EntryKind::TakeLock) {
-                                    chain.increment_lock();
-                                }
-                                chain.prep_append(ptr::null()).1
-                            };
-                            *next_ptr_storage = ptr;
-                            next_ptr_storage = next_ptr_storage.offset(1);
-                        };
-                    }
-                }
-                if let Some(ssi) = sentinel_start_index {
-                    trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &buffer.entry().locs()[ssi..]);
-                    for &OrderIndex(chain, index) in &buffer.entry().locs()[ssi..] {
+                {
+                    let val = buffer.entry_mut();
+                    val.kind.insert(EntryKind::ReadSuccess);
+                    'emplace: for &OrderIndex(chain, index) in val.locs() {
+                        if (chain, index) == (0.into(), 0.into()) {
+                            break 'emplace
+                        }
                         if self.stores_chain(chain) {
                             assert!(index != entry::from(0));
                             unsafe {
                                 let ptr = {
                                     let chain = self.ensure_chain(chain);
                                     if kind.contains(EntryKind::TakeLock) {
-                                        chain.increment_lock()
+                                        chain.increment_lock();
                                     }
                                     chain.prep_append(ptr::null()).1
                                 };
                                 *next_ptr_storage = ptr;
                                 next_ptr_storage = next_ptr_storage.offset(1);
                             };
+                        }
+                    }
+                    if let Some(ssi) = sentinel_start_index {
+                        trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.locs()[ssi..]);
+                        for &OrderIndex(chain, index) in &val.locs()[ssi..] {
+                            if self.stores_chain(chain) {
+                                assert!(index != entry::from(0));
+                                unsafe {
+                                    let ptr = {
+                                        let chain = self.ensure_chain(chain);
+                                        if kind.contains(EntryKind::TakeLock) {
+                                            chain.increment_lock()
+                                        }
+                                        chain.prep_append(ptr::null()).1
+                                    };
+                                    *next_ptr_storage = ptr;
+                                    next_ptr_storage = next_ptr_storage.offset(1);
+                                };
+                            }
                         }
                     }
                 }
