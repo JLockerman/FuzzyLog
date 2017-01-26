@@ -1,7 +1,5 @@
 use std::io;
-use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use deque::{self, Stolen, Worker, Stealer};

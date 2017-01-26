@@ -266,7 +266,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                                 let diff = sample_rtt - this.rtt;
                                 this.dev = this.dev + (diff.abs() - this.dev) / 4;
                                 this.rtt = this.rtt + (diff * 4 / 5);
-                                return Ok((0.into(), 0.into())); //TODO
+                                return Ok(OrderIndex(0.into(), 0.into())); //TODO
                             } else {
                                 trace!("?? packet {:?}", this.receive_buffer);
                                 continue 'receive;
@@ -294,9 +294,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
         let request_id = Uuid::new_v4();
 
         let mchains: Vec<_> = chains.into_iter()
-            .map(|&c| (c, 0.into()))
-            .chain(::std::iter::once((0.into(), 0.into())))
-            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .map(|&c| OrderIndex(c, 0.into()))
+            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
             .collect();
 
         *self.send_buffer = EntryContents::Multiput {
@@ -336,7 +336,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for UdpStore<V> {
                                 let diff = sample_rtt - self.rtt;
                                 self.dev = self.dev + (diff.abs() - self.dev) / 4;
                                 self.rtt = self.rtt + (diff * 4 / 5);
-                                return Ok((0.into(), 0.into())); //TODO
+                                return Ok(OrderIndex(0.into(), 0.into())); //TODO
                             } else {
                                 trace!("?? packet {:?}", self.receive_buffer);
                                 continue 'receive;
@@ -377,14 +377,12 @@ mod test {
     use super::*;
     use prelude::*;
 
-    use std::collections::HashMap;
-    use std::collections::hash_map::Entry::{Occupied, Vacant};
-    use std::mem::{self, forget, transmute};
+    use std::mem::{self, forget};
     use std::net::UdpSocket;
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::thread::spawn;
 
-    use servers::udp::Server;
+    use servers2::udp::Server;
     // use test::Bencher;
 
     // use mio::buf::{MutSliceBuf, SliceBuf};
@@ -404,8 +402,7 @@ mod test {
                 trace!("socket in use");
                 return;
             };
-            SERVERS_READY.fetch_add(1, Ordering::Release);
-            server.run()
+            server.run(&SERVERS_READY)
         });
         forget(handle);
 

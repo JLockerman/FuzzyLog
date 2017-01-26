@@ -28,19 +28,20 @@ macro_rules! general_tests {
             fn test_get_none() {
                 let _ = env_logger::init();
                 let mut store = $new_store(Vec::new());
-                let r = <Store<MapEntry<i32, i32>>>::get(&mut store, (14.into(), 0.into()));
+                let r = <Store<MapEntry<i32, i32>>>::get(&mut store,
+                    OrderIndex(14.into(), 0.into()));
                 assert_eq!(r, Err(GetErr::NoValue(0.into())))
             }
 
             #[test]
             fn test_get_none2() {
                 let _ = env_logger::init();
-                let mut store = $new_store(vec![(19.into(), 1.into()), (19.into(), 2.into()), (19.into(), 3.into()), (19.into(), 4.into()), (19.into(), 5.into())]);
+                let mut store = $new_store(vec![OrderIndex(19.into(), 1.into()), OrderIndex(19.into(), 2.into()), OrderIndex(19.into(), 3.into()), OrderIndex(19.into(), 4.into()), OrderIndex(19.into(), 5.into())]);
                 for i in 0..5 {
-                    let r = store.insert((19.into(), 0.into()), EntryContents::Data(&63, &[]));
-                    assert_eq!(r, Ok((19.into(), (i + 1).into())))
+                    let r = store.insert(OrderIndex(19.into(), 0.into()), EntryContents::Data(&63, &[]));
+                    assert_eq!(r, Ok(OrderIndex(19.into(), (i + 1).into())))
                 }
-                let r = store.get((19.into(), ::std::u32::MAX.into()));
+                let r = store.get(OrderIndex(19.into(), ::std::u32::MAX.into()));
                 assert_eq!(r, Err(GetErr::NoValue(5.into())))
             }
 
@@ -48,8 +49,8 @@ macro_rules! general_tests {
             fn test_threaded_appends() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    (0..22).map(|i| (1.into(), i.into()))
-                        .chain((0..4).map(|i| (2.into(), i.into())))
+                    (0..22).map(|i| OrderIndex(1.into(), i.into()))
+                        .chain((0..4).map(|i| OrderIndex(2.into(), i.into())))
                         .collect()
                 );
                 let s = store.clone();
@@ -73,7 +74,7 @@ macro_rules! general_tests {
                 let join = thread::spawn(move || {
                     trace!("T1 start");
                     let mut log = FuzzyLog::new(s, h, HashMap::new());
-                    let mut last_index = (1.into(), 0.into());
+                    let mut last_index = OrderIndex(1.into(), 0.into());
                     for i in 0..10 {
                         last_index = log.append(1.into(), &MapEntry(i * 2, i * 2), &*vec![]);
                         trace!("T1 inserted {:?} at {:?}", (i * 2, i * 2), last_index);
@@ -84,7 +85,7 @@ macro_rules! general_tests {
                 let join1 = thread::spawn(|| {
                     trace!("T2 start");
                     let mut log = FuzzyLog::new(s1, h1, HashMap::new());
-                    let mut last_index = (1.into(), 0.into());
+                    let mut last_index = OrderIndex(1.into(), 0.into());
                     for i in 0..10 {
                         last_index = log.append(1.into(), &MapEntry(i * 2 + 1, i * 2 + 1), &*vec![]);
                         trace!("T2 inserted {:?} at {:?}", (i * 2 + 1, i * 2 + 1), last_index);
@@ -120,8 +121,8 @@ macro_rules! general_tests {
             fn test_1_column() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    vec![(3.into(), 1.into()), (3.into(), 2.into()),
-                    (3.into(), 3.into())]
+                    vec![OrderIndex(3.into(), 1.into()), OrderIndex(3.into(), 2.into()),
+                    OrderIndex(3.into(), 3.into())]
                 );
                 let horizon = HashMap::new();
                 let mut map = Map::new(store, horizon, 3.into());
@@ -138,8 +139,8 @@ macro_rules! general_tests {
             fn test_1_column_ni() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    vec![(4.into(), 1.into()), (4.into(), 2.into()),
-                        (4.into(), 3.into()), (5.into(), 1.into())]
+                    vec![OrderIndex(4.into(), 1.into()), OrderIndex(4.into(), 2.into()),
+                        OrderIndex(4.into(), 3.into()), OrderIndex(5.into(), 1.into())]
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
@@ -153,13 +154,13 @@ macro_rules! general_tests {
 
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
                 let e1 = log.append(4.into(), &MapEntry(0, 1), &*vec![]);
-                assert_eq!(e1, (4.into(), 1.into()));
+                assert_eq!(e1, OrderIndex(4.into(), 1.into()));
                 let e2 = log.append(4.into(), &MapEntry(1, 17), &*vec![]);
-                assert_eq!(e2, (4.into(), 2.into()));
+                assert_eq!(e2, OrderIndex(4.into(), 2.into()));
                 let last_index = log.append(4.into(), &MapEntry(32, 5), &*vec![]);
-                assert_eq!(last_index, (4.into(), 3.into()));
+                assert_eq!(last_index, OrderIndex(4.into(), 3.into()));
                 let en = log.append(5.into(), &MapEntry(0, 0), &*vec![last_index]);
-                assert_eq!(en, (5.into(), 1.into()));
+                assert_eq!(en, OrderIndex(5.into(), 1.into()));
                 log.play_foward(4.into());
                 assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
             }
@@ -168,8 +169,8 @@ macro_rules! general_tests {
             fn test_deps() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    vec![(6.into(), 1.into()), (6.into(), 2.into()),
-                        (6.into(), 3.into()), (7.into(), 1.into())]
+                    vec![OrderIndex(6.into(), 1.into()), OrderIndex(6.into(), 2.into()),
+                        OrderIndex(6.into(), 3.into()), OrderIndex(7.into(), 1.into())]
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
@@ -182,13 +183,13 @@ macro_rules! general_tests {
                 upcalls.insert(7.into(), Box::new(|_, _, _| false));
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
                 let e1 = log.append(6.into(), &MapEntry(0, 1), &*vec![]);
-                assert_eq!(e1, (6.into(), 1.into()));
+                assert_eq!(e1, OrderIndex(6.into(), 1.into()));
                 let e2 = log.append(6.into(), &MapEntry(1, 17), &*vec![]);
-                assert_eq!(e2, (6.into(), 2.into()));
+                assert_eq!(e2, OrderIndex(6.into(), 2.into()));
                 let last_index = log.append(6.into(), &MapEntry(32, 5), &*vec![]);
-                assert_eq!(last_index, (6.into(), 3.into()));
+                assert_eq!(last_index, OrderIndex(6.into(), 3.into()));
                 let en = log.append(7.into(), &MapEntry(0, 0), &*vec![last_index]);
-                assert_eq!(en, (7.into(), 1.into()));
+                assert_eq!(en, OrderIndex(7.into(), 1.into()));
                 log.play_foward(7.into());
                 assert_eq!(*map.borrow(), [(0,1), (1,17), (32,5)].into_iter().cloned().collect());
             }
@@ -199,9 +200,9 @@ macro_rules! general_tests {
                 let _ = env_logger::init();
                 let store = $new_store(
 
-                    vec![(8.into(), 1.into()), (8.into(), 2.into()),
-                        (9.into(), 1.into()),
-                        (114.into(), 1.into())]
+                    vec![OrderIndex(8.into(), 1.into()), OrderIndex(8.into(), 2.into()),
+                        OrderIndex(9.into(), 1.into()),
+                        OrderIndex(114.into(), 1.into())]
                 );
                 let horizon = HashMap::new();
                 let map0 = Rc::new(RefCell::new(HashMap::new()));
@@ -246,8 +247,8 @@ macro_rules! general_tests {
             fn test_threaded_transaction() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    (0..40).map(|i| (11.into(), i.into()))
-                        .chain((0..40).map(|i| (12.into(), i.into())))
+                    (0..40).map(|i| OrderIndex(11.into(), i.into()))
+                        .chain((0..40).map(|i| OrderIndex(12.into(), i.into())))
                         .collect()
                 );
                 let s = store.clone();
@@ -306,9 +307,9 @@ macro_rules! general_tests {
             fn test_abort_transaction() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    vec![(13.into(), 0.into()), (13.into(), 1.into()),
-                    (13.into(), 2.into()), (13.into(), 3.into()),
-                    (13.into(), 4.into()), (13.into(), 5.into()),]
+                    vec![OrderIndex(13.into(), 0.into()), OrderIndex(13.into(), 1.into()),
+                    OrderIndex(13.into(), 2.into()), OrderIndex(13.into(), 3.into()),
+                    OrderIndex(13.into(), 4.into()), OrderIndex(13.into(), 5.into()),]
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
@@ -333,9 +334,9 @@ macro_rules! general_tests {
                 use std::mem::forget;
                 let _ = env_logger::init();
                 let store = $new_store(
-                    vec![(14.into(), 0.into()), (14.into(), 1.into()),
-                    (14.into(), 2.into()), (14.into(), 3.into()),
-                    (14.into(), 4.into()), (14.into(), 5.into()),]
+                    vec![OrderIndex(14.into(), 0.into()), OrderIndex(14.into(), 1.into()),
+                    OrderIndex(14.into(), 2.into()), OrderIndex(14.into(), 3.into()),
+                    OrderIndex(14.into(), 4.into()), OrderIndex(14.into(), 5.into()),]
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
@@ -362,10 +363,10 @@ macro_rules! general_tests {
             fn test_multiput() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    vec![(15.into(), 0.into()), (15.into(), 1.into()),
-                    (15.into(), 2.into()), (15.into(), 3.into()),
-                    (16.into(), 0.into()), (16.into(), 1.into()),
-                    (16.into(), 2.into()), (16.into(), 3.into()),]
+                    vec![OrderIndex(15.into(), 0.into()), OrderIndex(15.into(), 1.into()),
+                    OrderIndex(15.into(), 2.into()), OrderIndex(15.into(), 3.into()),
+                    OrderIndex(16.into(), 0.into()), OrderIndex(16.into(), 1.into()),
+                    OrderIndex(16.into(), 2.into()), OrderIndex(16.into(), 3.into()),]
                 );
                 let horizon = HashMap::new();
                 let map = Rc::new(RefCell::new(HashMap::new()));
@@ -388,19 +389,19 @@ macro_rules! general_tests {
                 let columns = &*vec![(15.into(), &MapEntry(13, 5)),
                     (16.into(), &MapEntry(92, 7))];
                 let v = log.try_multiput(0u32.into(), columns, &*vec![]);
-                assert_eq!(v, Some(&*vec![(15.into(), 1.into()),
-                    (16.into(), 1.into())]));
+                assert_eq!(v, Some(&*vec![OrderIndex(15.into(), 1.into()),
+                    OrderIndex(16.into(), 1.into())]));
 
                 let columns = &*vec![(15.into(), &MapEntry(3, 8)),
                     (16.into(), &MapEntry(2, 54))];
                 let v = log.try_multiput(0u32.into(), columns, &*vec![]);
-                assert_eq!(v, Some(&*vec![(15.into(), 2.into()),
-                    (16.into(), 2.into())]));
+                assert_eq!(v, Some(&*vec![OrderIndex(15.into(), 2.into()),
+                    OrderIndex(16.into(), 2.into())]));
 
-                log.play_until((15.into(), 1.into()));
+                log.play_until(OrderIndex(15.into(), 1.into()));
 
                 assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7]);
-                log.play_until((15.into(), 2.into()));
+                log.play_until(OrderIndex(15.into(), 2.into()));
                 assert_eq!(*map.borrow(), collect![13 => 5, 92 => 7, 3 => 8, 2 => 54]);
             }
 
@@ -408,8 +409,8 @@ macro_rules! general_tests {
             fn test_threaded_multiput() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    (0..20).map(|i| (17.into(), i.into()))
-                        .chain((0..20).map(|i| (18.into(), i.into())))
+                    (0..20).map(|i| OrderIndex(17.into(), i.into()))
+                        .chain((0..20).map(|i| OrderIndex(18.into(), i.into())))
                         .collect()
                 );
                 let s = store.clone();
@@ -470,9 +471,9 @@ macro_rules! general_tests {
             fn test_order() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    (0..5).map(|i| (20.into(), i.into()))
-                        .chain((0..21).map(|i| (21.into(), i.into())))
-                        .chain((0..22).map(|i| (22.into(), i.into())))
+                    (0..5).map(|i| OrderIndex(20.into(), i.into()))
+                        .chain((0..21).map(|i| OrderIndex(21.into(), i.into())))
+                        .chain((0..22).map(|i| OrderIndex(22.into(), i.into())))
                         .collect());
                 let horizon = HashMap::new();
                 let list: Rc<RefCell<Vec<i32>>> = Default::default();
@@ -496,9 +497,9 @@ macro_rules! general_tests {
             fn test_dependent_singlethreaded() {
                 let _ = env_logger::init();
                 let store = $new_store(
-                    (0..10).map(|i| (23.into(), i.into()))
-                        .chain((0..24).map(|i| (21.into(), i.into())))
-                        .chain((0..25).map(|i| (22.into(), i.into())))
+                    (0..10).map(|i| OrderIndex(23.into(), i.into()))
+                        .chain((0..24).map(|i| OrderIndex(21.into(), i.into())))
+                        .chain((0..25).map(|i| OrderIndex(22.into(), i.into())))
                         .collect());
                 let horizon = HashMap::new();
                 let mut upcalls: HashMap<_, Box<for<'u, 'o, 'r> Fn(&'u Uuid, &'o OrderIndex, &'r _) -> bool>> = Default::default();
@@ -519,18 +520,17 @@ macro_rules! general_tests {
                     log.dependent_multiappend(&[25.into()], &[23.into(), 24.into()], &(25, i), &[]);
                     trace!("finished {:?}", i);
                 }
-                log.play_until((25.into(), 1.into()));
+                log.play_until(OrderIndex(25.into(), 1.into()));
                 assert_eq!(list.borrow_mut().last(), Some(&(25, 1)));
                 assert!(list.borrow_mut().contains(&(23, 1)));
                 assert!(list.borrow_mut().contains(&(24, 1)));
-                log.play_until((25.into(), 2.into()));
+                log.play_until(OrderIndex(25.into(), 2.into()));
                 assert_eq!(list.borrow_mut().last(), Some(&(25, 2)));
                 assert!(list.borrow_mut().contains(&(23, 2)));
                 assert!(list.borrow_mut().contains(&(24, 2)));
-                log.play_until((25.into(), 9.into()));
+                log.play_until(OrderIndex(25.into(), 9.into()));
                 let mut last_multi_loc = None;
                 for i in 1..9 {
-                    use std::iter;
                     let multi_loc = list.borrow().iter().position(|l| l == &(25, i));
                     assert!(multi_loc.is_some(), "multi not found @ iter {:?}", i);
                     let multi_loc = multi_loc.unwrap();
@@ -550,9 +550,9 @@ macro_rules! general_tests {
             fn test_dependent_multithreaded() { //TODO multithreaded version
                 let _ = env_logger::init();
                 let store = $new_store(
-                    (0..60).map(|i| (26.into(), i.into()))
-                        .chain((0..27).map(|i| (21.into(), i.into())))
-                        .chain((0..28).map(|i| (22.into(), i.into())))
+                    (0..60).map(|i| OrderIndex(26.into(), i.into()))
+                        .chain((0..27).map(|i| OrderIndex(21.into(), i.into())))
+                        .chain((0..28).map(|i| OrderIndex(22.into(), i.into())))
                         .collect());
                 let s1 = store.clone();
                 let s2 = store.clone();
@@ -587,7 +587,7 @@ macro_rules! general_tests {
                 }
                 let mut log = FuzzyLog::new(store, horizon, upcalls);
                 let le = log.snapshot(28.into()).unwrap();
-                log.play_until((28.into(), le));
+                log.play_until(OrderIndex(28.into(), le));
                 let inverse_index: BTreeMap<_, _>  =
                     list.borrow().iter().enumerate().map(|(i, &oe)| (oe, i)).collect();
                 let mut last_multi_loc = None;

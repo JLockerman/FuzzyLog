@@ -1,6 +1,4 @@
 use std::collections::HashSet;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::rc::Rc;
 
 use prelude::*;
 
@@ -76,7 +74,7 @@ impl ServerLog {
                     //trace!("SERVER {:?} Horizon A {:?}", self.horizon);
                     //FIXME handle duplicates
                     'update_append_horizon: for i in 0..locs.len() {
-                        if locs[i] == (0.into(), 0.into()) {
+                        if locs[i] == OrderIndex(0.into(), 0.into()) {
                             sentinel_start_index = Some(i + 1);
                             break 'update_append_horizon
                         }
@@ -91,7 +89,7 @@ impl ServerLog {
                     }
                     if let Some(ssi) = sentinel_start_index {
                         for i in ssi..locs.len() {
-                            assert!(locs[i] != (0.into(), 0.into()));
+                            assert!(locs[i] != OrderIndex(0.into(), 0.into()));
                             let chain = locs[i].0;
                             if self.stores_chain(chain) {
                                 //FIXME handle duplicates
@@ -107,7 +105,7 @@ impl ServerLog {
                     trace!("SERVER {:?} ssi {:?}", self.this_server_num, sentinel_start_index);
                 }
                 trace!("SERVER {:?} appending at {:?}", self.this_server_num, val.locs());
-                'emplace: for &(chain, index) in val.locs() {
+                'emplace: for &OrderIndex(chain, index) in val.locs() {
                     if (chain, index) == (0.into(), 0.into()) {
                         break 'emplace
                     }
@@ -121,7 +119,7 @@ impl ServerLog {
                     val.kind.remove(EntryKind::Multiput);
                     val.kind.insert(EntryKind::Sentinel);
                     trace!("SERVER {:?} sentinal locs {:?}", self.this_server_num, &val.locs()[ssi..]);
-                    for &(chain, index) in &val.locs()[ssi..] {
+                    for &OrderIndex(chain, index) in &val.locs()[ssi..] {
                         if self.stores_chain(chain) {
                             assert!(index != entry::from(0));
                             self.ensure_chain(chain).append(&val);
@@ -135,7 +133,7 @@ impl ServerLog {
 
             EntryLayout::Read => {
                 trace!("SERVER {:?} Read", self.this_server_num);
-                let (chain, index) = val.locs()[0];
+                let OrderIndex(chain, index) = val.locs()[0];
                 //TODO validate lock
                 //     this will come after per-chain locks
                 match self.log.get(&chain) {
@@ -259,13 +257,12 @@ impl ServerLog {
 }
 
 fn empty_read(packet: &mut Entry<()>, last_loc: u32) {
-    let (old_id, old_loc) = unsafe {
-        (packet.id, packet.locs()[0])
-    };
+    let (old_id, old_loc) = (packet.id, packet.locs()[0]);
     let chain: order = old_loc.0;
     assert!(last_loc == 0 || entry::from(last_loc) < old_loc.1,
         "{:?} >= {:?}", last_loc, old_loc);
-    *packet = EntryContents::Data(&(), &[(chain, entry::from(last_loc))]).clone_entry();
+    *packet = EntryContents::Data(&(),
+        &[OrderIndex(chain, entry::from(last_loc))]).clone_entry();
     packet.id = old_id;
     packet.kind = EntryKind::NoValue;
     unsafe {

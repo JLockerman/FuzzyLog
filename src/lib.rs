@@ -22,6 +22,7 @@ extern crate rusoto;
 //extern crate test;
 
 extern crate bit_set;
+extern crate byteorder;
 extern crate deque;
 extern crate rustc_serialize;
 extern crate mio;
@@ -53,11 +54,9 @@ pub mod servers2;
 pub mod color_api;
 pub mod async;
 mod hash;
+mod socket_addr;
 //TODO only for testing, should be private
 pub mod buffer;
-
-#[cfg(feature = "dynamodb_tests")]
-pub mod dynamo_store;
 
 pub mod c_binidings {
 
@@ -75,8 +74,6 @@ pub mod c_binidings {
     use std::os::raw::c_char;
 
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    use color_api::*;
 
     use servers::tcp::Server;
 
@@ -405,7 +402,7 @@ pub mod c_binidings {
             oi
         }
         else {
-            (0.into(), 0.into())
+            OrderIndex(0.into(), 0.into())
         }
     }
 

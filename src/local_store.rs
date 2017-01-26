@@ -57,7 +57,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
             horizon
         };
         trace!("insert @ {:?}", (key.0, next_loc));
-        match self.data.entry((key.0, next_loc)) {
+        match self.data.entry(OrderIndex(key.0, next_loc)) {
             Occupied(..) => {
                 trace!("trace Occupied");
                 Err(InsertErr::AlreadyWritten)
@@ -69,7 +69,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                     val.fill_entry(new_val);
                     trace!("new val {:?}", new_val);
                 }
-                Ok((key.0, next_loc))
+                Ok(OrderIndex(key.0, next_loc))
             }
         }
     }
@@ -83,7 +83,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
         use std::collections::hash_map::Entry::*;
         let entr = EntryContents::Multiput{data: data, uuid: &Uuid::new_v4(),
             columns: chains, deps: deps};
-        for &(chain, _) in chains {
+        for &OrderIndex(chain, _) in chains {
             let horizon = {
                 let horizon_loc = self.horizon.entry(chain).or_insert(1.into());
                 let horizon = *horizon_loc;
@@ -91,7 +91,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 horizon
             };
             trace!("mnsert @ {:?}", (chain, horizon));
-            match self.data.entry((chain, horizon)) {
+            match self.data.entry(OrderIndex(chain, horizon)) {
                 Occupied(..) => {
                     trace!("trace Occupied");
                 }
@@ -102,7 +102,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 }
             }
         }
-        Ok((0.into(), 0.into()))
+        Ok(OrderIndex(0.into(), 0.into()))
     }
 
     fn dependent_multi_append(&mut self, chains: &[order],
@@ -119,7 +119,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 *horizon_loc = horizon + 1;
                 horizon
             };
-            match self.data.entry((chain, next_loc)) {
+            match self.data.entry(OrderIndex(chain, next_loc)) {
                 Occupied(..) => {
                     trace!("trace Occupied");
                     panic!()
@@ -129,16 +129,16 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                     unsafe {
                         new_val.as_multi_entry_mut().flex.cols = 1;
                     }
-                    new_val.locs_mut()[0] = (chain, next_loc);
+                    new_val.locs_mut()[0] = OrderIndex(chain, next_loc);
                     trace!("new val {:?}", new_val);
                     v.insert(new_val);
                 }
             }
         }
         let mchains: Vec<_> = chains.into_iter()
-            .map(|&c| (c, 0.into()))
-            .chain(::std::iter::once((0.into(), 0.into())))
-            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .map(|&c| OrderIndex(c, 0.into()))
+            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
             .collect();
         //TODO distinguish between inhabits and depends on
         let entr = EntryContents::Multiput{data: data, uuid: &id,
@@ -152,7 +152,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 horizon
             };
             trace!("mnsert @ {:?}", (chain, horizon));
-            match self.data.entry((chain, horizon)) {
+            match self.data.entry(OrderIndex(chain, horizon)) {
                 Occupied(..) => {
                     trace!("trace Occupied");
                 }
@@ -163,7 +163,7 @@ impl<V: ::std::fmt::Debug + Clone> Store<V> for LocalStore<V> {
                 }
             }
         }
-        Ok((0.into(), 0.into()))
+        Ok(OrderIndex(0.into(), 0.into()))
     }
 }
 

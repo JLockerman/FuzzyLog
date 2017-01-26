@@ -7,7 +7,7 @@ extern crate env_logger;
 extern crate test;
 
 
-use mio::deprecated::{EventLoop, Handler as MioHandler, Sender as MioSender};
+use mio::deprecated::{EventLoop, Handler as MioHandler};
 use mio::tcp::*;
 
 use nix::sys::socket::setsockopt;
@@ -50,6 +50,7 @@ fn main() {
         Args::TrivialServer(addr) => run_trivial_server(addr, &SERVER_READY),
         //Args::TrivialServer(addr) => run_bad_server(addr, 7),
         Args::TrivialClient(addr, num_clients) => run_trivial_client(addr, num_clients),
+        Args::ReadWrite(addr, num_clients, jobsize) => run_write_read_client(addr, num_clients, jobsize),
         Args::LocalTest => {
             let addr = "0.0.0.0:13669".parse().expect("invalid inet address");
             let h = thread::spawn(move || run_trivial_server(addr, &SERVER_READY));
@@ -68,12 +69,20 @@ fn main() {
             let mut log_handle = LogHandle::<()>::spawn_tcp_log(addr, iter::once(addr),
                 [order::from(5), order::from(6), order::from(7)].into_iter().cloned());
 
-            println!("starting client {}", client_num);
+            println!("starting client {} of {}", client_num, num_clients);
             CLIENTS_READY.fetch_add(1, Ordering::SeqCst);
-            while CLIENTS_READY.load(Ordering::SeqCst) < num_clients {}
+            while CLIENTS_READY.load(Ordering::SeqCst) < num_clients {
+                thread::yield_now()
+            }
+
+            /*for i in 0..1000000 {
+                log_handle.append(order::from(5), &(), &[]);
+                log_handle.append(order::from(6), &(), &[]);
+                log_handle.append(order::from(7), &(), &[]);
+            }*/
 
             log_handle.snapshot(order::from(5));
-            while let Some(..) = log_handle.get_next() { }
+            while let Some(..) = log_handle.get_next() {}
 
             let start = Instant::now();
             log_handle.snapshot(order::from(6));
@@ -148,10 +157,11 @@ enum Args {
     Client(SocketAddr, usize),
     TrivialServer(SocketAddr),
     TrivialClient(SocketAddr, usize),
+    ReadWrite(SocketAddr, usize, u64),
 }
 
 fn parse_args() -> Args {
-    let mut args = env::args().skip(1).take(3);
+    let mut args = env::args().skip(1);
     let arg0 = args.next();
     let arg1 = args.next();
     match (arg0.as_ref().map(|s| s.as_ref()), arg1.as_ref().map(|s| s.as_ref())) {
@@ -189,6 +199,17 @@ fn parse_args() -> Args {
             println!("{:?} trivial client(s) connecting to remote server @ {}.", num_clients, addr);
             let addr: &str = addr;
             Args::TrivialClient(addr.parse().expect("invalid addr"), num_clients)
+        }
+        (Some("-wr"), Some(addr)) => {
+            let num_clients =
+                if let Some(n) = args.next() { n.parse().unwrap() }
+                else { 1 };
+            let jobsize =
+                if let Some(n) = args.next() { n.parse().unwrap() }
+                else { 64 };
+            println!("{:?} write/read(s) connecting to remote server @ {}.", num_clients, addr);
+            let addr: &str = addr;
+            Args::ReadWrite(addr.parse().expect("invalid addr"), num_clients, jobsize)
         }
         _ => unimplemented!()
     }
@@ -229,20 +250,19 @@ pub fn run_server(addr: SocketAddr, num_workers: usize) -> ! {
 pub fn run_store(
     addr: SocketAddr,
     client: mpsc::Sender<Message>,
-    tsm: Arc<Mutex<Option<MioSender<Vec<u8>>>>>
+    tsm: Arc<Mutex<Option<mio::channel::Sender<Vec<u8>>>>>
 ) {
-    let mut event_loop = EventLoop::new().unwrap();
-    let to_store = event_loop.channel();
-    *tsm.lock().unwrap() = Some(to_store);
-    let mut store = AsyncTcpStore::tcp(addr,
+    let mut event_loop = mio::Poll::new().unwrap();
+    let (store, to_store) = AsyncTcpStore::tcp(addr,
         iter::once(addr),
         client, &mut event_loop).expect("");
-    event_loop.run(&mut store).expect("should never return")
+    *tsm.lock().unwrap() = Some(to_store);
+    store.run(event_loop)
 }
 
 #[inline(never)]
 pub fn run_log(
-    to_store: MioSender<Vec<u8>>,
+    to_store: mio::channel::Sender<Vec<u8>>,
     from_outside: mpsc::Receiver<Message>,
     ready_reads_s: mpsc::Sender<Vec<u8>>,
     finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
@@ -251,6 +271,8 @@ pub fn run_log(
         [order::from(5)].into_iter().cloned());
     log.run()
 }
+
+///////////////////////////////////////
 
 fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
     use std::io::{Read, Write};
@@ -271,8 +293,9 @@ fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
                 {
                     let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
                     e.kind = EntryKind::Read;
-                    e.locs_mut()[0] = (5.into(), 3.into());
+                    e.locs_mut()[0] = OrderIndex(5.into(), 3.into());
                 }
+                buffer.extend_from_slice(&[0xfu8; 6]);
                 for _ in 0..3000001 {
                     let _ = black_box(stream.write_all(&mut buffer));
                 }
@@ -285,17 +308,21 @@ fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
             let mut stream = &*stream;
             //TODO let mut buffer = vec![0u8; mem::size_of::<Entry<(), DataFlex<()>>>()];
             // since the entry is uninhabited extra data is sent
-            let mut buffer = vec![0u8; 40];
+            //let mut buffer = vec![0u8; 40];
+            let mut buffer = vec![];
+            {
+                let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
+            }
             let _ = black_box(stream.read_exact(&mut buffer));
-            for _ in 0..1000000 {
+            for _ in 0..1000000u64 {
                 black_box(stream.read_exact(&mut buffer)).unwrap();
             }
             let start = Instant::now();
-            for _ in 0..1000000 {
+            for _ in 0..1000000u64 {
                 black_box(stream.read_exact(&mut buffer)).unwrap();
             }
             let time = start.elapsed();
-            for _ in 0..1000000 {
+            for _ in 0..1000000u64 {
                 black_box(stream.read_exact(&mut buffer)).unwrap();
             }
             let s = time.as_secs() as f64 + (time.subsec_nanos() as f64 * 10.0f64.powi(-9));
@@ -319,6 +346,163 @@ fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
     std::process::exit(0)
 }
 
+///////////////////////////////////////
+
+fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u64) -> ! {
+    use std::io::{Read, Write};
+
+    static WRITERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+    static READERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+
+    let start = Instant::now();
+    let joins: Vec<_> = (0..num_clients).map(|client_num| {
+        thread::spawn(move || {
+            let stream = Arc::new(std::net::TcpStream::connect(server_addr).unwrap());
+            let color = order::from(client_num as u32);
+            let s1 = stream.clone();
+            let _h = thread::spawn(move || {
+                let mut stream = &*s1;
+                let mut buffer = Vec::new();
+                {
+                    let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);;
+                    e.locs_mut()[0] = OrderIndex(5.into(), 3.into());
+                };
+                buffer.extend_from_slice(&[0xfu8; 6]);
+
+                WRITERS_READY.fetch_add(1, Ordering::SeqCst);
+                while WRITERS_READY.load(Ordering::SeqCst) < num_clients * 2 {
+                    thread::yield_now()
+                }
+
+                for i in 0..1000000u32 {
+                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                        .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
+                    let _ = black_box(stream.write_all(&mut buffer));
+                }
+                for i in 0..1000000u32 {
+                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                        .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
+                    let _ = black_box(stream.write_all(&mut buffer));
+                }
+                for i in 0..1000000u32 {
+                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                        .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
+                    let _ = black_box(stream.write_all(&mut buffer));
+                }
+
+                ////////////////////////////////////////
+
+                {
+                    Entry::<()>::wrap_bytes_mut(&mut buffer).kind = EntryKind::Read;
+                }
+
+                READERS_READY.fetch_add(1, Ordering::SeqCst);
+                while READERS_READY.load(Ordering::SeqCst) < num_clients * 2 { thread::yield_now()
+                }
+                for i in 0..1000000u32 {
+                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                        .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
+                    let _ = black_box(stream.write_all(&mut buffer));
+                }
+                for i in 0..1000000u32 {
+                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                        .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
+                    let _ = black_box(stream.write_all(&mut buffer));
+                }
+                for i in 0..1000000u32 {
+                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                        .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
+                    let _ = black_box(stream.write_all(&mut buffer));
+                }
+            });
+
+            let mut stream = &*stream;
+
+            let mut buffer = vec![];
+            let mut big_buffer = {
+                let _ = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
+                let bytes_to_read = buffer.len() * 1_000_000;
+                vec![0u8; bytes_to_read]
+            };
+
+            WRITERS_READY.fetch_add(1, Ordering::SeqCst);
+            while WRITERS_READY.load(Ordering::SeqCst) < num_clients * 2 {
+                thread::yield_now()
+            }
+
+            //for _ in 0..1000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
+                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(i) + 1));
+            //}
+            let write_start = Instant::now();
+            //for _ in 1000000u32..2000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
+                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(i) + 1));
+            //}
+            let write_time = write_start.elapsed();
+            for i in 2000000u32..3000000u32 {
+                let _ = stream.read_exact(&mut buffer);
+                assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
+                    OrderIndex(color, entry::from(i) + 1));
+            }
+
+            ////////////////////////////////////////
+
+            READERS_READY.fetch_add(1, Ordering::SeqCst);
+            while READERS_READY.load(Ordering::SeqCst) < num_clients * 2 {
+                thread::yield_now()
+            }
+
+            //for _ in 0..1000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
+                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(i) + 1));
+            //}
+            let read_start = Instant::now();
+            //for _ in 0..1000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
+                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(i) + 1));
+            //}
+            let read_time = read_start.elapsed();
+            for i in 0..1000000u32 {
+                let _ = stream.read_exact(&mut buffer);
+                assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
+                    OrderIndex(color, entry::from(i) + 1));
+            }
+
+            let write_s = write_time.as_secs() as f64 + (write_time.subsec_nanos() as f64 * 10.0f64.powi(-9));
+            let read_s = read_time.as_secs() as f64 + (read_time.subsec_nanos() as f64 * 10.0f64.powi(-9));
+            let write_hz = 1000000.0 / write_s;
+            let read_hz = 1000000.0 / read_s;
+            println!("client {:?} elapsed time for 1000000 writes {:?}, {}s, {:.3} Hz",
+                client_num, write_time, write_s, write_hz);
+            println!("client {:?} elapsed time for 1000000 reads {:?}, {}s, {:.3} Hz",
+                client_num, read_time, read_s, read_hz);
+            (write_hz, read_hz)
+        })
+    }).collect();
+
+    //while READERS_READY.load(Ordering::SeqCst) < num_clients * 2 {
+    //    thread::yield_now()
+    //}
+
+    println!("All clients started");
+    let (total_write_hz, total_read_hz): (f64, f64) = joins.into_iter().map(|j| j.join().unwrap()).fold((0.0, 0.0), |(write_total, read_total), (write, read)|
+            (write_total + write, read_total + read)
+    );
+    let end = start.elapsed();
+    println!("total write Hz {:.3}", total_write_hz);
+    println!("total read  Hz {:.3}", total_read_hz);
+    println!("elapsed time {}s", end.as_secs());
+
+    std::process::exit(0)
+}
+
+///////////////////////////////////////
+
 #[derive(Copy, Clone)]
 enum RecvRes {
     Done,
@@ -330,92 +514,6 @@ enum RecvRes {
 #[repr(u8)]
 enum Io { Read, Write, ReadWrite }
 
-fn run_bad_server(addr: SocketAddr, num_workers: usize) -> ! {
-    use servers2::spmc;
-    let acceptor = mio::tcp::TcpListener::bind(&addr).unwrap();
-
-    let (dist_to_workers, recv_from_dist) = spmc::channel();
-    let (workers_to_dist, dist_from_workers) = mio::channel::channel();
-    for _ in 0..num_workers {
-        let from_dist = recv_from_dist.clone();
-        let to_dist   = workers_to_dist.clone();
-        thread::spawn(move ||
-            run_bad_worker(
-                from_dist,
-                to_dist,
-            )
-        );
-    }
-
-    const ACCEPT: mio::Token = mio::Token(0);
-    const FROM_WORKERS: mio::Token = mio::Token(1);
-    let poll = mio::Poll::new().unwrap();
-    poll.register(&acceptor,
-        ACCEPT,
-        mio::Ready::readable(),
-        mio::PollOpt::level()
-    );
-    poll.register(&dist_from_workers,
-        FROM_WORKERS,
-        mio::Ready::readable(),
-        mio::PollOpt::level()
-    );
-    let mut receivers: HashMap<_, _> = Default::default();
-    let mut events = mio::Events::with_capacity(1023);
-    let mut next_token = mio::Token(2);
-    let mut buffer_cache = Vec::new();
-    loop {
-        poll.poll(&mut events, None).unwrap();
-        for event in events.iter() {
-            match event.token() {
-                ACCEPT => {
-                    match acceptor.accept() {
-                        Err(e) => {},
-                        Ok((socket, addr)) => {
-                            let _ = socket.set_keepalive_ms(Some(1000));
-                            //TODO benchmark
-                            let _ = socket.set_nodelay(true);
-                            //TODO oveflow
-                            let tok = get_next_token(&mut next_token);
-                            poll.register(
-                                &socket,
-                                tok,
-                                mio::Ready::readable(),
-                                mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-                            );
-                            receivers.insert(tok, Some(socket));
-                        }
-                    }
-                }
-                FROM_WORKERS => {
-                    while let Ok((buffer, socket, tok)) = dist_from_workers.try_recv() {
-                        buffer_cache.push(buffer);
-                        poll.reregister(
-                            &socket,
-                            tok,
-                            mio::Ready::readable(),
-                            mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-                        );
-                        *receivers.get_mut(&tok).unwrap() = Some(socket)
-                    }
-                },
-                recv_tok => {
-                    let recv = receivers.get_mut(&recv_tok).unwrap();
-                    let recv = mem::replace(recv, None);
-                    match recv {
-                        None => {},
-                        Some(socket) => {
-                            //TODO should be min size ?
-                            let buffer =
-                                buffer_cache.pop().unwrap_or(Buffer::empty());
-                            dist_to_workers.send((buffer, socket, recv_tok))
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 fn run_bad_worker(
     from_dist: servers2::spmc::Receiver<(Buffer, TcpStream, mio::Token)>,
     to_dist: mio::channel::Sender<(Buffer, TcpStream, mio::Token)>
@@ -652,7 +750,7 @@ impl Server {
             mio::Token(0),
             mio::Ready::readable(),
             mio::PollOpt::level()).unwrap();
-        let mut events = mio::Events::with_capacity(127);
+        let mut events = mio::Events::with_capacity(1024);
         loop {
             poll.poll(&mut events, None).unwrap();
             for event in events.iter() {
@@ -834,6 +932,7 @@ impl PerClient {
                 (false, false) if needs_write => mio::Ready::writable(),
                 (false, false) => mio::Ready::readable(),
             };
+            //FIXME  no reregi
             poll.reregister(
                 &self.stream,
                 mio::Token(0),
@@ -858,15 +957,19 @@ impl PerClient {
             self.buffer.entry_mut().kind = EntryKind::ReadData;
         }
         else {
-            let packet = self.buffer.entry_mut();
-            let (old_id, old_loc) =  (packet.id, packet.locs()[0]);
-            let chain: order = old_loc.0;
-            *packet = EntryContents::Data(&(), &[(chain, entry::from(10000000))]).clone_entry();
-            packet.id = old_id;
-            packet.kind = EntryKind::NoValue;
-            unsafe {
-                packet.as_data_entry_mut().flex.loc = old_loc;
+            let (old_id, old_loc) =  {
+                let packet = self.buffer.entry_mut();
+                (packet.id, packet.locs()[0])
+            };
+            {
+                let chain: order = old_loc.0;
+                let e = self.buffer.fill_from_entry_contents(
+                    EntryContents::Data(&(), &[OrderIndex(chain, 1000000.into())]));
+                e.id = old_id;
+                e.kind = EntryKind::NoValue;
+                e.locs_mut()[0] = old_loc;
             }
+            self.buffer.ensure_len();
         }
         self.is_reading = false;
         self.buffer.ensure_capacity(40);
@@ -874,11 +977,12 @@ impl PerClient {
     }
 
     fn write_packet(&mut self) -> (bool, bool) {
-        //TODO let len = self.buffer.entry().entry_size();
-        let len = 40;
+        //let len = self.buffer.entry_size();
+        //let len = 40;
         //println!("SERVER writing {:?}", self.buffer.entry().locs()[0]);
-        self.bytes_written += self.stream.write(&self.buffer[self.bytes_written..len]).unwrap();
-        if self.bytes_written == len {
+        let e = self.buffer.entry_slice();
+        self.bytes_written += self.stream.write(&e[self.bytes_written..]).unwrap();
+        if self.bytes_written == e.len() {
             //println!("SERVER finished write {:?}", self.buffer.entry().locs()[0]);
             self.bytes_written = 0;
             self.bytes_read = 0;

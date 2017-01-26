@@ -3,6 +3,7 @@ use prelude::*;
 
 use std::mem;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mio;
 use mio::deprecated::{EventLoop, Handler as MioHandler};
@@ -38,12 +39,15 @@ impl MioHandler for Server {
                     //TODO currently we assume we read an entire packet
                     if let Some(addr) = self.read_packet() {
                         trace!("SERVER finished read from {:?}", addr);
-                        let need_to_respond = self.log.handle_op(&mut *self.buffer);
+                        let _need_to_respond = self.log.handle_op(&mut *self.buffer);
                         //TODO
                         //if need_to_respond {
                         self.write_packet(&addr);
                         trace!("SERVER finished write to {:?}", addr);
                         //}
+                    }
+                    else {
+                        trace!("SERVER null read");
                     }
                 } else {
                     panic!("invalid event {:?}", events);
@@ -70,12 +74,14 @@ impl Server {
         })
     }
 
-    pub fn run(&mut self) -> ! {
+    pub fn run(&mut self, start_flag: &AtomicUsize) -> ! {
         let mut event_loop = EventLoop::new().unwrap();
         event_loop.register(&self.socket, SOCKET_TOKEN,
             mio::Ready::readable() | mio::Ready::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot())
             .expect("could not register server");
+        trace!("SERVER start.");
+        start_flag.fetch_add(1, Ordering::Release);
         let res = event_loop.run(self);
         panic!("Server stopped with {:?}", res)
     }

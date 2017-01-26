@@ -37,10 +37,13 @@ pub fn u64_to_order_index(u: u64) -> OrderIndex {
     let ent = u & 0x00000000FFFFFFFF;
     let ord: u32 = ord as u32;
     let ent: u32 = ent as u32;
-    (ord.into(), ent.into())
+    OrderIndex(ord.into(), ent.into())
 }
 
-pub type OrderIndex = (order, entry);
+//pub type OrderIndex = (order, entry);
+#[repr(C)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone, Hash, Default)]
+pub struct OrderIndex(pub order, pub entry);
 
 ///////////////////////////////////////
 ///////////////////////////////////////
@@ -104,6 +107,13 @@ pub mod EntryKind {
                 &EntryLayout::Lock => Lock,
                 &EntryLayout::Sentinel => Sentinel,
                 &EntryLayout::Read => Read,
+            }
+        }
+
+        pub fn is_write(&self) -> bool {
+            match self {
+                &EntryLayout::Data | &EntryLayout::Multiput | &EntryLayout::Sentinel => true,
+                _ => false,
             }
         }
     }
@@ -335,7 +345,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
     pub fn wrap_bytes(bytes: &[u8]) -> &Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
-            mem::transmute(&bytes[0])
+            mem::transmute(bytes.as_ptr())
         }
     }
 
@@ -343,7 +353,7 @@ impl<V: Storeable + ?Sized, F> Entry<V, F> {
     pub fn wrap_bytes_mut(bytes: &mut [u8]) -> &mut Self {
         //assert_eq!(bytes.len(), mem::size_of::<Self>());
         unsafe {
-            mem::transmute(&mut bytes[0])
+            mem::transmute(bytes.as_mut_ptr())
         }
     }
 
@@ -850,6 +860,13 @@ pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> &mut Entry<()> {
     Entry::<()>::wrap_bytes_mut(bytes)
 }
 
+pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
+    match Entry::<[u8]>::wrap_bytes(bytes).contents() {
+        EntryContents::Data(data, ..) | EntryContents::Multiput{data, ..} => data,
+        EntryContents::Sentinel(..) => &[],
+    }
+}
+
 ///////////////////////////////////////
 ///////////////////////////////////////
 ///////////////////////////////////////
@@ -859,7 +876,6 @@ pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> &mut Entry<()> {
 mod test {
 
     use super::*;
-    use super::EntryContents::*;
 
     use std::marker::PhantomData;
 
@@ -941,18 +957,18 @@ mod test {
         //test_((3334u64, 1231123), &[], &[]);
         //test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
 
-        test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
-        test_(3334, &[], &[(32.into(), 0.into()), (402.into(), 5.into())]);
-        test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
-        test_(3334u64, &[], &[(32.into(), 0.into()), (402.into(), 5.into())]);
-        test_(3334u64, &[(01.into(), 10.into())], &[(02.into(), 9.into()), (201.into(), 0.into()), (02.into(), 57.into()), (201.into(), 0xffffffff.into()), (02.into(), 0xdeadbeef.into()), (201.into(), 2.into()), (02.into(), 6.into()), (201.into(), 201.into())]);
-        test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
-        test_((3334u64, 1231123), &[], &[(32.into(), 0.into()), (402.into(), 5.into())]);
-        test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[(32.into(), 0.into()), (402.into(), 5.into())]);
+        test_(1231123, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_(3334, &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_(1231123u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_(3334u64, &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_(3334u64, &[OrderIndex(01.into(), 10.into())], &[OrderIndex(02.into(), 9.into()), OrderIndex(201.into(), 0.into()), OrderIndex(02.into(), 57.into()), OrderIndex(201.into(), 0xffffffff.into()), OrderIndex(02.into(), 0xdeadbeef.into()), OrderIndex(201.into(), 2.into()), OrderIndex(02.into(), 6.into()), OrderIndex(201.into(), 201.into())]);
+        test_(3334u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_((3334u64, 1231123), &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_((3334u64, 1231123), &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex], cols: &[OrderIndex]) {
             let id = Uuid::new_v4();
-            let ent1 = Multiput{
+            let ent1 = EntryContents::Multiput{
             	data: &data,
                 uuid: &id,
                 deps: &deps,
@@ -968,16 +984,16 @@ mod test {
     #[test]
     fn data_entry_convert() {
         use std::fmt::Debug;
-        test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())]);
+        test_(1231123, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())]);
         test_(3334, &[]);
-        test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())]);
+        test_(1231123u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())]);
         test_(3334u64, &[]);
-        test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())]);
+        test_(3334u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())]);
         test_((3334u64, 1231123), &[]);
-        test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())]);
+        test_((3334u64, 1231123), &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())]);
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex]) {
-            let ent1 = Data(&data, &deps);
+            let ent1 = EntryContents::Data(&data, &deps);
             let entr = Box::new(ent1.clone_entry());
             let ent2 = entr.contents();
             assert_eq!(ent1, ent2);

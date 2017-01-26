@@ -2,12 +2,13 @@
 use prelude::*;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, LinkedList};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use linked_hash_map::LinkedHashMap;
 
 //TODO there is exactly one chain per colour.
+#[allow(non_camel_case_types)]
 pub type color = u32;
 
 //TODO is the 'static really necessary?
@@ -37,7 +38,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
 
         for &chain in &interesting_colors {
             upcalls.entry(chain.into()).or_insert_with(|| { let b = read_buffer.clone();
-                Box::new(move |i, &(c, e), v| {
+                Box::new(move |i, &OrderIndex(c, e), v| {
                     unsafe {
                         //FIXME multiappends return multiple times (once per chain +1)
                         //      currently I'm deduplicating here, but really I should
@@ -113,7 +114,8 @@ where V: Storeable, S: Store<V>, H: Horizon {
         let mut snapshot = Vec::with_capacity(depends_on.len());
         for &color in &depends_on[..] {
             //TODO should be in parallel
-            snapshot.push((color.into(), self.take_snapshot_of(color).unwrap_or(0.into())));
+            snapshot.push(OrderIndex(color.into(),
+                self.take_snapshot_of(color).unwrap_or(0.into())));
         }
         snapshot
     }
@@ -157,7 +159,7 @@ where V: Storeable, S: Store<V>, H: Horizon {
             let snap: Vec<_> = self.interesting_colors.iter().cloned().collect();
             let tmp = snap.into_iter()
                 .map(|c| (c.into(), self.take_snapshot_of(c)))
-                .flat_map(|(c, oe)| oe.map(|e| (c,e)))
+                .flat_map(|(c, oe)| oe.map(|e| OrderIndex(c,e)))
                 .collect::<Vec<_>>();
             self.snapshot.extend(tmp);
         }

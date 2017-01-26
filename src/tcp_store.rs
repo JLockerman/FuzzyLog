@@ -74,6 +74,7 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         self.socket
             .write_all(&self.send_buffer.bytes()[..send_size])
             .expect("cannot send");
+        //self.socket.write_all(&[0u8; 6]).expect("cannot send");
         //self.socket.flush();
     }
 }
@@ -249,7 +250,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             let diff = sample_rtt - self.rtt;
                             self.dev = self.dev + (diff.abs() - self.dev) / 4;
                             self.rtt = self.rtt + (diff * 4 / 5);
-                            return Ok((0.into(), 0.into())); //TODO
+                            return Ok(OrderIndex(0.into(), 0.into())); //TODO
                         } else {
                             trace!("?? packet {:?}", self.receive_buffer);
                             continue 'receive;
@@ -271,9 +272,9 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         let request_id = Uuid::new_v4();
 
         let mchains: Vec<_> = chains.into_iter()
-            .map(|&c| (c, 0.into()))
-            .chain(::std::iter::once((0.into(), 0.into())))
-            .chain(depends_on.iter().map(|&c| (c, 0.into())))
+            .map(|&c| OrderIndex(c, 0.into()))
+            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
             .collect();
 
         *self.send_buffer = EntryContents::Multiput {
@@ -304,7 +305,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                             let diff = sample_rtt - self.rtt;
                             self.dev = self.dev + (diff.abs() - self.dev) / 4;
                             self.rtt = self.rtt + (diff * 4 / 5);
-                            return Ok((0.into(), 0.into())); //TODO
+                            return Ok(OrderIndex(0.into(), 0.into())); //TODO
                         } else {
                             trace!("?? packet {:?}", self.receive_buffer);
                             continue 'receive;
@@ -349,21 +350,10 @@ pub mod t_test {
     use prelude::*;
 
     use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT, Ordering};
-    use std::collections::HashMap;
-    use std::collections::hash_map::Entry::{Occupied, Vacant};
-    use std::io::{self, Read, Write};
     use std::mem;
-    use std::net::SocketAddr;
-    use std::os::unix::io::AsRawFd;
     use std::thread;
-    use std::rc::Rc;
 
-    use mio;
     use mio::deprecated::EventLoop;
-    use mio::tcp::*;
-
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::TcpNoDelay;
 
     use servers::tcp::Server;
 
@@ -385,7 +375,7 @@ pub mod t_test {
                 if let Ok(mut server) = server {
                     SERVERS_READY.fetch_add(1, Ordering::Release);
                     trace!("starting server");
-                    event_loop.run(&mut server);
+                    event_loop.run(&mut server).unwrap();
                 }
                 trace!("server already started");
                 return;

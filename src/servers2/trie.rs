@@ -1,40 +1,86 @@
 
 use std::{mem, ptr};
-use std::cell::RefCell;
 
 use std::marker::PhantomData;
 
 use storeables::Storeable;
 use packets::Entry as Packet;
+
+use servers2::byte_trie::Trie as Alloc;
+
 //XXX UGH this is going to be wildly unsafe...
 
 
 pub struct Trie<V> {
-    root: RootEdge<V>, // is an array
+    //TODO should this be boxed?
+    root: RootEdge<V>,
 }
 
 type RootEdge<V> = Box<RootTable<V>>;
 
+//TODO it would be nice to intersperse the shortcuts of the two tries
+//     but it is to annoying to code.
 struct RootTable<V> {
-    l3: Shortcut<ValEdge>,
+    l6: Shortcut<ValEdge>,
+    next_entry: u64,
+    alloc: AllocPtr,
+    l5: Shortcut<L6Edge>,
+    l4: Shortcut<L5Edge>,
+    l3: Shortcut<L4Edge>,
     l2: Shortcut<L3Edge>,
     l1: Shortcut<L2Edge>,
-    array: [L1Edge; 4],
-    next_entry: u32,
-    alloc: AllocPtr<u8>,
+    array: [L1Edge; 16],
     _pd: PhantomData<V>,
 }
 
+pub type ByteLoc = u64;
+pub type TrieIndex = u64;
+
+//Remaining Address => 60 Bits
 type L1Edge = Option<Box<[L2Edge; ARRAY_SIZE]>>;
+///Remaining Address => 50 Bits
 type L2Edge = Option<Box<[L3Edge; ARRAY_SIZE]>>;
-type L3Edge = Option<Box<[ValEdge; ARRAY_SIZE]>>;
+//Remaining Address => 40 Bits
+type L3Edge = Option<Box<[L4Edge; ARRAY_SIZE]>>;
+//Remaining Address => 30 Bits
+type L4Edge = Option<Box<[L5Edge; ARRAY_SIZE]>>;
+//Remaining Address => 20 Bits
+type L5Edge = Option<Box<[L6Edge; ARRAY_SIZE]>>;
+//Remaining Address => 10 Bits
+type L6Edge = Option<Box<[ValEdge; ARRAY_SIZE]>>;
+//Remaining Address => 0 Bits
 type ValEdge = *const u8;
+
+/*
+after each level
+64 bits: 0xFFFFFFFFFFFFFFFF
+root 4b: 0x0FFFFFFFFFFFFFFF
+l1  10b: 0x0003FFFFFFFFFFFF
+l2  10b: 0x000000FFFFFFFFFF
+l3  10b: 0x000000003FFFFFFF
+l4  10b: 0x00000000000FFFFF
+l5  10b: 0x00000000000003FF
+l6  10b: 0x0000000000000000
+*/
+
+/*
+TODO if we have the last use 14b to index (16384Bytes) we don't need the root table...
+TODO we can probably do something more clever than byte addressing
+for alloc, last level uses last 13b: 0x1FFF
+51 bits: 0xFFFFFFFFFFFFFFFF
+root 1b: 0x7FFFFFFFFFFFFFFF
+l1  10b: 0x001FFFFFFFFFFFFF
+L2  10b: 0x000007FFFFFFFFFF
+L3  10b: 0x00000001FFFFFFFF
+L4  10b: 0x00000000007FFFFF
+L5  10b: 0x0000000000001FFF
+*/
 
 const LEVEL_BYTES: usize = 8192;
 const ARRAY_SIZE: usize = 8192 / 8;
-const MASK: u32 = ARRAY_SIZE as u32 - 1;
+const MASK: u64 = ARRAY_SIZE as u64 - 1;
 const SHIFT_LEN: u8 = 10;
-const ROOT_SHIFT: u8 = 30;
+const ROOT_SHIFT: u8 = 60;
 
 struct Shortcut<V>(*mut [V]);
 
@@ -70,46 +116,47 @@ impl<V> P<[V; ARRAY_SIZE]> {
     }
 }*/
 
-struct AllocPtr<V> {
-    ptr: *mut [V],
-    alloc_rem: usize, //should be ptrdiff_t?
+struct AllocPtr {
+    alloc: Alloc,
 }
 
-impl AllocPtr<u8> {
+impl AllocPtr {
 
+    #[allow(dead_code)]
     fn new() -> Self {
-        unsafe { mem::zeroed() }
+        AllocPtr { alloc: Alloc::new() }
     }
 
-    fn append<V>(&mut self, data: &Packet<V>) -> *mut u8
+    fn append<V>(&mut self, data: &Packet<V>) -> (*mut u8, ByteLoc)
     where V: Storeable {
         let bytes = data.bytes();
         let storage_size = bytes.len(); // FIXME
-        let append_to = self.prep_append(storage_size);
+        let (append_to, loc) = self.prep_append(storage_size);
         //safe do to: if self.alloc_rem < storage_size {..} at first line of fn prep_append
-        unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), append_to, storage_size);
-        }
-        append_to
+        append_to.copy_from_slice(bytes);
+        (append_to.as_mut_ptr(), loc)
     }
 
-    fn prep_append(&mut self, storage_size: usize) -> *mut u8 {
-        if self.alloc_rem < storage_size {
-            if storage_size > LEVEL_BYTES {
-                let mut storage = Vec::with_capacity(storage_size);
-                unsafe { storage.set_len(storage_size) };
-                return &mut unsafe { (*Box::into_raw(storage.into_boxed_slice()))[0] }
-            }
-            self.ptr = unsafe { Box::into_raw(Box::new([0; LEVEL_BYTES])) };
-            //TODO
-            self.alloc_rem = LEVEL_BYTES;
+    fn prep_append(&mut self, storage_size: usize) -> (&mut [u8], ByteLoc) {
+        if storage_size <= LEVEL_BYTES / 2 {
+                self.alloc.append(storage_size)
         }
-        let (append_to, rem) = unsafe {&mut *self.ptr}.split_at_mut(storage_size);
-        self.ptr = rem;
-        let append_to = &mut (*append_to)[0];
-        //TODO storage_size * mem::size_of::<V>()?
-        self.alloc_rem -= storage_size;
-        append_to
+        else {
+            let mut storage = Vec::with_capacity(storage_size);
+            let ptr = unsafe {
+                storage.set_len(storage_size);
+                &mut *Box::into_raw(storage.into_boxed_slice())
+            };
+            (ptr, ::std::u64::MAX)
+        }
+    }
+
+    unsafe fn alloc_at(&mut self, start: ByteLoc, size: usize) -> *mut u8 {
+        self.alloc.append_at(start, size).as_mut_ptr()
+    }
+
+    unsafe fn get_mut(&mut self, loc: ByteLoc, size: usize) -> *mut u8 {
+        self.alloc.get_mut(loc, size).unwrap().as_mut_ptr()
     }
 }
 
@@ -126,23 +173,54 @@ macro_rules! index {
     };
 }
 
+macro_rules! index_mut {
+    ($array:ident, $k:expr, $depth:expr) => {
+        {
+            let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            assert!(index < ARRAY_SIZE, "index: {}", index);
+            match *$array {
+                None => return None,
+                Some(ref mut ptr) => &mut (**ptr)[index],
+            }
+        }
+    };
+}
+
 macro_rules! insert {
     ($array:ident, $k:expr, $depth:expr) => {
         {
             let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
-            assert!(index < ARRAY_SIZE);
-            let l = &mut match *$array {
-                Some(ref mut ptr) => &mut **ptr,
+            assert!(index < ARRAY_SIZE, "index: {}", index);
+            match *$array {
+                Some(ref mut ptr) => &mut (**ptr)[index],
                 ref mut slot => {
-                    //*slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
-                    *slot = Some(P::new(alloc_seg() as *mut _));
-                    &mut **slot.as_mut().unwrap()
+                    *slot = Some(alloc_seg());
+                    &mut slot.as_mut().unwrap()[index]
                 }
-            }[index];
-            l
+            }
         }
     };
 }
+
+//
+// macro_rules! insert {
+    // ($array:ident, $k:expr, $depth:expr) => {
+        // {
+            // let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            // assert!(index < ARRAY_SIZE);
+            // let l = &mut match *$array {
+                // Some(ref mut ptr) => &mut **ptr,
+                // ref mut slot => {
+                //    *slot = Some(Unique::new(Box::into_raw(Box::new(mem::zeroed()))));
+                    // *slot = Some(P::new(alloc_seg() as *mut _));
+                    // &mut **slot.as_mut().unwrap()
+                // }
+            // }[index];
+            // l
+        // }
+    // };
+// }
+
 
 macro_rules! entry {
     ($array:ident, $k:expr, $depth:expr, $constructor:ident) => {
@@ -159,13 +237,6 @@ macro_rules! entry {
     };
 }
 
-#[repr(C)]
-pub struct entry_pointer_and_index {
-    pub entry: *mut *mut u8,
-    pub ptr: *mut u8,
-    pub index: u32,
-}
-
 //TODO wildly unsafe
 #[must_use]
 #[repr(C)]
@@ -173,6 +244,7 @@ pub struct AppendSlot<V> {
     trie_entry: *mut *const u8,
     data_ptr: *mut u8,
     data_size: usize,
+    storage_loc: ByteLoc,
     _pd: PhantomData<*mut V>,
 }
 
@@ -187,7 +259,7 @@ where V: Storeable {
         let bytes = data.bytes();
         let storage_size = bytes.len();
         assert_eq!(data_size, storage_size);
-        let wrote = unsafe {
+        let wrote = {
             ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, storage_size);
             let data_ptr = data_ptr as *mut Packet<V>;
             data_ptr.as_mut().unwrap()
@@ -206,7 +278,7 @@ where V: Storeable {
         let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
         let bytes = data.bytes();
         assert!(bytes.len() >= data_size);
-        let wrote = unsafe {
+        let wrote = {
             ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, data_size);
             let data_ptr = data_ptr as *mut Packet<V>;
             let wrote = data_ptr.as_mut().unwrap();
@@ -220,67 +292,202 @@ where V: Storeable {
         (*trie_entry).store(data_ptr, Ordering::Release);
         wrote
     }
+
+    pub fn loc(&self) -> ByteLoc {
+        self.storage_loc
+    }
 }
 
 impl<V> Trie<Packet<V>>
 where V: Storeable {
     pub fn new() -> Self {
         unsafe {
-            Trie { root: Box::new(mem::zeroed()) }
+            //FIXME gratuitously unsafe
+            let mut t = Trie { root: Box::new(mem::zeroed()) };
+            ::std::ptr::write(&mut t.root.alloc, AllocPtr::new());
+            t
         }
     }
 
-    pub fn append(&mut self, data: &Packet<V>) -> u32 {
+    pub fn append(&mut self, data: &Packet<V>) -> TrieIndex {
         self._append(data).0
     }
 
-    fn _append(&mut self, data: &Packet<V>) -> (u32, &mut u8) {
-        let val_ptr = self.root.alloc.append(data);
+    fn _append(&mut self, data: &Packet<V>) -> (TrieIndex, &mut u8) {
+        let (val_ptr, _) = self.root.alloc.append(data);
         let (entry, _) = unsafe { self.prep_append(val_ptr) };
         (entry, unsafe {val_ptr.as_mut().unwrap()})
     }
 
-    pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet<V>> {
-        let val_ptr: *mut u8 = self.root.alloc.prep_append(size);
-        let (index, trie_entry) = self.prep_append(ptr::null());
-        AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
-            _pd: Default::default()}
+    pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
+    -> AppendSlot<Packet<V>> {
+        use std::cmp::Ordering::*;
+        match key.cmp(&self.root.next_entry) {
+            Equal => self.partial_append(storage_size),
+            Less => self.get_append_slot(key, storage_start, storage_size),
+            Greater => {
+                //TODO
+                let trie_entry: *mut *const u8;
+                loop {
+                    let (index, tentry) = self.prep_append(ptr::null());
+                    if index == key {
+                        trie_entry = tentry;
+                        break
+                    }
+                }
+                let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
+                AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: storage_size, storage_loc: storage_start,
+                    _pd: Default::default()}
+            }
+        }
     }
 
-    unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (u32, &mut *const u8) {
+    pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet<V>> {
+        let (val_ptr, loc): (*mut u8, ByteLoc) = {
+            let (val_ptr, loc) = self.root.alloc.prep_append(size);
+            (val_ptr.as_mut_ptr(), loc)
+        };
+        let (_index, trie_entry) = self.prep_append(ptr::null());
+        AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
+            storage_loc: loc, _pd: Default::default()}
+    }
+
+    #[cfg(FALSE)]
+    pub unsafe fn append_at_with_storage(
+        &mut self,
+        key: TrieIndex,
+        //TODO what type?
+        storage: *mut [u8],
+    ) -> AppendSlot<Packet<V>> {
+        let trie_entry = self.prep_append_at(key, ptr::null());
+        let size = (*storage).len();
+        let storage = (*storage).as_mut_ptr();
+        AppendSlot {
+            trie_entry: trie_entry,
+            data_ptr: storage,
+            data_size: storage_size,
+            _pd: PhantomData
+        }
+    }
+
+    pub unsafe fn prep_append_at(&mut self, key: TrieIndex, val_ptr: *const u8) -> *mut *const u8 {
+        use std::cmp::Ordering::*;
+        match key.cmp(&self.root.next_entry) {
+            Equal => self.prep_append(val_ptr).1,
+            Less => self.get_entry_at(key).unwrap(),
+            Greater => {
+                //TODO
+                let trie_entry: *mut *const u8;
+                loop {
+                    let (index, tentry) = self.prep_append(ptr::null());
+                    if index == key {
+                        trie_entry = tentry;
+                        break
+                    }
+                }
+                trie_entry
+            }
+        }
+    }
+
+    pub unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (TrieIndex, &mut *const u8) {
         let root: &mut RootTable<_> =&mut *self.root;
         let next_entry = root.next_entry;
-        if next_entry & 0x3FFFFFFF == 0 {
+        //if we're out of address space there's nothing we can do...
+        debug_assert!(next_entry != 0xFFFFFFFFFFFFFFFF);
+        if next_entry & 0x0FFFFFFFFFFFFFFF == 0 {
             debug_assert!(root.l1.cannot_append());
             // new l2
             let index = (next_entry >> ROOT_SHIFT) & MASK;
             assert!(index < 4);
             let loc = &mut root.array[index as usize];
-            *loc = unsafe { Some(alloc_seg()) };
-            root.l1 = unsafe {Shortcut::new(&mut loc.as_mut().unwrap()[..])};
+            *loc = Some(alloc_seg());
+            root.l1 = Shortcut::new(&mut loc.as_mut().unwrap()[..]);
         }
-        if next_entry & 0xfffff == 0 {
+        if next_entry & 0x0003FFFFFFFFFFFF == 0 {
             debug_assert!(root.l2.cannot_append());
             // new l3
-            let new_chunk = root.l1.append(unsafe { Some(alloc_seg()) });
-            root.l2 = unsafe {Shortcut::new(&mut new_chunk.as_mut().unwrap()[..])};
+            let new_chunk = root.l1.append(Some(alloc_seg()));
+            root.l2 = Shortcut::new(&mut new_chunk.as_mut().unwrap()[..]);
         }
-        if next_entry & 0x3ff == 0 {
+        if next_entry & 0x000000FFFFFFFFFF == 0 {
             debug_assert!(root.l3.cannot_append());
+            // new l4
+            let new_chunk = root.l2.append(Some(alloc_seg()));
+            root.l3 = Shortcut::new(&mut new_chunk.as_mut().unwrap()[..]);
+        }
+        if next_entry & 0x000000003FFFFFFF == 0 {
+            debug_assert!(root.l4.cannot_append());
+            // new l5
+            let new_chunk = root.l3.append(Some(alloc_seg()));
+            root.l4 = Shortcut::new(&mut new_chunk.as_mut().unwrap()[..]);
+        }
+        if next_entry & 0x00000000000FFFFF == 0 {
+            debug_assert!(root.l5.cannot_append());
+            // new l5
+            let new_chunk = root.l4.append(Some(alloc_seg()));
+            root.l5 = Shortcut::new(&mut new_chunk.as_mut().unwrap()[..]);
+        }
+        if next_entry & 0x00000000000003FF == 0 {
+            debug_assert!(root.l6.cannot_append());
             // new val
-            let new_chunk = root.l2.append(unsafe { Some(alloc_seg()) });
-            root.l3 = unsafe {Shortcut::new(&mut new_chunk.as_mut().unwrap()[..])};
+            let new_chunk = root.l5.append(Some(alloc_seg()));
+            root.l6 = Shortcut::new(&mut new_chunk.as_mut().unwrap()[..]);
         }
         // fill val
         root.next_entry += 1;
-        (next_entry, root.l3.append(val_ptr))
+        (next_entry, root.l6.append(val_ptr))
+    }
+
+    fn get_append_slot(&mut self, k: TrieIndex, storage_start: ByteLoc, size: usize)
+    -> AppendSlot<Packet<V>> {
+        unsafe {
+            let trie_entry: *mut *const u8 = self.get_entry_at(k).unwrap();
+            //TODO these should be interleaved...
+            let data_ptr = self.root.alloc.get_mut(storage_start, size);
+            AppendSlot { trie_entry: trie_entry, data_ptr: data_ptr, data_size: size,
+                storage_loc: storage_start, _pd: Default::default()}
+        }
+    }
+
+    #[inline]
+    fn get_entry_at(&mut self, k: TrieIndex) -> Option<&mut *const u8> {
+        let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
+        let l1 = &mut self.root.array[root_index];
+        let l2 = index_mut!(l1, k, 1);
+        let l3 = index_mut!(l2, k, 2);
+        let l4 = index_mut!(l3, k, 3);
+        let l5 = index_mut!(l4, k, 4);
+        let l6 = index_mut!(l5, k, 5);
+        Some(index_mut!(l6, k, 6))
+    }
+
+    #[cfg(FALSE)]
+    pub unsafe fn partial_insert(&mut self, k: u64, size: usize) -> AppendSlot<Packet<V>> {
+        let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
+        //assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
+        let l1 = &mut self.root.array[root_index];
+        let l2 = insert!(l1, k, 1);
+        let l3 = insert!(l2, k, 2);
+        let l4 = insert!(l3, k, 3);
+        let l5 = insert!(l4, k, 4);
+        let l6 = insert!(l5, k, 5);
+        let trie_entry = insert!(l6, k, 6);
+
+        let val_ptr: *mut u8 = unsafe {
+            let mut v = Vec::with_capacity(size);
+            v.set_len(size);
+            (*Box::into_raw(v.into_boxed_slice())).as_mut_ptr()
+        };
+        AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
+            _pd: Default::default()}
     }
 
     #[cfg(FALSE)]
     fn insert(&mut self, k: u32, v: &[u8]) -> Option<&u8> {
         unsafe {
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
+            //assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
             let l1 = &mut match self.root {
                 Some(ref mut ptr) => &mut ***ptr,
                 ref mut slot => {
@@ -313,7 +520,7 @@ where V: Storeable {
 }
 
 impl<V> Trie<V> {
-    pub fn len(&self) -> u32 {
+    pub fn len(&self) -> u64 {
         self.root.next_entry
     }
 }
@@ -321,17 +528,20 @@ impl<V> Trie<V> {
 impl<V> Trie<Packet<V>>
 where V: Storeable {
 
-    pub fn get(&self, k: u32) -> Option<&Packet<V>> {
+    pub fn get(&self, k: u64) -> Option<&Packet<V>> {
         unsafe {
             // let root = self.array;
             // let l1_ptr = index!(root, k, 1);
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
-            assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
+            //assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
             let l1 = &self.root.array[root_index];
             let l2 = index!(l1, k, 1);
             let l3 = index!(l2, k, 2);
-            let val_ptr = index!(l3, k, 3);
-            let val_ptr = unsafe { val_ptr.as_ref() };
+            let l4 = index!(l3, k, 3);
+            let l5 = index!(l4, k, 4);
+            let l6 = index!(l5, k, 5);
+            let val_ptr = index!(l6, k, 6);
+            let val_ptr = val_ptr.as_ref();
             match val_ptr {
                 None => None,
                 Some(v) => {
@@ -343,14 +553,15 @@ where V: Storeable {
         }
     }
 
+    #[allow(dead_code)]
     #[inline(always)]
-    pub fn entry<'s>(&'s mut self, k: u32) -> Entry<'s, V> {
+    pub fn entry<'s>(&'s mut self, k: u64) -> Entry<'s, V> {
         //FIXME specialize for the case when k in next
         if k == self.root.next_entry {
             return Entry::Vacant(VacantEntry(k, Vacancy::Next(self)));
         }
         unsafe {
-            let root_index = (((k & 0xffffffff) >> ROOT_SHIFT) & MASK) as usize;
+            let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
             assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
             //let l2 = match &mut self.root.array[root_index] {
             //    &mut Some(ref mut ptr) => &mut (**ptr)[root_index],
@@ -359,12 +570,15 @@ where V: Storeable {
             let l1 = &mut self.root.array[root_index];
             let l2 = entry!(l1, k, 1, L1);
             let l3 = entry!(l2, k, 2, L2);
-            let val_ptr = entry!(l3, k, 3, L3);
+            let l4 = entry!(l3, k, 3, L3);
+            let l5 = entry!(l4, k, 4, L4);
+            let l6 = entry!(l5, k, 5, L5);
+            let val_ptr = entry!(l6, k, 6, L6);
             if val_ptr.is_null() {
                 return Entry::Vacant(VacantEntry(k, Vacancy::Val(val_ptr)))
             }
             let val_ptr: *mut u8 = *val_ptr as *mut _;
-            let val = unsafe { Packet::wrap_mut(&mut *val_ptr) };
+            let val = Packet::wrap_mut(&mut *val_ptr);
             Entry::Occupied(OccupiedEntry(val))
         }
     }
@@ -376,10 +590,12 @@ pub enum Entry<'a, V: 'a> {
 }
 
 pub struct OccupiedEntry<'a, V: 'a>(&'a mut Packet<V>);
-pub struct VacantEntry<'a, V: 'a>(u32, Vacancy<'a, V>);
+pub struct VacantEntry<'a, V: 'a>(u64, Vacancy<'a, V>);
 
 impl<'a, V: 'a> Entry<'a, V>
 where V: Storeable {
+
+    #[allow(dead_code)]
     pub fn or_insert(self, default: Packet<V>) -> &'a mut Packet<V> {
         use self::Entry::*;
         match self {
@@ -388,43 +604,50 @@ where V: Storeable {
         }
     }
 
+    #[allow(dead_code)]
     pub fn or_insert_with<F: FnOnce() -> Packet<V>>(self, default: F) -> &'a mut Packet<V> {
         use self::Entry::*;
         match self {
             Occupied(e) => e.into_mut(),
             //FIXME
-            Vacant(e) => unsafe { e.insert_with(default, alloc_seg2()) },
+            Vacant(e) => e.insert_with(default, alloc_seg2()),
         }
     }
 
+    #[allow(dead_code)]
     pub fn insert_with<F: FnOnce() -> Packet<V>>(self, default: F) -> &'a mut Packet<V> {
         use self::Entry::*;
         match self {
             Occupied(e) => e.insert_with(default),
             //FIXME
-            Vacant(e) => unsafe { e.insert_with(default, alloc_seg2()) },
+            Vacant(e) => e.insert_with(default, alloc_seg2()),
         }
     }
 }
 
 impl<'a, V: 'a> OccupiedEntry<'a, V>
 where V: Storeable {
+    #[allow(dead_code)]
     pub fn get(&self) -> &Packet<V> {
         &*self.0
     }
 
+    #[allow(dead_code)]
     pub fn get_mut(&mut self) -> &mut Packet<V> {
         &mut *self.0
     }
 
+    #[allow(dead_code)]
     pub fn into_mut(self) -> &'a mut Packet<V> {
         self.0
     }
 
+    #[allow(dead_code)]
     pub fn insert(&mut self, v: Packet<V>) -> Packet<V> {
         mem::replace(self.0, v)
     }
 
+    #[allow(dead_code)]
     pub fn insert_with<F: FnOnce() -> Packet<V>>(self, default: F) -> &'a mut Packet<V> {
         *self.0 = default();
         self.into_mut()
@@ -436,6 +659,9 @@ enum Vacancy<'a, V: 'a> {
     L1(&'a mut L1Edge),
     L2(&'a mut L2Edge),
     L3(&'a mut L3Edge),
+    L4(&'a mut L4Edge),
+    L5(&'a mut L5Edge),
+    L6(&'a mut L6Edge),
     Val(&'a mut ValEdge),
 }
 
@@ -470,7 +696,25 @@ macro_rules! fill_entry {
     };
     ($array:ident, $k:expr, $v:expr, 3, $val_loc:ident) => {
         {
-            let slot: &mut ValEdge = fill_entry!($array, $k, 3, body);
+            let l: &mut L4Edge = fill_entry!($array, $k, 3, body);
+            fill_entry!(l, $k, $v, 4, $val_loc)
+        }
+    };
+    ($array:ident, $k:expr, $v:expr, 4, $val_loc:ident) => {
+        {
+            let l: &mut L5Edge = fill_entry!($array, $k, 4, body);
+            fill_entry!(l, $k, $v, 5, $val_loc)
+        }
+    };
+    ($array:ident, $k:expr, $v:expr, 5, $val_loc:ident) => {
+        {
+            let l: &mut L6Edge = fill_entry!($array, $k, 5, body);
+            fill_entry!(l, $k, $v, 6, $val_loc)
+        }
+    };
+    ($array:ident, $k:expr, $v:expr, 6, $val_loc:ident) => {
+        {
+            let slot: &mut ValEdge = fill_entry!($array, $k, 6, body);
             fill_entry!(val: $v, $val_loc, slot)
         }
     };
@@ -480,7 +724,7 @@ macro_rules! fill_entry {
             let size = val.entry_size();
             let val = &val as *const _ as *const u8;
             //FIXME bounds check
-            unsafe { ptr::copy_nonoverlapping(val, $val_loc, size) }
+            ptr::copy_nonoverlapping(val, $val_loc, size);
             let slot: &mut ValEdge = $slot;
             *slot = $val_loc;
             let slot: *mut Packet<_> = (*slot) as *mut _;
@@ -525,6 +769,9 @@ where V: Storeable {
                 L1(slot) => fill_entry!(slot, k, v, 1, val_loc),
                 L2(slot) => fill_entry!(slot, k, v, 2, val_loc),
                 L3(slot) => fill_entry!(slot, k, v, 3, val_loc),
+                L4(slot) => fill_entry!(slot, k, v, 4, val_loc),
+                L5(slot) => fill_entry!(slot, k, v, 5, val_loc),
+                L6(slot) => fill_entry!(slot, k, v, 6, val_loc),
                 Next(root) => {
                     let val = root._append(&v()).1;
                     Packet::wrap_mut(val)
@@ -533,8 +780,9 @@ where V: Storeable {
         }
     }
 
+    #[allow(dead_code)]
     pub fn insert(self, v: Packet<V>) -> &'a mut Packet<V> {
-        unsafe { self.insert_with(|| v, alloc_seg2()) }
+        self.insert_with(|| v, alloc_seg2())
     }
 }
 
@@ -550,15 +798,14 @@ fn alloc_seg2() -> *mut u8 {
     unsafe { &mut (*b)[0] }
 }
 
+#[cfg(test)]
 pub mod test {
 
     use super::*;
 
     use packets::EntryContents::Data;
 
-    use std::mem;
-
-    use packets::Entry as Packet;
+    use packets::{Entry as Packet, OrderIndex};
 
     #[test]
     pub fn empty() {
@@ -572,22 +819,49 @@ pub mod test {
 
     #[test]
     pub fn append() {
-        let mut p = Data(&0, &[(5.into(), 6.into())]).clone_entry();
+        let mut p = Data(&0, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            unsafe { Data(&i, &[(5.into(), (i as u32).into())]).fill_entry(&mut p) }
-            assert_eq!(m.append(&p), i as u32);
+            unsafe { Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p) }
+            assert_eq!(m.append(&p), i as u64);
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
 
             for j in 0..i + 1 {
-                let r = m.get(j as u32);
+                let r = m.get(j as u64);
                 assert_eq!(r.map(|e| e.contents()),
-                    Some(Data(&j, &[(5.into(), (j as u32).into())])));
+                    Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
             }
 
-            for j in i + 1..1001 {
-                let r = m.get(j as u32);
+            for j in i + 1..255 {
+                let r = m.get(j as u64);
+                assert_eq!(r, None);
+            }
+        }
+    }
+
+    #[test]
+    pub fn insert() {
+        let mut p = Data(&0, &[OrderIndex(7.into(), 11.into())]).clone_entry();
+        let mut m = Trie::new();
+        for i in 0..255u8 {
+            unsafe { Data(&i, &[OrderIndex(7.into(), (i as u32).into())]).fill_entry(&mut p) }
+            unsafe {
+                let size = p.entry_size();
+                let slot = m.partial_append_at(i as u64, i as u64 * size as u64, size);
+                slot.finish_append(&p);
+            }
+            // println!("{:#?}", m);
+            // assert_eq!(m.get(&i).unwrap(), &i);
+
+            for j in 0..i + 1 {
+                let r = m.get(j as u64);
+                assert_eq!(r.map(|e| e.contents()),
+                    Some(Data(&j, &[OrderIndex(7.into(), (j as u32).into())])));
+            }
+
+            for j in i + 1..255 {
+                let r = m.get(j as u64);
                 assert_eq!(r, None);
             }
         }
@@ -609,7 +883,7 @@ pub mod test {
 
     #[test]
     pub fn multi_part_insert() {
-        let mut p = Data(&32i64, &[(5.into(), 6.into())]).clone_entry();
+        let mut p = Data(&32i64, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         unsafe {
             let mut t = Trie::new();
             assert!(t.get(0).is_none());
@@ -629,26 +903,69 @@ pub mod test {
             slot1.finish_append(&p);
             assert!(t.get(0).is_none());
             assert_eq!(t.get(1).map(|e| e.contents()),
-                Some(Data(&32i64, &[(5.into(), 6.into())])));
+                Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&1, &[(5.into(), (7 as u32).into())]).fill_entry(&mut p);
+            Data(&1, &[OrderIndex(5.into(), (7 as u32).into())]).fill_entry(&mut p);
             slot0.finish_append(&p);
             assert_eq!(t.get(0).map(|e| e.contents()),
-                Some(Data(&1, &[(5.into(), (7 as u32).into())])));
+                Some(Data(&1, &[OrderIndex(5.into(), (7 as u32).into())])));
             assert_eq!(t.get(1).map(|e| e.contents()),
-                Some(Data(&32i64, &[(5.into(), 6.into())])));
+                Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&-7, &[(5.into(), (92 as u32).into())]).fill_entry(&mut p);
+            Data(&-7, &[OrderIndex(5.into(), (92 as u32).into())]).fill_entry(&mut p);
             slot2.finish_append(&p);
             assert_eq!(t.get(0).map(|e| e.contents()),
-                Some(Data(&1, &[(5.into(), (7 as u32).into())])));
+                Some(Data(&1, &[OrderIndex(5.into(), (7 as u32).into())])));
             assert_eq!(t.get(1).map(|e| e.contents()),
-                Some(Data(&32i64, &[(5.into(), 6.into())])));
+                Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert_eq!(t.get(2).map(|e| e.contents()),
-                Some(Data(&-7, &[(5.into(), (92 as u32).into())])));
+                Some(Data(&-7, &[OrderIndex(5.into(), (92 as u32).into())])));
             assert_eq!(t.len(), 3);
+        }
+    }
+
+    #[test]
+    pub fn even_more_append() {
+        let mut p = Data(&32u64, &[OrderIndex(5.into(), 6.into())]).clone_entry();
+        let entry_size = p.entry_size();
+        let mut m = Trie::new();
+        for i in 0..0x18000u64 {
+            assert_eq!(m.len(), i);
+            unsafe { Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p) }
+            assert_eq!(m.append(&p), i);
+            //println!("{:#?}", m);
+            //println!("{:#?}", i);
+            if i > 0 {
+                assert_eq!(m.get(i - 1).map(|e| e.contents()),
+                    Some(Data(&(i - 1), &[OrderIndex(5.into(), ((i-1) as u32).into())])));
+            }
+            if i >= 3 {
+                assert_eq!(m.get(i - 3).map(|e| e.contents()),
+                    Some(Data(&(i - 3), &[OrderIndex(5.into(), ((i-3) as u32).into())])));
+            }
+            if i >= 1000 {
+                assert_eq!(m.get(i - 1000).map(|e| e.contents()),
+                    Some(Data(&(i - 1000), &[OrderIndex(5.into(), ((i-1000) as u32).into())])));
+            }
+            assert_eq!(m.get(i).map(|e| e.contents()),
+                Some(Data(&i, &[OrderIndex(5.into(), (i as u32).into())])));
+            assert_eq!(m.get(i + 1), None);
+            assert_eq!(m.len(), i + 1);
+        }
+
+        assert_eq!(m.len(), 0x18000u64);
+
+        for j in 0..0x18000u64 {
+            assert_eq!(m.get(j).map(|e| e.contents()),
+                Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
+        }
+
+        assert_eq!(m.len(), 0x18000u64);
+
+        for j in 0x18000..0x28000u64 {
+            assert_eq!(m.get(j), None);
         }
     }
 
@@ -679,7 +996,7 @@ pub mod test {
         #[test]
         pub fn even_more_append() {
             let mut m = Trie::new();
-            for i in 0..0x18000 {
+            for i in 0..0x18000u64 {
                 assert_eq!(m.append(&i), i);
                 //println!("{:#?}", m);
                 //println!("{:#?}", i);
@@ -696,12 +1013,12 @@ pub mod test {
                 assert_eq!(m.get(i + 1), None);
             }
 
-            for j in 0..0x18000 {
+            for j in 0..0x18000u64 {
                 let r = m.get(j);
                 assert_eq!(r, Some(&j));
             }
 
-            for j in 0x18000..0x28000 {
+            for j in 0x18000..0x28000u64 {
                 let r = m.get(j);
                 assert_eq!(r, None);
             }
