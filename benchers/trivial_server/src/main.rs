@@ -419,26 +419,28 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
             let mut stream = &*stream;
 
             let mut buffer = vec![];
-            {
+            let mut big_buffer = {
                 let _ = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
-            }
+                let bytes_to_read = buffer.len() * 1_000_000;
+                vec![0u8; bytes_to_read]
+            };
 
             WRITERS_READY.fetch_add(1, Ordering::SeqCst);
             while WRITERS_READY.load(Ordering::SeqCst) < num_clients * 2 {
                 thread::yield_now()
             }
 
-            for _ in 0..1000000u32 {
-                let _ = stream.read_exact(&mut buffer);
+            //for _ in 0..1000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
                 //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
                 //    OrderIndex(color, entry::from(i) + 1));
-            }
+            //}
             let write_start = Instant::now();
-            for _ in 1000000u32..2000000u32 {
-                let _ = stream.read_exact(&mut buffer);
+            //for _ in 1000000u32..2000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
                 //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
                 //    OrderIndex(color, entry::from(i) + 1));
-            }
+            //}
             let write_time = write_start.elapsed();
             for i in 2000000u32..3000000u32 {
                 let _ = stream.read_exact(&mut buffer);
@@ -453,17 +455,17 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
                 thread::yield_now()
             }
 
-            for _ in 0..1000000u32 {
-                let _ = stream.read_exact(&mut buffer);
+            //for _ in 0..1000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
                 //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
                 //    OrderIndex(color, entry::from(i) + 1));
-            }
+            //}
             let read_start = Instant::now();
-            for _ in 0..1000000u32 {
-                let _ = stream.read_exact(&mut buffer);
+            //for _ in 0..1000000u32 {
+                let _ = stream.read_exact(&mut big_buffer);
                 //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
                 //    OrderIndex(color, entry::from(i) + 1));
-            }
+            //}
             let read_time = read_start.elapsed();
             for i in 0..1000000u32 {
                 let _ = stream.read_exact(&mut buffer);

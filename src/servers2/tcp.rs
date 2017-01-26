@@ -215,21 +215,44 @@ pub fn run_with_replication(
         trace!("SERVER {} connected upstream.", this_server_num);
     }
 
-    /*TODO
-    let num_downstream = negotiate_num_downstreams(&admin_socket);
-    let num_upstream = negotiate_num_downstreams(&admin_socket);
-    handle connections...
-    let donwstream: Vec<_> = ...
-    let upstream: Vec<_> = ...
-    */
+    let num_downstream = negotiate_num_downstreams(&mut downstream_admin_socket, num_workers as u16);
+    let num_upstream = negotiate_num_upstreams(&mut upstream_admin_socket, num_workers as u16);
+    let mut downstream = Vec::with_capacity(num_downstream);
+    let mut upstream = Vec::with_capacity(num_upstream);
+    while downstream.len() + 1 < num_downstream {
+        poll.poll(&mut events, None).unwrap();
+        for event in events.iter() {
+            match event.token() {
+                ACCEPT => {
+                    match acceptor.accept() {
+                        Err(e) => trace!("error {}", e),
+                        Ok((socket, addr)) => if Some(addr.ip()) == next_server_ip {
+                            trace!("SERVER {} add downstream.", this_server_num);
+                            let _ = socket.set_keepalive_ms(Some(1000));
+                            //TODO benchmark
+                            let _ = socket.set_nodelay(true);
+                            downstream.push(socket)
+                        } else {
+                            trace!("SERVER got other connection {:?}", addr);
+                            other_sockets.push((socket, addr))
+                        }
+                    }
+                }
+                _ => unreachable!()
+            }
+        }
+    }
 
-    let mut downstream = vec![]; // TODO Vec::with_capacity(num_downstream);
-    let mut upstream = vec![]; // TODO Vec::with_capacity(num_ipstream);
+    if let Some(ref ip) = prev_server_ip {
+        for _ in 1..num_upstream {
+            upstream.push(TcpStream::connect(ip).expect("cannot connect upstream"))
+        }
+    }
 
     downstream_admin_socket.take().map(|s| downstream.push(s));
     upstream_admin_socket.take().map(|s| upstream.push(s));
-    let num_downstream = downstream.len();
-    let num_upstream = upstream.len();
+    assert_eq!(downstream.len(), num_downstream);
+    assert_eq!(upstream.len(), num_upstream);
     let (log_to_dist, dist_from_log) = spmc::channel();
 
     trace!("SERVER {} {} up, {} down.", this_server_num, num_upstream, num_downstream);
@@ -404,7 +427,7 @@ pub fn run_with_replication(
     }
 }
 
-fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> u16 {
+fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> usize {
     use std::cmp::min;
     if let Some(ref mut socket) = socket.as_mut() {
         let mut num_other_threads = [0u8; 2];
@@ -412,14 +435,16 @@ fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -
         let num_other_threads = unsafe { mem::transmute(num_other_threads) };
         let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
         blocking_write(socket, &to_write).expect("downstream failed");
-        min(num_other_threads, num_workers)
+        trace!("SERVER down workers: {}, other's workers {}.", num_workers, num_other_threads);
+        min(num_other_threads, num_workers) as usize
     }
     else {
+        trace!("SERVER no downstream.");
         0
     }
 }
 
-fn negotiate_num_upstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> u16 {
+fn negotiate_num_upstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> usize {
     use std::cmp::min;
     if let Some(ref mut socket) = socket.as_mut() {
         let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
@@ -427,7 +452,8 @@ fn negotiate_num_upstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> 
         let mut num_other_threads = [0u8; 2];
         blocking_read(socket, &mut num_other_threads).expect("upstream failed");
         let num_other_threads = unsafe { mem::transmute(num_other_threads) };
-        min(num_other_threads, num_workers)
+        trace!("SERVER up workers: {}, other's workers {}.", num_workers, num_other_threads);
+        min(num_other_threads, num_workers) as usize
     }
     else {
         0

@@ -2056,7 +2056,7 @@ mod tests {
                                 trace!("starting replica server {}", i);
                                 ::servers2::tcp::run_with_replication(acceptor, 0, 1,
                                     prev_server, next_server,
-                                    1, &SERVERS_READY)
+                                    2, &SERVERS_READY)
                             });
                         }
                         else {
