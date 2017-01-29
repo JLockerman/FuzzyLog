@@ -9,7 +9,7 @@ use std::rc::Rc;
 use packets::*;
 use buffer::Buffer;
 
-use hash::HashMap;
+use hash::{HashMap, HashSet};
 use socket_addr::Ipv4SocketAddr;
 
 use mio;
@@ -53,9 +53,9 @@ pub struct PerServer<Socket> {
 #[derive(Debug)]
 enum WriteState {
     SingleServer(Vec<u8>),
-    ToLockServer(Vec<u8>, Vec<u8>),
-    MultiServer(Rc<RefCell<Vec<u8>>>, Rc<HashMap<usize, u64>>),
-    UnlockServer(Rc<RefCell<Vec<u8>>>, u64),
+    ToLockServer(Vec<u8>),
+    MultiServer(Rc<RefCell<Vec<u8>>>, Rc<RefCell<HashSet<usize>>>, Rc<Box<[OrderIndex]>>),
+    UnlockServer(Rc<RefCell<Vec<u8>>>),
 }
 
 struct UdpConnection {
@@ -306,7 +306,7 @@ where PerServer<S>: Connected,
 
     fn handle_new_requests_from_client(&mut self) {
         use std::sync::mpsc::TryRecvError;
-        trace!("CLIENT got new req");
+        //trace!("CLIENT got new req");
         let msg = match self.from_client.try_recv() {
             Ok(msg) => msg,
             Err(TryRecvError::Empty) => return,
@@ -356,17 +356,11 @@ where PerServer<S>: Connected,
         }
     }
 
-    fn add_get_lock_nums(&mut self, mut msg: Vec<u8>) {
-        Entry::<()>::wrap_bytes_mut(&mut msg).kind.insert(EntryKind::TakeLock);
-        let lock_chains = self.get_lock_server_chains_for(&msg);
-        //TODO we shouldn't just alloc this...
-        let lock_req = EntryContents::Multiput {
-               data: &msg, uuid: &Uuid::new_v4(), columns: &lock_chains, deps: &[],
-        }.clone_bytes();
+    fn add_get_lock_nums(&mut self, msg: Vec<u8>) {
         let lock_server = self.lock_token();
         //let per_server = self.server_for_token_mut(lock_server);
         let per_server = &mut self.servers[lock_server.0];
-        per_server.add_get_lock_nums(lock_req, msg);
+        per_server.add_get_lock_nums(msg);
         if !per_server.got_new_message {
             per_server.got_new_message = true;
             self.awake_io.push_back(lock_server.0)
@@ -435,6 +429,7 @@ where PerServer<S>: Connected,
     fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize,
         packet: &Buffer) -> bool {
         let id = packet.entry().id;
+        let unreplicated = self.is_unreplicated;
         trace!("CLIENT handle completed write");
         //TODO for multistage writes check if we need to do more work...
         if let Some(v) = self.sent_writes.remove(&id) {
@@ -442,21 +437,41 @@ where PerServer<S>: Connected,
                 //if lock
                 //    for server in v.servers()
                 //         server.send_lock+data
-                WriteState::ToLockServer(_, msg) => {
+                WriteState::ToLockServer(mut msg) => {
                     trace!("CLIENT finished lock");
-                    //TODO should I bother keeping around lockbuf for resends?
                     assert_eq!(token, self.lock_token());
-                    let lock_nums = packet.get_lock_nums();
-                    self.add_multis(msg, lock_nums);
+                    {
+                        let e = Entry::<()>::wrap_bytes_mut(&mut msg);
+                        e.kind.insert(EntryKind::TakeLock);
+                        let msg_locs = e.locs_mut();
+                        let lock_locs = &packet.entry().locs()[..msg_locs.len()];
+                        for i in 0..msg_locs.len() {
+                            debug_assert_eq!(msg_locs[i].0, lock_locs[i].0);
+                            msg_locs[i] = lock_locs[i];
+                            debug_assert!(
+                                if msg_locs[i].0 != order::from(0) {
+                                    msg_locs[i].1 != entry::from(0)
+                                } else {
+                                    msg_locs[i].1 == entry::from(0)
+                                }
+                            );
+                        }
+                    }
+                    self.add_multis(msg);
                     return false
                 }
-                WriteState::MultiServer(buf, lock_nums) => {
+                WriteState::MultiServer(buf, remaining_servers, locks) => {
                     assert!(token != self.lock_token());
                     trace!("CLIENT finished multi section");
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
-                        let finished_writes = fill_locs(&mut b, packet.entry(),
-                            token, num_chain_servers);
+                        let filled = fill_locs(&mut b, packet.entry(),
+                            token, self.num_chain_servers, unreplicated);
+                        let mut r = remaining_servers.borrow_mut();
+                        if r.remove(&token.0) {
+                            assert!(filled > 0, "no fill for {:?}", token);
+                        }
+                        let finished_writes = r.is_empty();
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
@@ -466,7 +481,12 @@ where PerServer<S>: Connected,
                     };
                     match ready_to_unlock {
                         Some(locs) => {
-                            self.add_unlocks(buf, lock_nums);
+                            {
+                                Entry::<()>::wrap_bytes_mut(&mut buf.borrow_mut())
+                                    .locs_mut()
+                                    .copy_from_slice(&locks)
+                            }
+                            self.add_unlocks(buf);
                             trace!("CLIENT finished multi at {:?}", locs);
                             //TODO
                             self.client.on_finished_write(id, locs);
@@ -474,7 +494,7 @@ where PerServer<S>: Connected,
                         }
                         None => {
                             self.sent_writes.insert(id,
-                                WriteState::MultiServer(buf, lock_nums));
+                                WriteState::MultiServer(buf, remaining_servers, locks));
                             return false
                         }
                     }
@@ -482,7 +502,7 @@ where PerServer<S>: Connected,
                 WriteState::SingleServer(mut buf) => {
                     assert!(token != self.lock_token());
                     trace!("CLIENT finished single server");
-                    fill_locs(&mut buf, packet.entry(), token, num_chain_servers);
+                    fill_locs(&mut buf, packet.entry(), token, self.num_chain_servers, unreplicated);
                     let locs = packet.entry().locs().to_vec();
                     self.client.on_finished_write(id, locs);
                     return true
@@ -491,22 +511,20 @@ where PerServer<S>: Connected,
             };
 
             fn fill_locs(buf: &mut [u8], e: &Entry<()>,
-                server: Token, num_chain_servers: usize) -> bool {
+                server: Token, num_chain_servers: usize, unreplicated: bool) -> usize {
                 let locs = Entry::<()>::wrap_bytes_mut(buf).locs_mut();
-                let mut remaining = locs.len();
+                let mut filled = 0;
                 let fill_from = e.locs();
                 //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
                 for (i, &loc) in fill_from.into_iter().enumerate() {
-                    if locs[i].0 != 0.into()
-                        && write_server_for_chain(loc.0, num_chain_servers) == server.0 {//should be read_server_for_chain
+                    if locs[i].0 != order::from(0)
+                        && read_server_for_chain(loc.0, num_chain_servers, unreplicated) == server.0 {//should be read_server_for_chain
                         assert!(loc.1 != 0.into(), "zero index for {:?}", loc.0);
                         locs[i] = loc;
-                    }
-                    if locs[i] == OrderIndex(0.into(), 0.into()) || locs[i].1 != 0.into() {
-                        remaining -= 1;
+                        filled += 1;
                     }
                 }
-                remaining == 0
+                filled
             }
         }
         else {
@@ -558,34 +576,25 @@ where PerServer<S>: Connected,
         }
     }
 
-    fn add_unlocks(&mut self, mut buf: Rc<RefCell<Vec<u8>>>, lock_nums: Rc<HashMap<usize, u64>>) {
-        match Rc::get_mut(&mut buf) {
+    fn add_unlocks(&mut self, mut buf: Rc<RefCell<Vec<u8>>>) {
+        let servers = match Rc::get_mut(&mut buf) {
             None => unreachable!(),
             Some(mut buf) => {
                 let buf = buf.get_mut();
-                trace!("buf pre clear {:?}", buf);
-                buf.clear();
-                trace!("buf after clear {:?}", buf);
-                let lock = Lock {
-                    //TODO id?
-                    id: Uuid::nil(),
-                    _padding: unsafe { mem::zeroed() },
-                    kind: EntryKind::Lock,
-                    lock: 0,
-                };
-                //TODO we shouldn't just free this...
-                let lock = lock.bytes();
-                trace!("lock bytes {:?}", lock);
-                buf.extend_from_slice(lock);
-                trace!("buflock {:?}", buf);
+                let server = self.get_servers_for_multi(&buf);
+                let e = Entry::<()>::wrap_bytes_mut(buf);
+                e.kind.remove(EntryKind::Multiput);
+                e.kind.insert(EntryKind::Sentinel);
+                e.kind.insert(EntryKind::Unlock);
+                server
             }
-        }
-        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).kind.layout(), EntryLayout::Lock);
-        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).entry_size(), buf.borrow().len());
-        for (&server, &lock_num) in lock_nums.iter() {
-            trace!("CLIENT add unlock for {:?}", (server, lock_num));
+        };
+        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).kind.layout(), EntryLayout::Sentinel);
+        //assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).entry_size(), buf.borrow().len());
+        for server in servers {
+            trace!("CLIENT add unlock for {:?}", server);
             let per_server = &mut self.servers[server];
-            per_server.add_unlock(buf.clone(), lock_num);
+            per_server.add_unlock(buf.clone());
             if !per_server.got_new_message {
                 per_server.got_new_message = true;
                 self.awake_io.push_back(server)
@@ -593,13 +602,20 @@ where PerServer<S>: Connected,
         }
     }
 
-    fn add_multis(&mut self, msg: Vec<u8>, lock_nums: HashMap<usize, u64>) {
-        assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
-        let lock_nums = Rc::new(lock_nums);
+    fn add_multis(&mut self, msg: Vec<u8>) {
+        debug_assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
+        let locks = Rc::new(Entry::<()>::wrap_bytes(&msg).locs().to_vec().into_boxed_slice());
+        let servers = self.get_servers_for_multi(&msg);
+        let mut remaining_servers: HashSet<usize> = Default::default();
+        remaining_servers.reserve(servers.len());
+        for &writer in servers.iter() {
+            remaining_servers.insert(self.read_server_for_write_server(writer));
+        }
+        let remaining_servers = Rc::new(RefCell::new(remaining_servers));
         let msg = Rc::new(RefCell::new(msg));
-        for (&s, _) in lock_nums.iter() {
+        for s in servers {
             let per_server = &mut self.servers[s];
-            per_server.add_multi(msg.clone(), lock_nums.clone());
+            per_server.add_multi(msg.clone(), remaining_servers.clone(), locks.clone());
             if !per_server.got_new_message {
                 per_server.got_new_message = true;
                 self.awake_io.push_back(s)
@@ -623,31 +639,47 @@ where PerServer<S>: Connected,
         single
     }
 
-    fn get_lock_server_chains_for(&self, msg: &[u8]) -> Vec<OrderIndex> {
-        //assert is multi?
+    fn get_servers_for_multi(&self, msg: &[u8]) -> Vec<usize> {
+        debug_assert!(
+            Entry::<()>::wrap_bytes(msg).kind.layout() == EntryLayout::Multiput
+            || Entry::<()>::wrap_bytes(msg).kind.layout() == EntryLayout::Sentinel
+        );
         Entry::<()>::wrap_bytes(msg).locs()
-            .iter().cloned()
-            .filter(|&oi| oi != OrderIndex(0.into(), 0.into()))
+            .iter()
+            .filter(|&&oi| oi != OrderIndex(0.into(), 0.into()))
             .fold((0..self.num_chain_servers) //FIXME ?
                 .map(|_| false).collect::<Vec<_>>(),
-            |mut v, OrderIndex(o, _)| {
+            |mut v, &OrderIndex(o, _)| {
                 v[self.write_server_for_chain(o)] = true;
                 v
             }).into_iter()
             .enumerate()
             .filter_map(|(i, present)|
-                if present { Some(OrderIndex((i as u32 + 1).into(), 0.into())) }
+                if present { Some(i) }
                 else { None })
-            .collect::<Vec<OrderIndex>>()
+            .collect()
     }
 
     fn read_server_for_chain(&self, chain: order) -> usize {
-        if self.is_unreplicated {
+        let server = if self.is_unreplicated {
             write_server_for_chain(chain, self.num_chain_servers)
         }
         else {
-            read_server_for_chain(chain, self.num_chain_servers)
-        }
+            read_server_for_chain(chain, self.num_chain_servers, self.is_unreplicated)
+        };
+        debug_assert!(server < self.servers.len());
+        server
+    }
+
+    fn read_server_for_write_server(&self, write_server: usize) -> usize {
+        debug_assert!(write_server < self.servers.len());
+        let server = if self.is_unreplicated {
+            write_server
+        } else {
+            write_server + self.num_chain_servers
+        };
+        debug_assert!(server < self.servers.len());
+        server
     }
 
     fn write_server_for_chain(&self, chain: order) -> usize {
@@ -846,7 +878,7 @@ where PerServer<S>: Connected {
 
         match self.awaiting_send.pop_front() {
             None => None,
-            Some(MultiServer(to_send, lock_nums)) => {
+            Some(MultiServer(to_send, remaining_servers, locks)) => {
                 let finished = {
                     trace!("CLIENT PerServer {:?} multi", token);
                     let mut ts = to_send.borrow_mut();
@@ -856,9 +888,7 @@ where PerServer<S>: Connected {
                     assert!(kind.layout() == EntryLayout::Multiput
                         || kind.layout() == EntryLayout::Sentinel);
                     assert!(kind.contains(EntryKind::TakeLock));
-                    let lock_num = lock_nums.get(&token.0)
-                        .expect("sending unlock for non-locked server");
-                    let send_end = unsafe {
+                    let send_end = {
                         let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
                         {
                             let is_data = e.locs().into_iter()
@@ -876,8 +906,6 @@ where PerServer<S>: Connected {
                             kind.insert(EntryKind::TakeLock);
 
                         }
-                        e.as_multi_entry_mut().flex.lock = *lock_num;
-                        //TODO this is either vec.len, or sentinelsize
                         e.entry_size()
                     };
                     let kind = {
@@ -892,41 +920,35 @@ where PerServer<S>: Connected {
                     self.send_packet(&ts[..send_end])
                 };
                 if finished {
-                    Some(MultiServer(to_send, lock_nums))
+                    Some(MultiServer(to_send, remaining_servers, locks))
                 } else {
                     mem::replace(
                         &mut self.currently_sending,
-                        Some(MultiServer(to_send, lock_nums))
+                        Some(MultiServer(to_send, remaining_servers, locks))
                     );
                     return None
                 }
             }
-            Some(UnlockServer(to_send, lock_num)) => {
+            Some(UnlockServer(to_send)) => {
                 let finished = {
                     trace!("CLIENT PerServer {:?} unlock", token);
                     let mut ts = to_send.borrow_mut();
-                    let tslen = ts.len();
-                    unsafe {
-                        let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
-                        assert_eq!(e.kind.layout(), EntryLayout::Lock);
-                        e.as_multi_entry_mut().flex.lock = lock_num;
-                        assert_eq!(e.kind.layout(), EntryLayout::Lock);
-                        assert_eq!(e.entry_size(), tslen);
-                    }
-                    trace!("CLIENT willsend {:?}", &*ts);
-                    self.send_packet(&*ts)
+                    debug_assert_eq!(Entry::<()>::wrap_bytes_mut(&mut *ts).kind.layout(), EntryLayout::Sentinel);
+                    debug_assert!(Entry::<()>::wrap_bytes_mut(&mut *ts).kind.contains(EntryKind::Unlock));
+                    //trace!("CLIENT willsend {:?}", &*ts);
+                    self.send_packet(Entry::<()>::wrap_bytes(&ts).bytes())
                 };
                 if finished {
-                    Some(UnlockServer(to_send, lock_num))
+                    Some(UnlockServer(to_send))
                 } else {
                     mem::replace(
                         &mut self.currently_sending,
-                        Some(UnlockServer(to_send, lock_num))
+                        Some(UnlockServer(to_send))
                     );
                     return None
                 }
             }
-            Some(to_send @ ToLockServer(_, _)) | Some(to_send @ SingleServer(_)) => {
+            Some(to_send @ ToLockServer(_)) | Some(to_send @ SingleServer(_)) => {
                 trace!("CLIENT PerServer {:?} single", token);
                 {
                     let (l, _s) = to_send.with_packet(|p| {
@@ -936,7 +958,6 @@ where PerServer<S>: Connected {
                     assert!(l == EntryLayout::Data || l == EntryLayout::Multiput
                         || l == EntryLayout::Read)
                 }
-                //TODO multipart writes?
                 let finished = if to_send.is_read() {
                     to_send.with_packet(|p| self.send_packet(p))
                 }
@@ -959,17 +980,17 @@ where PerServer<S>: Connected {
         self.awaiting_send.push_back(WriteState::SingleServer(msg));
     }
 
-    fn add_multi(&mut self, msg: Rc<RefCell<Vec<u8>>>, lock_nums: Rc<HashMap<usize, u64>>) {
-        self.awaiting_send.push_back(WriteState::MultiServer(msg, lock_nums));
+    fn add_multi(&mut self, msg: Rc<RefCell<Vec<u8>>>, remaining_servers: Rc<RefCell<HashSet<usize>>>, locks: Rc<Box<[OrderIndex]>>) {
+        self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks));
     }
 
-    fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>, lock_num: u64) {
+    fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
         //unlike other reqs here we send the unlock first to minimize the contention window
-        self.awaiting_send.push_front(WriteState::UnlockServer(buffer, lock_num))
+        self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
     }
 
-    fn add_get_lock_nums(&mut self, lock_req: Vec<u8>, msg: Vec<u8>) {
-        self.awaiting_send.push_back(WriteState::ToLockServer(lock_req, msg))
+    fn add_get_lock_nums(&mut self, msg: Vec<u8>) {
+        self.awaiting_send.push_back(WriteState::ToLockServer(msg))
     }
 
     fn needs_to_write(&self) -> bool {
@@ -982,8 +1003,8 @@ impl WriteState {
     where F: for<'a> FnOnce(&'a [u8]) -> R {
         use self::WriteState::*;
         match self {
-            &SingleServer(ref buf) | &ToLockServer(ref buf, _) => f(&**buf),
-            &MultiServer(ref buf, _) | &UnlockServer(ref buf, _) => {
+            &SingleServer(ref buf) | &ToLockServer(ref buf) => f(&**buf),
+            &MultiServer(ref buf, ..) | &UnlockServer(ref buf) => {
                 let b = buf.borrow();
                 f(&*b)
             },
@@ -993,8 +1014,8 @@ impl WriteState {
     fn take(self) -> Vec<u8> {
         use self::WriteState::*;
         match self {
-            SingleServer(buf) | ToLockServer(buf, _) => buf,
-            MultiServer(buf, _) | UnlockServer(buf, _) =>
+            SingleServer(buf) | ToLockServer(buf) => buf,
+            MultiServer(buf, ..) | UnlockServer(buf) =>
                 Rc::try_unwrap(buf).expect("taking from non unique WriteState").into_inner()
         }
     }
@@ -1050,7 +1071,7 @@ impl WriteState {
     fn clone_multi(&self) -> WriteState {
         use self::WriteState::*;
         match self {
-            &MultiServer(ref b, ref l) => MultiServer(b.clone(), l.clone()),
+            &MultiServer(ref b, ref remaining_servers, ref locks) => MultiServer(b.clone(), remaining_servers.clone(), locks.clone()),
             s => panic!("invlaid clone multi on {:?}", s)
         }
 
@@ -1061,9 +1082,13 @@ fn write_server_for_chain(chain: order, num_servers: usize) -> usize {
     <u32 as From<order>>::from(chain) as usize % num_servers
 }
 
-fn read_server_for_chain(chain: order, num_servers: usize) -> usize {
+fn read_server_for_chain(chain: order, num_servers: usize, unreplicated: bool) -> usize {
     //(<u32 as From<order>>::from(chain) as usize % (num_servers)  + 1) * 2
-    <u32 as From<order>>::from(chain) as usize % (num_servers) + num_servers
+    if unreplicated {
+        write_server_for_chain(chain, num_servers)
+    } else {
+        <u32 as From<order>>::from(chain) as usize % (num_servers) + num_servers
+    }
 }
 
 fn is_write_server_for(chain: order, tok: Token, num_servers: usize) -> bool {

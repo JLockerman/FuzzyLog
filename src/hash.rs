@@ -1,6 +1,6 @@
 // from https://github.com/rust-lang/rust/commit/eca1cc957fff157575f485ebfd2aaafb33ee98cb
 
-use std::collections::HashMap as DefaultHashMap;
+use std::collections::{HashMap as DefaultHashMap, HashSet as DefaultHashSet};
 
 use std::default::Default;
 use std::hash::{Hasher, BuildHasherDefault};
@@ -8,6 +8,7 @@ use std::ops::BitXor;
 
 
 pub type HashMap<K, V> = DefaultHashMap<K, V, BuildHasherDefault<FxHasher>>;
+pub type HashSet<K> = DefaultHashSet<K, BuildHasherDefault<FxHasher>>;
 
 pub struct FxHasher {
     hash: usize

@@ -143,6 +143,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         let val = buffer.entry_mut();
                         {
                             let locs = val.locs_mut();
+                            trace!("SERVER {} try unlock {:?}", self.this_server_num, locs);
                             for i in 0..locs.len() {
                                 if locs[i] == OrderIndex(0.into(), 0.into()) {
                                     continue
@@ -153,7 +154,11 @@ where ToWorkers: DistributeToWorkers<T> {
                             }
                         }
                         if all_unlocked {
+                            trace!("SERVER {} unlocked {:?}", self.this_server_num, val.locs());
                             val.kind.insert(EntryKind::ReadSuccess)
+                        }
+                        else {
+                            trace!("SERVER {} failed unlock {:?}", self.this_server_num, val.locs());
                         }
                     };
                     self.to_workers.send_to_worker(Reply(buffer, t));
@@ -197,12 +202,12 @@ where ToWorkers: DistributeToWorkers<T> {
                                 let chain = self.ensure_chain(chain);
                                 if kind.contains(EntryKind::TakeLock) {
                                     if chain.cannot_lock(u32::from(locs[i].1) as u64) {
-                                        //the lock that failed is always the first 0
+                                        //the lock that failed is always the first MAX
                                         trace!("SERVER wrong lock {} @ {:?}",
                                             u32::from(locs[i].1),
                                             chain.lock_pair()
                                         );
-                                        locs[i].1 = entry::from(0);
+                                        locs[i].1 = entry::from(::std::u64::MAX as u32);
                                         lock_failed = true;
                                         break 'update_append_horizon
                                     }
@@ -214,6 +219,8 @@ where ToWorkers: DistributeToWorkers<T> {
                             let next_entry = entry::from(next_entry as u32);
                             locs[i].1 = next_entry;
                             num_places += 1
+                        } else {
+                            locs[i].1 = entry::from(0)
                         }
                     }
                     if let (Some(ssi), false) = (sentinel_start_index, lock_failed) {
@@ -230,7 +237,7 @@ where ToWorkers: DistributeToWorkers<T> {
                                                 u32::from(locs[i].1),
                                                 chain.lock_pair()
                                             );
-                                            locs[i].1 = entry::from(0);
+                                            locs[i].1 = entry::from(::std::u64::MAX as u32);
                                             lock_failed = true;
                                             break 'senti_horizon
                                         }
@@ -242,6 +249,8 @@ where ToWorkers: DistributeToWorkers<T> {
                                 let next_entry = entry::from(next_entry as u32);
                                 locs[i].1 = next_entry;
                                 num_places += 1
+                            } else {
+                                locs[i].1 = entry::from(0)
                             }
                         }
                     }

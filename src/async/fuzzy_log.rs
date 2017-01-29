@@ -541,6 +541,7 @@ impl ThreadLog {
                         .locs_mut().into_iter()
                         .find(|&&mut OrderIndex(o, _)| o == read_loc.0)
                         .unwrap();
+                    //FIXME
                     was_blind_search = loc_ptr.1 == entry::from(0);
                     *loc_ptr = read_loc;
                     multi.pieces_remaining -= 1;
@@ -588,7 +589,12 @@ impl ThreadLog {
             };
 
             //perform a non blind search if possible
-            if index != entry::from(0) {
+            //TODO less than ideal with new lock scheme
+            //     lock index is always below color index, starting with a non-blind read
+            //     based on the lock number should be balid, if a bit conservative
+            //     this would require some way to fall back to a blind read,
+            //     if the horizon was reached before the multi found
+            if index != entry::from(0) /* && !pc.is_within_snapshot(index) */ {
                 trace!("RRRRR non-blind search {:?} {:?}", chain, index);
                 let unblocked = pc.update_horizon(potential_new_horizon);
                 (unblocked, early_sentinel)
@@ -1018,7 +1024,11 @@ impl PerChain {
     fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
         assert!(index != 0.into());
         let old = self.found_but_unused_multiappends.insert(id, index);
-        debug_assert!(old.is_none());
+        //TODO I'm not sure this is correct with how we handle overreads
+        //debug_assert!(old.is_none(),
+        //    "double sentinel insert {:?}",
+        //    (self.chain, index)
+        //);
     }
 
     fn take_early_sentinel(&mut self, id: &Uuid) -> Option<entry> {
@@ -1719,7 +1729,7 @@ mod tests {
 
             #[test]
             #[inline(never)]
-            pub fn test_dependent_multi() {
+            pub fn test_dependent_multi1() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
 
