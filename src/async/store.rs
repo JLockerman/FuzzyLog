@@ -586,6 +586,8 @@ where PerServer<S>: Connected,
                 e.kind.remove(EntryKind::Multiput);
                 e.kind.insert(EntryKind::Sentinel);
                 e.kind.insert(EntryKind::Unlock);
+                e.data_bytes = 0;
+                e.dependency_bytes = 0;
                 server
             }
         };
