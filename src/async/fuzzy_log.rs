@@ -105,6 +105,7 @@ pub enum FromClient {
     //TODO
     SnapshotAndPrefetch(order),
     PerformAppend(Vec<u8>),
+    ReturnBuffer(Vec<u8>),
     Shutdown,
 }
 
@@ -116,8 +117,9 @@ enum MultiSearch {
     //MultiSearch::FirstPart(),
 }
 
+//TODO no-alloc
 struct BufferCache {
-    //TODO vec_cache: VecDeque<Vec<u8>>,
+    vec_cache: VecDeque<Vec<u8>>,
     //     rc_cache: VecDeque<Rc<Vec<u8>>>,
     //     alloced: usize,
     //     avg_alloced: usize,
@@ -190,6 +192,10 @@ impl ThreadLog {
                     assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
                 }
                 self.to_store.send(msg).expect("store hung up");
+                true
+            }
+            ReturnBuffer(mut buffer) => {
+                self.cache.cache_buffer(buffer);
                 true
             }
             Shutdown => {
@@ -1062,12 +1068,21 @@ impl PerChain {
 
 impl BufferCache {
     fn new() -> Self {
-        BufferCache{}
+        BufferCache{
+            vec_cache: VecDeque::new()
+        }
     }
 
     fn alloc(&mut self) -> Vec<u8> {
+        self.vec_cache.pop_front().unwrap_or(Vec::new())
+    }
+
+    fn cache_buffer(&mut self, mut buffer: Vec<u8>) {
         //TODO
-        Vec::new()
+        if self.vec_cache.len() < 100 {
+            buffer.clear();
+            self.vec_cache.push_front(buffer)
+        }
     }
 }
 
@@ -1319,7 +1334,10 @@ where V: Storeable {
 
         'recv: loop {
             //TODO use recv_timeout in real version
-            self.curr_entry = self.ready_reads.recv().unwrap();
+            let old = mem::replace(&mut self.curr_entry, self.ready_reads.recv().unwrap());
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old)));
+            }
             if self.curr_entry.len() != 0 {
                 break 'recv
             }
