@@ -24,6 +24,9 @@ struct RootTable<V> {
     l6: Shortcut<ValEdge>,
     next_entry: u64,
     alloc: AllocPtr,
+    last_lock: u64,
+    //FIXME if we want to do lock handoff we need to know until where we can read...
+    last_unlock: u64,
     l5: Shortcut<L6Edge>,
     l4: Shortcut<L5Edge>,
     l3: Shortcut<L4Edge>,
@@ -448,6 +451,33 @@ where V: Storeable {
             AppendSlot { trie_entry: trie_entry, data_ptr: data_ptr, data_size: size,
                 storage_loc: storage_start, _pd: Default::default()}
         }
+    }
+
+    pub fn cannot_lock(&self, lock_num: u64) -> bool {
+        self.is_locked() || lock_num != self.root.last_unlock + 1
+    }
+
+    pub fn increment_lock(&mut self) {
+        self.root.last_lock += 1;
+        debug_assert_eq!(self.root.last_lock, self.root.last_unlock + 1);
+    }
+
+    pub fn unlock(&mut self, lock_num: u64) -> bool {
+        if lock_num == self.root.last_lock {
+            debug_assert!(self.root.last_unlock <= self.root.last_lock);
+            self.root.last_unlock = lock_num;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.root.last_lock != self.root.last_unlock
+    }
+
+    pub fn lock_pair(&self) -> (u64, u64) {
+        (self.root.last_lock, self.root.last_unlock)
     }
 
     #[inline]

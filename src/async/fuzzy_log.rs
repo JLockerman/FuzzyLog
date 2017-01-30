@@ -105,6 +105,7 @@ pub enum FromClient {
     //TODO
     SnapshotAndPrefetch(order),
     PerformAppend(Vec<u8>),
+    ReturnBuffer(Vec<u8>),
     Shutdown,
 }
 
@@ -116,8 +117,9 @@ enum MultiSearch {
     //MultiSearch::FirstPart(),
 }
 
+//TODO no-alloc
 struct BufferCache {
-    //TODO vec_cache: VecDeque<Vec<u8>>,
+    vec_cache: VecDeque<Vec<u8>>,
     //     rc_cache: VecDeque<Rc<Vec<u8>>>,
     //     alloced: usize,
     //     avg_alloced: usize,
@@ -190,6 +192,10 @@ impl ThreadLog {
                     assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
                 }
                 self.to_store.send(msg).expect("store hung up");
+                true
+            }
+            ReturnBuffer(mut buffer) => {
+                self.cache.cache_buffer(buffer);
                 true
             }
             Shutdown => {
@@ -541,6 +547,7 @@ impl ThreadLog {
                         .locs_mut().into_iter()
                         .find(|&&mut OrderIndex(o, _)| o == read_loc.0)
                         .unwrap();
+                    //FIXME
                     was_blind_search = loc_ptr.1 == entry::from(0);
                     *loc_ptr = read_loc;
                     multi.pieces_remaining -= 1;
@@ -588,7 +595,12 @@ impl ThreadLog {
             };
 
             //perform a non blind search if possible
-            if index != entry::from(0) {
+            //TODO less than ideal with new lock scheme
+            //     lock index is always below color index, starting with a non-blind read
+            //     based on the lock number should be balid, if a bit conservative
+            //     this would require some way to fall back to a blind read,
+            //     if the horizon was reached before the multi found
+            if index != entry::from(0) /* && !pc.is_within_snapshot(index) */ {
                 trace!("RRRRR non-blind search {:?} {:?}", chain, index);
                 let unblocked = pc.update_horizon(potential_new_horizon);
                 (unblocked, early_sentinel)
@@ -1018,7 +1030,11 @@ impl PerChain {
     fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
         assert!(index != 0.into());
         let old = self.found_but_unused_multiappends.insert(id, index);
-        debug_assert!(old.is_none());
+        //TODO I'm not sure this is correct with how we handle overreads
+        //debug_assert!(old.is_none(),
+        //    "double sentinel insert {:?}",
+        //    (self.chain, index)
+        //);
     }
 
     fn take_early_sentinel(&mut self, id: &Uuid) -> Option<entry> {
@@ -1052,12 +1068,21 @@ impl PerChain {
 
 impl BufferCache {
     fn new() -> Self {
-        BufferCache{}
+        BufferCache{
+            vec_cache: VecDeque::new()
+        }
     }
 
     fn alloc(&mut self) -> Vec<u8> {
+        self.vec_cache.pop_front().unwrap_or(Vec::new())
+    }
+
+    fn cache_buffer(&mut self, mut buffer: Vec<u8>) {
         //TODO
-        Vec::new()
+        if self.vec_cache.len() < 100 {
+            buffer.clear();
+            self.vec_cache.push_front(buffer)
+        }
     }
 }
 
@@ -1309,7 +1334,10 @@ where V: Storeable {
 
         'recv: loop {
             //TODO use recv_timeout in real version
-            self.curr_entry = self.ready_reads.recv().unwrap();
+            let old = mem::replace(&mut self.curr_entry, self.ready_reads.recv().unwrap());
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old)));
+            }
             if self.curr_entry.len() != 0 {
                 break 'recv
             }
@@ -1719,7 +1747,7 @@ mod tests {
 
             #[test]
             #[inline(never)]
-            pub fn test_dependent_multi() {
+            pub fn test_dependent_multi1() {
                 let _ = env_logger::init();
                 trace!("TEST multi");
 
