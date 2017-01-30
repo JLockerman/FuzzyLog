@@ -98,163 +98,43 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
         <u32 as From<order>>::from(chain) as usize % self.sockets.len()
     }
 
-    #[cfg(False)]
-    fn single_node_multiappend(&mut self, request_id: &Uuid, socket_id: usize) -> InsertResult {
-        trace!("sn multi_append from {:?}", self.sockets[0].local_addr());
-        // TODO find server
-        let start_time = precise_time_ns() as i64;
-        'send: loop {
-            self.send_packet(socket_id);
-
-            'receive: loop {
-                self.read_packet(socket_id);
-                trace!("got packet");
-                match self.receive_buffer.kind.layout() {
-                    EntryLayout::Multiput => {
-                        // TODO types?
-                        trace!("correct response");
-                        trace!("id {:?}", self.receive_buffer.id);
-                        if self.receive_buffer.id == *request_id {
-                            trace!("multiappend success");
-                            let sample_rtt = precise_time_ns() as i64 - start_time;
-                            let diff = sample_rtt - self.rtt;
-                            self.dev = self.dev + (diff.abs() - self.dev) / 4;
-                            self.rtt = self.rtt + (diff * 4 / 5);
-                            return Ok(OrderIndex(0.into(), 0.into())); //TODO
-                        } else {
-                            // trace!("?? packet {:?}", self.receive_buffer);
-                            continue 'receive;
-                        }
-                    }
-                    v => {
-                        trace!("invalid response {:?}", v);
-                        continue 'receive;
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(False)]
-    fn multi_node_multiappend(&mut self, request_id: &Uuid, chains: &[OrderIndex]) -> InsertResult {
-        trace!("mn multi_append from {:?}", self.sockets[0].local_addr());
-
-        let indices = self.get_lock_inidices(chains);
-        trace!("M locks {:?}", indices);
-
-        self.send_buffer.kind.insert(EntryKind::TakeLock);
-
-        for &OrderIndex(socket_id, lock_num) in &*indices {
-            self.emplace_multi_node(socket_id, lock_num)
-        }
-
-        'validate: for &OrderIndex(socket_id, lock_num) in &*indices {
-            'receive: loop {
-                self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
-                trace!("got packet from {:?}", <u32 as From<_>>::from(socket_id) as usize);
-                match self.receive_buffer.kind.layout() {
-                    EntryLayout::Multiput => {
-                        // TODO should also have lock-success
-                        // TODO types?
-                        trace!("correct response");
-                        trace!("id {:?}", self.receive_buffer.id);
-                        if self.receive_buffer.id == *request_id {
-                            //TODO recovery
-                            if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
-                                trace!("M lock failed resending {:?}", self.receive_buffer.id);
-                                self.emplace_multi_node(socket_id, lock_num);
-                                continue 'receive
-                            }
-                            trace!("multiappend success");
-                            continue 'validate;
-                        } else {
-                            // trace!("?? packet {:?}", self.receive_buffer);
-                            continue 'receive;
-                        }
-                    }
-                    v => {
-                        trace!("invalid response {:?}", v);
-                        continue 'receive;
-                    }
-                }
-            }
-        }
-
-        for &OrderIndex(socket_id, lock_num) in &*indices {
-            self.unlock(socket_id, lock_num)
-        }
-
-        return Ok(OrderIndex(0.into(), 0.into()));
-    }
-
-    #[cfg(False)]
-    fn lock(&mut self, socket_id: order, lock_num: entry) {
-        let lock = Lock {
-            //TODO id?
-            id: Uuid::nil(),
-            _padding: unsafe{ mem::uninitialized() },
-            kind: EntryKind::Lock | EntryKind::TakeLock,
-            lock: <u32 as From<_>>::from(lock_num) as u64,
-        };
-        let socket_id = <u32 as From<_>>::from(socket_id) as usize;
-        self.sockets[socket_id].write_all(lock.bytes()).expect("cannot send");
-        self.socket[socket_id].write_all(&[0u8; 6]).expect("cannot send");
-    }
-
-    fn unlock(&mut self, socket_id: order, lock_num: entry) {
-        let lock = Lock {
-            //TODO id?
-            id: Uuid::nil(),
-            _padding: unsafe{ mem::uninitialized() },
-            kind: EntryKind::Lock,
-            lock: <u32 as From<_>>::from(lock_num) as u64,
-        };
-        let socket_id = <u32 as From<_>>::from(socket_id) as usize;
-        self.sockets[socket_id].write_all(lock.bytes()).expect("cannot send");
+    fn unlock(&mut self, socket_id: usize) {
+        self.send_buffer.kind.remove(EntryKind::Multiput);
+        self.send_buffer.kind.insert(EntryKind::Sentinel);
+        self.send_buffer.kind.insert(EntryKind::Unlock);
+        self.send_buffer.data_bytes = 0;
+        self.send_buffer.dependency_bytes = 0;
+        self.sockets[socket_id].write_all(self.send_buffer.bytes()).expect("cannot send");
         self.sockets[socket_id].write_all(&[0u8; 6]).expect("cannot send");
     }
 
-    fn emplace_multi_node(&mut self, socket_id: order, lock_num: entry) {
+    fn emplace_multi_node(&mut self, socket_id: usize) {
         trace!("sending mnm actual {:?}", self.send_buffer.id);
         assert!(self.send_buffer.kind.layout() == EntryLayout::Multiput
             || self.send_buffer.kind.layout() == EntryLayout::Sentinel);
-        unsafe {
-            self.send_buffer.as_multi_entry_mut().flex.lock =
-                <u32 as From<_>>::from(lock_num) as u64;
-            //assert!(self.send_buffer.as_multi_entry_mut().flex.lock != 0u32.into());
-        }
-        self.send_packet(<u32 as From<_>>::from(socket_id) as usize);
+        self.send_packet(socket_id);
     }
 
-    fn get_lock_inidices(&mut self, chains: &[OrderIndex]) -> Vec<OrderIndex> {
+    fn get_lock_inidices(&mut self) -> (Box<[OrderIndex]>, HashSet<usize>) {
         trace!("getting lock nums");
-        let send_buffer_size = self.send_buffer.entry_size() as usize;
         //TODO should be bitset?
         let mut nodes_to_lock: Vec<_> = (0..self.sockets.len()).map(|_| false).collect();
-        for &OrderIndex(o, _) in chains {
-            nodes_to_lock[self.socket_id(o)] = true;
-            trace!("{:?} => socket {:?}", o, self.socket_id(o));
+        {
+            let chains = self.send_buffer.locs();
+            for &OrderIndex(o, _) in chains {
+                nodes_to_lock[self.socket_id(o)] = true;
+                trace!("{:?} => socket {:?}", o, self.socket_id(o));
+            }
         }
+        self.send_buffer.kind.remove(EntryKind::TakeLock);
 
-        let mut lock_chains: Vec<_> = nodes_to_lock.into_iter()
+        let lock_sockets: HashSet<_> = nodes_to_lock.into_iter()
             .enumerate()
             .filter_map(|(i, present)|
-                if present {
-                    Some(OrderIndex((i as u32 + 1).into(), 0.into()))
-                } else {
-                    None
-                })
+                if present { Some(i) } else { None })
             .collect();
-        trace!("ntl {:?}", lock_chains);
-        let lock_id = Uuid::new_v4();
-        let lock_request = EntryContents::Multiput {
-                               data: &self.send_buffer.bytes()[..send_buffer_size],
-                               uuid: &lock_id,
-                               columns: &lock_chains[..],
-                               deps: &[],
-                           }
-                           .clone_bytes();
-        self.lock_socket.write_all(&lock_request[..]).expect("cannot send");
+        trace!("ntl {:?}", lock_sockets);
+        self.lock_socket.write_all(self.send_buffer.bytes()).expect("cannot send");
         self.lock_socket.write_all(&[0u8; 6]).expect("cannot send");
         'receive: loop {
             self.read_lockserver_packet();
@@ -264,15 +144,12 @@ impl<V: Storeable + ?Sized> TcpStore<V> {
                     // TODO types?
                     trace!("correct response");
                     trace!("id {:?}", self.receive_buffer.id);
-                    if self.receive_buffer.id == lock_id {
-                        trace!("multiappend success");
-                        let locs = self.receive_buffer.locs();
-                        assert_eq!(locs.len(), lock_chains.len());
-                        for i in 0..locs.len() {
-                            let OrderIndex(soc, lock) = locs[i];
-                            lock_chains[i] = OrderIndex(soc - 1 , lock);
-                        }
-                        return lock_chains;
+                    if self.receive_buffer.id == self.send_buffer.id {
+                        trace!("Lock multiappend success");
+                        let locks = self.receive_buffer.locs().to_vec().into_boxed_slice();
+                        self.send_buffer.locs_mut().copy_from_slice(&locks);
+                        self.send_buffer.kind.insert(EntryKind::TakeLock);
+                        return (locks, lock_sockets);
                     } else {
                         // trace!("?? packet {:?}", self.receive_buffer);
                         continue 'receive;
@@ -501,41 +378,41 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         trace!("Tpacket {:#?}", self.send_buffer);
 
         let single_node = self.is_single_node_append(chains.iter().map(|&OrderIndex(o, _)|  o));
-        let indices =
+        let (locks, indices) =
             if single_node {
                 trace!("M single");
-                let mut h = HashMap::new();
+                let mut h = HashSet::new();
                 let socket_id = self.socket_id(chains[0].0);
-                h.insert((socket_id as u32).into(), 0.into());
-                h
+                h.insert(socket_id);
+                (vec![].into_boxed_slice(), h)
             }
             else {
+                let (locks, locked_sockets) = self.get_lock_inidices();
                 self.send_buffer.kind.insert(EntryKind::TakeLock);
-                self.get_lock_inidices(&chains).into_iter()
-                    .map(|OrderIndex(o, i)| (o,i)).collect()
+                (locks, locked_sockets)
             };
         trace!("M locks {:?}", indices);
 
         let mut to_lock =
             if indices.len() > 1 {
-                indices.iter().map(|(&o, &e)| (o, e)).collect()
+                indices.clone()
             }
             else {
                 HashSet::new()
             };
-        let mut locked: HashSet<OrderIndex> = HashSet::with_capacity(to_lock.len());
+        let mut locked: HashSet<_> = HashSet::with_capacity(to_lock.len());
 
-        for (&socket_id, &lock_num) in indices.iter() {
-            self.emplace_multi_node(socket_id, lock_num);
-            if to_lock.remove(&(socket_id, lock_num)) {
-                locked.insert(OrderIndex(socket_id, lock_num));
+        for &socket_id in indices.iter() {
+            self.emplace_multi_node(socket_id);
+            if to_lock.remove(&socket_id) {
+                locked.insert(socket_id);
             }
         }
         assert!(to_lock.is_empty());
 
-        'validate: for (&socket_id, &lock_num) in indices.iter() {
+        'validate: for &socket_id in indices.iter() {
             'receive: loop {
-                self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
+                self.read_packet(socket_id);
                 trace!("M got packet");
                 match self.receive_buffer.kind.layout() {
                     EntryLayout::Multiput => {
@@ -546,7 +423,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                         if self.receive_buffer.id == request_id {
                             if !self.receive_buffer.kind.contains(EntryKind::ReadSuccess) {
                                 trace!("M lock fail, resend");
-                                self.emplace_multi_node(socket_id, lock_num);
+                                self.emplace_multi_node(socket_id);
                                 continue 'receive
                             }
                             trace!("M multiappend success");
@@ -566,8 +443,12 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
 
         trace!("M unlock");
 
-        for OrderIndex(socket_id, lock_num) in locked {
-            self.unlock(socket_id, lock_num)
+        if locked.len() > 0 {
+            self.send_buffer.locs_mut().copy_from_slice(&locks);
+        }
+
+        for socket_id in locked {
+            self.unlock(socket_id)
         }
 
         trace!("M done unlock");
@@ -608,54 +489,48 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         trace!("D multi_append from {:?}", self.sockets[0].local_addr());
 
         let locked_chains = chains.into_iter().chain(depends_on.iter());
-        let (indices, will_lock) =
+        let (locks, indices, will_lock) =
             if self.is_single_node_append(locked_chains.cloned()) {
                 trace!("D single s");
                 self.send_buffer.kind.remove(EntryKind::TakeLock);
-                let mut h = HashMap::new();
+                let mut h = HashSet::new();
                 let socket_id = self.socket_id(chains[0]);
-                h.insert((socket_id as u32).into(), 0.into());
-                (h, false)
+                h.insert(socket_id);
+                (vec![].into_boxed_slice(), h, false)
             }
             else {
                 trace!("D multi s");
+                let (locks, to_lock) = self.get_lock_inidices();
+                trace!("tl {:?} {:?}", to_lock, locks);
                 self.send_buffer.kind.insert(EntryKind::TakeLock);
-                let to_lock: Vec<OrderIndex> = chains.iter()
-                    .chain(depends_on.iter())
-                    .map(|&c| OrderIndex(c, 0.into()))
-                    .collect();
-                trace!("tl {:?}", to_lock);
-                (self.get_lock_inidices(&to_lock).into_iter()
-                    .map(|OrderIndex(o,i)| (o,i)).collect(), true)
+                (locks, to_lock, true)
             };
 
         trace!("D locks {:?}", indices);
-        debug_assert!(self.send_buffer.kind.contains(EntryKind::TakeLock) == will_lock);
+        debug_assert_eq!(self.send_buffer.kind.contains(EntryKind::TakeLock), will_lock);
+        debug_assert_eq!(indices.len() > 1, will_lock);
 
         let mut to_lock =
             if indices.len() > 1 {
-                indices.iter().map(|(&o, &e)| (o, e)).collect()
+                indices.clone()
             }
             else {
                 HashSet::new()
             };
-        let mut locked: HashSet<OrderIndex> = HashSet::with_capacity(to_lock.len());
+        let mut locked: HashSet<_> = HashSet::with_capacity(to_lock.len());
 
         trace!("in {:?}", indices);
 
         if to_lock.is_empty() {
-            let socket_id: order = (self.socket_id(chains[0]) as u32).into();
-            let lock_num = indices[&socket_id];
-            assert_eq!(lock_num, entry::from(0));
-            self.emplace_multi_node(socket_id, lock_num);
+            let socket_id = self.socket_id(chains[0]);
+            self.emplace_multi_node(socket_id);
         }
         else {
             for &chain in chains {
-                let socket_id: order = (self.socket_id(chain) as u32).into();
-                let lock_num = indices[&socket_id];
-                if to_lock.remove(&(socket_id, lock_num)) {
-                    self.emplace_multi_node(socket_id, lock_num);
-                    locked.insert(OrderIndex(socket_id, lock_num));
+                let socket_id = self.socket_id(chain);
+                if to_lock.remove(&socket_id) {
+                    self.emplace_multi_node(socket_id);
+                    locked.insert(socket_id);
                 }
             }
         }
@@ -665,14 +540,14 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
         self.send_buffer.kind.insert(EntryKind::Sentinel);
         debug_assert!(self.send_buffer.kind.contains(EntryKind::TakeLock) == will_lock);
 
-        for (socket_id, lock_num) in to_lock {
-            self.emplace_multi_node(socket_id, lock_num);
-            locked.insert(OrderIndex(socket_id, lock_num));
+        for socket_id in to_lock {
+            self.emplace_multi_node(socket_id);
+            locked.insert(socket_id);
         }
 
-        'validate: for (&socket_id, &lock_num) in indices.iter() {
+        'validate: for &socket_id in indices.iter() {
             'receive: loop {
-                self.read_packet(<u32 as From<_>>::from(socket_id) as usize);
+                self.read_packet(socket_id);
                 trace!("D got packet");
                 match self.receive_buffer.kind.layout() {
                     k @ EntryLayout::Multiput | k @ EntryLayout::Sentinel => {
@@ -685,7 +560,7 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
                                 self.send_buffer.kind = k.kind();
                                 if will_lock { self.send_buffer.kind.insert(EntryKind::TakeLock) }
                                 else { self.send_buffer.kind.remove(EntryKind::TakeLock) }
-                                self.emplace_multi_node(socket_id, lock_num);
+                                self.emplace_multi_node(socket_id);
                                 continue 'receive
                             }
                             trace!("D multiappend success");
@@ -705,8 +580,12 @@ impl<V: Storeable + ?Sized + Debug> Store<V> for TcpStore<V> {
 
         trace!("dma unlock");
 
-        for OrderIndex(socket_id, lock_num) in locked {
-            self.unlock(socket_id, lock_num)
+        if locked.len() > 0{
+            self.send_buffer.locs_mut().copy_from_slice(&locks);
+        }
+
+        for socket_id in locked {
+            self.unlock(socket_id)
         }
 
         trace!("done unlock");
