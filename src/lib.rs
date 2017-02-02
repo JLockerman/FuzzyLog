@@ -46,7 +46,7 @@ pub mod servers2;
 pub mod color_api;
 pub mod async;
 mod hash;
-mod socket_addr;
+pub mod socket_addr;
 //TODO only for testing, should be private
 pub mod buffer;
 

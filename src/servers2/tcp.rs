@@ -393,6 +393,7 @@ pub fn run_with_replication(
                     }*/
                 },
                 DIST_FROM_LOG => {
+                    //unreachable!()
                     //FIXME handle completing work on original thread, only do send on DOWNSTREAM
                     /*let packet = dist_from_log.try_recv();
                     if let Some(mut to_worker) = packet {
@@ -404,6 +405,7 @@ pub fn run_with_replication(
                     }*/
                 },
                 _recv_tok => {
+                    //unreachable!()
                     /*let recv = receivers.get_mut(&recv_tok).unwrap();
                     let recv = mem::replace(recv, None);
                     match recv {
@@ -1156,16 +1158,40 @@ impl PerSocket {
                     Ok(i) => {
                         trace!("SOCKET finished sending burst {}B.", *bytes_written + i);
                         //Done with burst check if more bursts to be sent
+                        debug_assert_eq!(*bytes_written + i, being_written.len());
                         being_written.clear();
                         *bytes_written = 0;
                         if let Some(buffer) = pending.pop_front() {
-                            trace!("SOCKET swap buffer.");
-                            let old_buffer = mem::replace(being_written, buffer);
-                            //TODO
-                            if old_buffer.capacity() > WRITE_BUFFER_SIZE / 4
-                            || pending.is_empty() {
-                                pending.push_back(old_buffer)
+                            if !buffer.is_empty() {
+                                trace!("SOCKET swap buffer.");
+                                let old_buffer = mem::replace(being_written, buffer);
+                                if pending.is_empty() {
+                                    pending.push_back(old_buffer);
+                                    return Ok(true)
+                                }
+                                let (should_replace, add_anyway) = pending.back().map(|v| {
+                                    let should_replace =
+                                        v.is_empty()
+                                        && v.capacity() <= old_buffer.capacity();
+                                    let add_anyway =
+                                        !v.is_empty() &&
+                                        old_buffer.capacity() > WRITE_BUFFER_SIZE / 4;
+                                    (should_replace, add_anyway)
+                                }).unwrap_or((false, false));
+                                if should_replace {
+                                    pending.back_mut().map(|v| *v = old_buffer);
+                                    return Ok(true)
+                                }
+                                if add_anyway {
+                                    pending.push_back(old_buffer)
+                                }
+                                return Ok(true)
+                            } else {
+                                debug_assert!(pending.front().map(|v| v.is_empty()).unwrap_or(true));
+                                debug_assert!(pending.back().map(|v| v.is_empty()).unwrap_or(true));
+                                pending.push_front(buffer)
                             }
+
                         }
                         Ok(true)
                     },
@@ -1185,27 +1211,38 @@ impl PerSocket {
             | &mut Client {ref mut being_written, ref mut pending, ..} => {
                 trace!("SOCKET send down {}B", to_write.len());
                 //FIXME send src_addr
-                //TODO if being_written is empty try to send immdiately, place remainder
-                if being_written.capacity() - being_written.len() >= to_write.len() {
-                    being_written.extend_from_slice(to_write)
-                } else {
-                    let placed = if let Some(buffer) = pending.back_mut() {
-                        if buffer.capacity() - buffer.len() >= to_write.len()
-                        || buffer.capacity() < WRITE_BUFFER_SIZE {
-                            buffer.extend_from_slice(&to_write[..]);
-                            true
-                        } else { false }
-                    } else { false };
-                    if !placed {
-                        pending.push_back(to_write[..].to_vec())
-                    }
+                //TODO if being_written is empty try to send immediately, place remainder
+                let no_other_inhabited_buffer =
+                    pending.front().map(|v| v.is_empty()).unwrap_or(true);
+                if no_other_inhabited_buffer && being_written.capacity() - being_written.len() >= to_write.len() {
+                    debug_assert!(
+                        pending.front().unwrap_or(&Vec::new()).is_empty(),
+                        "being written {{cap: {}, len: {}}}, >= to_write {{len : {}}},\npending {:?}",
+                        being_written.capacity(), being_written.len(), to_write.len(),
+                        pending
+                    );
+                    being_written.extend_from_slice(to_write);
+                    return
                 }
+                if let Some(buffer) = pending.back_mut() {
+                    if buffer.capacity() - buffer.len() >= to_write.len()
+                    || buffer.capacity() < WRITE_BUFFER_SIZE {
+                        buffer.extend_from_slice(&to_write[..]);
+                        return
+                    }
+                };
+                debug_assert!(
+                    pending.front().map(|v| !v.is_empty()).unwrap_or(true),
+                    "pending {:?}", pending
+                 );
+                pending.push_back(to_write[..].to_vec())
             }
             _ => unreachable!()
         }
     }
 
     fn add_send_buffer(&mut self, to_write: Buffer) {
+        unreachable!();
         //TODO Is there some maximum size at which we shouldn't buffer?
         //TODO can we simply write directly from the trie?
         use self::PerSocket::*;

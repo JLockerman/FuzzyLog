@@ -268,7 +268,8 @@ impl RootTable {
                     self.storage_val.len()
                 );
                 // new val
-                let new_chunk = self.storage_l4.append(Some(alloc_level()));
+                //TODO let new_chunk = self.storage_l4.append(Some(alloc_level()));
+                let new_chunk = self.storage_l4.append(Some(alloc_val_level()));
                 let (val, shortcut) = new_chunk.as_mut().unwrap().split_at_mut(size);
                 self.stored_bytes += size as u64;
                 self.storage_val = Shortcut::new(shortcut);
@@ -297,6 +298,10 @@ unsafe fn alloc_seg<V>() -> Box<[V; ARRAY_SIZE]> {
 
 fn alloc_level() -> Box<[u8; LEVEL_BYTES]> {
     unsafe { Box::new(mem::zeroed()) }
+}
+
+fn alloc_val_level() -> Box<[u8; LEVEL_BYTES]> {
+    unsafe { Box::new(mem::uninitialized()) }
 }
 
 #[cfg(test)]
