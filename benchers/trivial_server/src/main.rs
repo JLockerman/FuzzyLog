@@ -37,7 +37,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use fuzzy_log::servers2;
 use fuzzy_log::buffer::Buffer;
 
-use fuzzy_log::async::fuzzy_log::{LogHandle, ThreadLog, Message};
+use fuzzy_log::async::fuzzy_log::{ThreadLog, Message};
+use fuzzy_log::async::fuzzy_log::log_handle::LogHandle;
 use fuzzy_log::async::store::AsyncTcpStore;
 
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
