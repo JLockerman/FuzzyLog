@@ -114,6 +114,7 @@ enum MultiSearch {
     InProgress,
     EarlySentinel,
     BeyondHorizon(Vec<u8>),
+    Repeat,
     //MultiSearch::FirstPart(),
 }
 
@@ -309,6 +310,7 @@ impl ThreadLog {
                         self.add_blockers(&packet);
                         self.try_returning(packet);
                     }
+                    MultiSearch::Repeat => {}
                 }
             }
 
@@ -475,7 +477,7 @@ impl ThreadLog {
             let id = entr.id;
             let locs = entr.locs();
             let num_pieces = locs.into_iter()
-                .filter(|&&OrderIndex(o, _)| o != order::from(0))
+                .filter(|&&OrderIndex(o, i)| o != order::from(0))
                 .count();
             trace!("FUZZY multi part read {:?} @ {:?}, {:?} pieces", id, locs, num_pieces);
             (id, num_pieces)
@@ -489,10 +491,18 @@ impl ThreadLog {
         let is_later_piece = self.blocked_multiappends.contains_key(&id);
         let mut omsg = None;
         if !is_later_piece && !is_sentinel {
-            //FIXME I'm not sure if this is right
-            if !self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1) {
-                trace!("FUZZY read multi too early @ {:?}", read_loc);
-                return MultiSearch::BeyondHorizon(msg)
+            {
+                let pc = &self.per_chains[&read_loc.0];
+                //FIXME I'm not sure if this is right
+                if !pc.is_within_snapshot(read_loc.1) {
+                    trace!("FUZZY read multi too early @ {:?}", read_loc);
+                    return MultiSearch::BeyondHorizon(msg)
+                }
+
+                if pc.has_returned(read_loc.1) {
+                    trace!("FUZZY duplicate multi @ {:?}", read_loc);
+                    return MultiSearch::BeyondHorizon(msg)
+                }
             }
 
             let mut pieces_remaining = num_pieces;
@@ -506,18 +516,21 @@ impl ThreadLog {
                         assert!(loc != entry::from(0));
                         *i = loc;
                         pieces_remaining -= 1
+                    } else if *i != entry::from(0) {
+                        trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
+                        pieces_remaining -= 1
                     }
                 } else {
                     trace!("FUZZY no need to fetch multi part @ {:?}", (o, *i));
                 }
             }
 
-            if num_pieces == 0 {
+            if pieces_remaining == 0 {
                 trace!("FUZZY all sentinels had already been found for {:?}", read_loc);
                 return MultiSearch::Finished(msg)
             }
 
-            trace!("FUZZY {:?} waiting for {:?} pieces", read_loc, num_pieces);
+            trace!("FUZZY {:?} waiting for {:?} pieces", read_loc, pieces_remaining);
             self.blocked_multiappends.insert(id, MultiSearchState {
                 val: msg,
                 pieces_remaining: pieces_remaining
@@ -549,9 +562,14 @@ impl ThreadLog {
                         .unwrap();
                     //FIXME
                     was_blind_search = loc_ptr.1 == entry::from(0);
-                    *loc_ptr = read_loc;
-                    multi.pieces_remaining -= 1;
-                    trace!("FUZZY multi pieces remaining {:?}", multi.pieces_remaining);
+                    if !was_blind_search {
+                        debug_assert_eq!(*loc_ptr, read_loc)
+                    } else {
+                        multi.pieces_remaining -= 1;
+                        trace!("FUZZY multi pieces remaining {:?}", multi.pieces_remaining);
+                        *loc_ptr = read_loc;
+                    }
+
                     multi.pieces_remaining == 0
                 };
                 match finished {
@@ -1224,6 +1242,46 @@ where V: Storeable {
         LogHandle::new(to_log, ready_reads_r, finished_writes_r)
     }
 
+/*TODO
+    pub fn tcp_log_with_replication<S, C>(
+        lock_server: Option<SocketAddr>,
+        chain_servers: S,
+        interesting_chains: C
+    ) -> Self
+    where S: IntoIterator<Item=(SocketAddr, SocketAddr)>,
+          C: IntoIterator<Item=order>,
+    {
+        let to_store_m = Arc::new(Mutex::new(None));
+        let tsm = to_store_m.clone();
+        let (to_log, from_outside) = mpsc::channel();
+        let client = to_log.clone();
+        let (ready_reads_s, ready_reads_r) = mpsc::channel();
+        let (finished_writes_s, finished_writes_r) = mpsc::channel();
+        thread::spawn(move || {
+            let mut event_loop = mio::Poll::new().unwrap();
+            let (store, to_store) = AsyncTcpStore::udp(addr_str.parse().unwrap(),
+                    iter::once(addr_str).map(|s| s.parse().unwrap()),
+                    client, &mut event_loop).expect("");
+                *tsm.lock().unwrap() = Some(to_store);
+                store.run(event_loop);
+            });
+        let to_store;
+        loop {
+            let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+            if let Some(s) = ts {
+                to_store = s;
+                break
+            }
+        }
+        thread::spawn(move || {
+            let log = ThreadLog::new(to_store, from_outside, ready_reads_s,
+                finished_writes_s, interesting_chains.into_iter());
+            log.run()
+        });
+
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+    }
+*/
     pub fn spawn_tcp_log<S, C>(
         lock_server: SocketAddr,
         chain_servers: S,
