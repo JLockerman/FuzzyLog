@@ -229,6 +229,13 @@ pub mod c_binidings {
         dag.wait_for_an_append();
     }
 
+    #[no_mangle]
+    pub unsafe extern "C" fn flush_completed_appends(dag: *mut DAG) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        dag.flush_completed_appends();
+    }
+
+
     //NOTE we need either a way to specify data size, or to pass out a pointer
     // this version simple assumes that no data+metadat passed in or out will be
     // greater than DELOS_MAX_DATA_SIZE

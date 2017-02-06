@@ -56,6 +56,7 @@ fn main() {
         //Args::TrivialServer(addr) => run_bad_server(addr, 7),
         Args::TrivialClient(addr, num_clients) => run_trivial_client(addr, num_clients),
         Args::ReadWrite(addr, num_clients, jobsize) => run_write_read_client(addr, num_clients, jobsize),
+        Args::ReadWriteA(addr, num_clients, jobsize) => run_write_read_actual(addr, num_clients, jobsize),
         Args::LocalTest => {
             let addr = "0.0.0.0:13669".parse().expect("invalid inet address");
             let h = thread::spawn(move || run_trivial_server(addr, &SERVER_READY));
@@ -163,6 +164,7 @@ enum Args {
     TrivialServer(SocketAddr),
     TrivialClient(SocketAddr, usize),
     ReadWrite(SocketAddr, usize, usize),
+    ReadWriteA(SocketAddr, usize, usize),
 }
 
 fn parse_args() -> Args {
@@ -215,6 +217,17 @@ fn parse_args() -> Args {
             println!("{:?} write/read(s) connecting to remote server @ {}.", num_clients, addr);
             let addr: &str = addr;
             Args::ReadWrite(addr.parse().expect("invalid addr"), num_clients, jobsize)
+        }
+        (Some("-wra"), Some(addr)) => {
+            let num_clients =
+                if let Some(n) = args.next() { n.parse().unwrap() }
+                else { 1 };
+            let jobsize =
+                if let Some(n) = args.next() { n.parse().unwrap() }
+                else { 0 };
+            println!("{:?} write/read(s) connecting to remote server @ {}.", num_clients, addr);
+            let addr: &str = addr;
+            Args::ReadWriteA(addr.parse().expect("invalid addr"), num_clients, jobsize)
         }
         _ => unimplemented!()
     }
@@ -575,6 +588,95 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
     //while READERS_READY.load(Ordering::SeqCst) < num_clients * 2 {
     //    thread::yield_now()
     //}
+
+    println!("All clients started");
+    let (total_write_hz, total_read_hz): (f64, f64) = joins.into_iter().map(|j| j.join().unwrap()).fold((0.0, 0.0), |(write_total, read_total), (write, read)|
+            (write_total + write, read_total + read)
+    );
+    let end = start.elapsed();
+    println!("total write Hz {:.3}, {:.3}b/s", total_write_hz, total_write_hz * job_bytes * 8.0);
+    println!("total read  Hz {:.3}, {:.3}b/s", total_read_hz, total_read_hz * job_bytes * 8.0);
+    println!("elapsed time {}s", end.as_secs());
+
+    std::process::exit(0)
+}
+
+///////////////////////////////////////
+
+fn run_write_read_actual(server_addr: SocketAddr, num_clients: usize, jobsize: usize) -> ! {
+    use std::io::{Read, Write};
+
+    static WRITERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+    static READERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+
+    let (job_bytes, job_bytes_u) = {
+        let data = vec![0u8; jobsize];
+        let size = EntryContents::Data(&data[..], &[]).fill_vec(&mut vec![]).entry_size();
+        println!("each entry contains {}B", size);
+        (size as f64, size)
+    };
+
+    const NUM_PACKETS: u32 = 1000000u32; //1000000u32;
+
+    let start = Instant::now();
+    let joins: Vec<_> = (0..num_clients).map(|client_num| {
+        thread::spawn(move || {
+            let chain = (client_num as u32).into();
+            let mut handle = LogHandle::spawn_tcp_log(
+                server_addr,
+                ::std::iter::once(server_addr),
+                ::std::iter::once(chain),
+            );
+            let data = vec![0u8; jobsize];
+
+            WRITERS_READY.fetch_add(1, Ordering::SeqCst);
+            while WRITERS_READY.load(Ordering::SeqCst) < num_clients {
+                thread::yield_now()
+            }
+
+            //TODO we are going to need to pause on occasion...
+            let write_start = Instant::now();
+            let mut sent = 0;
+            //for _ in 0..100 {
+            //    handle.async_append(chain, &*data, &[]);
+            //    sent += 1;
+            //}
+            while sent < NUM_PACKETS {
+                handle.async_append(chain, &*data, &[]);
+                sent += 1;
+                handle.flush_completed_appends();
+            }
+            handle.wait_for_all_appends();
+            let write_time = write_start.elapsed();
+
+            ////////////////////////////////////////
+
+            READERS_READY.fetch_add(1, Ordering::SeqCst);
+            while READERS_READY.load(Ordering::SeqCst) < num_clients {
+                thread::yield_now()
+            }
+
+            let read_start = Instant::now();
+            handle.snapshot(chain);
+            let mut num_entries = 0usize;
+            while let Some(..) = handle.get_next() {
+                num_entries += 1;
+            }
+            let read_time = read_start.elapsed();
+
+            let write_s = write_time.as_secs() as f64 + (write_time.subsec_nanos() as f64 * 10.0f64.powi(-9));
+            let read_s = read_time.as_secs() as f64 + (read_time.subsec_nanos() as f64 * 10.0f64.powi(-9));
+            let write_hz = NUM_PACKETS as f64 / write_s;
+            let read_hz = num_entries as f64 / read_s;
+            let write_bits = write_hz * (data.len() * 8) as f64;
+            let read_bits = read_hz * (data.len() * 8) as f64;
+            println!("client {:?} elapsed time for {} writes {:?}, {}s, {:.3} Hz, {}b/s",
+                client_num, sent, write_time, write_s, write_hz, write_bits);
+            println!("client {:?} elapsed time for {} reads {:?}, {}s, {:.3} Hz, {}b/s",
+                client_num, num_entries, read_time, read_s, read_hz, read_bits);
+            (write_hz, read_hz)
+        })
+    }).collect();
 
     println!("All clients started");
     let (total_write_hz, total_read_hz): (f64, f64) = joins.into_iter().map(|j| j.join().unwrap()).fold((0.0, 0.0), |(write_total, read_total), (write, read)|

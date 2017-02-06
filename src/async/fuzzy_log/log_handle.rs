@@ -353,10 +353,13 @@ where V: Storeable {
     }
 
     pub fn wait_for_all_appends(&mut self) {
-        for _ in 0..self.num_async_writes {
+        trace!("HANDLE waiting for {} appends", self.num_async_writes);
+        for i in 0..self.num_async_writes {
             //TODO return buffers here and cache them?
             self.finished_writes.recv().unwrap();
+            trace!("HANDLE got {}", i);
         }
+        trace!("HANDLE got all appends");
         self.num_async_writes = 0;
     }
 
@@ -379,6 +382,12 @@ where V: Storeable {
             return Some(self.finished_writes.recv().unwrap())
         }
         None
+    }
+
+    pub fn flush_completed_appends(&mut self) {
+        while let Ok(..) = self.finished_writes.try_recv() {
+            self.num_async_writes -= 1;
+        }
     }
 
     //TODO add wait_and_snapshot(..)
