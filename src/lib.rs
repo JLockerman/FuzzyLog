@@ -56,7 +56,7 @@ pub mod c_binidings {
     use local_store::LocalHorizon;
     //use tcp_store::TcpStore;
     use multitcp_store::TcpStore;
-    use async::fuzzy_log::LogHandle;
+    use async::fuzzy_log::log_handle::LogHandle;
 
     use std::collections::HashMap;
     use std::{mem, ptr, slice};
