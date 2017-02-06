@@ -19,6 +19,11 @@ struct colors
 
 typedef struct DAGHandle DAGHandle;
 
+typedef struct write_id {
+	uint64_t p1;
+	uint64_t p2;
+} write_id;
+
 //! Creates a new DAGHandle for a server group.
 //!
 //! @param lock_server_ip
@@ -51,8 +56,15 @@ static inline DAGHandle *new_dag_handle_for_single_server(const char *chain_serv
 //! Creates a new DAGHandle for a server group based on a config file.
 DAGHandle *new_dag_handle_from_config(const char *config_filename,
 	struct colors *interesting_colors);
+write_id do_append(DAGHandle *handle, char *data, size_t data_size,
+	struct colors* inhabits, struct colors* depends_on, uint8_t async);
+
 
 //! Appends a new node to the dag.
+//!
+//! \warning This function will flush some pending async appends.
+//!          If you wish to wait for a specific write_id call wait_for_append()
+//!          before this function.
 //!
 //! @param handle
 //!     The DAGHandle being worked through.
@@ -70,15 +82,51 @@ DAGHandle *new_dag_handle_from_config(const char *config_filename,
 //!     The colors which the new node should happen-after. May be empty.
 //!
 //NOTE currently can only use 31bits of return value
-uint32_t append(DAGHandle *handle, char *data, size_t data_size,
-	struct colors* inhabits, struct colors* depends_on);
+static inline uint32_t append(DAGHandle *handle, char *data, size_t data_size,
+	struct colors* inhabits, struct colors* depends_on) {
+	do_append(handle, data, data_size, inhabits, depends_on, 0);
+	return 0;
+}
+
+//! Asynchronously appends a new node to the dag.
+//! This functions returns immediately with a write_id which uniquely identifies
+//! the write. The id can be used with wait_for_append() to wait for this
+//! specific write to be finished.
+//! Also provided are wait_for_all_appends() which waits for all outstanding
+//! appends to be finished and wait_for_an_append() which will wait until any
+//! append finishes.
+//!
+//! \warning No guarantees are made on ordering of concurrent appends.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param data
+//!     The data contained within the node.
+//!
+//! @param data_size
+//!     The size, in bytes, of data.
+//!
+//! @param inhabits
+//!     The colors which the new node shall be colored with. Must be non-empty.
+//!
+//! @param depends_on
+//!     The colors which the new node should happen-after. May be empty.
+//!
+//! @return an id which uniquely identifies the write
+//!
+//NOTE currently can only use 31bits of return value
+static inline write_id async_append(DAGHandle *handle, char *data, size_t data_size,
+	struct colors* inhabits, struct colors* depends_on) {
+	return do_append(handle, data, data_size, inhabits, depends_on, 1);
+}
 
 //! Reads a valid next node from the new nodes discovered with the latests
 //! snapshot. If there are no such nodes (i.e. all new nodes have been read)
 //! data_read and inhabits_out->numcolors will be set to 0.
 //!
 //! @param handle
-//!     The DAGHandle being worked through,
+//!     The DAGHandle being worked through.
 //!
 //! @param[out] data_out
 //!     The size in bytes of the data that was read.
@@ -102,6 +150,28 @@ uint32_t append(DAGHandle *handle, char *data, size_t data_size,
 // greater than DELOS_MAX_DATA_SIZE
 uint32_t get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
 
+//! Waits for all outstanding appends to be ACK'd.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+void wait_for_all_appends(DAGHandle *handle);
+
+//! Waits for an append with a specified id to be ACK'd,
+//! or for no appends to be in-flight, whichever comes first.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+void wait_for_append(DAGHandle *handle, write_id id);
+
+//! Waits for any append to be ACK'd, or returns immediately if there are none
+//! in-flight
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+void wait_for_an_append(DAGHandle *handle, write_id id);
 
 //! If there is no unread updates attempts to take a snapshot of the interesting
 //! colors
