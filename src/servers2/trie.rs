@@ -148,7 +148,9 @@ impl AllocPtr {
             let mut storage = Vec::with_capacity(storage_size);
             let ptr = unsafe {
                 storage.set_len(storage_size);
-                &mut *Box::into_raw(storage.into_boxed_slice())
+                let bx = storage.into_boxed_slice();
+                debug_assert_eq!(bx.len(), storage_size);
+                &mut *Box::into_raw(bx)
             };
             (ptr, ::std::u64::MAX)
         }

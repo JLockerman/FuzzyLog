@@ -1,4 +1,7 @@
 #![feature(test)]
+//#![feature(alloc_system)]
+
+//extern crate alloc_system;
 
 extern crate fuzzy_log;
 extern crate mio;
@@ -22,6 +25,7 @@ use std::{env, mem, ops, thread};
 use std::time::Instant;
 
 use fuzzy_log::prelude::*;
+use fuzzy_log::socket_addr::Ipv4SocketAddr;
 
 use test::black_box;
 
@@ -157,7 +161,7 @@ enum Args {
     Client(SocketAddr, usize),
     TrivialServer(SocketAddr),
     TrivialClient(SocketAddr, usize),
-    ReadWrite(SocketAddr, usize, u64),
+    ReadWrite(SocketAddr, usize, usize),
 }
 
 fn parse_args() -> Args {
@@ -206,7 +210,7 @@ fn parse_args() -> Args {
                 else { 1 };
             let jobsize =
                 if let Some(n) = args.next() { n.parse().unwrap() }
-                else { 64 };
+                else { 0 };
             println!("{:?} write/read(s) connecting to remote server @ {}.", num_clients, addr);
             let addr: &str = addr;
             Args::ReadWrite(addr.parse().expect("invalid addr"), num_clients, jobsize)
@@ -295,7 +299,8 @@ fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
                     e.kind = EntryKind::Read;
                     e.locs_mut()[0] = OrderIndex(5.into(), 3.into());
                 }
-                buffer.extend_from_slice(&[0xfu8; 6]);
+
+                buffer.extend_from_slice(&[0u8;6]);
                 for _ in 0..3000001 {
                     let _ = black_box(stream.write_all(&mut buffer));
                 }
@@ -348,11 +353,20 @@ fn run_trivial_client(server_addr: SocketAddr, num_clients: usize) -> ! {
 
 ///////////////////////////////////////
 
-fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u64) -> ! {
+fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: usize) -> ! {
     use std::io::{Read, Write};
 
     static WRITERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
     static READERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+
+    let (job_bytes, job_bytes_u) = {
+        let data = vec![0u8; jobsize];
+        let size = EntryContents::Data(&data[..], &[]).fill_vec(&mut vec![]).entry_size();
+        println!("each entry contains {}B", size);
+        (size as f64, size)
+    };
+
+    const NUM_PACKETS: u32 = 1000000u32;
 
     let start = Instant::now();
     let joins: Vec<_> = (0..num_clients).map(|client_num| {
@@ -362,12 +376,23 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
             let s1 = stream.clone();
             let _h = thread::spawn(move || {
                 let mut stream = &*s1;
-                let mut buffer = Vec::new();
+                let mut write_buffer = Vec::new();
                 {
-                    let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);;
-                    e.locs_mut()[0] = OrderIndex(5.into(), 3.into());
+                    let data = vec![0u8; jobsize];
+                    let e = EntryContents::Data(&data[..], &[]).fill_vec(&mut write_buffer);
+                    debug_assert_eq!(e.entry_size(), job_bytes_u);
                 };
-                buffer.extend_from_slice(&[0xfu8; 6]);
+                let addr = stream.local_addr().unwrap();
+                write_buffer.extend_from_slice(Ipv4SocketAddr::from_socket_addr(addr).bytes());
+
+                let mut read_buffer = Vec::new();
+                {
+                    let e = EntryContents::Data(&(), &[]).fill_vec(&mut read_buffer);
+                    e.kind = EntryKind::Read;
+                }
+                read_buffer.extend_from_slice(Ipv4SocketAddr::from_socket_addr(addr).bytes());
+
+                assert_eq!(write_buffer.len(), job_bytes_u + 6);
 
                 WRITERS_READY.fetch_add(1, Ordering::SeqCst);
                 while WRITERS_READY.load(Ordering::SeqCst) < num_clients * 2 {
@@ -375,44 +400,43 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
                 }
 
                 for i in 0..1000000u32 {
-                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                    Entry::<()>::wrap_bytes_mut(&mut write_buffer)
                         .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
-                    let _ = black_box(stream.write_all(&mut buffer));
+                    debug_assert_eq!(write_buffer.len(), job_bytes_u + 6);
+                    let _ = black_box(stream.write_all(&mut write_buffer));
                 }
                 for i in 0..1000000u32 {
-                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                    Entry::<()>::wrap_bytes_mut(&mut write_buffer)
                         .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
-                    let _ = black_box(stream.write_all(&mut buffer));
+                    debug_assert_eq!(write_buffer.len(), job_bytes_u + 6);
+                    let _ = black_box(stream.write_all(&mut write_buffer));
                 }
                 for i in 0..1000000u32 {
-                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                    Entry::<()>::wrap_bytes_mut(&mut write_buffer)
                         .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
-                    let _ = black_box(stream.write_all(&mut buffer));
+                    debug_assert_eq!(write_buffer.len(), job_bytes_u + 6);
+                    let _ = black_box(stream.write_all(&mut write_buffer));
                 }
 
                 ////////////////////////////////////////
-
-                {
-                    Entry::<()>::wrap_bytes_mut(&mut buffer).kind = EntryKind::Read;
-                }
 
                 READERS_READY.fetch_add(1, Ordering::SeqCst);
                 while READERS_READY.load(Ordering::SeqCst) < num_clients * 2 { thread::yield_now()
                 }
                 for i in 0..1000000u32 {
-                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                    Entry::<[u8]>::wrap_bytes_mut(&mut read_buffer)
                         .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
-                    let _ = black_box(stream.write_all(&mut buffer));
+                    let _ = black_box(stream.write_all(&mut read_buffer));
                 }
                 for i in 0..1000000u32 {
-                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                    Entry::<[u8]>::wrap_bytes_mut(&mut read_buffer)
                         .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
-                    let _ = black_box(stream.write_all(&mut buffer));
+                    let _ = black_box(stream.write_all(&mut read_buffer));
                 }
                 for i in 0..1000000u32 {
-                    Entry::<()>::wrap_bytes_mut(&mut buffer)
+                    Entry::<[u8]>::wrap_bytes_mut(&mut read_buffer)
                         .locs_mut()[0] = OrderIndex(color, entry::from(i) + 1);
-                    let _ = black_box(stream.write_all(&mut buffer));
+                    let _ = black_box(stream.write_all(&mut read_buffer));
                 }
             });
 
@@ -420,9 +444,10 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
 
             let mut buffer = vec![];
             let mut big_buffer = {
-                let _ = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
-                let bytes_to_read = buffer.len() * 1_000_000;
-                vec![0u8; bytes_to_read]
+                let data = vec![0u8; jobsize];
+                let _ = EntryContents::Data(&data[..], &[]).fill_vec(&mut buffer);
+                //let bytes_to_read = buffer.len() * 1_000_000;
+                //vec![0u8; bytes_to_read]
             };
 
             WRITERS_READY.fetch_add(1, Ordering::SeqCst);
@@ -430,22 +455,54 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
                 thread::yield_now()
             }
 
-            //for _ in 0..1000000u32 {
-                let _ = stream.read_exact(&mut big_buffer);
-                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
-                //    OrderIndex(color, entry::from(i) + 1));
-            //}
+            for _i in 0..1000000u32 {
+                //let _ = stream.read_exact(&mut big_buffer);
+                let _ = stream.read_exact(&mut buffer).unwrap();
+                //assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(_i) + 1));
+                debug_assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].0, color);
+                debug_assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].1,
+                    (_i + 1).into());
+                debug_assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).entry_size(),
+                    buffer.len());
+                debug_assert!({
+                    let e = Entry::<[u8]>::wrap_bytes(&buffer);
+                    let l = e.locs()[0];
+                    l.1 >= entry::from(1u32)
+                    && l.1 <= entry::from(3000000u32) && e.entry_size() == buffer.len()
+                }, "write fail {}: {:?} == {:?}, 0 < {:?} <= 3000000u32, size: {} == {}",
+                    _i,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].0,
+                    color,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].1,
+                    Entry::<[u8]>::wrap_bytes(&buffer).entry_size(),
+                    buffer.len(),
+                );
+            }
             let write_start = Instant::now();
-            //for _ in 1000000u32..2000000u32 {
-                let _ = stream.read_exact(&mut big_buffer);
-                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
-                //    OrderIndex(color, entry::from(i) + 1));
-            //}
-            let write_time = write_start.elapsed();
-            for i in 2000000u32..3000000u32 {
+            for _i in 1000000u32..2000000u32 {
+                //let _ = stream.read_exact(&mut big_buffer);
                 let _ = stream.read_exact(&mut buffer);
-                assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
-                    OrderIndex(color, entry::from(i) + 1));
+                //assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(_i) + 1));
+            }
+            let write_time = write_start.elapsed();
+            for _i in 2000000u32..3000000u32 {
+                stream.read_exact(&mut buffer).unwrap();
+                //assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(_i) + 1));
+                assert!({
+                    let e = Entry::<[u8]>::wrap_bytes(&buffer);
+                    let l = e.locs()[0];
+                    l.1 == (_i + 1).into() && l.0 == color && l.1 >= entry::from(2000000u32)
+                    && l.1 <= entry::from(3000000u32) && e.entry_size() == buffer.len()
+                }, "write fail {}: {:?} == {:?}, 2000000 < {:?} 3000000u32, size: {}",
+                    _i,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].0,
+                    color,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].1,
+                    Entry::<[u8]>::wrap_bytes(&buffer).entry_size()
+                );
             }
 
             ////////////////////////////////////////
@@ -455,32 +512,61 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
                 thread::yield_now()
             }
 
-            //for _ in 0..1000000u32 {
-                let _ = stream.read_exact(&mut big_buffer);
-                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
-                //    OrderIndex(color, entry::from(i) + 1));
-            //}
-            let read_start = Instant::now();
-            //for _ in 0..1000000u32 {
-                let _ = stream.read_exact(&mut big_buffer);
-                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
-                //    OrderIndex(color, entry::from(i) + 1));
-            //}
-            let read_time = read_start.elapsed();
-            for i in 0..1000000u32 {
+            for _i in 0..1000000u32 {
+                //let _ = stream.read_exact(&mut big_buffer);
                 let _ = stream.read_exact(&mut buffer);
-                assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
-                    OrderIndex(color, entry::from(i) + 1));
+                //assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(_i) + 1));
+                debug_assert!({
+                    let e = Entry::<[u8]>::wrap_bytes(&buffer);
+                    let l = e.locs()[0];
+                    l.1 == (_i + 1).into() && l.0 == color && l.1 >= entry::from(1u32)
+                    && l.1 <= entry::from(3000000u32) && e.entry_size() == buffer.len()
+                }, "read fail {}: {:?} == {:?}, 0 < {:?} <= 3000000u32, size: {} == {}",
+                    _i,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].0,
+                    color,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].1,
+                    Entry::<[u8]>::wrap_bytes(&buffer).entry_size(),
+                    buffer.len(),
+                );
+            }
+            let read_start = Instant::now();
+            for _i in 0..1000000u32 {
+                //let _ = stream.read_exact(&mut big_buffer);
+                let _ = stream.read_exact(&mut buffer);
+                //assert_eq!(Entry::<()>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(i) + 1));
+            }
+            let read_time = read_start.elapsed();
+            for _i in 0..1000000u32 {
+                stream.read_exact(&mut buffer).unwrap();
+                //assert_eq!(Entry::<[u8]>::wrap_bytes(&buffer).locs()[0],
+                //    OrderIndex(color, entry::from(_i) + 1));
+                assert!({
+                    let e = Entry::<[u8]>::wrap_bytes(&buffer);
+                    let l = e.locs()[0];
+                    l.1 == (_i + 1).into() && l.0 == color && l.1 <= entry::from(1000000u32) && e.entry_size() == buffer.len()},
+                    "read fail {}: {:?} == {:?}, 2000000 < {:?} <= 3000000u32, size: {} == {}",
+                    _i,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].0,
+                    color,
+                    Entry::<[u8]>::wrap_bytes(&buffer).locs()[0].1,
+                    Entry::<[u8]>::wrap_bytes(&buffer).entry_size(),
+                    buffer.len(),
+                );
             }
 
             let write_s = write_time.as_secs() as f64 + (write_time.subsec_nanos() as f64 * 10.0f64.powi(-9));
             let read_s = read_time.as_secs() as f64 + (read_time.subsec_nanos() as f64 * 10.0f64.powi(-9));
-            let write_hz = 1000000.0 / write_s;
-            let read_hz = 1000000.0 / read_s;
-            println!("client {:?} elapsed time for 1000000 writes {:?}, {}s, {:.3} Hz",
-                client_num, write_time, write_s, write_hz);
-            println!("client {:?} elapsed time for 1000000 reads {:?}, {}s, {:.3} Hz",
-                client_num, read_time, read_s, read_hz);
+            let write_hz = NUM_PACKETS as f64 / write_s;
+            let read_hz = NUM_PACKETS as f64 / read_s;
+            let write_bits = write_hz * (buffer.len() * 8) as f64;
+            let read_bits = read_hz * (buffer.len() * 8) as f64;
+            println!("client {:?} elapsed time for 1000000 writes {:?}, {}s, {:.3} Hz, {}b/s",
+                client_num, write_time, write_s, write_hz, write_bits);
+            println!("client {:?} elapsed time for 1000000 reads {:?}, {}s, {:.3} Hz, {}b/s",
+                client_num, read_time, read_s, read_hz, read_bits);
             (write_hz, read_hz)
         })
     }).collect();
@@ -494,8 +580,8 @@ fn run_write_read_client(server_addr: SocketAddr, num_clients: usize, jobsize: u
             (write_total + write, read_total + read)
     );
     let end = start.elapsed();
-    println!("total write Hz {:.3}", total_write_hz);
-    println!("total read  Hz {:.3}", total_read_hz);
+    println!("total write Hz {:.3}, {:.3}b/s", total_write_hz, total_write_hz * job_bytes * 8.0);
+    println!("total read  Hz {:.3}, {:.3}b/s", total_read_hz, total_read_hz * job_bytes * 8.0);
     println!("elapsed time {}s", end.as_secs());
 
     std::process::exit(0)
