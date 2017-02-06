@@ -195,7 +195,7 @@ impl ThreadLog {
                 self.to_store.send(msg).expect("store hung up");
                 true
             }
-            ReturnBuffer(mut buffer) => {
+            ReturnBuffer(buffer) => {
                 self.cache.cache_buffer(buffer);
                 true
             }
