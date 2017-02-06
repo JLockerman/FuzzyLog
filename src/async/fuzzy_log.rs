@@ -621,6 +621,9 @@ impl ThreadLog {
             if index != entry::from(0) /* && !pc.is_within_snapshot(index) */ {
                 trace!("RRRRR non-blind search {:?} {:?}", chain, index);
                 let unblocked = pc.update_horizon(potential_new_horizon);
+                if pc.last_read_sent_to_server == index - 1 {
+                    pc.last_read_sent_to_server = pc.last_read_sent_to_server + 1
+                }
                 (unblocked, early_sentinel)
             } else if early_sentinel.is_some() {
                 trace!("RRRRR already found {:?} {:?}", chain, early_sentinel);
