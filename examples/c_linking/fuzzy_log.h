@@ -93,6 +93,12 @@ static inline uint32_t append(DAGHandle *handle, char *data, size_t data_size,
 //! appends to be finished and wait_for_an_append() which will wait until any
 //! append finishes.
 //!
+//! Additionally there is flush_completed_appends().
+//! In the event that a large number of concurrent appends are sent a large
+//! amount of temporary allocations get performed.
+//! If the exact point at which the various appends complete is irrelevant,
+//! flush_completed_appends() can be used to remove these temporary allocations.
+//!
 //! \warning No guarantees are made on ordering of concurrent appends.
 //!
 //! @param handle
@@ -146,6 +152,13 @@ static inline write_id async_append(DAGHandle *handle, char *data, size_t data_s
 // this version simple assumes that no data+metadat passed in or out will be
 // greater than DELOS_MAX_DATA_SIZE
 uint32_t get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
+
+//! Flush all appends that have already been completed.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+void flush_completed_appends(DAGHandle *handle);
 
 //! Waits for all outstanding appends to be ACK'd.
 //!
