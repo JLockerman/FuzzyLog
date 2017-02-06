@@ -65,11 +65,13 @@ pub mod c_binidings {
     use std::net::SocketAddr;
     use std::os::raw::c_char;
 
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use servers::tcp::Server;
+    use servers2;
 
-    use mio::deprecated::EventLoop;
+    use mio;
+
+    use byteorder::{ByteOrder, NativeEndian};
 
     //pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
     //pub type DAG = DAGHandle<[u8], Box<Store<[u8]>>, LocalHorizon>;
@@ -80,6 +82,31 @@ pub mod c_binidings {
     pub struct colors {
         numcolors: usize,
         mycolors: *const ColorID,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    pub struct WriteId {
+        p1: u64,
+        p2: u64,
+    }
+
+    impl WriteId {
+        fn from_uuid(id: Uuid) -> Self {
+            let bytes = id.as_bytes();
+            WriteId {
+                p1: NativeEndian::read_u64(&bytes[0..8]),
+                p2: NativeEndian::read_u64(&bytes[8..16]),
+            }
+        }
+
+        fn to_uuid(self) -> Uuid {
+            let WriteId {p1, p2} = self;
+            let mut bytes = [0u8; 16];
+            NativeEndian::write_u64(&mut bytes[0..8], p1);
+            NativeEndian::write_u64(&mut bytes[8..16], p2);
+            Uuid::from_bytes(&bytes[..]).unwrap()
+        }
     }
 
     #[no_mangle]
@@ -117,8 +144,8 @@ pub mod c_binidings {
 
     //NOTE currently can only use 31bits of return value
     #[no_mangle]
-    pub extern "C" fn append(dag: *mut DAG, data: *const u8, data_size: usize,
-        inhabits: *const colors, depends_on: *const colors) -> u32 {
+    pub extern "C" fn do_append(dag: *mut DAG, data: *const u8, data_size: usize,
+        inhabits: *const colors, depends_on: *const colors, async: u8) -> WriteId {
         assert!(data_size == 0 || data != ptr::null());
         assert!(inhabits != ptr::null());
         assert!(colors_valid(inhabits));
@@ -140,13 +167,31 @@ pub mod c_binidings {
                 &[]
             }
         };
-        dag.color_append(data, inhabits, depends_on);
-        0
+        let id = dag.color_append(data, inhabits, depends_on, async != 0);
+        WriteId::from_uuid(id)
     }
 
     fn colors_valid(c: *const colors) -> bool {
         unsafe { c != ptr::null() &&
             ((*c).numcolors == 0 || (*c).mycolors != ptr::null()) }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wait_for_all_appends(dag: *mut DAG) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        dag.wait_for_all_appends();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wait_for_append(dag: *mut DAG, write_id: WriteId) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        dag.wait_for_append(write_id.to_uuid());
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wait_for_an_append(dag: *mut DAG) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        dag.wait_for_an_append();
     }
 
     //NOTE we need either a way to specify data size, or to pass out a pointer
@@ -215,19 +260,15 @@ pub mod c_binidings {
     #[no_mangle]
     pub extern "C" fn start_fuzzy_log_server_for_group(server_ip: *const c_char,
         server_number: u32, total_servers_in_group: u32) -> ! {
-        let mut event_loop = EventLoop::new()
-            .expect("unable to start server loop");
-        let mut server = start_server(&mut event_loop, server_ip, server_number,
-            total_servers_in_group);
-        let res = event_loop.run(&mut server);
-        panic!("server stopped with: {:?}", res)
+        start_server(server_ip, server_number,
+            total_servers_in_group, &AtomicUsize::new(0));
     }
 
     #[no_mangle]
     pub extern "C" fn start_fuzzy_log_server_thread_from_group(server_ip: *const c_char,
         server_number: u32, total_servers_in_group: u32) {
             assert!(server_ip != ptr::null());
-            let server_started = AtomicBool::new(false);
+            let server_started = AtomicUsize::new(0);
             let (started, server_ip) = unsafe {
                 //This should be safe since the while loop at the of the function
                 //prevents it from exiting until the server is started and
@@ -235,16 +276,9 @@ pub mod c_binidings {
                 (extend_lifetime(&server_started), &*server_ip)
             };
             let handle = ::std::thread::spawn(move || {
-                let mut event_loop = EventLoop::new()
-                    .expect("unable to start server loop");
-                let mut server = start_server(&mut event_loop, server_ip, server_number,
-                    total_servers_in_group);
-                started.store(true, Ordering::SeqCst);
-                mem::drop(started);
-                let res = event_loop.run(&mut server);
-                panic!("server stopped with: {:?}", res)
+                start_server(server_ip, server_number, total_servers_in_group, &started)
             });
-            while !server_started.load(Ordering::SeqCst) {}
+            while !server_started.load(Ordering::SeqCst) < 1 {}
             mem::forget(handle);
             mem::drop(server_ip);
 
@@ -253,14 +287,20 @@ pub mod c_binidings {
             }
     }
 
-    fn start_server(event_loop: &mut EventLoop<Server>, server_ip: *const c_char,
-        server_num: u32, total_num_servers: u32) -> Server {
+    fn start_server(server_ip: *const c_char,
+        server_num: u32, total_num_servers: u32, servers_ready: &AtomicUsize) -> ! {
         let server_addr_str = unsafe {
             CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
         };
         let ip_addr = server_addr_str.parse().expect("invalid IP addr");
-        Server::new(&ip_addr, server_num, total_num_servers, event_loop)
-            .expect("unable to start server")
+        let acceptor = mio::tcp::TcpListener::bind(&ip_addr).expect("cannot start server");
+        ::servers2::tcp::run(
+            acceptor,
+            server_num,
+            total_num_servers,
+            1,
+            &servers_ready,
+        )
     }
 
     ////////////////////////////////////

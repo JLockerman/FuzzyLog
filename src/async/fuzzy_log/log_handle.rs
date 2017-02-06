@@ -22,6 +22,7 @@ use packets::{
 pub struct LogHandle<V: ?Sized> {
     _pd: PhantomData<Box<V>>,
     num_snapshots: usize,
+    num_async_writes: usize,
     to_log: mpsc::Sender<Message>,
     ready_reads: mpsc::Receiver<Vec<u8>>,
     finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
@@ -272,6 +273,7 @@ where V: Storeable {
             _pd: Default::default(),
             curr_entry: Default::default(),
             num_snapshots: 0,
+            num_async_writes: 0,
         }
     }
 
@@ -313,7 +315,13 @@ where V: Storeable {
         Some((val, locs))
     }
 
-    pub fn color_append(&mut self, data: &V, inhabits: &[order], depends_on: &[order]) {
+    pub fn color_append(
+        &mut self,
+        data: &V,
+        inhabits: &[order],
+        depends_on: &[order],
+        async: bool,
+    ) -> Uuid {
         //TODO get rid of gratuitous copies
         assert!(inhabits.len() > 0);
         let mut inhabits = inhabits.to_vec();
@@ -326,50 +334,101 @@ where V: Storeable {
         let _no_snapshot = inhabits == depends_on || depends_on.len() == 0;
         // if we're performing a single colour append we might be able fuzzy_log.append
         // instead of multiappend
-        if depends_on.len() > 0 {
+        let id = if depends_on.len() > 0 {
             trace!("dependent append");
-            self.dependent_multiappend(&*inhabits, &*depends_on, data, &[]);
+            self.async_dependent_multiappend(&*inhabits, &*depends_on, data, &[])
         }
         else if inhabits.len() == 1 {
             trace!("single append");
-            self.append(inhabits[0].into(), data, &[]);
+            self.async_append(inhabits[0].into(), data, &[])
         }
         else {
             trace!("multi  append");
-            self.multiappend(&*inhabits, data, &[]);
+            self.async_multiappend(&*inhabits, data, &[])
+        };
+        if !async {
+            self.wait_for_append(id);
         }
+        id
     }
 
-    pub fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Vec<OrderIndex> {
+    pub fn wait_for_all_appends(&mut self) {
+        for _ in 0..self.num_async_writes {
+            //TODO return buffers here and cache them?
+            self.finished_writes.recv().unwrap();
+        }
+        self.num_async_writes = 0;
+    }
+
+    pub fn wait_for_append(&mut self, write_id: Uuid) -> Option<Vec<OrderIndex>> {
+        for _ in 0..self.num_async_writes {
+            //TODO return buffers here and cache them?
+            let (id, locs) = self.finished_writes.recv().unwrap();
+            self.num_async_writes -= 1;
+            if id == write_id {
+                return Some(locs)
+            }
+        }
+        return None
+    }
+
+    pub fn wait_for_an_append(&mut self) -> Option<(Uuid, Vec<OrderIndex>)> {
+        if self.num_async_writes > 0 {
+            self.num_async_writes -= 1;
+            //TODO return buffers here and cache them?
+            return Some(self.finished_writes.recv().unwrap())
+        }
+        None
+    }
+
+    //TODO add wait_and_snapshot(..)
+    //TODO add append_and_wait(..) ?
+
+    pub fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex])
+    -> Vec<OrderIndex> {
+        let id = self.async_append(chain, data, deps);
+        self.wait_for_append(id).unwrap()
+    }
+
+    pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
         //TODO no-alloc?
         let mut buffer = EntryContents::Data(data, &deps).clone_bytes();
+        let id = Uuid::new_v4();
         {
             //TODO I should make a better entry builder
             let e = bytes_as_entry_mut(&mut buffer);
-            e.id = Uuid::new_v4();
+            e.id = id;
             e.locs_mut()[0] = OrderIndex(chain, 0.into());
         }
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        //TODO return buffers here and cache them?
-        self.finished_writes.recv().unwrap().1
+        self.num_async_writes += 1;
+        id
     }
 
     pub fn multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
     -> Vec<OrderIndex> {
         //TODO no-alloc?
+        let id = self.async_multiappend(chains, data, deps);
+        self.wait_for_append(id).unwrap()
+    }
+
+    pub fn async_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Uuid {
+        //TODO no-alloc?
         assert!(chains.len() > 1);
         let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
         locs.sort();
         locs.dedup();
+        let id = Uuid::new_v4();
         let buffer = EntryContents::Multiput {
             data: data,
-            uuid: &Uuid::new_v4(),
+            uuid: &id,
             columns: &locs,
             deps: deps,
         }.clone_bytes();
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        //TODO return buffers here and cache them?
-        self.finished_writes.recv().unwrap().1
+        self.num_async_writes += 1;
+        id
     }
 
     //TODO return two vecs
@@ -379,6 +438,17 @@ where V: Storeable {
         data: &V,
         deps: &[OrderIndex])
     -> Vec<OrderIndex> {
+        let id = self.async_dependent_multiappend(chains, depends_on, data, deps);
+        self.wait_for_append(id).unwrap()
+    }
+
+    //TODO return two vecs
+    pub fn async_dependent_multiappend(&mut self,
+        chains: &[order],
+        depends_on: &[order],
+        data: &V,
+        deps: &[OrderIndex])
+    -> Uuid {
         assert!(depends_on.len() > 0);
         let mut mchains: Vec<_> = chains.into_iter()
             .map(|&c| OrderIndex(c, 0.into()))
@@ -398,13 +468,15 @@ where V: Storeable {
             .all(|&OrderIndex(o, _)| chains.contains(&o)));
         debug_assert!(mchains[(chains.len() + 1)..]
             .iter().all(|&OrderIndex(o, _)| depends_on.contains(&o)));
+        let id = Uuid::new_v4();
         let buffer = EntryContents::Multiput {
             data: data,
-            uuid: &Uuid::new_v4(),
+            uuid: &id,
             columns: &mchains,
             deps: deps,
         }.clone_bytes();
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.finished_writes.recv().unwrap().1
+        self.num_async_writes += 1;
+        id
     }
 }

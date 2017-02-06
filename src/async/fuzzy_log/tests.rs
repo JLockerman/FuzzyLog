@@ -433,7 +433,7 @@ macro_rules! async_tests {
             let _ = lh.append(61.into(), &(), &[]);
             let _ = lh.multiappend(&[61.into(), 62.into()], &(), &[]);
             let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
-            let _ = lh.color_append(&(), &[61.into()], &[]);
+            let _ = lh.color_append(&(), &[61.into()], &[], false);
             lh.snapshot(61.into());
             assert_eq!(lh.get_next(),
                 Some((&(), &[OrderIndex(61.into(), 1.into())][..])));
@@ -445,6 +445,25 @@ macro_rules! async_tests {
                     OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
             assert_eq!(lh.get_next(),
                 Some((&(), &[OrderIndex(61.into(), 4.into())][..])));
+            assert_eq!(lh.get_next(), None);
+        }
+
+        #[test]
+        #[inline(never)]
+        pub fn test_async_1_column() {
+            let _ = env_logger::init();
+            trace!("TEST async 1 column");
+            let mut lh = $new_thread_log::<i32>(vec![63.into()]);
+            let _ = lh.async_append(63.into(), &1, &[]);
+            let _ = lh.async_append(63.into(), &17, &[]);
+            let _ = lh.async_append(63.into(), &32, &[]);
+            let _ = lh.async_append(63.into(), &-1, &[]);
+            lh.wait_for_all_appends();
+            lh.snapshot(63.into());
+            assert_eq!(lh.get_next(), Some((&1,  &[OrderIndex(63.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Some((&17, &[OrderIndex(63.into(), 2.into())][..])));
+            assert_eq!(lh.get_next(), Some((&32, &[OrderIndex(63.into(), 3.into())][..])));
+            assert_eq!(lh.get_next(), Some((&-1, &[OrderIndex(63.into(), 4.into())][..])));
             assert_eq!(lh.get_next(), None);
         }
 
@@ -498,7 +517,7 @@ macro_rules! async_tests {
                 let _ = lh.append(1_000_02.into(), &[], &[]);
                 let _ = lh.multiappend(&[1_000_02.into(), 1_000_03.into()], &[] , &[]);
                 let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
-                let _ = lh.color_append(&[], &[1_000_02.into()], &[]);
+                let _ = lh.color_append(&[], &[1_000_02.into()], &[], false);
                 lh.snapshot(1_000_02.into());
                 assert_eq!(lh.get_next(),
                     Some((&[][..], &[OrderIndex(1_000_02.into(), 1.into())][..])));
