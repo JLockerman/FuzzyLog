@@ -212,6 +212,7 @@ where V: Storeable {
 
         let to_store;
         loop {
+            thread::yield_now();
             let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
             if let Some(s) = ts {
                 to_store = s;

@@ -47,7 +47,7 @@ use buffer::Buffer;
 
     for multi entry values store refcount before entry,
     we want bit field which tells us where seq of entries end in allocator,
-    use to distinguis btwn single and multi entries...
+    use to distinguish btwn single and multi entries...
 */
 
 /*
@@ -61,6 +61,15 @@ use buffer::Buffer;
     by having the index thread distribute the placement jobs round robin
     (or other load balancing if we figure out one that works,
      actually, dumping all of the to-copies in a work-stealing queue might actually work...)
+*/
+
+/*
+  writes are a bit slower than reads, and this gets worse as entry size increases
+  I suspect this due to malloc.
+  We can parallelize malloc by having workers send one level's worth of alloc
+  along with each write request.
+  We could even use the initial recv-buffer as this alloc if we ensure that said
+  buffers are always LEVEL_BYTES in size
 */
 
 /*
