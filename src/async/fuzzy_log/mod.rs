@@ -771,9 +771,7 @@ impl ThreadLog {
 
     fn finshed_reading(&mut self) -> bool {
         let finished = Rc::get_mut(&mut self.chains_currently_being_read).is_some();
-        //FIXME this is dumb, it might be better to have a counter of how many servers we are
-        //      waiting for
-        debug_assert_eq!({
+        /*debug_assert_eq!({
             let mut currently_being_read = 0;
             for (_, pc) in self.per_chains.iter() {
                 assert_eq!(pc.is_finished(), !pc.has_read_state());
@@ -788,7 +786,19 @@ impl ThreadLog {
                 currently_being_read, finished);
             }
             currently_being_read == 0
-        }, finished);
+        }, finished);*/
+        debug_assert!(
+            if finished {
+                self.per_chains.iter().map(|(_, pc)| {
+                    if !pc.has_outstanding() {
+                        assert!(pc.finished_until_snapshot());
+                    }
+                });
+                true
+            } else {
+                true
+            }
+        );
 
         finished
     }

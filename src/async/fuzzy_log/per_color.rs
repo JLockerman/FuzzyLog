@@ -134,12 +134,16 @@ impl PerColor {
     }
 
     pub fn decrement_outstanding_snapshots(&mut self) -> u32 {
-        self.is_being_read.as_mut().map(|&mut ReadState {ref mut outstanding_snapshots, ..}|{
+        let (snap, finished) = self.is_being_read.as_mut().map(|r|{
             //TODO saturating arith
-            *outstanding_snapshots = *outstanding_snapshots - 1;
-            *outstanding_snapshots
+            r.outstanding_snapshots = r.outstanding_snapshots - 1;
+            (r.outstanding_snapshots, r.is_finished())
             //TODO should this set is_being_read to None when last_returned == last snap?
-        }).expect("tried to decrement snapshots on a chain not being read")
+        }).expect("tried to decrement snapshots on a chain not being read");
+        if finished {
+            self.is_being_read = None
+        }
+        snap
     }
 
     pub fn increment_multi_search(&mut self, is_being_read: &IsRead) {
@@ -161,15 +165,18 @@ impl PerColor {
     }
 
     pub fn decrement_multi_search(&mut self) {
-        let num_search = self.is_being_read.as_mut().map(|&mut ReadState {ref mut num_multiappends_searching_for, ..}| {
-            debug_assert!(*num_multiappends_searching_for > 0);
+        let (num_search, finished) = self.is_being_read.as_mut().map(|r| {
+            debug_assert!(r.num_multiappends_searching_for > 0);
             //TODO saturating arith
-            *num_multiappends_searching_for = *num_multiappends_searching_for - 1;
-            *num_multiappends_searching_for
+            r.num_multiappends_searching_for = r.num_multiappends_searching_for - 1;
+            (r.num_multiappends_searching_for, r.is_finished())
             //TODO should this set is_being_read to None when last_returned == last snap?
         }).expect("tried to decrement multi_search in a chain not being read");
         trace!("QQQQQ {:?} - now searching for {:?} multis",
             self.chain, num_search);
+        if finished {
+            self.is_being_read = None
+        }
     }
 
     #[inline(always)]
@@ -191,10 +198,9 @@ impl PerColor {
             read_state.outstanding_reads -= 1;
             read_state.is_finished()
         });
-        //TODO if let Some(true) = finished {
-            //self.is_being_read = None
-        //}
-        //self.outstanding_reads -= 1
+        if let Some(true) = finished {
+            self.is_being_read = None
+        }
     }
 
     pub fn has_read_state(&self) -> bool {
@@ -361,6 +367,10 @@ impl PerColor {
         self.found_but_unused_multiappends.remove(id)
     }
 
+    pub fn has_outstanding(&self) -> bool {
+        self.is_being_read.is_some()
+    }
+
     pub fn has_outstanding_reads(&self) -> bool {
         self.is_being_read.as_ref().map_or(false, |r| r.outstanding_reads > 0)
     }
@@ -374,7 +384,7 @@ impl PerColor {
             outstanding_snapshots > 0).unwrap_or(false)
     }
 
-    fn finished_until_snapshot(&self) -> bool {
+    pub fn finished_until_snapshot(&self) -> bool {
         self.last_returned_to_client == self.last_snapshot
             && !self.has_outstanding_snapshots()
     }
