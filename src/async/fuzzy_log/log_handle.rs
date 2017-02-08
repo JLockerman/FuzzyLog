@@ -348,7 +348,7 @@ where V: Storeable {
             self.async_multiappend(&*inhabits, data, &[])
         };
         if !async {
-            self.wait_for_append(id);
+            self.wait_for_a_specific_append(id);
         }
         id
     }
@@ -364,7 +364,7 @@ where V: Storeable {
         self.num_async_writes = 0;
     }
 
-    pub fn wait_for_append(&mut self, write_id: Uuid) -> Option<Vec<OrderIndex>> {
+    pub fn wait_for_a_specific_append(&mut self, write_id: Uuid) -> Option<Vec<OrderIndex>> {
         for _ in 0..self.num_async_writes {
             //TODO return buffers here and cache them?
             let (id, locs) = self.finished_writes.recv().unwrap();
@@ -376,7 +376,7 @@ where V: Storeable {
         return None
     }
 
-    pub fn wait_for_an_append(&mut self) -> Option<(Uuid, Vec<OrderIndex>)> {
+    pub fn wait_for_any_append(&mut self) -> Option<(Uuid, Vec<OrderIndex>)> {
         if self.num_async_writes > 0 {
             self.num_async_writes -= 1;
             //TODO return buffers here and cache them?
@@ -397,7 +397,7 @@ where V: Storeable {
     pub fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex])
     -> Vec<OrderIndex> {
         let id = self.async_append(chain, data, deps);
-        self.wait_for_append(id).unwrap()
+        self.wait_for_a_specific_append(id).unwrap()
     }
 
     pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
@@ -419,7 +419,7 @@ where V: Storeable {
     -> Vec<OrderIndex> {
         //TODO no-alloc?
         let id = self.async_multiappend(chains, data, deps);
-        self.wait_for_append(id).unwrap()
+        self.wait_for_a_specific_append(id).unwrap()
     }
 
     pub fn async_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
@@ -449,7 +449,7 @@ where V: Storeable {
         deps: &[OrderIndex])
     -> Vec<OrderIndex> {
         let id = self.async_dependent_multiappend(chains, depends_on, data, deps);
-        self.wait_for_append(id).unwrap()
+        self.wait_for_a_specific_append(id).unwrap()
     }
 
     //TODO return two vecs
