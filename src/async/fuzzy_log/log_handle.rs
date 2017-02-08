@@ -403,6 +403,7 @@ where V: Storeable {
     pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
         //TODO no-alloc?
         let mut buffer = EntryContents::Data(data, &deps).clone_bytes();
+        buffer.extend_from_slice(&[0u8; 6]);
         let id = Uuid::new_v4();
         {
             //TODO I should make a better entry builder
@@ -430,12 +431,13 @@ where V: Storeable {
         locs.sort();
         locs.dedup();
         let id = Uuid::new_v4();
-        let buffer = EntryContents::Multiput {
+        let mut buffer = EntryContents::Multiput {
             data: data,
             uuid: &id,
             columns: &locs,
             deps: deps,
         }.clone_bytes();
+        buffer.extend_from_slice(&[0u8; 6]);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
@@ -479,12 +481,13 @@ where V: Storeable {
         debug_assert!(mchains[(chains.len() + 1)..]
             .iter().all(|&OrderIndex(o, _)| depends_on.contains(&o)));
         let id = Uuid::new_v4();
-        let buffer = EntryContents::Multiput {
+        let mut buffer = EntryContents::Multiput {
             data: data,
             uuid: &id,
             columns: &mchains,
             deps: deps,
         }.clone_bytes();
+        buffer.extend_from_slice(&[0u8; 6]);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id

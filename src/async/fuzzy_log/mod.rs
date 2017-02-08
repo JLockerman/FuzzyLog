@@ -766,6 +766,7 @@ impl ThreadLog {
             debug_assert_eq!(e.data_bytes, 0);
             debug_assert_eq!(e.dependency_bytes, 0);
         }
+        buffer.extend_from_slice(&[0u8; 6]);
         buffer
     }
 

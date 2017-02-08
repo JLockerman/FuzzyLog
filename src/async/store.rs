@@ -348,7 +348,7 @@ where PerServer<S>: Connected,
     } // End fn handle_new_requests_from_client
 
     fn add_single_server_send(&mut self, server: usize, msg: Vec<u8>) {
-        assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
+        assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size() + mem::size_of::<Ipv4SocketAddr>(), msg.len());
         //let per_server = self.server_for_token_mut(Token(server));
         let per_server = &mut self.servers[server];
         per_server.add_single_server_send(msg);
@@ -530,7 +530,7 @@ where PerServer<S>: Connected,
             }
         }
         else {
-            trace!("CLIENT no write for {:?}", token);
+            trace!("CLIENT no write for {:?} @ {:?}", id, token);
             return true
         }
     }// end handle_completed_write
@@ -607,7 +607,7 @@ where PerServer<S>: Connected,
     }
 
     fn add_multis(&mut self, msg: Vec<u8>) {
-        debug_assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
+        debug_assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size() + mem::size_of::<Ipv4SocketAddr>(), msg.len());
         let locks = Rc::new(Entry::<()>::wrap_bytes(&msg).locs().to_vec().into_boxed_slice());
         let servers = self.get_servers_for_multi(&msg);
         let mut remaining_servers: HashSet<usize> = Default::default();
@@ -773,6 +773,7 @@ impl Connected for PerServer<TcpStream> {
         use std::io::ErrorKind;
         //let is_write = Entry::<()>::wrap_bytes(packet).kind.layout().is_write();
         trace!("CLIENT continue send {}/{} bytes.", self.bytes_sent, packet.len());
+        let len = packet.len();
         debug_assert!({
             let e = Entry::<()>::wrap_bytes(packet);
             if e.kind.layout() == EntryLayout::Read {
@@ -780,11 +781,12 @@ impl Connected for PerServer<TcpStream> {
             } else { true }
         });
         debug_assert_eq!(
-            Entry::<()>::wrap_bytes(packet).entry_size(),
+            Entry::<()>::wrap_bytes(packet).entry_size() + mem::size_of::<Ipv4SocketAddr>(),
             packet.len()
         );
-        if packet.len() == 0 { return true }
-        if self.bytes_sent < packet.len() {
+        //debug_assert_eq!(&packet[len-6..len], &*self.receiver.bytes());
+        //if packet.len() == 0 { return true }
+        if self.bytes_sent < len {
             match self.stream.write(&packet[self.bytes_sent..]) {
                 Ok(i) => self.bytes_sent += i,
                 Err(e) => match e.kind() {
@@ -793,7 +795,14 @@ impl Connected for PerServer<TcpStream> {
                 }
             }
         }
-        let packet_len = packet.len();
+        trace!("CLIENT sent {}/{} bytes.", self.bytes_sent, packet.len());
+        if self.bytes_sent >= len {
+            self.bytes_sent = 0;
+            true
+        } else {
+            false
+        }
+        /*let packet_len = packet.len();
         let finished = self.bytes_sent >= packet_len;
         if finished {
             //TODO if is_write
@@ -818,7 +827,7 @@ impl Connected for PerServer<TcpStream> {
             finished && finished_ip
         } else {
             false
-        }
+        }*/
     }
 }
 
@@ -873,8 +882,10 @@ where PerServer<S>: Connected {
         use self::WriteState::*;
 
         let send_in_progress = mem::replace(&mut self.currently_sending, None);
-        if let Some(currently_sending) = send_in_progress {
-            let finished = currently_sending.with_packet(|p| self.send_packet(p) );
+        if let Some(mut currently_sending) = send_in_progress {
+            let finished = currently_sending
+                .ensure_ip(self.receiver)
+                .with_packet(|p| self.send_packet(p) );
             if finished {
                 return Some(currently_sending)
             }
@@ -890,6 +901,12 @@ where PerServer<S>: Connected {
                 let finished = {
                     trace!("CLIENT PerServer {:?} multi", token);
                     let mut ts = to_send.borrow_mut();
+                    let len = ts.len();
+                    debug_assert_eq!(len,
+                        Entry::<()>::wrap_bytes(&*ts).entry_size()
+                        + mem::size_of::<Ipv4SocketAddr>()
+                    );
+                    ts[len-6..len].copy_from_slice(&*self.receiver.bytes());
                     let kind = {
                         Entry::<()>::wrap_bytes(&*ts).kind
                     };
@@ -941,6 +958,12 @@ where PerServer<S>: Connected {
                 let finished = {
                     trace!("CLIENT PerServer {:?} unlock", token);
                     let mut ts = to_send.borrow_mut();
+                    let len = ts.len();
+                    debug_assert_eq!(len,
+                        Entry::<()>::wrap_bytes(&*ts).entry_size()
+                        + mem::size_of::<Ipv4SocketAddr>()
+                    );
+                    ts[len-6..len].copy_from_slice(&*self.receiver.bytes());
                     debug_assert_eq!(Entry::<()>::wrap_bytes_mut(&mut *ts).kind.layout(), EntryLayout::Sentinel);
                     debug_assert!(Entry::<()>::wrap_bytes_mut(&mut *ts).kind.contains(EntryKind::Unlock));
                     //trace!("CLIENT willsend {:?}", &*ts);
@@ -956,7 +979,7 @@ where PerServer<S>: Connected {
                     return None
                 }
             }
-            Some(to_send @ ToLockServer(_)) | Some(to_send @ SingleServer(_)) => {
+            Some(mut to_send @ ToLockServer(_)) | Some(mut to_send @ SingleServer(_)) => {
                 trace!("CLIENT PerServer {:?} single", token);
                 {
                     let (l, _s) = to_send.with_packet(|p| {
@@ -970,7 +993,7 @@ where PerServer<S>: Connected {
                     to_send.with_packet(|p| self.send_packet(p))
                 }
                 else {
-                    to_send.with_packet(|p| self.send_packet(p))
+                    to_send.ensure_ip(self.receiver).with_packet(|p| self.send_packet(p))
                 };
 
                 trace!("CLIENT PerServer {:?} single written", token);
@@ -1017,6 +1040,32 @@ impl WriteState {
                 f(&*b)
             },
         }
+    }
+
+    fn ensure_ip(&mut self, ip: Ipv4SocketAddr) -> &Self {
+        use self::WriteState::*;
+        match self {
+            &mut SingleServer(ref mut b) | &mut ToLockServer(ref mut b) => {
+                let len = b.len();
+                debug_assert_eq!(
+                    len,
+                    Entry::<()>::wrap_bytes(&*b).entry_size()
+                    + mem::size_of::<Ipv4SocketAddr>()
+                );
+                b[len-6..len].copy_from_slice(&*ip.bytes());
+            },
+            &mut MultiServer(ref buf, ..) | &mut UnlockServer(ref buf) => {
+                let mut b = buf.borrow_mut();
+                let len = b.len();
+                debug_assert_eq!(
+                    len,
+                    Entry::<()>::wrap_bytes(&*b).entry_size()
+                    + mem::size_of::<Ipv4SocketAddr>()
+                );
+                b[len-6..len].copy_from_slice(&*ip.bytes());
+            },
+        }
+        self
     }
 
     fn take(self) -> Vec<u8> {

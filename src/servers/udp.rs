@@ -89,7 +89,7 @@ impl Server {
     fn read_packet(&mut self) -> Option<SocketAddr> {
         let finished_read = self.try_read_packet();
         finished_read.map(|(read, addr)| {
-            assert_eq!(read, self.buffer.entry_size());
+            assert_eq!(read, self.buffer.entry_size() + 6);
             addr
          })
     }
