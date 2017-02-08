@@ -218,15 +218,15 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn wait_for_append(dag: *mut DAG, write_id: WriteId) {
+    pub unsafe extern "C" fn wait_for_a_specific_append(dag: *mut DAG, write_id: WriteId) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.wait_for_append(write_id.to_uuid());
+        dag.wait_for_a_specific_append(write_id.to_uuid());
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn wait_for_an_append(dag: *mut DAG) {
+    pub unsafe extern "C" fn wait_for_any_append(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.wait_for_an_append();
+        dag.wait_for_any_append();
     }
 
     #[no_mangle]
@@ -241,7 +241,7 @@ pub mod c_binidings {
     // greater than DELOS_MAX_DATA_SIZE
     #[no_mangle]
     pub extern "C" fn get_next(dag: *mut DAG, data_out: *mut u8, data_read: *mut usize,
-        inhabits_out: *mut colors) -> u32 {
+        inhabits_out: *mut colors) {
         assert!(data_out != ptr::null_mut());
         assert!(data_read != ptr::null_mut());
         assert!(inhabits_out != ptr::null_mut());
@@ -271,7 +271,6 @@ pub mod c_binidings {
 
             ptr::write(inhabits_out, colors{ numcolors: numcolors, mycolors: mycolors});
         }
-        0
     }
 
     #[no_mangle]

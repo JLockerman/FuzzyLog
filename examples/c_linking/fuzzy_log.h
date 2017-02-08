@@ -154,7 +154,7 @@ static inline write_id async_append(DAGHandle *handle, char *data, size_t data_s
 //NOTE we need either a way to specify data size, or to pass out a pointer
 // this version simple assumes that no data+metadat passed in or out will be
 // greater than DELOS_MAX_DATA_SIZE
-uint32_t get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
+void get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
 
 //! Flush all appends that have already been completed.
 //!
@@ -170,21 +170,21 @@ void flush_completed_appends(DAGHandle *handle);
 //!
 void wait_for_all_appends(DAGHandle *handle);
 
-//! Waits for an append with a specified id to be ACK'd,
-//! or for no appends to be in-flight, whichever comes first.
-//!
-//! @param handle
-//!     The DAGHandle being worked through.
-//!
-void wait_for_append(DAGHandle *handle, write_id id);
-
 //! Waits for any append to be ACK'd, or returns immediately if there are none
 //! in-flight
 //!
 //! @param handle
 //!     The DAGHandle being worked through.
 //!
-void wait_for_an_append(DAGHandle *handle, write_id id);
+void wait_for_any_append(DAGHandle *handle);
+
+//! Waits for an append with a specified id to be ACK'd,
+//! or for no appends to be in-flight, whichever comes first.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+void wait_for_a_specific_append(DAGHandle *handle, write_id id);
 
 //! If there is no unread updates attempts to take a snapshot of the interesting
 //! colors

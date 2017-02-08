@@ -18,7 +18,10 @@ use self::FromClient::*;
 
 use hash::HashMap;
 
+use self::per_color::{PerColor, IsRead, ReadHandle};
+
 pub mod log_handle;
+mod per_color;
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +35,7 @@ pub struct ThreadLog {
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
     blocked_multiappends: HashMap<Uuid, MultiSearchState>,
-    per_chains: HashMap<order, PerChain>,
+    per_chains: HashMap<order, PerColor>,
     //TODO replace with queue from deque to allow multiple consumers
     ready_reads: mpsc::Sender<Vec<u8>>,
     //TODO blocked_chains: BitSet ?
@@ -46,49 +49,6 @@ pub struct ThreadLog {
     chains_currently_being_read: IsRead,
     num_snapshots: usize,
 }
-
-//TODO we could add messages from the client on read, and keep a counter of messages sent
-//     this would allow us to ensure that every client gets an end-of-data message, as long
-//     ad there're no concurrent snapshots...
-struct PerChain {
-    //TODO repr?
-    //blocking: HashMap<entry, OrderIndex>,
-    //read: VecDeque<ChainEntry>,
-    //searching_for_multi_appends: HashMap<Uuid, OrderIndex>,
-    //found_sentinels: HashSet<Uuid>,
-    chain: order,
-    last_snapshot: entry,
-    last_read_sent_to_server: entry,
-    outstanding_reads: u32, //TODO what size should this be
-    //TODO is this necessary first_buffered: entry,
-    last_returned_to_client: entry,
-    blocked_on_new_snapshot: Option<Vec<u8>>,
-    //TODO this is where is might be nice to have a more structured id format
-    found_but_unused_multiappends: HashMap<Uuid, entry>,
-    is_being_read: Option<ReadState>,
-    is_interesting: bool,
-}
-
-struct ReadState {
-    outstanding_snapshots: u32,
-    num_multiappends_searching_for: usize,
-    _being_read: IsRead,
-}
-
-impl ReadState {
-    fn new(being_read: &IsRead) -> Self {
-        ReadState {
-            outstanding_snapshots: 0,
-            num_multiappends_searching_for: 0,
-            _being_read: being_read.clone(),
-        }
-    }
-}
-
-type IsRead = Rc<ReadHandle>;
-
-#[derive(Debug)]
-struct ReadHandle;
 
 struct MultiSearchState {
     val: Vec<u8>,
@@ -148,7 +108,7 @@ impl ThreadLog {
             blocked_multiappends: Default::default(),
             ready_reads: ready_reads,
             finished_writes: finished_writes,
-            per_chains: interesting_chains.into_iter().map(|c| (c, PerChain::interesting(c))).collect(),
+            per_chains: interesting_chains.into_iter().map(|c| (c, PerColor::interesting(c))).collect(),
             to_return: Default::default(),
             no_longer_blocked: Default::default(),
             cache: BufferCache::new(),
@@ -262,7 +222,7 @@ impl ThreadLog {
                     //     it might be better to switch to a buffer per-chain model
                     self.per_chains.get_mut(&read_loc.0).map(|s| {
                         s.overread_at(read_loc.1);
-                        s.outstanding_reads -= 1;
+                        s.decrement_outstanding_reads();
                     });
                 }
                 else {
@@ -272,8 +232,7 @@ impl ThreadLog {
                         debug_assert!(!e.kind.contains(EntryKind::ReadSuccess));
                         let new_horizon = e.dependencies()[0].1;
                         trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
-                        s.decrement_outstanding_snapshots();
-                        s.update_horizon(new_horizon)
+                        s.give_new_snapshot(new_horizon)
                     });
                     if let Some(val) = unblocked {
                         let locs = self.return_entry(val);
@@ -287,7 +246,8 @@ impl ThreadLog {
                 //assert!(read_loc.1 >= pc.first_buffered);
                 //TODO check that read is needed?
                 //TODO no-alloc?
-                self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
+                self.per_chains.get_mut(&read_loc.0).map(|s|
+                    s.decrement_outstanding_reads());
                 let packet = Rc::new(msg);
                 self.add_blockers(&packet);
                 self.try_returning_at(read_loc, packet);
@@ -295,7 +255,8 @@ impl ThreadLog {
             layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
                 trace!("FUZZY read is multi");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
-                self.per_chains.get_mut(&read_loc.0).map(|s| s.outstanding_reads -= 1);
+                self.per_chains.get_mut(&read_loc.0).map(|s|
+                    s.decrement_outstanding_reads());
                 let is_sentinel = layout == EntryLayout::Sentinel;
                 let search_status = self.update_multi_part_read(read_loc, msg, is_sentinel);
                 match search_status {
@@ -303,7 +264,7 @@ impl ThreadLog {
                     MultiSearch::BeyondHorizon(..) => {
                         //TODO better ooo reads
                         self.per_chains.entry(read_loc.0)
-                            .or_insert_with(|| PerChain::new(read_loc.0))
+                            .or_insert_with(|| PerColor::new(read_loc.0))
                             .overread_at(read_loc.1);
                     }
                     MultiSearch::Finished(msg) => {
@@ -329,11 +290,11 @@ impl ThreadLog {
             self.per_chains.get_mut(&read_loc.0).map(|pc| {
                 debug_assert!(pc.is_finished());
                 trace!("FUZZY chain {:?} is finished", pc.chain);
-                pc.is_being_read = None
+                pc.set_finished_reading();
             });
             if self.finshed_reading() {
                 trace!("FUZZY finished reading all chains");
-                //FIXME add is_snapshoting to PerChain so this doesn't race?
+                //FIXME add is_snapshoting to PerColor so this doesn't race?
                 trace!("FUZZY finished reading");
                 //TODO do we need a better system?
                 let num_completeds = mem::replace(&mut self.num_snapshots, 0);
@@ -589,7 +550,7 @@ impl ThreadLog {
         if was_blind_search {
             trace!("FUZZY finished blind seach for {:?}", read_loc);
             let pc = self.per_chains.entry(read_loc.0)
-                .or_insert_with(|| PerChain::new(read_loc.0));
+                .or_insert_with(|| PerColor::new(read_loc.0));
             pc.decrement_multi_search();
         }
 
@@ -609,7 +570,7 @@ impl ThreadLog {
         //TODO argh, no-alloc
         let (unblocked, early_sentinel) = {
             let pc = self.per_chains.entry(chain)
-                .or_insert_with(|| PerChain::new(chain));
+                .or_insert_with(|| PerColor::new(chain));
 
             let early_sentinel = pc.take_early_sentinel(&id);
             let potential_new_horizon = match early_sentinel {
@@ -626,17 +587,15 @@ impl ThreadLog {
             if index != entry::from(0) /* && !pc.is_within_snapshot(index) */ {
                 trace!("RRRRR non-blind search {:?} {:?}", chain, index);
                 let unblocked = pc.update_horizon(potential_new_horizon);
-                if pc.last_read_sent_to_server == index - 1 {
-                    pc.last_read_sent_to_server = pc.last_read_sent_to_server + 1
-                }
+                pc.mark_as_already_fetched(index);
                 (unblocked, early_sentinel)
             } else if early_sentinel.is_some() {
                 trace!("RRRRR already found {:?} {:?}", chain, early_sentinel);
                 //FIXME How does this interact with cached reads?
                 (None, early_sentinel)
             } else {
-                pc.increment_multi_search(&self.chains_currently_being_read);
                 trace!("RRRRR blind search {:?}", chain);
+                pc.increment_multi_search(&self.chains_currently_being_read);
                 (None, None)
             }
         };
@@ -653,16 +612,18 @@ impl ThreadLog {
     fn continue_fetch_if_needed(&mut self, chain: order) -> bool {
         //TODO num_to_fetch
         let (num_to_fetch, unblocked) = {
-            let pc = self.per_chains.entry(chain).or_insert_with(|| PerChain::new(chain));
+            let pc = self.per_chains.entry(chain).or_insert_with(|| PerColor::new(chain));
             let num_to_fetch = pc.num_to_fetch();
             //TODO should fetch == number of multis searching for
-            if num_to_fetch == 0 && pc.is_searching_for_multi() && pc.outstanding_reads == 0 {
+            if num_to_fetch > 0 {
+                trace!("FUZZY {:?} needs {:?} additional reads", chain, num_to_fetch);
+                (num_to_fetch, None)
+            } else if pc.has_more_multi_search_than_outstanding_reads() {
                 trace!("FUZZY {:?} updating horizon due to multi search", chain);
                 (1, pc.increment_horizon())
             }
             else {
-                trace!("FUZZY {:?} needs {:?} additional reads", chain, num_to_fetch);
-                (num_to_fetch, None)
+                (0, None)
             }
         };
 
@@ -683,11 +644,14 @@ impl ThreadLog {
 
     fn enqueue_packet(&mut self, loc: OrderIndex, packet: ChainEntry) {
         assert!(loc.1 > 1.into());
-        debug_assert!(self.per_chains.get(&loc.0).unwrap().last_returned_to_client
-            < loc.1 - 1,
-            "tried to enqueue non enqueable entry {:?}; last returned {:?}",
+        debug_assert!(
+            !self.per_chains[&loc.0].next_return_is(loc.1)
+            && !self.per_chains[&loc.0].has_returned(loc.1),
+            //self.per_chains.get(&loc.0).unwrap().last_returned_to_client
+            //< loc.1 - 1,
+            "tried to enqueue non enqueable entry {:?};",// last returned {:?}",
             loc.1 - 1,
-            self.per_chains.get(&loc.0).unwrap().last_returned_to_client,
+            //self.per_chains.get(&loc.0).unwrap().last_returned_to_client,
         );
         let blocked_on = OrderIndex(loc.0, loc.1 - 1);
         trace!("FUZZY read @ {:?} blocked on prior {:?}", loc, blocked_on);
@@ -786,9 +750,7 @@ impl ThreadLog {
             //    "last_read_sent_to_server {:?} >= {:?} last_snapshot @ fetch_next",
             //    per_chain.last_read_sent_to_server, per_chain.last_snapshot,
             //);
-            per_chain.last_read_sent_to_server = per_chain.last_read_sent_to_server + 1;
-            per_chain.increment_outstanding_reads(&self.chains_currently_being_read);
-            per_chain.last_read_sent_to_server
+            per_chain.increment_fetch(&self.chains_currently_being_read)
         };
         let packet = self.make_read_packet(chain, next);
 
@@ -809,12 +771,10 @@ impl ThreadLog {
 
     fn finshed_reading(&mut self) -> bool {
         let finished = Rc::get_mut(&mut self.chains_currently_being_read).is_some();
-        //FIXME this is dumb, it might be better to have a counter of how many servers we are
-        //      waiting for
-        debug_assert_eq!({
+        /*debug_assert_eq!({
             let mut currently_being_read = 0;
             for (_, pc) in self.per_chains.iter() {
-                assert_eq!(pc.is_finished(), !pc.is_being_read.is_some());
+                assert_eq!(pc.is_finished(), !pc.has_read_state());
                 if !pc.is_finished() {
                     currently_being_read += 1
                 }
@@ -826,269 +786,28 @@ impl ThreadLog {
                 currently_being_read, finished);
             }
             currently_being_read == 0
-        }, finished);
+        }, finished);*/
+        debug_assert!(
+            if finished {
+                self.per_chains.iter().map(|(_, pc)| {
+                    if !pc.has_outstanding() {
+                        assert!(pc.finished_until_snapshot());
+                    }
+                });
+                true
+            } else {
+                true
+            }
+        );
 
         finished
     }
 
     fn server_is_finished(&self, chain: order) -> bool {
         let pc = &self.per_chains[&chain];
-        assert!(!(pc.outstanding_reads == 0
-            && pc.last_read_sent_to_server < pc.last_snapshot));
+        assert!(!(!pc.has_outstanding_reads() && pc.has_pending_reads_reqs()));
         assert!(!(pc.is_searching_for_multi() && !pc.has_outstanding_reads()));
         pc.is_finished()
-    }
-}
-
-impl PerChain {
-    fn new(chain: order) -> Self {
-        PerChain {
-            chain: chain,
-            last_snapshot: 0.into(),
-            last_read_sent_to_server: 0.into(),
-            outstanding_reads: 0,
-            last_returned_to_client: 0.into(),
-            blocked_on_new_snapshot: None,
-            found_but_unused_multiappends: Default::default(),
-            is_being_read: None,
-            is_interesting: false,
-        }
-    }
-
-    fn interesting(chain: order) -> Self {
-        let mut s = Self::new(chain);
-        s.is_interesting = true;
-        s
-    }
-
-    #[inline(always)]
-    fn set_returned(&mut self, index: entry) {
-        assert!(self.next_return_is(index));
-        assert!(index > self.last_returned_to_client);
-        assert!(index <= self.last_snapshot);
-        trace!("QQQQQ returning {:?}", (self.chain, index));
-        self.last_returned_to_client = index;
-        if self.is_finished() {
-            trace!("QQQQQ {:?} is finished", self.chain);
-            self.is_being_read = None
-        }
-    }
-
-    fn overread_at(&mut self, index: entry) {
-        // The conditional is needed because sends we sent before reseting
-        // last_read_sent_to_server race future calls to this function
-        if self.last_read_sent_to_server >= index
-            && self.last_read_sent_to_server > self.last_returned_to_client {
-            trace!("FUZZY resetting read loc for {:?} from {:?} to {:?}",
-                self.chain, self.last_read_sent_to_server, index - 1);
-            self.last_read_sent_to_server = index - 1;
-        }
-    }
-
-    fn increment_outstanding_snapshots(&mut self, is_being_read: &IsRead) -> u32 {
-        let out = match &mut self.is_being_read {
-            &mut Some(ReadState {ref mut outstanding_snapshots, ..} ) => {
-                //TODO saturating arith
-                *outstanding_snapshots = *outstanding_snapshots + 1;
-                *outstanding_snapshots
-            }
-            r @ &mut None => {
-                let mut read_state = ReadState::new(is_being_read);
-                read_state.outstanding_snapshots += 1;
-                let outstanding_snapshots = read_state.outstanding_snapshots;
-                *r = Some(read_state);
-                outstanding_snapshots
-
-            }
-        };
-        debug_assert!(self.is_being_read.is_some());
-        out
-    }
-
-    fn decrement_outstanding_snapshots(&mut self) -> u32 {
-        self.is_being_read.as_mut().map(|&mut ReadState {ref mut outstanding_snapshots, ..}|{
-            //TODO saturating arith
-            *outstanding_snapshots = *outstanding_snapshots - 1;
-            *outstanding_snapshots
-            //TODO should this set is_being_read to None when last_returned == last snap?
-        }).expect("tried to decerement snapshots on a chain not being read")
-    }
-
-    fn increment_multi_search(&mut self, is_being_read: &IsRead) {
-        let searching = match &mut self.is_being_read {
-            &mut Some(ReadState {ref mut num_multiappends_searching_for, ..} ) => {
-                //TODO saturating arith
-                *num_multiappends_searching_for = *num_multiappends_searching_for + 1;
-                *num_multiappends_searching_for
-            }
-            r @ &mut None => {
-                let mut read_state = ReadState::new(is_being_read);
-                read_state.num_multiappends_searching_for += 1;
-                let num_multiappends_searching_for = read_state.num_multiappends_searching_for;
-                *r = Some(read_state);
-                num_multiappends_searching_for
-            }
-        };
-        trace!("QQQQQ {:?} + now searching for {:?} multis", self.chain, searching);
-    }
-
-    fn decrement_multi_search(&mut self) {
-        let num_search = self.is_being_read.as_mut().map(|&mut ReadState {ref mut num_multiappends_searching_for, ..}| {
-            debug_assert!(*num_multiappends_searching_for > 0);
-            //TODO saturating arith
-            *num_multiappends_searching_for = *num_multiappends_searching_for - 1;
-            *num_multiappends_searching_for
-            //TODO should this set is_being_read to None when last_returned == last snap?
-        }).expect("tried to decrement multi_search in a chain not being read");
-        trace!("QQQQQ {:?} - now searching for {:?} multis",
-            self.chain, num_search);
-    }
-
-    #[inline(always)]
-    fn increment_outstanding_reads(&mut self, is_being_read: &IsRead) {
-        self.outstanding_reads += 1;
-        if self.is_being_read.is_none() {
-            self.is_being_read = Some(ReadState::new(is_being_read));
-        }
-    }
-
-    fn can_return(&self, index: entry) -> bool {
-        self.next_return_is(index) && self.is_within_snapshot(index)
-    }
-
-    fn has_returned(&self, index: entry) -> bool {
-        trace!{"QQQQQ last return for {:?}: {:?}", self.chain, self.last_returned_to_client};
-        index <= self.last_returned_to_client
-    }
-
-    fn next_return_is(&self, index: entry) -> bool {
-        trace!("QQQQQ check {:?} next return for {:?}: {:?}",
-            index, self.chain, self.last_returned_to_client + 1);
-        index == self.last_returned_to_client + 1
-    }
-
-    fn is_within_snapshot(&self, index: entry) -> bool {
-        trace!("QQQQQ {:?}: {:?} <= {:?}", self.chain, index, self.last_snapshot);
-        index <= self.last_snapshot
-    }
-
-    fn is_searching_for_multi(&self) -> bool {
-        self.is_being_read.as_ref().map(|br|
-            br.num_multiappends_searching_for > 0).unwrap_or(false)
-    }
-
-    fn increment_horizon(&mut self) -> Option<Vec<u8>> {
-        let new_horizon = self.last_snapshot + 1;
-        self.update_horizon(new_horizon)
-    }
-
-    fn update_horizon(&mut self, new_horizon: entry) -> Option<Vec<u8>> {
-        if self.last_snapshot < new_horizon {
-            trace!("FUZZY update horizon {:?}", (self.chain, new_horizon));
-            self.last_snapshot = new_horizon;
-            if self.last_read_sent_to_server > new_horizon {
-                //see also fn overread_at
-                self.last_read_sent_to_server = new_horizon;
-            }
-            if entry_is_unblocked(&self.blocked_on_new_snapshot, self.chain, new_horizon) {
-                trace!("FUZZY unblocked entry");
-                return mem::replace(&mut self.blocked_on_new_snapshot, None)
-            }
-        }
-        else {
-            trace!("FUZZY needless horizon update for {:?}: {:?} <= {:?}",
-                self.chain, new_horizon, self.last_snapshot);
-        }
-
-        return None;
-
-        fn entry_is_unblocked(val: &Option<Vec<u8>>, chain: order, new_horizon: entry) -> bool {
-            val.as_ref().map_or(false, |v| {
-                let locs = bytes_as_entry(v).locs();
-                for &OrderIndex(o, i) in locs {
-                    if o == chain && i <= new_horizon {
-                        return true
-                    }
-                }
-                false
-            })
-        }
-    }
-
-    fn block_on_snapshot(&mut self, val: Vec<u8>) {
-        debug_assert!(bytes_as_entry(&val).locs().into_iter()
-            .find(|&&OrderIndex(o, _)| o == self.chain).unwrap().1 == self.last_snapshot + 1);
-        assert!(self.blocked_on_new_snapshot.is_none());
-        self.blocked_on_new_snapshot = Some(val)
-    }
-
-    fn num_to_fetch(&self) -> u32 {
-        use std::cmp::min;
-        //TODO
-        const MAX_PIPELINED: u32 = 1000;
-        //TODO switch to saturating sub?
-        assert!(self.last_returned_to_client <= self.last_snapshot,
-            "FUZZY returned value early. {:?} should be less than {:?}",
-            self.last_returned_to_client, self.last_snapshot);
-        if self.last_read_sent_to_server < self.last_snapshot
-            && self.outstanding_reads < MAX_PIPELINED {
-            let needed_reads =
-                (self.last_snapshot - self.last_read_sent_to_server.into()).into();
-            let to_read = min(needed_reads, MAX_PIPELINED - self.outstanding_reads);
-            to_read
-            //std::cmp::min(
-            //    (self.last_snapshot - self.last_read_sent_to_server.into()).into(),
-            //    MAX_PIPELINED
-            //)
-        } else {
-            0
-        }
-    }
-
-    fn currently_buffering(&self) -> u32 {
-        //TODO switch to saturating sub?
-        let currently_buffering = self.last_read_sent_to_server
-            - self.last_returned_to_client.into();
-        let currently_buffering: u32 = currently_buffering.into();
-        currently_buffering
-    }
-
-    fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
-        assert!(index != 0.into());
-        let old = self.found_but_unused_multiappends.insert(id, index);
-        //TODO I'm not sure this is correct with how we handle overreads
-        //debug_assert!(old.is_none(),
-        //    "double sentinel insert {:?}",
-        //    (self.chain, index)
-        //);
-    }
-
-    fn take_early_sentinel(&mut self, id: &Uuid) -> Option<entry> {
-        self.found_but_unused_multiappends.remove(id)
-    }
-
-    fn has_outstanding_reads(&self) -> bool {
-        self.outstanding_reads > 0
-    }
-
-    fn has_outstanding_snapshots(&self) -> bool {
-        self.is_being_read.as_ref().map(|&ReadState {outstanding_snapshots, ..}|
-            outstanding_snapshots > 0).unwrap_or(false)
-    }
-
-    fn finished_until_snapshot(&self) -> bool {
-        self.last_returned_to_client == self.last_snapshot
-            && !self.has_outstanding_snapshots()
-    }
-
-    fn is_finished(&self) -> bool {
-        assert!(!(self.outstanding_reads == 0
-            && self.last_read_sent_to_server < self.last_snapshot),
-            "outstanding_reads {:?}, last_read_sent_to_server {:?}, last_snapshot {:?}",
-            self.outstanding_reads, self.last_read_sent_to_server, self.last_snapshot,
-        );
-        self.finished_until_snapshot()
-            && !(self.is_searching_for_multi() || self.has_outstanding_snapshots())
     }
 }
 
