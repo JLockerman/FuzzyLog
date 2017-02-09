@@ -30,9 +30,9 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     servers: Vec<PerServer<Socket>>,
     awake_io: VecDeque<usize>,
     sent_writes: HashMap<Uuid, WriteState>,
-    sent_reads: HashMap<OrderIndex, Vec<u8>>,
-    //sent_reads: HashSet<OrderIndex>,
-    //waiting_buffers: VecDeque<Vec<u8>>,
+    //sent_reads: HashMap<OrderIndex, Vec<u8>>,
+    sent_reads: HashSet<OrderIndex>,
+    waiting_buffers: VecDeque<Vec<u8>>,
     num_chain_servers: usize,
     lock_token: Token,
     //FIXME change to spsc::Receiver<Buffer?>
@@ -107,6 +107,7 @@ where C: AsyncStoreClient {
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
             sent_reads: Default::default(),
+            waiting_buffers: Default::default(),
             servers: servers,
             num_chain_servers: num_chain_servers,
             lock_token: lock_token,
@@ -166,6 +167,7 @@ where C: AsyncStoreClient {
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
             sent_reads: Default::default(),
+            waiting_buffers: Default::default(),
             servers: servers,
             num_chain_servers: num_chain_servers,
             lock_token: lock_token,
@@ -210,6 +212,7 @@ where C: AsyncStoreClient {
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
             sent_reads: Default::default(),
+            waiting_buffers: Default::default(),
             awake_io: Default::default(),
             servers: servers,
             num_chain_servers: num_chain_servers,
@@ -408,7 +411,8 @@ where PerServer<S>: Connected,
                 let layout = sent.layout();
                 if layout == EntryLayout::Read {
                     let read_loc = sent.read_loc();
-                    self.sent_reads.insert(read_loc, sent.take());
+                    self.sent_reads.insert(read_loc);
+                    self.waiting_buffers.push_back(sent.take())
                 }
                 else if !sent.is_unlock() {
                     let id = sent.id();
@@ -542,11 +546,13 @@ where PerServer<S>: Connected,
         if token == self.lock_token() { return }
         for &oi in packet.entry().locs() {
             trace!("CLIENT completed read @ {:?}", oi);
-            if let Some(mut v) = self.sent_reads.remove(&oi) {
+            if self.sent_reads.remove(&oi) {
                 //TODO validate correct id for failing read
                 //TODO num copies?
+                let mut v = self.waiting_buffers.pop_front()
+                    .unwrap_or_else(|| Vec::with_capacity(packet.entry_size()));
                 v.clear();
-                v.extend_from_slice(&packet[..]);
+                v.extend_from_slice(packet.entry_slice());
                 self.client.on_finished_read(oi, v);
             }
         }
@@ -560,7 +566,17 @@ where PerServer<S>: Connected,
             }
             EntryLayout::Read => {
                 let read_loc = packet.entry().locs()[0];
-                self.sent_reads.remove(&read_loc).map(WriteState::SingleServer)
+                if self.sent_reads.contains(&read_loc) {
+                    let mut b = self.waiting_buffers.pop_front()
+                        .unwrap_or_else(|| Vec::with_capacity(50));
+                    {
+                        let e = EntryContents::Data(&(), &[]).fill_vec(&mut b);
+                        e.kind = EntryKind::Read;
+                        e.locs_mut()[0] = read_loc;
+                    }
+                    //FIXME better read packet handling
+                    Some(WriteState::SingleServer(b))
+                } else { None }
             }
             EntryLayout::Lock => {
                 // The only kind of send we do with a Lock layout is unlock
