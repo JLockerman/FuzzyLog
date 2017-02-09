@@ -224,6 +224,7 @@ where C: AsyncStoreClient {
 impl PerServer<TcpStream> {
     fn tcp(addr: SocketAddr) -> Result<Self, io::Error> {
         let stream = try!(TcpStream::connect(&addr));
+        let _ = stream.set_nodelay(true);
         let local_addr = try!(stream.local_addr());
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
