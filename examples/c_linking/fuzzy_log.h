@@ -24,6 +24,8 @@ typedef struct write_id {
 	uint64_t p2;
 } write_id;
 
+static write_id WRITE_ID_NIL = {.p1 = 0, .p2 = 0};
+
 //! Creates a new DAGHandle for a server group.
 //!
 //! @param lock_server_ip
@@ -173,7 +175,20 @@ void wait_for_all_appends(DAGHandle *handle);
 //! @param handle
 //!     The DAGHandle being worked through.
 //!
-void wait_for_any_append(DAGHandle *handle);
+//! @return the write_id of the write that completed,
+//!         WRITE_ID_NIL if there were no pending writes
+//!
+write_id wait_for_any_append(DAGHandle *handle);
+
+//! Checks if there are any ACK'd appends and if so returns the first ones id
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @return the write_id of the write that completed,
+//!         WRITE_ID_NIL if there were no completed writes
+//!
+write_id try_wait_for_any_append(DAGHandle *handle);
 
 //! Waits for an append with a specified id to be ACK'd,
 //! or for no appends to be in-flight, whichever comes first.

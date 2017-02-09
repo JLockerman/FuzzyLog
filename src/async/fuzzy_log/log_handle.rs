@@ -385,6 +385,15 @@ where V: Storeable {
         None
     }
 
+    pub fn try_wait_for_any_append(&mut self) -> Option<(Uuid, Vec<OrderIndex>)> {
+        if self.num_async_writes > 0 {
+            self.num_async_writes -= 1;
+            //TODO return buffers here and cache them?
+            return self.finished_writes.try_recv().ok()
+        }
+        None
+    }
+
     pub fn flush_completed_appends(&mut self) {
         while let Ok(..) = self.finished_writes.try_recv() {
             self.num_async_writes -= 1;

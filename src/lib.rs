@@ -189,9 +189,17 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn wait_for_any_append(dag: *mut DAG) {
+    pub unsafe extern "C" fn wait_for_any_append(dag: *mut DAG) -> WriteId {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.wait_for_any_append();
+        let id = dag.wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn try_wait_for_any_append(dag: *mut DAG) -> WriteId {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        let id = dag.try_wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
+        WriteId::from_uuid(id)
     }
 
     #[no_mangle]

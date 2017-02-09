@@ -31,6 +31,8 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     awake_io: VecDeque<usize>,
     sent_writes: HashMap<Uuid, WriteState>,
     sent_reads: HashMap<OrderIndex, Vec<u8>>,
+    //sent_reads: HashSet<OrderIndex>,
+    //waiting_buffers: VecDeque<Vec<u8>>,
     num_chain_servers: usize,
     lock_token: Token,
     //FIXME change to spsc::Receiver<Buffer?>
@@ -42,7 +44,6 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
 pub struct PerServer<Socket> {
     awaiting_send: VecDeque<WriteState>,
     read_buffer: Buffer,
-    //waiting_buffers: VecDeque<Vec<u8>>,
     stream: Socket,
     bytes_read: usize,
     bytes_sent: usize,
