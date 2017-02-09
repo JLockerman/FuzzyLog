@@ -31,6 +31,8 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     awake_io: VecDeque<usize>,
     sent_writes: HashMap<Uuid, WriteState>,
     sent_reads: HashMap<OrderIndex, Vec<u8>>,
+    //sent_reads: HashSet<OrderIndex>,
+    //waiting_buffers: VecDeque<Vec<u8>>,
     num_chain_servers: usize,
     lock_token: Token,
     //FIXME change to spsc::Receiver<Buffer?>
@@ -222,10 +224,12 @@ where C: AsyncStoreClient {
 impl PerServer<TcpStream> {
     fn tcp(addr: SocketAddr) -> Result<Self, io::Error> {
         let stream = try!(TcpStream::connect(&addr));
+        let _ = stream.set_nodelay(true);
         let local_addr = try!(stream.local_addr());
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
             read_buffer: Buffer::new(), //TODO cap
+            //read_buffer: Buffer::no_drop(), //TODO cap
             stream: stream,
             bytes_read: 0,
             bytes_sent: 0,
@@ -392,7 +396,7 @@ where PerServer<S>: Connected,
             else {
                 self.handle_redo(Token(server), kind, &packet)
             }
-            self.server_for_token_mut(token).read_buffer = packet
+            self.servers.get_mut(server).unwrap().read_buffer = packet;
         }
 
         if self.servers[server].needs_to_write() {
@@ -709,6 +713,9 @@ impl Connected for PerServer<TcpStream> {
     fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error> {
         use std::io::ErrorKind;
 
+        //FIXME
+        assert!(self.read_buffer.buffer_len() >= 8192);
+
         let bhs = base_header_size();
         //TODO I should make a nb_read macro...
         if self.bytes_read < bhs {
@@ -759,7 +766,8 @@ impl Connected for PerServer<TcpStream> {
         debug_assert_eq!(self.bytes_read, self.read_buffer.entry_size());
         trace!("CLIENT finished recv");
         self.bytes_read = 0;
-        let buff = mem::replace(&mut self.read_buffer, Buffer::new());
+        let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
+        //let buff = mem::replace(&mut self.read_buffer, Buffer::new());
         Ok(Some(buff))
     }
 
@@ -830,7 +838,7 @@ impl Connected for PerServer<UdpConnection> {
             .expect("cannot read");
         if let Some((read, _)) = read {
             if read > 0 {
-                let buff = mem::replace(&mut self.read_buffer, Buffer::new());
+                let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
                 return Ok(Some(buff))
             }
         }
