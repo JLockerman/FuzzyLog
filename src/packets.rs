@@ -74,12 +74,14 @@ pub mod EntryKind {
             const Data = 0x1,
             const Multiput = 0x2,
             const Lock = 0x4,
+            //TODO sentinel should be multi + no-remote + no-data
             const Sentinel = Lock.bits | Multiput.bits,
             const Read = Data.bits | Multiput.bits,
             const Layout = Data.bits | Multiput.bits | Sentinel.bits,
 
             const TakeLock = 0x8,
             const Unlock = 0x10,
+            const NoRemote = 0x20,
 
             const ReadSuccess = 0x80,
 

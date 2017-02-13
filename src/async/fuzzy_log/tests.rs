@@ -467,6 +467,49 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), None);
         }
 
+        #[test]
+        #[inline(never)]
+        pub fn test_no_remote_multi1() {
+            let _ = env_logger::init();
+            trace!("TEST nrmulti");
+
+            let columns = vec![64.into(), 65.into(), 66.into()];
+            let mut lh = $new_thread_log::<u64>(columns.clone());
+            let _ = lh.no_remote_multiappend(&columns, &0xfeed, &[]);
+            let _ = lh.no_remote_multiappend(&columns, &0xbad , &[]);
+            let _ = lh.no_remote_multiappend(&columns, &0xcad , &[]);
+            let _ = lh.no_remote_multiappend(&columns, &13    , &[]);
+            for col in 64..67u32 {
+                let col = col.into();
+                lh.snapshot(col);
+                assert_eq!(
+                    lh.get_next().map(
+                        |(&v, l)| (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((0xfeed, OrderIndex(col, 1.into())))
+                );
+                assert_eq!(
+                    lh.get_next().map(|(&v, l)|
+                        (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((0xbad, OrderIndex(col, 2.into())))
+                );
+                assert_eq!(
+                    lh.get_next().map(|(&v, l)|
+                        (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((0xcad, OrderIndex(col, 3.into())))
+                );
+                assert_eq!(
+                    lh.get_next().map(|(&v, l)|
+                        (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((13, OrderIndex(col, 4.into())))
+                );
+                assert_eq!(lh.get_next(), None);
+            }
+        }
+
         //TODO test append after prefetch but before read
     );
     () => ( async_tests!(tcp); async_tests!(udp); async_tests!(rtcp); );

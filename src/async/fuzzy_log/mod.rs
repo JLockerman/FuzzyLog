@@ -241,7 +241,15 @@ impl ThreadLog {
                 self.per_chains.get_mut(&read_loc.0).map(|s|
                     s.decrement_outstanding_reads());
                 let packet = Rc::new(msg);
-                self.add_blockers(&packet);
+                self.add_blockers_at(read_loc, &packet);
+                self.try_returning_at(read_loc, packet);
+            }
+            EntryLayout::Multiput if kind.contains(EntryKind::NoRemote) => {
+                trace!("FUZZY read is atom");
+                self.per_chains.get_mut(&read_loc.0).map(|s|
+                    s.decrement_outstanding_reads());
+                let packet = Rc::new(msg);
+                self.add_blockers_at(read_loc, &packet);
                 self.try_returning_at(read_loc, packet);
             }
             layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
@@ -338,6 +346,37 @@ impl ThreadLog {
             if !is_next_in_chain && needs_to_be_returned {
                 self.enqueue_packet(loc, packet.clone());
             }
+        }
+    }
+
+    /// Blocks a packet on entries a it depends on. Will increment the refcount for each
+    /// blockage.
+    fn add_blockers_at(&mut self, loc: OrderIndex, packet: &ChainEntry) {
+        //FIXME dependencies currently assumes you gave it the correct type
+        //      this is unnecessary and should be changed
+        let entr = bytes_as_entry(packet);
+        let deps = entr.dependencies();
+        trace!("FUZZY checking {:?} for blockers in {:?}", loc, deps);
+        for &OrderIndex(chain, index) in deps {
+            let blocker_already_returned = self.per_chains.get_mut(&chain)
+                .expect("read uninteresting chain")
+                .has_returned(index);
+            if !blocker_already_returned {
+                trace!("FUZZY read @ {:?} blocked on {:?}", loc, (chain, index));
+                //TODO no-alloc?
+                let blocked = self.blockers.entry(OrderIndex(chain, index))
+                    .or_insert_with(Vec::new);
+                blocked.push(packet.clone());
+            } else {
+                trace!("FUZZY read @ {:?} need not wait for {:?}", loc, (chain, index));
+            }
+        }
+        let (is_next_in_chain, needs_to_be_returned) = {
+            let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
+            (pc.next_return_is(loc.1), !pc.has_returned(loc.1))
+        };
+        if !is_next_in_chain && needs_to_be_returned {
+            self.enqueue_packet(loc, packet.clone());
         }
     }
 
@@ -655,8 +694,8 @@ impl ThreadLog {
     }
 
     fn return_entry_at(&mut self, loc: OrderIndex, val: Vec<u8>) -> bool {
-        debug_assert!(bytes_as_entry(&val).locs()[0] == loc);
-        debug_assert!(bytes_as_entry(&val).locs().len() == 1);
+        //debug_assert!(bytes_as_entry(&val).locs()[0] == loc);
+        //debug_assert!(bytes_as_entry(&val).locs().len() == 1);
         trace!("FUZZY trying to return read @ {:?}", loc);
         let OrderIndex(o, i) = loc;
 

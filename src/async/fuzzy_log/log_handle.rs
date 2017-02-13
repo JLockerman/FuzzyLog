@@ -450,6 +450,34 @@ where V: Storeable {
         id
     }
 
+    pub fn no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Vec<OrderIndex> {
+        //TODO no-alloc?
+        let id = self.async_no_remote_multiappend(chains, data, deps);
+        self.wait_for_a_specific_append(id).unwrap()
+    }
+
+    pub fn async_no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Uuid {
+        use packets::EntryKind::NoRemote;
+        //TODO no-alloc?
+        assert!(chains.len() > 1);
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
+        locs.sort();
+        locs.dedup();
+        let id = Uuid::new_v4();
+        let mut buffer = EntryContents::Multiput {
+            data: data,
+            uuid: &id,
+            columns: &locs,
+            deps: deps,
+        }.clone_bytes();
+        Entry::<V>::wrap_bytes_mut(&mut buffer).kind.insert(NoRemote);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        self.num_async_writes += 1;
+        id
+    }
+
     //TODO return two vecs
     pub fn dependent_multiappend(&mut self,
         chains: &[order],
