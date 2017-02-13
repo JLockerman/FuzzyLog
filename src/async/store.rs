@@ -71,13 +71,6 @@ struct UdpConnection {
     addr: SocketAddr,
 }
 
-pub trait Connected {
-    type Connection: mio::Evented;
-    fn connection(&self) -> &Self::Connection;
-    fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error>;
-    fn send_packet(&mut self, packet: &[u8]) -> bool;
-}
-
 //TODO rename to AsyncStore
 impl<C> AsyncTcpStore<TcpStream, C>
 where C: AsyncStoreClient {
@@ -286,8 +279,8 @@ impl PerServer<UdpConnection> {
     }
 }
 
-impl<C> AsyncTcpStore<TcpStream, C>
-where /*PerServer<S>: Connected,*/
+impl<S, C> AsyncTcpStore<S, C>
+where PerServer<S>: Connected,
       C: AsyncStoreClient {
     pub fn run(mut self, poll: mio::Poll) -> ! {
         trace!("CLIENT start.");
@@ -454,7 +447,7 @@ where /*PerServer<S>: Connected,*/
         if self.servers[server].needs_to_write() {
             trace!("CLIENT write");
             let num_chain_servers = self.num_chain_servers;
-            let finished_send = self.servers[server].send_next_packet(token, num_chain_servers);
+            let finished_send = self.servers[server].send_next_burst();
             if finished_send {
                 trace!("CLIENT finished a send to {:?}", token);
                 stay_awake = true;
@@ -770,7 +763,7 @@ where /*PerServer<S>: Connected,*/
         write_server_for_chain(chain, self.num_chain_servers)
     }
 
-    fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer<TcpStream> {
+    fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer<S> {
         &mut self.servers[token.0]
     }
 
@@ -781,6 +774,41 @@ where /*PerServer<S>: Connected,*/
     }
 
 } // end impl AsyncStore
+
+trait Connected {
+    type Connection: mio::Evented;
+
+    fn connection(&self) -> &Self::Connection;
+
+    fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind)
+    -> Option<WriteState>;
+
+    fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error>;
+    fn send_next_burst(&mut self) -> bool;
+
+    fn add_send(&mut self, to_send: WriteState) -> bool;
+
+    fn add_single_server_send(&mut self, msg: Vec<u8>) -> bool {
+        let send = WriteState::SingleServer(msg);
+        self.add_send(send)
+    }
+
+    fn add_multi(&mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        locks: Rc<Box<[OrderIndex]>>,
+        num_servers: usize,
+    );
+
+    fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>);
+
+    fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
+        let send = WriteState::ToLockServer(msg);
+        self.add_send(send)
+    }
+
+    fn needs_to_write(&self) -> bool;
+}
 
 impl Connected for PerServer<TcpStream> {
     type Connection = TcpStream;
@@ -849,95 +877,6 @@ impl Connected for PerServer<TcpStream> {
         Ok(Some(buff))
     }
 
-    fn send_packet(&mut self, packet: &[u8]) -> bool {
-        use std::io::ErrorKind;
-        unimplemented!();
-        //let is_write = Entry::<()>::wrap_bytes(packet).kind.layout().is_write();
-        trace!("CLIENT continue send {}/{} bytes.", self.bytes_sent, packet.len());
-        debug_assert!({
-            let e = Entry::<()>::wrap_bytes(packet);
-            if e.kind.layout() == EntryLayout::Read {
-                e.data_bytes == 0 && e.dependency_bytes == 0
-            } else { true }
-        });
-        debug_assert_eq!(
-            Entry::<()>::wrap_bytes(packet).entry_size(),
-            packet.len()
-        );
-        if packet.len() == 0 { return true }
-        if self.bytes_sent < packet.len() {
-            match self.stream.write(&packet[self.bytes_sent..]) {
-                Ok(i) => self.bytes_sent += i,
-                Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {}
-                    _ => panic!("CLIENT send error {}", e),
-                }
-            }
-        }
-        let packet_len = packet.len();
-        let finished = self.bytes_sent >= packet_len;
-        if finished {
-            //TODO if is_write
-            debug_assert_eq!(self.receiver.bytes().len(), 6);
-            let receiver_sent = self.bytes_sent - packet.len();
-            debug_assert!(receiver_sent <= self.receiver.bytes().len());
-            //match self.stream.write(&self.receiver[receiver_sent..0]) {
-            match self.stream.write(&self.receiver.bytes()[receiver_sent..]) {
-                Ok(i) => self.bytes_sent += i,
-                Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {}
-                    _ => panic!("CLIENT send error {}", e),
-                }
-            }
-            //let finished_ip = self.bytes_sent >= packet.len() + self.receiver.len();
-            let finished_ip = self.bytes_sent >= (packet_len + self.receiver.bytes().len());
-            if finished_ip {
-                debug_assert_eq!(self.bytes_sent, packet_len + self.receiver.bytes().len());
-                trace!("CLIENT sent {}/{} bytes.", self.bytes_sent, packet.len());
-                self.bytes_sent = 0
-            }
-            finished && finished_ip
-        } else {
-            false
-        }
-    }
-}
-
-impl Connected for PerServer<UdpConnection> {
-    type Connection = UdpSocket;
-    fn connection(&self) -> &Self::Connection {
-        &self.stream.socket
-    }
-
-    fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error> {
-        //TODO
-        self.read_buffer.ensure_capacity(8192);
-        //FIXME handle WouldBlock and number of bytes read
-        let read = self.stream.socket.recv_from(&mut self.read_buffer[0..8192])
-            .expect("cannot read");
-        if let Some((read, _)) = read {
-            if read > 0 {
-                let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
-                return Ok(Some(buff))
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn send_packet(&mut self, packet: &[u8]) -> bool {
-        let addr = &self.stream.addr;
-        //FIXME handle WouldBlock and number of bytes read
-        let sent = self.stream.socket.send_to(packet, addr).expect("cannot write");
-        if let Some(sent) = sent {
-            return sent > 0
-        }
-        return false
-    }
-}
-
-impl PerServer<TcpStream> {
-
     fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
         let to_ret = match &failed {
             f @ &WriteState::MultiServer(..) => Some(f.clone_multi()),
@@ -949,14 +888,14 @@ impl PerServer<TcpStream> {
         to_ret
     }
 
-    fn send_next_packet(&mut self, token: Token, num_servers: usize) -> bool {
+    fn send_next_burst(&mut self) -> bool {
         use self::WriteState::*;
         use std::io::ErrorKind;
         //FIXME add specialcase for really big send...
 
         if self.being_written.first_bytes().is_empty()
         && self.awaiting_send.is_empty() {
-            trace!("FFFFF empty send @ {:?}", token);
+            trace!("FFFFF empty send @ {:?}", self.token);
             return false
         }
 
@@ -967,13 +906,13 @@ impl PerServer<TcpStream> {
                 Ok(i) => self.bytes_sent += i,
                 Err(e) => match e.kind() {
                     ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
-                        trace!("FFFFF would block @ {:?}", token);
+                        trace!("FFFFF would block @ {:?}", self.token);
                     }
                     _ => panic!("CLIENT send error {}", e),
                 }
             }
             trace!("FFFFF {:?} sent {:?}/{:?}",
-                token, self.bytes_sent, self.being_written.first_bytes().len()
+                self.token, self.bytes_sent, self.being_written.first_bytes().len()
             );
             if self.bytes_sent < self.being_written.first_bytes().len() {
                 return false
@@ -1080,6 +1019,7 @@ impl PerServer<TcpStream> {
             self.being_written.try_fill(&b[..], self.receiver)
         };
         if can_write {
+            //FIXME this is unneeded
             self.being_sent.push_back(WriteState::UnlockServer(buffer))
         } else {
             self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
@@ -1096,7 +1036,37 @@ impl PerServer<TcpStream> {
     }
 }
 
-impl PerServer<UdpConnection> {
+impl Connected for PerServer<UdpConnection> {
+    type Connection = UdpSocket;
+    fn connection(&self) -> &Self::Connection {
+        &self.stream.socket
+    }
+
+    fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error> {
+        //TODO
+        self.read_buffer.ensure_capacity(8192);
+        //FIXME handle WouldBlock and number of bytes read
+        let read = self.stream.socket.recv_from(&mut self.read_buffer[0..8192])
+            .expect("cannot read");
+        if let Some((read, _)) = read {
+            if read > 0 {
+                let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
+                return Ok(Some(buff))
+            }
+        }
+
+        Ok(None)
+    }
+
+    //fn send_packet(&mut self, packet: &[u8]) -> bool {
+    //    let addr = &self.stream.addr;
+    //    //FIXME handle WouldBlock and number of bytes read
+    //    let sent = self.stream.socket.send_to(packet, addr).expect("cannot write");
+    //    if let Some(sent) = sent {
+    //        return sent > 0
+    //    }
+    //    return false
+    //}
 
     fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
         let to_ret = match &failed {
@@ -1109,8 +1079,25 @@ impl PerServer<UdpConnection> {
     }
 
     //FIXME add seperate write function which is split into TCP and UDP versions
-    fn send_next_packet(&mut self, token: Token, num_servers: usize) -> Option<WriteState> {
-        unimplemented!()/*
+    //fn send_next_burst(&mut self) -> Option<WriteState> {
+    fn send_next_burst(&mut self) -> bool {
+        let addr = &self.stream.addr;
+        //TODO no-alloc?
+        let packet = self.awaiting_send.pop_front();
+        if let Some(packet) = packet {
+            //FIXME handle WouldBlock and number of bytes read
+            let sent = packet.with_packet(|p| self.stream.socket.send_to(p, addr)
+                .expect("cannot write")
+            );
+            if let Some(sent) = sent {
+                self.being_sent.push_back(packet);
+                return sent > 0
+            }
+            self.awaiting_send.push_front(packet);
+            return false
+        }
+        false
+        /*
         use self::WriteState::*;
 
         let send_in_progress = mem::replace(&mut self.currently_sending, None);
@@ -1225,22 +1212,38 @@ impl PerServer<UdpConnection> {
         }*/
     }
 
-    fn add_single_server_send(&mut self, msg: Vec<u8>) {
+    fn add_single_server_send(&mut self, msg: Vec<u8>) -> bool {
         self.awaiting_send.push_back(WriteState::SingleServer(msg));
+        true
     }
 
-    fn add_multi(&mut self, msg: Rc<RefCell<Vec<u8>>>, remaining_servers: Rc<RefCell<HashSet<usize>>>, locks: Rc<Box<[OrderIndex]>>) {
+    fn add_send(&mut self, to_send: WriteState) -> bool {
+        self.awaiting_send.push_back(to_send);
+        true
+    }
+
+    fn add_multi(&mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        locks: Rc<Box<[OrderIndex]>>,
+        num_servers: usize,
+    ) {
+    //fn add_multi(&mut self, msg: Rc<RefCell<Vec<u8>>>, remaining_servers: Rc<RefCell<HashSet<usize>>>, locks: Rc<Box<[OrderIndex]>>) {
         //FIXME
-        self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks, false));
+        unimplemented!()
+        //self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks, false));
     }
 
     fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
         //unlike other reqs here we send the unlock first to minimize the contention window
-        self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
+        //self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
+        unimplemented!()
     }
 
-    fn add_get_lock_nums(&mut self, msg: Vec<u8>) {
-        self.awaiting_send.push_back(WriteState::ToLockServer(msg))
+    fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
+        //self.awaiting_send.push_back(WriteState::ToLockServer(msg));
+        //true
+        unimplemented!()
     }
 
     fn needs_to_write(&self) -> bool {
