@@ -149,8 +149,11 @@ where ToWorkers: DistributeToWorkers<T> {
                                     continue
                                 }
                                 let chain = locs[i].0;
-                                let chain = self.ensure_chain(chain);
-                                all_unlocked &= chain.unlock(u32::from(locs[i].1) as u64);
+                                if self.stores_chain(chain) {
+                                    let chain = self.ensure_chain(chain);
+                                    all_unlocked &= chain.unlock(u32::from(locs[i].1)
+                                        as u64);
+                                }
                             }
                         }
                         if all_unlocked {
@@ -165,7 +168,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     return
                 }
 
-                trace!("SERVER {:?} multiput", self.this_server_num);
+                trace!("SERVER {:?} multiput {:?}", self.this_server_num, kind);
                 /*if kind.contains(EntryKind::TakeLock) {
                     debug_assert!(self.last_lock == buffer.entry().lock_num(),
                         "SERVER {:?} lock {:?} == valock {:?}",
@@ -223,6 +226,10 @@ where ToWorkers: DistributeToWorkers<T> {
                             locs[i].1 = entry::from(0)
                         }
                     }
+                    debug_assert!(!(sentinel_start_index.is_none() && kind.contains(EntryKind::Sentinel)),
+                        "BAD SENTINEL @ {:?}",
+                        locs,
+                    );
                     if let (Some(ssi), false) = (sentinel_start_index, lock_failed) {
                         'senti_horizon: for i in ssi..locs.len() {
                             assert!(locs[i] != OrderIndex(0.into(), 0.into()));

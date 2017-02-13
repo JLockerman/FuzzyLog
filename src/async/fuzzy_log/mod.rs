@@ -83,14 +83,6 @@ enum MultiSearch {
     //MultiSearch::FirstPart(),
 }
 
-//TODO no-alloc
-struct BufferCache {
-    vec_cache: VecDeque<Vec<u8>>,
-    //     rc_cache: VecDeque<Rc<Vec<u8>>>,
-    //     alloced: usize,
-    //     avg_alloced: usize,
-}
-
 impl ThreadLog {
 
     //TODO
@@ -302,13 +294,15 @@ impl ThreadLog {
                 for _ in 0..num_completeds {
                     let _ = self.ready_reads.send(vec![]);
                 }
+                self.cache.flush();
             }
         }
         else {
-            //#[cfg(debug_assertions)]
-            //self.per_chains.get(&read_loc.0).map(|pc| {
-            //    trace!("chain {:?} not finished, " pc.outstanding_reads, pc.last_returned)
-            //});
+            #[cfg(debug_assertions)]
+            self.per_chains.get(&read_loc.0).map(|pc| {
+                pc.trace_unfinished()
+            });
+
         }
     }
 
@@ -789,7 +783,7 @@ impl ThreadLog {
         }, finished);*/
         debug_assert!(
             if finished {
-                self.per_chains.iter().map(|(_, pc)| {
+                self.per_chains.iter().map(|(o, pc)| {
                     if !pc.has_outstanding() {
                         assert!(pc.finished_until_snapshot());
                     }
@@ -811,23 +805,56 @@ impl ThreadLog {
     }
 }
 
+//TODO no-alloc
+struct BufferCache {
+    vec_cache: VecDeque<Vec<u8>>,
+    //     rc_cache: VecDeque<Rc<Vec<u8>>>,
+    //     alloced: usize,
+    //     avg_alloced: usize,
+    //num_allocs: u64,
+    //num_misses: u64,
+}
+
 impl BufferCache {
     fn new() -> Self {
         BufferCache{
-            vec_cache: VecDeque::new()
+            vec_cache: VecDeque::new(),
+            //num_allocs: 0,
+            //num_misses: 0,
         }
     }
 
     fn alloc(&mut self) -> Vec<u8> {
-        self.vec_cache.pop_front().unwrap_or(Vec::new())
+        //self.num_allocs += 1;
+        self.vec_cache.pop_front().unwrap_or_else(||{
+            //self.num_misses += 1;
+            Vec::new()
+        })
     }
 
     fn cache_buffer(&mut self, mut buffer: Vec<u8>) {
         //TODO
-        if self.vec_cache.len() < 100 {
-            buffer.clear();
-            self.vec_cache.push_front(buffer)
+        //if self.vec_cache.len() < 100 {
+        buffer.clear();
+        self.vec_cache.push_front(buffer)
+        //}
+    }
+
+    fn flush(&mut self) {
+        //TODO replace with truncate
+        /*println!("veccache len {:?}", self.vec_cache.len());
+        let hits = self.num_allocs - self.num_misses;
+        // hits / allocs = x / 100
+        let hit_p = (100.0 * hits as f64) / self.num_allocs as f64;
+        println!("num alloc {}, hit {}% ,\nhits {}, misses {}",
+            self.vec_cache.len(), hit_p,
+            hits, self.num_misses,
+        );*/
+        for _ in 100..self.vec_cache.len() {
+            self.vec_cache.pop_back();
         }
+        //self.num_allocs = 0;
+        //self.num_misses = 0;
     }
 }
 

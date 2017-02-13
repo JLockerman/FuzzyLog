@@ -683,9 +683,17 @@ fn run_write_read_actual(server_addr: SocketAddr, num_clients: usize, jobsize: u
             (write_total + write, read_total + read)
     );
     let end = start.elapsed();
-    println!("total write Hz {:.3}, {:.3}b/s", total_write_hz, total_write_hz * job_bytes * 8.0);
-    println!("total read  Hz {:.3}, {:.3}b/s", total_read_hz, total_read_hz * job_bytes * 8.0);
-    println!("elapsed time {}s", end.as_secs());
+    println!("#jobsize | write Hz | read Hz | write b/s | read b/s");
+    println!("{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}",
+        jobsize,
+        total_write_hz,
+        total_read_hz,
+        total_write_hz * job_bytes * 8.0,
+        total_read_hz * job_bytes * 8.0
+    );
+    //println!("total write Hz {:.3}, {:.3}b/s", total_write_hz, total_write_hz * job_bytes * 8.0);
+    //println!("total read  Hz {:.3}, {:.3}b/s", total_read_hz, total_read_hz * job_bytes * 8.0);
+    println!("#elapsed time {}s", end.as_secs());
 
     std::process::exit(0)
 }
