@@ -469,7 +469,7 @@ macro_rules! async_tests {
 
         //TODO test append after prefetch but before read
     );
-    () => ( async_tests!(tcp); async_tests!(udp); async_tests!(rtcp); );
+    () => ( async_tests!(tcp); /*async_tests!(udp);*/ async_tests!(rtcp); );
     (tcp) => (
         mod tcp {
             async_tests!(test new_thread_log);

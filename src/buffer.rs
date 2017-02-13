@@ -116,7 +116,7 @@ impl Buffer {
 #[cfg(debug_assertions)]
 impl Drop for Buffer {
     fn drop(&mut self) {
-        if self.no_drop {
+        if !::std::thread::panicking() && self.no_drop {
             panic!("Dropped NoDropBuffer.")
         }
     }
@@ -214,6 +214,8 @@ impl ::std::ops::DerefMut for NoDropBuffer {
 
 impl Drop for NoDropBuffer {
     fn drop(&mut self) {
-        panic!("Dropped NoDropBuffer.")
+        if !::std::thread::panicking() {
+            panic!("Dropped NoDropBuffer.")
+        }
     }
 }

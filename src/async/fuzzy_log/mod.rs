@@ -293,6 +293,7 @@ impl ThreadLog {
                 pc.set_finished_reading();
             });
             if self.finshed_reading() {
+                //TODO flush cached buffers
                 trace!("FUZZY finished reading all chains");
                 //FIXME add is_snapshoting to PerColor so this doesn't race?
                 trace!("FUZZY finished reading");
@@ -305,10 +306,11 @@ impl ThreadLog {
             }
         }
         else {
-            //#[cfg(debug_assertions)]
-            //self.per_chains.get(&read_loc.0).map(|pc| {
-            //    trace!("chain {:?} not finished, " pc.outstanding_reads, pc.last_returned)
-            //});
+            #[cfg(debug_assertions)]
+            self.per_chains.get(&read_loc.0).map(|pc| {
+                pc.trace_unfinished()
+            });
+
         }
     }
 
@@ -789,7 +791,7 @@ impl ThreadLog {
         }, finished);*/
         debug_assert!(
             if finished {
-                self.per_chains.iter().map(|(_, pc)| {
+                self.per_chains.iter().map(|(o, pc)| {
                     if !pc.has_outstanding() {
                         assert!(pc.finished_until_snapshot());
                     }

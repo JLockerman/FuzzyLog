@@ -43,11 +43,13 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
 
 pub struct PerServer<Socket> {
     awaiting_send: VecDeque<WriteState>,
+    being_written: DoubleBuffer,
+    being_sent: VecDeque<WriteState>,
     read_buffer: Buffer,
     stream: Socket,
     bytes_read: usize,
     bytes_sent: usize,
-    currently_sending: Option<WriteState>,
+    token: Token,
     got_new_message: bool,
     receiver: Ipv4SocketAddr,
 }
@@ -56,7 +58,11 @@ pub struct PerServer<Socket> {
 enum WriteState {
     SingleServer(Vec<u8>),
     ToLockServer(Vec<u8>),
-    MultiServer(Rc<RefCell<Vec<u8>>>, Rc<RefCell<HashSet<usize>>>, Rc<Box<[OrderIndex]>>),
+    MultiServer(Rc<RefCell<Vec<u8>>>,
+        Rc<RefCell<HashSet<usize>>>,
+        Rc<Box<[OrderIndex]>>,
+        bool,
+    ),
     UnlockServer(Rc<RefCell<Vec<u8>>>),
 }
 
@@ -91,8 +97,9 @@ where C: AsyncStoreClient {
         //TODO if let Some(lock_server) = lock_server...
         let lock_token = Token(servers.len());
         servers.push(lock_server);
-        for (i, server) in servers.iter().enumerate() {
-            event_loop.register(server.connection(), Token(i),
+        for (i, server) in servers.iter_mut().enumerate() {
+            server.token = Token(i);
+            event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
@@ -147,8 +154,9 @@ where C: AsyncStoreClient {
             Token(servers.len() - 1)
         } else { Token(servers.len() + 1) };
         //TODO if let Some(lock_server) = lock_server...
-        for (i, server) in servers.iter().enumerate() {
-            event_loop.register(server.connection(), Token(i),
+        for (i, server) in servers.iter_mut().enumerate() {
+            server.token = Token(i);
+            event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
@@ -196,8 +204,9 @@ where C: AsyncStoreClient {
         //TODO if let Some(lock_server) = lock_server...
         let lock_token = Token(servers.len());
         servers.push(lock_server);
-        for (i, server) in servers.iter().enumerate() {
-            event_loop.register(server.connection(), Token(i),
+        for (i, server) in servers.iter_mut().enumerate() {
+            server.token = Token(i);
+            event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
@@ -231,12 +240,14 @@ impl PerServer<TcpStream> {
         let local_addr = try!(stream.local_addr());
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
+            being_written: DoubleBuffer::with_first_buffer_capacity(1024),
+            being_sent: Default::default(),
             read_buffer: Buffer::new(), //TODO cap
             //read_buffer: Buffer::no_drop(), //TODO cap
             stream: stream,
             bytes_read: 0,
             bytes_sent: 0,
-            currently_sending: None,
+            token: Token(::std::usize::MAX),
             got_new_message: false,
             receiver: Ipv4SocketAddr::from_socket_addr(local_addr),
         })
@@ -258,11 +269,13 @@ impl PerServer<UdpConnection> {
                 0));
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
+            being_written: DoubleBuffer::new(),
+            being_sent: Default::default(),
             read_buffer: Buffer::new(), //TODO cap
             stream: UdpConnection { socket: unsafe { UdpSocket::from_raw_fd(fd) }, addr: addr },
             bytes_read: 0,
             bytes_sent: 0,
-            currently_sending: None,
+            token: Token(::std::usize::MAX),
             got_new_message: false,
             receiver: Ipv4SocketAddr::nil(),
         })
@@ -273,8 +286,8 @@ impl PerServer<UdpConnection> {
     }
 }
 
-impl<S, C> AsyncTcpStore<S, C>
-where PerServer<S>: Connected,
+impl<C> AsyncTcpStore<TcpStream, C>
+where /*PerServer<S>: Connected,*/
       C: AsyncStoreClient {
     pub fn run(mut self, poll: mio::Poll) -> ! {
         trace!("CLIENT start.");
@@ -302,7 +315,11 @@ where PerServer<S>: Connected,
         for event in events {
             let token = event.token();
             if token.0 >= self.servers.len() {
-                self.handle_new_requests_from_client()
+                'new_reqs: loop { //for _ in 0..1000 {
+                    if !self.handle_new_requests_from_client() {
+                        break 'new_reqs
+                    }
+                }
             }
             else {
                 debug_assert!(token.0 < self.servers.len());
@@ -311,71 +328,101 @@ where PerServer<S>: Connected,
         }
     }
 
-    fn handle_new_requests_from_client(&mut self) {
+    fn handle_new_requests_from_client(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
         //trace!("CLIENT got new req");
         let msg = match self.from_client.try_recv() {
             Ok(msg) => msg,
-            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Empty) => return false,
             //TODO Err(TryRecvError::Disconnected) => panic!("client disconnected.")
-            Err(TryRecvError::Disconnected) => return,
+            Err(TryRecvError::Disconnected) => return false,
         };
         let new_msg_kind = Entry::<()>::wrap_bytes(&msg).kind.layout();
         match new_msg_kind {
             EntryLayout::Read => {
-                let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
+                let loc = Entry::<()>::wrap_bytes(&msg).locs()[0];
+                trace!("CLIENT got read {:?}", loc);
+                let loc = loc.0;
                 let s = self.read_server_for_chain(loc);
                 //TODO if writeable write?
-                self.add_single_server_send(s, msg);
+                self.add_single_server_send(s, msg)
             }
             EntryLayout::Data => {
                 let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
+                trace!("CLIENT got write {:?}", loc);
                 let s = self.write_server_for_chain(loc);
                 //TODO if writeable write?
-                self.add_single_server_send(s, msg);
+                self.add_single_server_send(s, msg)
             }
             EntryLayout::Multiput => {
+                trace!("CLIENT got multi write");
                 if self.is_single_node_append(&msg) {
                     let chain = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
                     let s = self.write_server_for_chain(chain);
-                    self.add_single_server_send(s, msg);
+                    self.add_single_server_send(s, msg)
                 }
                 else {
                     let mut msg = msg;
                     Entry::<()>::wrap_bytes_mut(&mut msg).locs_mut().into_iter()
                         .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
-                    self.add_get_lock_nums(msg);
-                };
+                    self.add_get_lock_nums(msg)
+                }
             }
             r @ EntryLayout::Sentinel | r @ EntryLayout::Lock =>
                 panic!("Invalid send request {:?}", r),
         }
     } // End fn handle_new_requests_from_client
 
-    fn add_single_server_send(&mut self, server: usize, msg: Vec<u8>) {
+    fn add_single_server_send(&mut self, server: usize, msg: Vec<u8>) -> bool {
         assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
         //let per_server = self.server_for_token_mut(Token(server));
         let per_server = &mut self.servers[server];
-        per_server.add_single_server_send(msg);
+        let written = per_server.add_single_server_send(msg);
         if !per_server.got_new_message {
             per_server.got_new_message = true;
             self.awake_io.push_back(server)
         }
+        for sent in per_server.being_sent.drain(..) {
+            let layout = sent.layout();
+            if layout == EntryLayout::Read {
+                let read_loc = sent.read_loc();
+                self.sent_reads.insert(read_loc);
+                self.waiting_buffers.push_back(sent.take())
+            }
+            else if !sent.is_unlock() {
+                let id = sent.id();
+                self.sent_writes.insert(id, sent);
+            }
+        }
+        written
     }
 
-    fn add_get_lock_nums(&mut self, msg: Vec<u8>) {
+    fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
         let lock_server = self.lock_token();
         //let per_server = self.server_for_token_mut(lock_server);
         let per_server = &mut self.servers[lock_server.0];
-        per_server.add_get_lock_nums(msg);
+        let written = per_server.add_get_lock_nums(msg);
         if !per_server.got_new_message {
             per_server.got_new_message = true;
             self.awake_io.push_back(lock_server.0)
         }
+        for sent in per_server.being_sent.drain(..) {
+            let layout = sent.layout();
+            if layout == EntryLayout::Read {
+                let read_loc = sent.read_loc();
+                self.sent_reads.insert(read_loc);
+                self.waiting_buffers.push_back(sent.take())
+            }
+            else if !sent.is_unlock() {
+                let id = sent.id();
+                self.sent_writes.insert(id, sent);
+            }
+        }
+        written
     }
 
     fn handle_server_event(&mut self, server: usize) {
-        trace!("CLIENT handle server event");
+        trace!("CLIENT handle server {:?} event", server);
         self.servers[server].got_new_message = false;
         //TODO pass in whether a read or write is ready?
         let mut stay_awake = false;
@@ -386,8 +433,10 @@ where PerServer<S>: Connected,
             let kind = packet.entry().kind;
             trace!("CLIENT got a {:?} from {:?}", kind, token);
             if kind.contains(EntryKind::ReadSuccess) {
-                let num_chain_servers = self.num_chain_servers;
-                self.handle_completion(token, num_chain_servers, &packet)
+                if !kind.contains(EntryKind::Unlock) {
+                    let num_chain_servers = self.num_chain_servers;
+                    self.handle_completion(token, num_chain_servers, &packet)
+                }
             }
             //TODO distinguish between locks and empties
             else if kind.layout() == EntryLayout::Read
@@ -403,20 +452,23 @@ where PerServer<S>: Connected,
         }
 
         if self.servers[server].needs_to_write() {
+            trace!("CLIENT write");
             let num_chain_servers = self.num_chain_servers;
             let finished_send = self.servers[server].send_next_packet(token, num_chain_servers);
-            if let Some(sent) = finished_send {
+            if finished_send {
                 trace!("CLIENT finished a send to {:?}", token);
                 stay_awake = true;
-                let layout = sent.layout();
-                if layout == EntryLayout::Read {
-                    let read_loc = sent.read_loc();
-                    self.sent_reads.insert(read_loc);
-                    self.waiting_buffers.push_back(sent.take())
-                }
-                else if !sent.is_unlock() {
-                    let id = sent.id();
-                    self.sent_writes.insert(id, sent);
+                for sent in self.servers[server].being_sent.drain(..) {
+                    let layout = sent.layout();
+                    if layout == EntryLayout::Read {
+                        let read_loc = sent.read_loc();
+                        self.sent_reads.insert(read_loc);
+                        self.waiting_buffers.push_back(sent.take())
+                    }
+                    else if !sent.is_unlock() {
+                        let id = sent.id();
+                        self.sent_writes.insert(id, sent);
+                    }
                 }
             }
         }
@@ -465,10 +517,10 @@ where PerServer<S>: Connected,
                             );
                         }
                     }
-                    self.add_multis(msg);
+                    self.add_multis(msg, num_chain_servers);
                     return false
                 }
-                WriteState::MultiServer(buf, remaining_servers, locks) => {
+                WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel) => {
                     assert!(token != self.lock_token());
                     trace!("CLIENT finished multi section");
                     let ready_to_unlock = {
@@ -502,7 +554,7 @@ where PerServer<S>: Connected,
                         }
                         None => {
                             self.sent_writes.insert(id,
-                                WriteState::MultiServer(buf, remaining_servers, locks));
+                                WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel));
                             return false
                         }
                     }
@@ -602,17 +654,21 @@ where PerServer<S>: Connected,
             Some(mut buf) => {
                 let buf = buf.get_mut();
                 let server = self.get_servers_for_multi(&buf);
-                let e = Entry::<()>::wrap_bytes_mut(buf);
-                e.kind.remove(EntryKind::Multiput);
-                e.kind.insert(EntryKind::Sentinel);
-                e.kind.insert(EntryKind::Unlock);
-                e.data_bytes = 0;
-                e.dependency_bytes = 0;
+                let size = {
+                    let e = Entry::<()>::wrap_bytes_mut(buf);
+                    e.kind.remove(EntryKind::Multiput);
+                    e.kind.insert(EntryKind::Sentinel);
+                    e.kind.insert(EntryKind::Unlock);
+                    e.data_bytes = 0;
+                    e.dependency_bytes = 0;
+                    e.entry_size()
+                };
+                unsafe { buf.set_len(size) };
                 server
             }
         };
         assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).kind.layout(), EntryLayout::Sentinel);
-        //assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).entry_size(), buf.borrow().len());
+        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).entry_size(), buf.borrow().len());
         for server in servers {
             trace!("CLIENT add unlock for {:?}", server);
             let per_server = &mut self.servers[server];
@@ -624,7 +680,7 @@ where PerServer<S>: Connected,
         }
     }
 
-    fn add_multis(&mut self, msg: Vec<u8>) {
+    fn add_multis(&mut self, msg: Vec<u8>, num_servers: usize) {
         debug_assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
         let locks = Rc::new(Entry::<()>::wrap_bytes(&msg).locs().to_vec().into_boxed_slice());
         let servers = self.get_servers_for_multi(&msg);
@@ -633,11 +689,17 @@ where PerServer<S>: Connected,
         for &writer in servers.iter() {
             remaining_servers.insert(self.read_server_for_write_server(writer));
         }
+        trace!("CLIENT multi to {:?}", remaining_servers);
         let remaining_servers = Rc::new(RefCell::new(remaining_servers));
         let msg = Rc::new(RefCell::new(msg));
         for s in servers {
             let per_server = &mut self.servers[s];
-            per_server.add_multi(msg.clone(), remaining_servers.clone(), locks.clone());
+            per_server.add_multi(
+                msg.clone(),
+                remaining_servers.clone(),
+                locks.clone(),
+                num_servers,
+            );
             if !per_server.got_new_message {
                 per_server.got_new_message = true;
                 self.awake_io.push_back(s)
@@ -708,7 +770,7 @@ where PerServer<S>: Connected,
         write_server_for_chain(chain, self.num_chain_servers)
     }
 
-    fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer<S> {
+    fn server_for_token_mut(&mut self, token: Token) -> &mut PerServer<TcpStream> {
         &mut self.servers[token.0]
     }
 
@@ -789,6 +851,7 @@ impl Connected for PerServer<TcpStream> {
 
     fn send_packet(&mut self, packet: &[u8]) -> bool {
         use std::io::ErrorKind;
+        unimplemented!();
         //let is_write = Entry::<()>::wrap_bytes(packet).kind.layout().is_write();
         trace!("CLIENT continue send {}/{} bytes.", self.bytes_sent, packet.len());
         debug_assert!({
@@ -873,8 +936,167 @@ impl Connected for PerServer<UdpConnection> {
     }
 }
 
-impl<S> PerServer<S>
-where PerServer<S>: Connected {
+impl PerServer<TcpStream> {
+
+    fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
+        let to_ret = match &failed {
+            f @ &WriteState::MultiServer(..) => Some(f.clone_multi()),
+            _ => None,
+        };
+        self.add_send(failed);
+        //TODO front or back?
+        //self.awaiting_send.push_front(failed);
+        to_ret
+    }
+
+    fn send_next_packet(&mut self, token: Token, num_servers: usize) -> bool {
+        use self::WriteState::*;
+        use std::io::ErrorKind;
+        //FIXME add specialcase for really big send...
+
+        if self.being_written.first_bytes().is_empty()
+        && self.awaiting_send.is_empty() {
+            trace!("FFFFF empty send @ {:?}", token);
+            return false
+        }
+
+        if !self.being_written.first_bytes().is_empty() {
+            match self.stream.write(
+                &self.being_written.first_bytes()[self.bytes_sent..]
+            ) {
+                Ok(i) => self.bytes_sent += i,
+                Err(e) => match e.kind() {
+                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                        trace!("FFFFF would block @ {:?}", token);
+                    }
+                    _ => panic!("CLIENT send error {}", e),
+                }
+            }
+            trace!("FFFFF {:?} sent {:?}/{:?}",
+                token, self.bytes_sent, self.being_written.first_bytes().len()
+            );
+            if self.bytes_sent < self.being_written.first_bytes().len() {
+                return false
+            }
+            self.bytes_sent = 0;
+            self.being_written.swap_if_needed();
+        }
+
+        while !self.awaiting_send.is_empty() {
+            let being_written = &mut self.being_written;
+            let addr = self.receiver;
+            let added = self.awaiting_send.front().unwrap()
+                .with_packet(|p| being_written.try_fill(p, addr));
+            if !added { break }
+            let msg = self.awaiting_send.pop_front().unwrap();
+            self.being_sent.push_back(msg);
+        }
+
+        return true
+    }
+
+    fn add_send(&mut self, to_send: WriteState) -> bool {
+        if !self.awaiting_send.is_empty() {
+            trace!("FFFFF add to wait");
+            self.awaiting_send.push_back(to_send);
+            return false
+        }
+
+        let can_write = to_send.with_packet(|p|
+            self.being_written.try_fill(p, self.receiver));
+        if can_write {
+            trace!("FFFFF add to buffer");
+            self.being_sent.push_back(to_send)
+        } else {
+            trace!("FFFFF buffer full");
+            self.awaiting_send.push_back(to_send)
+        }
+        can_write
+    }
+
+    fn add_single_server_send(&mut self, msg: Vec<u8>) -> bool {
+        let send = WriteState::SingleServer(msg);
+        self.add_send(send)
+    }
+
+    fn add_multi(&mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        locks: Rc<Box<[OrderIndex]>>,
+        num_servers: usize,
+    ) {
+        let len = msg.borrow().len();
+        if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {
+            let is_data;
+            {
+                let mut ts = msg.borrow_mut();
+                let send_end = {
+                    let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
+                    {
+                        is_data = e.locs().into_iter()
+                            .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
+                            .any(|oi| is_write_server_for(oi.0, self.token, num_servers));
+                        let kind = &mut e.kind;
+                        debug_assert!(kind.layout() == EntryLayout::Multiput
+                            || kind.layout() == EntryLayout::Sentinel);
+                        debug_assert!(kind.contains(EntryKind::TakeLock));
+                        if is_data {
+                            kind.remove(EntryKind::Lock);
+                            debug_assert_eq!(kind.layout(), EntryLayout::Multiput);
+                        }
+                        else {
+                            kind.insert(EntryKind::Lock);
+                            debug_assert_eq!(kind.layout(), EntryLayout::Sentinel);
+                        }
+                        kind.insert(EntryKind::TakeLock);
+                    }
+                    if !is_data {
+                        debug_assert!(e.locs().contains(&OrderIndex(0.into(), 0.into())));
+                    }
+                    e.entry_size()
+                };
+                //Since sentinels have a different size than multis, we need to truncate
+                //for those sends
+                let sent = self.being_written.try_fill(&ts[..send_end], self.receiver);
+                debug_assert!(sent);
+            }
+            self.being_sent.push_back(WriteState::MultiServer(msg, remaining_servers, locks, !is_data))
+        } else {
+            let is_sentinel = {
+                let ts = msg.borrow();
+                !Entry::<()>::wrap_bytes(&*ts)
+                    .locs().into_iter()
+                    .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
+                    .any(|oi| is_write_server_for(oi.0, self.token, num_servers))
+            };
+            self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks, is_sentinel));
+        }
+    }
+
+    fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
+        //unlike other reqs here we send the unlock first to minimize the contention window
+        let can_write = {
+            let b = buffer.borrow();
+            self.being_written.try_fill(&b[..], self.receiver)
+        };
+        if can_write {
+            self.being_sent.push_back(WriteState::UnlockServer(buffer))
+        } else {
+            self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
+        }
+    }
+
+    fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
+        let send = WriteState::ToLockServer(msg);
+        self.add_send(send)
+    }
+
+    fn needs_to_write(&self) -> bool {
+        !self.being_written.first_bytes().is_empty()
+    }
+}
+
+impl PerServer<UdpConnection> {
 
     fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
         let to_ret = match &failed {
@@ -888,6 +1110,7 @@ where PerServer<S>: Connected {
 
     //FIXME add seperate write function which is split into TCP and UDP versions
     fn send_next_packet(&mut self, token: Token, num_servers: usize) -> Option<WriteState> {
+        unimplemented!()/*
         use self::WriteState::*;
 
         let send_in_progress = mem::replace(&mut self.currently_sending, None);
@@ -999,7 +1222,7 @@ where PerServer<S>: Connected {
                     return None
                 }
             }
-        }
+        }*/
     }
 
     fn add_single_server_send(&mut self, msg: Vec<u8>) {
@@ -1007,7 +1230,8 @@ where PerServer<S>: Connected {
     }
 
     fn add_multi(&mut self, msg: Rc<RefCell<Vec<u8>>>, remaining_servers: Rc<RefCell<HashSet<usize>>>, locks: Rc<Box<[OrderIndex]>>) {
-        self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks));
+        //FIXME
+        self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks, false));
     }
 
     fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
@@ -1024,14 +1248,97 @@ where PerServer<S>: Connected {
     }
 }
 
+const MAX_WRITE_BUFFER_SIZE: usize = 40000;
+
+struct DoubleBuffer {
+    first: Vec<u8>,
+    second: Vec<u8>,
+}
+
+impl DoubleBuffer {
+
+    fn new() -> Self {
+        DoubleBuffer {
+            first: Vec::new(),
+            second: Vec::new(),
+        }
+    }
+
+    fn with_first_buffer_capacity(cap: usize) -> Self {
+        DoubleBuffer {
+            first: Vec::with_capacity(cap),
+            second: Vec::new(),
+        }
+    }
+
+    fn first_bytes(&self) -> &[u8] {
+        &self.first[..]
+    }
+
+    fn swap_if_needed(&mut self) {
+        self.first.clear();
+        if self.second.len() > 0 {
+            mem::swap(&mut self.first, &mut self.second)
+        }
+    }
+
+    fn can_hold_bytes(&self, bytes: usize) -> bool {
+        buffer_can_hold_bytes(&self.first, bytes)
+        || buffer_can_hold_bytes(&self.second, bytes)
+    }
+
+    fn try_fill(&mut self, bytes: &[u8], addr: Ipv4SocketAddr) -> bool {
+        if self.is_filling_first() {
+            if buffer_can_hold_bytes(&self.first, bytes.len() + addr.bytes().len())
+            || self.first.is_empty() {
+                self.first.extend_from_slice(bytes);
+                self.first.extend_from_slice(addr.bytes());
+                return true
+            }
+        }
+
+        if buffer_can_hold_bytes(&self.second, bytes.len() + addr.bytes().len())
+        || self.second.capacity() < MAX_WRITE_BUFFER_SIZE {
+            self.second.extend_from_slice(bytes);
+            self.second.extend_from_slice(addr.bytes());
+            return true
+        }
+
+        return false
+    }
+
+    fn is_filling_first(&self) -> bool {
+        self.second.len() == 0
+    }
+}
+
+fn buffer_can_hold_bytes(buffer: &Vec<u8>, bytes: usize) -> bool {
+    buffer.capacity() - buffer.len() >= bytes
+}
+
 impl WriteState {
     fn with_packet<F, R>(&self, f: F) -> R
     where F: for<'a> FnOnce(&'a [u8]) -> R {
         use self::WriteState::*;
         match self {
             &SingleServer(ref buf) | &ToLockServer(ref buf) => f(&**buf),
-            &MultiServer(ref buf, ..) | &UnlockServer(ref buf) => {
-                let b = buf.borrow();
+            &MultiServer(ref buf, _, _, is_sentinel) => {
+                let mut b = buf.borrow_mut();
+                {
+                    let e = Entry::<()>::wrap_bytes_mut(&mut *b);
+                    if is_sentinel {
+                        e.kind.remove(EntryKind::Multiput);
+                        e.kind.insert(EntryKind::Sentinel);
+                    }
+                    else {
+                        e.kind.remove(EntryKind::Sentinel);
+                        e.kind.insert(EntryKind::Multiput);
+                    }
+                }
+                f(&*b)
+            },
+            &UnlockServer(ref buf) => {
+                let b = buf.borrow_mut();
                 f(&*b)
             },
         }
@@ -1097,7 +1404,7 @@ impl WriteState {
     fn clone_multi(&self) -> WriteState {
         use self::WriteState::*;
         match self {
-            &MultiServer(ref b, ref remaining_servers, ref locks) => MultiServer(b.clone(), remaining_servers.clone(), locks.clone()),
+            &MultiServer(ref b, ref remaining_servers, ref locks, is_sentinel) => MultiServer(b.clone(), remaining_servers.clone(), locks.clone(), is_sentinel),
             s => panic!("invlaid clone multi on {:?}", s)
         }
 

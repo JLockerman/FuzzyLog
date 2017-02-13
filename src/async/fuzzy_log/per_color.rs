@@ -400,4 +400,13 @@ impl PerColor {
         self.finished_until_snapshot()
             && !(self.is_searching_for_multi() || self.has_outstanding_snapshots())
     }
+
+    pub fn trace_unfinished(&self) {
+        trace!("chain {:?} finished? {:?}, last_ret {:?}, last_snap {:?}",
+            self.chain,
+            self.is_being_read,
+            self.last_returned_to_client,
+            self.last_snapshot
+        )
+    }
 }
