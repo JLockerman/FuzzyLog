@@ -315,8 +315,16 @@ impl PerColor {
 
     pub fn num_to_fetch(&self) -> u32 {
         use std::cmp::min;
-        //TODO
-        const MAX_PIPELINED: u32 = 1000;
+        //TODO this decision needs to be made at the store level for this to really work
+        //     a better solutions is the log tells store what range of entries it wants
+        //     the store trys to send a full buffer's worth of read requests,
+        //     and stores the ranges of reads it has sent.
+        //     upon _receipt_ of a read response the _store_ trys to alloc a buffer
+        //     from the buffer cache and forwards the read to log
+        //FIXME the longer the allowed pipeline depth the better throughput,
+        //      but the more memory is wasted, anyway current scheme is suboptimal,
+        //      see TODO above
+        const MAX_PIPELINED: u32 = 20000;
         //TODO switch to saturating sub?
         assert!(self.last_returned_to_client <= self.last_snapshot,
             "FUZZY returned value early. {:?} should be less than {:?}",
