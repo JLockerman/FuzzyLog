@@ -433,7 +433,7 @@ macro_rules! async_tests {
             let _ = lh.append(61.into(), &(), &[]);
             let _ = lh.multiappend(&[61.into(), 62.into()], &(), &[]);
             let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
-            let _ = lh.color_append(&(), &[61.into()], &[], false);
+            let _ = lh.color_append(&(), &mut [61.into()], &mut [], false);
             lh.snapshot(61.into());
             assert_eq!(lh.get_next(),
                 Some((&(), &[OrderIndex(61.into(), 1.into())][..])));
@@ -560,7 +560,7 @@ macro_rules! async_tests {
                 let _ = lh.append(1_000_02.into(), &[], &[]);
                 let _ = lh.multiappend(&[1_000_02.into(), 1_000_03.into()], &[] , &[]);
                 let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
-                let _ = lh.color_append(&[], &[1_000_02.into()], &[], false);
+                let _ = lh.color_append(&[], &mut [1_000_02.into()], &mut [], false);
                 lh.snapshot(1_000_02.into());
                 assert_eq!(lh.get_next(),
                     Some((&[][..], &[OrderIndex(1_000_02.into(), 1.into())][..])));

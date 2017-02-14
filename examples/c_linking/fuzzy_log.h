@@ -8,6 +8,7 @@
 //TODO where does the best effort flag go?
 #define DELOS_MAX_DATA_SIZE 8000
 typedef uint32_t ColorID;
+typedef uint32_t LocationInColor;
 
 struct colors
 {
@@ -23,6 +24,11 @@ typedef struct write_id {
 	uint64_t p1;
 	uint64_t p2;
 } write_id;
+
+typedef struct fuzzy_log_location {
+	ColorID color;
+	LocationInColor entry;
+} fuzzy_log_location;
 
 static write_id WRITE_ID_NIL = {.p1 = 0, .p2 = 0};
 
@@ -125,6 +131,58 @@ static inline write_id async_append(DAGHandle *handle, char *data, size_t data_s
 	struct colors* inhabits, struct colors* depends_on) {
 	return do_append(handle, data, data_size, inhabits, depends_on, 1);
 }
+
+//! Atomically appends new node(s) to the dag.
+//! This functions differs from append() in that,
+//! if an append inhabits multiple colors,
+//! if one of the entries is read the others need not be read.
+//! In append() reading on part of a multi-color append forces the client to read
+//! all parts of said append.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param data
+//!     The data contained within the node.
+//!
+//! @param data_size
+//!     The size, in bytes, of data.
+//!
+//! @param inhabits
+//!     The colors which the new node shall be colored with. Must be non-empty.
+//!
+//! @param deps
+//!     Specific entries in the log which this append must happen after.
+//!
+//! @return The location in the log the append was written to.
+//!
+fuzzy_log_location no_remote_append(DAGHandle *handle, char *data,
+	size_t data_size, struct colors* inhabits, fuzzy_log_location *deps,
+	size_t num_deps);
+
+//! An asynchronous version of no_remote_append().
+//! Is to no_remote_append() what async_append() is to append().
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param data
+//!     The data contained within the node.
+//!
+//! @param data_size
+//!     The size, in bytes, of data.
+//!
+//! @param inhabits
+//!     The colors which the new node shall be colored with. Must be non-empty.
+//!
+//! @param deps
+//!     Specific entries in the log which this append must happen after.
+//!
+//! @return An id which uniquely identifies the write.
+//!
+fuzzy_log_location async_no_remote_append(DAGHandle *handle, char *data,
+	size_t data_size, struct colors* inhabits, fuzzy_log_location *deps,
+	size_t num_deps);
 
 //! Reads a valid next node from the new nodes discovered with the latests
 //! snapshot. If there are no such nodes (i.e. all new nodes have been read)
