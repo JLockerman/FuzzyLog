@@ -433,7 +433,7 @@ macro_rules! async_tests {
             let _ = lh.append(61.into(), &(), &[]);
             let _ = lh.multiappend(&[61.into(), 62.into()], &(), &[]);
             let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
-            let _ = lh.color_append(&(), &[61.into()], &[], false);
+            let _ = lh.color_append(&(), &mut [61.into()], &mut [], false);
             lh.snapshot(61.into());
             assert_eq!(lh.get_next(),
                 Some((&(), &[OrderIndex(61.into(), 1.into())][..])));
@@ -465,6 +465,49 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Some((&32, &[OrderIndex(63.into(), 3.into())][..])));
             assert_eq!(lh.get_next(), Some((&-1, &[OrderIndex(63.into(), 4.into())][..])));
             assert_eq!(lh.get_next(), None);
+        }
+
+        #[test]
+        #[inline(never)]
+        pub fn test_no_remote_multi1() {
+            let _ = env_logger::init();
+            trace!("TEST nrmulti");
+
+            let columns = vec![64.into(), 65.into(), 66.into()];
+            let mut lh = $new_thread_log::<u64>(columns.clone());
+            let _ = lh.no_remote_multiappend(&columns, &0xfeed, &[]);
+            let _ = lh.no_remote_multiappend(&columns, &0xbad , &[]);
+            let _ = lh.no_remote_multiappend(&columns, &0xcad , &[]);
+            let _ = lh.no_remote_multiappend(&columns, &13    , &[]);
+            for col in 64..67u32 {
+                let col = col.into();
+                lh.snapshot(col);
+                assert_eq!(
+                    lh.get_next().map(
+                        |(&v, l)| (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((0xfeed, OrderIndex(col, 1.into())))
+                );
+                assert_eq!(
+                    lh.get_next().map(|(&v, l)|
+                        (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((0xbad, OrderIndex(col, 2.into())))
+                );
+                assert_eq!(
+                    lh.get_next().map(|(&v, l)|
+                        (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((0xcad, OrderIndex(col, 3.into())))
+                );
+                assert_eq!(
+                    lh.get_next().map(|(&v, l)|
+                        (v, *l.iter().find(|oi| oi.0 == col).unwrap())
+                    ),
+                    Some((13, OrderIndex(col, 4.into())))
+                );
+                assert_eq!(lh.get_next(), None);
+            }
         }
 
         //TODO test append after prefetch but before read
@@ -517,7 +560,7 @@ macro_rules! async_tests {
                 let _ = lh.append(1_000_02.into(), &[], &[]);
                 let _ = lh.multiappend(&[1_000_02.into(), 1_000_03.into()], &[] , &[]);
                 let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
-                let _ = lh.color_append(&[], &[1_000_02.into()], &[], false);
+                let _ = lh.color_append(&[], &mut [1_000_02.into()], &mut [], false);
                 lh.snapshot(1_000_02.into());
                 assert_eq!(lh.get_next(),
                     Some((&[][..], &[OrderIndex(1_000_02.into(), 1.into())][..])));

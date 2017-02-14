@@ -55,7 +55,7 @@ pub struct PerServer<Socket> {
 }
 
 #[derive(Debug)]
-enum WriteState {
+pub enum WriteState {
     SingleServer(Vec<u8>),
     ToLockServer(Vec<u8>),
     MultiServer(Rc<RefCell<Vec<u8>>>,
@@ -775,7 +775,7 @@ where PerServer<S>: Connected,
 
 } // end impl AsyncStore
 
-trait Connected {
+pub trait Connected {
     type Connection: mio::Evented;
 
     fn connection(&self) -> &Self::Connection;

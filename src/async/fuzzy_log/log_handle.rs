@@ -319,14 +319,12 @@ where V: Storeable {
     pub fn color_append(
         &mut self,
         data: &V,
-        inhabits: &[order],
-        depends_on: &[order],
+        inhabits: &mut [order],
+        depends_on: &mut [order],
         async: bool,
     ) -> Uuid {
         //TODO get rid of gratuitous copies
         assert!(inhabits.len() > 0);
-        let mut inhabits = inhabits.to_vec();
-        let mut depends_on = depends_on.to_vec();
         trace!("color append");
         trace!("inhabits   {:?}", inhabits);
         trace!("depends_on {:?}", depends_on);
@@ -351,6 +349,30 @@ where V: Storeable {
             self.wait_for_a_specific_append(id);
         }
         id
+    }
+
+    pub fn color_no_remote_append(
+        &mut self,
+        data: &V,
+        inhabits: &mut [order],
+        deps: &mut [OrderIndex],
+        async: bool,
+    ) -> (Uuid, Option<OrderIndex>) {
+        if inhabits.len() == 0 {
+            return (Uuid::nil(), None)
+        }
+
+        inhabits.sort();
+        let id = if inhabits.len() == 1 {
+            self.async_append(inhabits[0].into(), data, deps)
+        } else {
+            self.async_no_remote_multiappend(inhabits, data, deps)
+        };
+        let mut loc = None;
+        if !async {
+            loc = self.wait_for_a_specific_append(id).map(|v| v[0]);
+        }
+        (id, loc)
     }
 
     pub fn wait_for_all_appends(&mut self) {
@@ -445,6 +467,34 @@ where V: Storeable {
             columns: &locs,
             deps: deps,
         }.clone_bytes();
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        self.num_async_writes += 1;
+        id
+    }
+
+    pub fn no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Vec<OrderIndex> {
+        //TODO no-alloc?
+        let id = self.async_no_remote_multiappend(chains, data, deps);
+        self.wait_for_a_specific_append(id).unwrap()
+    }
+
+    pub fn async_no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Uuid {
+        use packets::EntryKind::NoRemote;
+        //TODO no-alloc?
+        assert!(chains.len() > 1);
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
+        locs.sort();
+        locs.dedup();
+        let id = Uuid::new_v4();
+        let mut buffer = EntryContents::Multiput {
+            data: data,
+            uuid: &id,
+            columns: &locs,
+            deps: deps,
+        }.clone_bytes();
+        Entry::<V>::wrap_bytes_mut(&mut buffer).kind.insert(NoRemote);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id

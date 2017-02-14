@@ -89,7 +89,7 @@ pub mod c_binidings {
     #[repr(C)]
     pub struct colors {
         numcolors: usize,
-        mycolors: *const ColorID,
+        mycolors: *mut ColorID,
     }
 
     #[repr(C)]
@@ -114,6 +114,10 @@ pub mod c_binidings {
             NativeEndian::write_u64(&mut bytes[0..8], p1);
             NativeEndian::write_u64(&mut bytes[8..16], p2);
             Uuid::from_bytes(&bytes[..]).unwrap()
+        }
+
+        fn nil() -> Self {
+            WriteId::from_uuid(Uuid::nil())
         }
     }
 
@@ -180,26 +184,26 @@ pub mod c_binidings {
     //NOTE currently can only use 31bits of return value
     #[no_mangle]
     pub extern "C" fn do_append(dag: *mut DAG, data: *const u8, data_size: usize,
-        inhabits: *const colors, depends_on: *const colors, async: u8) -> WriteId {
+        inhabits: *mut colors, depends_on: *mut colors, async: u8) -> WriteId {
         assert!(data_size == 0 || data != ptr::null());
-        assert!(inhabits != ptr::null());
+        assert!(inhabits != ptr::null_mut());
         assert!(colors_valid(inhabits));
         assert!(data_size <= 8000);
 
         let (dag, data, inhabits) = unsafe {
-            let s = slice::from_raw_parts((*inhabits).mycolors, (*inhabits).numcolors);
+            let s = slice::from_raw_parts_mut((*inhabits).mycolors, (*inhabits).numcolors);
             (dag.as_mut().expect("need to provide a valid DAGHandle"),
                 slice::from_raw_parts(data, data_size),
                 mem::transmute(s))
         };
-        let depends_on: &[order] = unsafe {
-            if depends_on != ptr::null() {
+        let depends_on: &mut [order] = unsafe {
+            if depends_on != ptr::null_mut() {
                 assert!(colors_valid(depends_on));
-                let s = slice::from_raw_parts((*depends_on).mycolors, (*depends_on).numcolors);
+                let s = slice::from_raw_parts_mut((*depends_on).mycolors, (*depends_on).numcolors);
                 mem::transmute(s)
             }
             else {
-                &[]
+                &mut []
             }
         };
         let id = dag.color_append(data, inhabits, depends_on, async != 0);
@@ -208,7 +212,61 @@ pub mod c_binidings {
 
     fn colors_valid(c: *const colors) -> bool {
         unsafe { c != ptr::null() &&
-            ((*c).numcolors == 0 || (*c).mycolors != ptr::null()) }
+            ((*c).numcolors == 0 || (*c).mycolors != ptr::null_mut()) }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn async_no_remote_append(
+        dag: *mut DAG,
+        data: *const u8,
+        data_size: usize,
+        inhabits: *mut colors,
+        deps: *mut OrderIndex,
+        num_deps: usize,
+    ) -> WriteId {
+        assert!(data_size == 0 || data != ptr::null());
+        assert!(inhabits != ptr::null_mut());
+        assert!(colors_valid(inhabits));
+        assert!(data_size <= 8000);
+
+        let (dag, data, inhabits, deps) = unsafe {
+            let colors: *mut order = (*inhabits).mycolors as *mut _;
+            let s = slice::from_raw_parts_mut(colors, (*inhabits).numcolors);
+            let d = slice::from_raw_parts_mut(deps, num_deps);
+            (dag.as_mut().expect("need to provide a valid DAGHandle"),
+                slice::from_raw_parts(data, data_size),
+                s,
+                d)
+        };
+        let id = dag.color_no_remote_append(data, inhabits, deps, true).0;
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn no_remote_append(
+        dag: *mut DAG,
+        data: *const u8,
+        data_size: usize,
+        inhabits: *mut colors,
+        deps: *mut OrderIndex,
+        num_deps: usize,
+    ) -> OrderIndex {
+        assert!(data_size == 0 || data != ptr::null());
+        assert!(inhabits != ptr::null_mut());
+        assert!(colors_valid(inhabits));
+        assert!(data_size <= 8000);
+
+        let (dag, data, inhabits, deps) = unsafe {
+            let colors: *mut order = (*inhabits).mycolors as *mut _;
+            let s = slice::from_raw_parts_mut(colors, (*inhabits).numcolors);
+            let d = slice::from_raw_parts_mut(deps, num_deps);
+            (dag.as_mut().expect("need to provide a valid DAGHandle"),
+                slice::from_raw_parts(data, data_size),
+                s,
+                d)
+        };
+        let loc = dag.color_no_remote_append(data, inhabits, deps, false).1;
+        loc.unwrap_or(OrderIndex(0.into(), 0.into()))
     }
 
     #[no_mangle]
