@@ -15,12 +15,47 @@ use fuzzy_log::servers2;
 
 pub fn main() {
     let _ = env_logger::init();
-    let Args {port_number, group, num_worker_threads} = parse_args();
+    let Args {port_number, group, num_worker_threads, upstream, downstream}
+        = parse_args();
     let ip_addr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
     let addr = SocketAddr::new(ip_addr, port_number);
+    let (server_num, group_size) = match group {
+        Group::Singleton | Group::LockServer => (0, 1),
+        Group::InGroup(server_num, group_size) => (server_num, group_size),
+    };
     let acceptor = mio::tcp::TcpListener::bind(&addr);
     let a = AtomicUsize::new(0);
-    match (acceptor, group) {
+    let replicated = upstream.is_some() || downstream.is_some();
+    let print_start = |addr| match group {
+        Group::Singleton =>
+            println!("Starting singleton server at {} with {} worker threads",
+                addr, num_worker_threads),
+        Group::LockServer =>
+            println!("Starting lock server at {} with {} worker threads",
+                addr, num_worker_threads),
+        Group::InGroup(..) =>
+            println!("Starting server {} out of {} at {} with {} worker threads",
+                server_num, group_size, addr, num_worker_threads),
+    };
+    match acceptor {
+        Ok(accept) => {
+            let addr = accept.local_addr().unwrap();
+            print_start(addr);
+            if replicated {
+                println!("upstream {:?}, downstream {:?}", upstream, downstream);
+                servers2::tcp::run_with_replication(accept, server_num, group_size,
+                    upstream, downstream, num_worker_threads, &a)
+            }
+            else {
+                servers2::tcp::run(accept, server_num, group_size, num_worker_threads, &a)
+            }
+        }
+        Err(e) => {
+            error!("Could not start server due to {}.", e);
+            std::process::exit(1)
+        }
+    }
+    /*match (acceptor, group) {
         (Ok(accept), Group::Singleton) => {
             let addr = accept.local_addr().unwrap();
             println!("Starting singleton server at {} with {} worker threads",
@@ -43,7 +78,7 @@ pub fn main() {
             error!("Could not start server due to {}.", e);
             std::process::exit(1)
         }
-    }
+    }*/
 }
 
 const USAGE: &'static str =
@@ -58,6 +93,8 @@ struct Args {
     port_number: u16,
     group: Group,
     num_worker_threads: usize,
+    upstream: Option<SocketAddr>,
+    downstream: Option<IpAddr>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -71,6 +108,8 @@ enum Flag {
     None,
     Workers,
     InGroup,
+    Upstream,
+    Downstream,
 }
 
 fn parse_args() -> Args {
@@ -83,6 +122,8 @@ fn parse_args() -> Args {
         port_number: 0,
         group: Group::Singleton,
         num_worker_threads: num_cpus::get() - 2,
+        upstream: None,
+        downstream: None,
     };
     let mut last_flag = Flag::None;
     for arg in env_args.skip(1) {
@@ -104,6 +145,12 @@ fn parse_args() -> Args {
                         }
                         args.group = Group::LockServer
                     }
+                    "-up" | "--upstream" => {
+                        last_flag = Flag::Upstream
+                    }
+                    "-dwn" | "--downstream" => {
+                        last_flag = Flag::Downstream
+                    }
                     port => {
                         match port.parse() {
                             Ok(port) => args.port_number = port,
@@ -120,7 +167,7 @@ fn parse_args() -> Args {
                 match arg.parse() {
                     Ok(num_workers) => {
                         if num_workers == 0 {
-                            println!("WARNING Number of worker threads must be non-zero, will default to 1");
+                            println!("WARNING: Number of worker threads must be non-zero, will default to 1");
                             args.num_worker_threads = 1
                         }
                         else {
@@ -133,6 +180,28 @@ fn parse_args() -> Args {
                         std::process::exit(1)
                     }
                 }
+            }
+            Flag::Upstream => {
+                match arg.parse() {
+                    Ok(addr) => {
+                        args.upstream = Some(addr)
+                    }
+                    Err(e) => {
+                        error!("Invalid <upstream addr> at '--upstream': {}.", e);
+                    }
+                }
+                last_flag = Flag::None;
+            }
+            Flag::Downstream => {
+                match arg.parse() {
+                    Ok(addr) => {
+                        args.downstream = Some(addr)
+                    }
+                    Err(e) => {
+                        error!("Invalid <downstream addr> at '--downstream': {}.", e);
+                    }
+                }
+                last_flag = Flag::None;
             }
             Flag::InGroup => {
                 let split: Vec<_> = arg.split(':').collect();
@@ -177,6 +246,14 @@ fn parse_args() -> Args {
         },
         Flag::Workers => {
             error!("Missing <num worker threads> for '--workers'");
+            std::process::exit(1)
+        }
+        Flag::Downstream => {
+            error!("Missing <downstream addr> for '--downstream'");
+            std::process::exit(1)
+        }
+        Flag::Upstream => {
+            error!("Missing <upstream addr> for '--upstream'");
             std::process::exit(1)
         }
     }
