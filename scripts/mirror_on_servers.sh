@@ -28,7 +28,7 @@ transfer_to_servers () {
         echo "Sending to:  $username@$hostname:~/$dir_name"
         # The options added to ssh causes it to resuse the connection for both
         # commands, thus only needing one login per server
-        rsync -e "ssh -o \"ControlPath=~/.ssh/master$$\" -o \"ControlMaster=auto\" -o \"ControlPersist=10\"" --filter=':- .gitignore' -P -avz ./ "$username@$hostname:~/$dir_name"
+        rsync -e "ssh -o \"ControlPath=~/.ssh/master$$\" -o \"ControlMaster=auto\" -o \"ControlPersist=10\"" --exclude=".*" --exclude=".*/" --filter=':- .gitignore' -P -avz ./ "$username@$hostname:~/$dir_name"
         ssh -o "ControlPath=~/.ssh/master$$" -o "ControlMaster=auto" -o "ControlPersist=10" -t "$username@$hostname" $script
         #
     }
