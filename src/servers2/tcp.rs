@@ -220,7 +220,13 @@ pub fn run_with_replication(
 
     if let Some(ref ip) = prev_server_ip {
         trace!("SERVER {} waiting for upstream {:?}.", this_server_num, prev_server_ip);
-        upstream_admin_socket = Some(TcpStream::connect(ip).expect("cannot connect upstream"));
+        while upstream_admin_socket.is_none() {
+            if let Ok(socket) = TcpStream::connect(ip) {
+                upstream_admin_socket = Some(socket)
+            } else {
+                thread::yield_now()
+            }
+        }
         trace!("SERVER {} connected upstream.", this_server_num);
     }
 
