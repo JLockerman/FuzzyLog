@@ -85,6 +85,7 @@ where C: AsyncStoreClient {
             .into_iter()
             .map(PerServer::tcp)
             .collect::<Result<Vec<_>, _>>());
+        assert!(servers.len() > 0);
         let num_chain_servers = servers.len();
         let lock_server = try!(PerServer::tcp(lock_server));
         //TODO if let Some(lock_server) = lock_server...
@@ -139,6 +140,7 @@ where C: AsyncStoreClient {
                 .collect::<Result<Vec<_>, _>>());
         let num_chain_servers = servers.len();
         assert_eq!(num_chain_servers, read_servers.len());
+        assert!(num_chain_servers > 0);
         servers.extend(read_servers.into_iter());
 
         let lock_token = if let Some(lock_server) = lock_server {
@@ -483,9 +485,10 @@ where PerServer<S>: Connected,
         packet: &Buffer) -> bool {
         let id = packet.entry().id;
         let unreplicated = self.is_unreplicated;
-        trace!("CLIENT handle completed write");
+        trace!("CLIENT handle completed write?");
         //TODO for multistage writes check if we need to do more work...
         if let Some(v) = self.sent_writes.remove(&id) {
+            trace!("CLIENT write needed completion");
             match v {
                 //if lock
                 //    for server in v.servers()
@@ -587,11 +590,12 @@ where PerServer<S>: Connected,
     }// end handle_completed_write
 
     fn handle_completed_read(&mut self, token: Token, packet: &Buffer) {
-        trace!("CLIENT handle completed read");
+        trace!("CLIENT handle completed read?");
         if token == self.lock_token() { return }
         for &oi in packet.entry().locs() {
-            trace!("CLIENT completed read @ {:?}", oi);
+            //trace!("CLIENT completed read @ {:?}", oi);
             if self.sent_reads.remove(&oi) {
+                trace!("CLIENT read needed completion @ {:?}", oi);
                 //TODO validate correct id for failing read
                 //TODO num copies?
                 let mut v = self.waiting_buffers.pop_front()

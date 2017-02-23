@@ -1,0 +1,27 @@
+[package]
+name = "fuzzy_log_throughput_bench"
+version = "0.1.0"
+authors = ["Joshua Lockerman <Joshua.Lockerman@yale.edu>"]
+
+[dependencies]
+clap = "2.20.3"
+env_logger = "0.3"
+fuzzy_log = {path = "../.."}
+log = "0.3"
+mio = "*"
+num_cpus = "1"
+rand = "0.3"
+
+[profile.release]
+opt-level = 3
+debug = true
+rpath = false
+lto = true
+debug-assertions = false
+#debug-assertions = true
+codegen-units = 1
+panic = 'unwind'
+
+[features]
+default = ["fuzzy_log/no_trace", "log/max_level_info"]
+

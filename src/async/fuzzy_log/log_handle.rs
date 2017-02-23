@@ -146,7 +146,6 @@ where V: Storeable {
         LogHandle::new(to_log, ready_reads_r, finished_writes_r)
     }
 
-/*TODO
     pub fn tcp_log_with_replication<S, C>(
         lock_server: Option<SocketAddr>,
         chain_servers: S,
@@ -155,37 +154,38 @@ where V: Storeable {
     where S: IntoIterator<Item=(SocketAddr, SocketAddr)>,
           C: IntoIterator<Item=order>,
     {
-        let to_store_m = Arc::new(Mutex::new(None));
-        let tsm = to_store_m.clone();
-        let (to_log, from_outside) = mpsc::channel();
-        let client = to_log.clone();
-        let (ready_reads_s, ready_reads_r) = mpsc::channel();
-        let (finished_writes_s, finished_writes_r) = mpsc::channel();
-        thread::spawn(move || {
-            let mut event_loop = mio::Poll::new().unwrap();
-            let (store, to_store) = AsyncTcpStore::udp(addr_str.parse().unwrap(),
-                    iter::once(addr_str).map(|s| s.parse().unwrap()),
-                    client, &mut event_loop).expect("");
-                *tsm.lock().unwrap() = Some(to_store);
-                store.run(event_loop);
-            });
-        let to_store;
-        loop {
-            let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
-            if let Some(s) = ts {
-                to_store = s;
-                break
-            }
-        }
-        thread::spawn(move || {
-            let log = ThreadLog::new(to_store, from_outside, ready_reads_s,
-                finished_writes_s, interesting_chains.into_iter());
-            log.run()
-        });
+        use std::thread;
+        use std::sync::{Arc, Mutex};
 
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+        let chain_servers: Vec<_> = chain_servers.into_iter().collect();
+
+        let make_store = |client| {
+            let to_store_m = Arc::new(Mutex::new(None));
+            let tsm = to_store_m.clone();
+            thread::spawn(move || {
+                let mut event_loop = mio::Poll::new().unwrap();
+                let (store, to_store) = ::async::store::AsyncTcpStore::replicated_tcp(
+                    lock_server,
+                    chain_servers.into_iter(),
+                    client,
+                    &mut event_loop).expect("could not start store.");
+                    *tsm.lock().unwrap() = Some(to_store);
+                    store.run(event_loop);
+                });
+            let to_store;
+            loop {
+                let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                if let Some(s) = ts {
+                    to_store = s;
+                    break
+                }
+            }
+            to_store
+        };
+
+        LogHandle::with_store(interesting_chains, make_store)
     }
-*/
+
     pub fn spawn_tcp_log<S, C>(
         lock_server: SocketAddr,
         chain_servers: S,

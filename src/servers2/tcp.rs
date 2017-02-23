@@ -193,6 +193,19 @@ pub fn run_with_replication(
     let mut downstream_admin_socket = None;
     let mut upstream_admin_socket = None;
     let mut other_sockets = Vec::new();
+    match acceptor.accept() {
+        Err(e) => trace!("error {}", e),
+        Ok((socket, addr)) => if Some(addr.ip()) != next_server_ip {
+            trace!("SERVER got other connection {:?}", addr);
+            other_sockets.push((socket, addr))
+        } else {
+            trace!("SERVER {} connected downstream.", this_server_num);
+            let _ = socket.set_keepalive_ms(Some(1000));
+            //TODO benchmark
+            let _ = socket.set_nodelay(true);
+            downstream_admin_socket = Some(socket)
+        }
+    }
     while next_server_ip.is_some() && downstream_admin_socket.is_none() {
         trace!("SERVER {} waiting for downstream {:?}.", this_server_num, next_server);
         poll.poll(&mut events, None).unwrap();
@@ -222,16 +235,20 @@ pub fn run_with_replication(
         trace!("SERVER {} waiting for upstream {:?}.", this_server_num, prev_server_ip);
         while upstream_admin_socket.is_none() {
             if let Ok(socket) = TcpStream::connect(ip) {
+                trace!("SERVER {} connected upstream on {:?}.",
+                    this_server_num, socket.local_addr().unwrap());
+                socket.set_nodelay(true);
                 upstream_admin_socket = Some(socket)
             } else {
-                thread::yield_now()
+                //thread::yield_now()
+                thread::sleep(Duration::from_millis(1));
             }
         }
         trace!("SERVER {} connected upstream.", this_server_num);
     }
 
     let num_downstream = negotiate_num_downstreams(&mut downstream_admin_socket, num_workers as u16);
-    let num_upstream = negotiate_num_upstreams(&mut upstream_admin_socket, num_workers as u16);
+    let num_upstream = negotiate_num_upstreams(&mut upstream_admin_socket, num_workers as u16, prev_server_ip);
     let mut downstream = Vec::with_capacity(num_downstream);
     let mut upstream = Vec::with_capacity(num_upstream);
     while downstream.len() + 1 < num_downstream {
@@ -456,23 +473,46 @@ fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -
         min(num_other_threads, num_workers) as usize
     }
     else {
-        trace!("SERVER no downstream.");
+        trace!("SERVER no need to negotiate downstream.");
         0
     }
 }
 
-fn negotiate_num_upstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> usize {
+fn negotiate_num_upstreams(
+    socket: &mut Option<TcpStream>,
+    num_workers: u16,
+    remote_addr: Option<SocketAddr>
+) -> usize {
     use std::cmp::min;
     if let Some(ref mut socket) = socket.as_mut() {
+        let remote_addr = remote_addr.unwrap();
         let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
-        blocking_write(socket, &to_write).expect("upstream failed");
+        trace!("will req {:?}", to_write);
+        let mut refusals = 0;
+        'write: loop {
+            let r = blocking_write(socket, &to_write);
+            match r {
+                Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                    if refusals >= 60000 { panic!("write fail {:?}", e) }
+                    refusals += 1;
+                    trace!("upstream refused reconnect attempt {}", refusals);
+                    thread::sleep(Duration::from_millis(1));
+                    **socket = TcpStream::connect(&remote_addr).unwrap();
+                }
+                Err(e) => panic!("write fail {:?}", e),
+                Ok(..) => break 'write,
+            }
+        }
+        trace!("req {:?}", to_write);
         let mut num_other_threads = [0u8; 2];
         blocking_read(socket, &mut num_other_threads).expect("upstream failed");
+        trace!("other {:?}", to_write);
         let num_other_threads = unsafe { mem::transmute(num_other_threads) };
         trace!("SERVER up workers: {}, other's workers {}.", num_workers, num_other_threads);
         min(num_other_threads, num_workers) as usize
     }
     else {
+        trace!("SERVER no need to negotiate upstream.");
         0
     }
 }
@@ -483,7 +523,10 @@ fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
         match r.read(buffer) {
             Ok(i) => { let tmp = buffer; buffer = &mut tmp[i..]; }
             Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue 'recv,
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                    thread::yield_now();
+                    continue 'recv
+                },
                 _ => { return Err(e) }
             }
         }
@@ -503,7 +546,10 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
         match w.write(buffer) {
             Ok(i) => { let tmp = buffer; buffer = &tmp[i..]; }
             Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue 'recv,
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                    thread::yield_now();
+                    continue 'recv
+                },
                 _ => { return Err(e) }
             }
         }
