@@ -777,12 +777,14 @@ impl Worker {
                             None => {
                                 self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
                                 self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                                self.inner.awake_io.push_back(token);
                                 continue 'event
                             }
                             Some((ref worker, ref tok))
                             if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
                                 self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
                                 self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                                self.inner.awake_io.push_back(token);
                                 continue 'event
                             }
                             Some((worker, tok)) => {
@@ -793,6 +795,7 @@ impl Worker {
                             assert_eq!(tok, DOWNSTREAM);
                             self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
                             self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                            self.inner.awake_io.push_back(token);
                             continue 'event
                         }
                         if tok == DOWNSTREAM {
