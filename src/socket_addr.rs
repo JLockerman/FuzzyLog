@@ -51,6 +51,7 @@ impl Ipv4SocketAddr {
         (addr, u16::from_le(port))
     }
 
+    #[allow(dead_code)]
     fn to_socket_addr(&self) -> SocketAddr {
         let (ip_addr, port) = self.to_addr_and_port();
         SocketAddr::new(IpAddr::V4(ip_addr), port)

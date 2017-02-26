@@ -43,8 +43,8 @@ impl<V> Storeable for V { //TODO should V be Copy/Clone?
         slice::from_raw_parts(ptr, size)
     }
 
-    unsafe fn bytes_to_ref(val: &u8, size: usize) -> &Self {
-        //TODO assert_eq!(size, mem::size_of::<Self>());
+    unsafe fn bytes_to_ref(val: &u8, _size: usize) -> &Self {
+        //TODO assert_eq!(_size, mem::size_of::<Self>());
         mem::transmute(val)
     }
 

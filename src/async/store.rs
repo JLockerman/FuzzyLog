@@ -85,6 +85,7 @@ where C: AsyncStoreClient {
             .into_iter()
             .map(PerServer::tcp)
             .collect::<Result<Vec<_>, _>>());
+        assert!(servers.len() > 0);
         let num_chain_servers = servers.len();
         let lock_server = try!(PerServer::tcp(lock_server));
         //TODO if let Some(lock_server) = lock_server...
@@ -139,6 +140,7 @@ where C: AsyncStoreClient {
                 .collect::<Result<Vec<_>, _>>());
         let num_chain_servers = servers.len();
         assert_eq!(num_chain_servers, read_servers.len());
+        assert!(num_chain_servers > 0);
         servers.extend(read_servers.into_iter());
 
         let lock_token = if let Some(lock_server) = lock_server {
@@ -446,7 +448,7 @@ where PerServer<S>: Connected,
 
         if self.servers[server].needs_to_write() {
             trace!("CLIENT write");
-            let num_chain_servers = self.num_chain_servers;
+            //let num_chain_servers = self.num_chain_servers;
             let finished_send = self.servers[server].send_next_burst();
             if finished_send {
                 trace!("CLIENT finished a send to {:?}", token);
@@ -483,9 +485,10 @@ where PerServer<S>: Connected,
         packet: &Buffer) -> bool {
         let id = packet.entry().id;
         let unreplicated = self.is_unreplicated;
-        trace!("CLIENT handle completed write");
+        trace!("CLIENT handle completed write?");
         //TODO for multistage writes check if we need to do more work...
         if let Some(v) = self.sent_writes.remove(&id) {
+            trace!("CLIENT write needed completion");
             match v {
                 //if lock
                 //    for server in v.servers()
@@ -587,11 +590,12 @@ where PerServer<S>: Connected,
     }// end handle_completed_write
 
     fn handle_completed_read(&mut self, token: Token, packet: &Buffer) {
-        trace!("CLIENT handle completed read");
+        trace!("CLIENT handle completed read?");
         if token == self.lock_token() { return }
         for &oi in packet.entry().locs() {
-            trace!("CLIENT completed read @ {:?}", oi);
+            //trace!("CLIENT completed read @ {:?}", oi);
             if self.sent_reads.remove(&oi) {
+                trace!("CLIENT read needed completion @ {:?}", oi);
                 //TODO validate correct id for failing read
                 //TODO num copies?
                 let mut v = self.waiting_buffers.pop_front()
@@ -889,7 +893,6 @@ impl Connected for PerServer<TcpStream> {
     }
 
     fn send_next_burst(&mut self) -> bool {
-        use self::WriteState::*;
         use std::io::ErrorKind;
         //FIXME add specialcase for really big send...
 
@@ -1222,6 +1225,7 @@ impl Connected for PerServer<UdpConnection> {
         true
     }
 
+     #[allow(unused_variables)]
     fn add_multi(&mut self,
         msg: Rc<RefCell<Vec<u8>>>,
         remaining_servers: Rc<RefCell<HashSet<usize>>>,
@@ -1234,12 +1238,14 @@ impl Connected for PerServer<UdpConnection> {
         //self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks, false));
     }
 
+    #[allow(unused_variables)]
     fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
         //unlike other reqs here we send the unlock first to minimize the contention window
         //self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
         unimplemented!()
     }
 
+    #[allow(unused_variables)]
     fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
         //self.awaiting_send.push_back(WriteState::ToLockServer(msg));
         //true
@@ -1366,14 +1372,6 @@ impl WriteState {
     fn is_multi(&self) -> bool {
         match self {
             &WriteState::MultiServer(..) => true,
-            _ => false,
-        }
-    }
-
-    fn is_read(&self) -> bool {
-        match self {
-            &WriteState::SingleServer(ref vec) =>
-                Entry::<()>::wrap_bytes(&vec[..]).kind.layout() == EntryLayout::Read,
             _ => false,
         }
     }

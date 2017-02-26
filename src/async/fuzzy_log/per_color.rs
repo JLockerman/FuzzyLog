@@ -207,6 +207,7 @@ impl PerColor {
         self.is_being_read.is_some()
     }
 
+    #[allow(dead_code)]
     fn can_return(&self, index: entry) -> bool {
         self.next_return_is(index) && self.is_within_snapshot(index)
     }
@@ -363,9 +364,9 @@ impl PerColor {
 
     pub fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
         assert!(index != 0.into());
-        let old = self.found_but_unused_multiappends.insert(id, index);
+        let _old = self.found_but_unused_multiappends.insert(id, index);
         //TODO I'm not sure this is correct with how we handle overreads
-        //debug_assert!(old.is_none(),
+        //debug_assert!(_old.is_none(),
         //    "double sentinel insert {:?}",
         //    (self.chain, index)
         //);
@@ -376,7 +377,8 @@ impl PerColor {
     }
 
     pub fn has_outstanding(&self) -> bool {
-        self.is_being_read.is_some()
+        //self.is_being_read.is_some()
+        self.has_read_state()
     }
 
     pub fn has_outstanding_reads(&self) -> bool {
