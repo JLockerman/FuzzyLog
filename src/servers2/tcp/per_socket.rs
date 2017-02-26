@@ -38,12 +38,14 @@ pub enum PerSocket {
         being_read: VecDeque<Buffer>,
         bytes_read: usize,
         stream: TcpStream,
+        needs_to_stay_awake: bool,
     },
     Downstream {
         being_written: Vec<u8>,
         bytes_written: usize,
         stream: TcpStream,
         pending: VecDeque<Vec<u8>>,
+        needs_to_stay_awake: bool,
     },
     //FIXME Client should be divided into reader and writer?
     Client {
@@ -53,6 +55,7 @@ pub enum PerSocket {
         being_written: Vec<u8>,
         bytes_written: usize,
         pending: VecDeque<Vec<u8>>,
+        needs_to_stay_awake: bool,
 
     }
 }
@@ -124,6 +127,7 @@ impl PerSocket {
             being_written: Vec::with_capacity(WRITE_BUFFER_SIZE),
             bytes_written: 0,
             pending: Default::default(),
+            needs_to_stay_awake: true,
         }
     }
 
@@ -132,6 +136,7 @@ impl PerSocket {
             being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::no_drop()).collect(),
             bytes_read: 0,
             stream: stream,
+            needs_to_stay_awake: true,
         }
     }
 
@@ -141,6 +146,7 @@ impl PerSocket {
             bytes_written: 0,
             pending: Default::default(),
             stream: stream,
+            needs_to_stay_awake: true,
         }
     }
 
@@ -157,7 +163,8 @@ impl PerSocket {
         use self::PerSocket::*;
         trace!("SOCKET try recv");
         match self {
-            &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream} => {
+            &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream,
+                ref mut needs_to_stay_awake} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
                     trace!("SOCKET recv actual");
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read, mem::size_of::<u64>());
@@ -169,6 +176,7 @@ impl PerSocket {
                             let entry_size = read_buffer.entry_size();
                             let end = entry_size + mem::size_of::<u64>();
                             let storage_loc = LittleEndian::read_u64(&read_buffer[entry_size..end]);;
+                            *needs_to_stay_awake = true;
                             RecvPacket::FromUpstream(read_buffer, src_addr, storage_loc)
                         },
                         //FIXME remove from map
@@ -191,7 +199,8 @@ impl PerSocket {
                     RecvPacket::Pending
                 }
             }
-            &mut Client {ref mut being_read, ref mut bytes_read, ref stream, ..} => {
+            &mut Client {ref mut being_read, ref mut bytes_read, ref stream,
+                ref mut needs_to_stay_awake, ..} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
                     trace!("SOCKET recv actual");
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read, 0);
@@ -200,6 +209,7 @@ impl PerSocket {
                         RecvRes::Done(src_addr) => {
                             *bytes_read = 0;
                             trace!("SOCKET recevd for {}.", src_addr);
+                            *needs_to_stay_awake = true;
                             RecvPacket::FromClient(read_buffer, src_addr)
                         },
                         //FIXME remove from map
@@ -229,8 +239,8 @@ impl PerSocket {
     pub fn send_burst(&mut self) -> Result<ShouldContinue, ()> {
         use self::PerSocket::*;
         match self {
-            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending}
-            | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ..} => {
+            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake}
+            | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ..} => {
                 trace!("SOCKET send actual.");
                 let to_write = being_written.len();
                 if to_write == 0 {
@@ -247,6 +257,7 @@ impl PerSocket {
                     },
                     Ok(i) => {
                         trace!("SOCKET finished sending burst {}B.", *bytes_written + i);
+                        *needs_to_stay_awake = true;
                         //Done with burst check if more bursts to be sent
                         debug_assert_eq!(*bytes_written + i, being_written.len());
                         being_written.clear();
@@ -296,6 +307,7 @@ impl PerSocket {
         //TODO can we simply write directly from the trie?
         use self::PerSocket::*;
         trace!("SOCKET add downstream send");
+        self.stay_awake();
         match self {
             &mut Downstream {ref mut being_written, ref mut pending, ..}
             | &mut Client {ref mut being_written, ref mut pending, ..} => {
@@ -367,12 +379,14 @@ impl PerSocket {
 
     pub fn return_buffer(&mut self, buffer: Buffer) {
         use self::PerSocket::*;
+        self.stay_awake();
         match self {
             &mut Client {ref mut being_read, ..}
             | &mut Upstream {ref mut being_read, ..} => {
                 being_read.push_back(buffer);
                 trace!("returned buffer now @ {}", being_read.len());
                 debug_assert!(being_read.len() <= NUMBER_READ_BUFFERS);
+
             },
             _ => unreachable!(),
         }
@@ -383,6 +397,51 @@ impl PerSocket {
         match self {
             &Downstream {ref stream, ..} | &Client {ref stream, ..} | &Upstream {ref stream, ..} =>
                 stream,
+        }
+    }
+
+    pub fn is_backpressured(&self) -> bool {
+        use self::PerSocket::*;
+        match self {
+            &Client {ref being_read, ..}
+            | &Upstream {ref being_read, ..} => {
+                being_read.is_empty()
+
+            },
+            _ => false,
+        }
+    }
+
+    fn stay_awake(&mut self) {
+        use self::PerSocket::*;
+        match self {
+            &mut Downstream {ref mut needs_to_stay_awake, ..}
+            | &mut Client {ref mut needs_to_stay_awake, ..}
+            | &mut Upstream {ref mut needs_to_stay_awake, ..} => {
+                *needs_to_stay_awake = true;
+            }
+        }
+    }
+
+    pub fn needs_to_stay_awake(&self) -> bool {
+        use self::PerSocket::*;
+        match self {
+            &Downstream {needs_to_stay_awake, ..}
+            | &Client {needs_to_stay_awake, ..}
+            | &Upstream {needs_to_stay_awake, ..} => {
+                needs_to_stay_awake
+            }
+        }
+    }
+
+    pub fn wake(&mut self) {
+        use self::PerSocket::*;
+        match self {
+            &mut Downstream {ref mut needs_to_stay_awake, ..}
+            | &mut Client {ref mut needs_to_stay_awake, ..}
+            | &mut Upstream {ref mut needs_to_stay_awake, ..} => {
+                *needs_to_stay_awake = false;
+            }
         }
     }
 }

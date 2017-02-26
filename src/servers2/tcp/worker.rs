@@ -103,6 +103,7 @@ impl Worker {
             mio::Ready::readable(),
             mio::PollOpt::level()
         ).expect("cannot pol from log on worker");
+        let mut awake_io: VecDeque<_> = Default::default();
         let mut clients: HashMap<_, _> = Default::default();
         if let Some(up) = upstream {
             assert!(!is_unreplicated);
@@ -113,6 +114,7 @@ impl Worker {
                 mio::PollOpt::edge()
             ).expect("cannot pol from dist on worker");
             let ps = PerSocket::upstream(up);
+            awake_io.push_back(UPSTREAM);
             clients.insert(UPSTREAM, ps);
         }
         let mut has_downstream = false;
@@ -125,13 +127,14 @@ impl Worker {
                 mio::PollOpt::edge()
             ).expect("cannot pol from dist on worker");
             let ps = PerSocket::downstream(down);
+            awake_io.push_back(DOWNSTREAM);
             clients.insert(DOWNSTREAM, ps);
             has_downstream = true;
         }
         Worker {
             clients: clients,
             inner: WorkerInner {
-                awake_io: Default::default(),
+                awake_io: awake_io,
                 from_dist: from_dist,
                 to_dist: to_dist,
                 from_log: from_log,
@@ -174,12 +177,19 @@ impl Worker {
                         self.inner.handle_burst(token, o.into_mut());
                     }
                 }
+
                 if self.inner.awake_io.is_empty() {
                     break 'work
                 }
                 self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)))
                     .expect("worker poll failed");
                 self.handle_new_events(events.iter());
+            }
+            #[cfg(debug_assertions)]
+            for (tok, c) in self.clients.iter() {
+                debug_assert!(!(c.needs_to_stay_awake() && !c.is_backpressured()),
+                    "Token {:?} sleep @ stay_awake: {}, backpressure: {}",
+                    tok, c.needs_to_stay_awake(), c.is_backpressured());
             }
         }
     }// end fn run
@@ -211,6 +221,7 @@ impl Worker {
                                 self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
                                 self.clients.get_mut(&token).unwrap().return_buffer(buffer);
                                 self.inner.awake_io.push_back(token);
+                                self.inner.awake_io.push_back(*tok);
                                 continue 'event
                             }
                             Some((worker, tok)) => {
@@ -222,6 +233,7 @@ impl Worker {
                             self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
                             self.clients.get_mut(&token).unwrap().return_buffer(buffer);
                             self.inner.awake_io.push_back(token);
+                            self.inner.awake_io.push_back(tok);
                             continue 'event
                         }
                         if tok == DOWNSTREAM {
@@ -267,7 +279,8 @@ impl Worker {
                         self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
                         let state =
                             self.clients.entry(tok).or_insert(PerSocket::client(stream));
-                        self.inner.recv_packet(tok, state);
+                        //self.inner.recv_packet(tok, state);
+                        self.inner.awake_io.push_back(tok);
                     },
                     Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
                         trace!("WORKER {} recv downstream from dist for {}.",
@@ -323,6 +336,7 @@ impl WorkerInner {
             &mut Downstream {..} => (true, false),
             &mut Client {..} => (true, true),
         };
+        socket_state.wake();
         if send {
             trace!("WORKER {} will try to send.", self.worker_num);
             //FIXME need to disinguish btwn to client and to upstream
@@ -332,6 +346,9 @@ impl WorkerInner {
             trace!("WORKER {} will try to recv.", self.worker_num);
             //FIXME need to disinguish btwn from client and from upstream
             self.recv_packet(token, socket_state)
+        }
+        if socket_state.needs_to_stay_awake() {
+            self.awake_io.push_back(token)
         }
     }
 
