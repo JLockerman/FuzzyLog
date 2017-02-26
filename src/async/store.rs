@@ -448,7 +448,7 @@ where PerServer<S>: Connected,
 
         if self.servers[server].needs_to_write() {
             trace!("CLIENT write");
-            let num_chain_servers = self.num_chain_servers;
+            //let num_chain_servers = self.num_chain_servers;
             let finished_send = self.servers[server].send_next_burst();
             if finished_send {
                 trace!("CLIENT finished a send to {:?}", token);
@@ -893,7 +893,6 @@ impl Connected for PerServer<TcpStream> {
     }
 
     fn send_next_burst(&mut self) -> bool {
-        use self::WriteState::*;
         use std::io::ErrorKind;
         //FIXME add specialcase for really big send...
 
@@ -1226,6 +1225,7 @@ impl Connected for PerServer<UdpConnection> {
         true
     }
 
+     #[allow(unused_variables)]
     fn add_multi(&mut self,
         msg: Rc<RefCell<Vec<u8>>>,
         remaining_servers: Rc<RefCell<HashSet<usize>>>,
@@ -1238,12 +1238,14 @@ impl Connected for PerServer<UdpConnection> {
         //self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks, false));
     }
 
+    #[allow(unused_variables)]
     fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
         //unlike other reqs here we send the unlock first to minimize the contention window
         //self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
         unimplemented!()
     }
 
+    #[allow(unused_variables)]
     fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
         //self.awaiting_send.push_back(WriteState::ToLockServer(msg));
         //true
@@ -1370,14 +1372,6 @@ impl WriteState {
     fn is_multi(&self) -> bool {
         match self {
             &WriteState::MultiServer(..) => true,
-            _ => false,
-        }
-    }
-
-    fn is_read(&self) -> bool {
-        match self {
-            &WriteState::SingleServer(ref vec) =>
-                Entry::<()>::wrap_bytes(&vec[..]).kind.layout() == EntryLayout::Read,
             _ => false,
         }
     }

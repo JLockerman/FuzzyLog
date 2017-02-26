@@ -15,7 +15,6 @@ use packets::{
     Uuid,
     Storeable,
     order,
-    entry,
     bytes_as_entry_mut
 };
 
@@ -300,7 +299,7 @@ where V: Storeable {
             //TODO use recv_timeout in real version
             let old = mem::replace(&mut self.curr_entry, self.ready_reads.recv().unwrap());
             if old.capacity() > 0 {
-                self.to_log.send(Message::FromClient(ReturnBuffer(old)));
+                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
             }
             if self.curr_entry.len() != 0 {
                 break 'recv

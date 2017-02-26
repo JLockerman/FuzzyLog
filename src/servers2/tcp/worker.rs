@@ -1,21 +1,18 @@
-use prelude::*;
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write, ErrorKind};
-use std::{mem, thread};
-use std::net::{IpAddr, SocketAddr};
 use std::sync::mpsc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use servers2::{self, spmc, ServerLog, ToReplicate, ToWorker, DistributeToWorkers};
-use hash::{HashMap, FxHasher};
+use servers2::{self, spmc, ToReplicate, ToWorker, DistributeToWorkers};
+use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
 use mio;
 use mio::tcp::*;
 
 use buffer::Buffer;
+
+use byteorder::{ByteOrder, LittleEndian};
 
 //use super::{DistToWorker, WorkerToDist, ToLog, WorkerNum};
 use super::*;
@@ -45,6 +42,7 @@ pub struct Worker {
     inner: WorkerInner,
 }
 
+#[allow(dead_code)]
 struct WorkerInner {
     awake_io: VecDeque<mio::Token>,
     from_dist: spmc::Receiver<DistToWorker>,
@@ -277,9 +275,9 @@ impl Worker {
                         trace!("WORKER {} recv from dist.", self.inner.worker_num);
                         let client_addr = Ipv4SocketAddr::from_socket_addr(stream.peer_addr().unwrap());
                         self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
-                        let state =
+                        let _state =
                             self.clients.entry(tok).or_insert(PerSocket::client(stream));
-                        //self.inner.recv_packet(tok, state);
+                        //self.inner.recv_packet(tok, _state);
                         self.inner.awake_io.push_back(tok);
                     },
                     Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
@@ -364,7 +362,7 @@ impl WorkerInner {
             Ok(false) => {},
             //FIXME remove from map, log
             Err(e) => {
-                error!("send error @ {:?}", token);
+                error!("send error {:?} @ {:?}", e, token);
                 let _ = self.poll.deregister(socket_state.stream());
             }
         }
@@ -375,7 +373,7 @@ impl WorkerInner {
         token: mio::Token,
         socket_state: &mut PerSocket
     ) {
-        let socket_kind = socket_state.kind();
+        //TODO let socket_kind = socket_state.kind();
         let packet = socket_state.recv_packet();
         match packet {
             //FIXME remove from map, log

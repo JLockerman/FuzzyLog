@@ -67,8 +67,6 @@ pub mod c_binidings {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use servers2;
-
     use mio;
 
     use byteorder::{ByteOrder, NativeEndian};
@@ -108,6 +106,7 @@ pub mod c_binidings {
             Uuid::from_bytes(&bytes[..]).unwrap()
         }
 
+        #[allow(dead_code)]
         fn nil() -> Self {
             WriteId::from_uuid(Uuid::nil())
         }

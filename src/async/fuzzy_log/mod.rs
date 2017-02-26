@@ -3,8 +3,6 @@
 use std::{self, iter, mem};
 use std::collections::VecDeque;
 use std::collections::hash_map;
-use std::marker::PhantomData;
-use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::u32;
@@ -42,6 +40,7 @@ pub struct ThreadLog {
     //TODO how to multiplex writers finished_writes: Vec<mpsc::Sender<()>>,
     finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
     //FIXME is currently unused
+    #[allow(dead_code)]
     to_return: VecDeque<Vec<u8>>,
     //TODO
     no_longer_blocked: Vec<OrderIndex>,
@@ -79,6 +78,7 @@ enum MultiSearch {
     InProgress,
     EarlySentinel,
     BeyondHorizon(Vec<u8>),
+    #[allow(dead_code)]
     Repeat,
     //MultiSearch::FirstPart(),
 }
@@ -476,7 +476,7 @@ impl ThreadLog {
             let id = entr.id;
             let locs = entr.locs();
             let num_pieces = locs.into_iter()
-                .filter(|&&OrderIndex(o, i)| o != order::from(0))
+                .filter(|&&OrderIndex(o, _)| o != order::from(0))
                 .count();
             trace!("FUZZY multi part read {:?} @ {:?}, {:?} pieces", id, locs, num_pieces);
             (id, num_pieces)
@@ -822,10 +822,11 @@ impl ThreadLog {
         }, finished);*/
         debug_assert!(
             if finished {
-                self.per_chains.iter().map(|(o, pc)| {
+                let _ = self.per_chains.iter().map(|(_, pc)| {
                     if !pc.has_outstanding() {
                         assert!(pc.finished_until_snapshot());
                     }
+                    assert!(pc.is_finished());
                 });
                 true
             } else {

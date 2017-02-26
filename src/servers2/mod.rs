@@ -75,6 +75,8 @@ pub enum WhichMulti {
 
 impl<T> ToWorker<T>
 where T: Send + Sync {
+
+    #[allow(dead_code)]
     fn edit_associated_data<F>(&mut self, f: F)
     where F: FnOnce(&mut T) {
         match self {
@@ -100,7 +102,7 @@ where T: Copy + Send + Sync {
 
 unsafe impl<T> Send for ToWorker<T> where T: Send + Sync {}
 
-enum ToReplicate {
+pub enum ToReplicate {
     Data(BufferSlice, u64),
     //TODO probably needs a custom Rc for garbage collection
     //     ideally one with the layout { count, entry }
@@ -440,6 +442,7 @@ where ToWorkers: DistributeToWorkers<T> {
         })
     }
 
+    #[allow(dead_code)]
     fn server_num(&self) -> u32 {
         self.this_server_num
     }
@@ -570,7 +573,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 );
             },
 
-            ToReplicate::UnLock(buffer) => {
+            ToReplicate::UnLock(_buffer) => {
                 //FIXME
 
                 //let lock_num = unsafe { buffer.entry().as_lock_entry().lock };

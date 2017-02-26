@@ -1,18 +1,12 @@
 use prelude::*;
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write, ErrorKind};
-use std::{mem, thread};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::mpsc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-
-use servers2::{self, spmc, ServerLog, ToReplicate, ToWorker, DistributeToWorkers};
-use hash::{HashMap, FxHasher};
+use std::io::{Read, Write, ErrorKind};
+use std::mem;
 use socket_addr::Ipv4SocketAddr;
 
-use mio;
+use byteorder::{ByteOrder, LittleEndian};
+
 use mio::tcp::*;
 
 use buffer::Buffer;
@@ -61,7 +55,7 @@ pub enum PerSocket {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum PerSocketKind {
+pub enum PerSocketKind {
     Upstream,
     Downstream,
     Client,
@@ -150,6 +144,7 @@ impl PerSocket {
         }
     }
 
+    #[allow(dead_code)]
     pub fn kind(&self) -> PerSocketKind {
         match self {
             &PerSocket::Upstream{..} => PerSocketKind::Upstream,
@@ -346,40 +341,6 @@ impl PerSocket {
         }
     }
 
-    fn add_send_buffer(&mut self, to_write: Buffer) {
-        unreachable!();
-        //TODO Is there some maximum size at which we shouldn't buffer?
-        //TODO can we simply write directly from the trie?
-        use self::PerSocket::*;
-        trace!("SOCKET add send_b");
-        match self {
-            &mut Client {ref mut being_written, ref mut pending, ref mut being_read, ..} => {
-                //TODO if being_written is empty try to send immdiately, place remainder
-                //TODO the big buffer itself may be premature, check if sending directly works...
-                trace!("SOCKET send to client {}B", to_write.entry_size());
-                if being_written.capacity() - being_written.len() >= to_write.entry_size() {
-                    being_written.extend_from_slice(to_write.entry_slice())
-                } else {
-                    let placed = if let Some(buffer) = pending.back_mut() {
-                        if buffer.capacity() - buffer.len() >= to_write.entry_size()
-                        || buffer.capacity() < WRITE_BUFFER_SIZE {
-                            buffer.extend_from_slice(to_write.entry_slice());
-                            true
-                        } else { false }
-                    } else { false };
-                    if !placed {
-                        pending.push_back(to_write.entry_slice().to_vec())
-                    }
-                }
-                //FIXME make sure the buffer goes to the right worker
-                being_read.push_back(to_write);
-                trace!("SOCKET re-add buffer, now @ {}", being_read.len());
-                debug_assert!(being_read.len() <= NUMBER_READ_BUFFERS);
-            },
-            _ => unreachable!()
-        }
-    }
-
     pub fn return_buffer(&mut self, buffer: Buffer) {
         use self::PerSocket::*;
         self.stay_awake();
@@ -449,7 +410,7 @@ impl PerSocket {
     }
 }
 
-enum SendRes {
+/*enum SendRes {
     Done,
     Error,
     NeedsMore(usize),
@@ -463,7 +424,7 @@ fn send_packet(buffer: &Buffer, mut stream: &TcpStream, sent: usize) -> SendRes 
        Err(e) => if e.kind() == ErrorKind::WouldBlock { SendRes::NeedsMore(sent) }
                  else { error!("send error {:?}", e); SendRes::Error },
    }
-}
+}*/
 
 enum RecvRes {
     Done(Ipv4SocketAddr),
@@ -490,7 +451,7 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, ext
         }
     }
     trace!("WORKER recved {} bytes.", read);
-    let (header_size, is_write) = {
+    let (header_size, _is_write) = {
         let e = buffer.entry();
         (e.header_size(), e.kind.layout().is_write())
     };

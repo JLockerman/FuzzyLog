@@ -374,7 +374,6 @@ impl<V: Storeable + ?Sized> Clone for UdpStore<V> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use prelude::*;
 
     use std::mem::{self, forget};
     use std::net::UdpSocket;

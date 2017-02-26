@@ -1,6 +1,5 @@
 use std::collections::hash_map::Entry as HashEntry;
-use std::collections::VecDeque;
-use std::io::{self, Read, Write, ErrorKind};
+use std::io::{self, Read, Write};
 use std::{mem, thread};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::mpsc;
@@ -8,16 +7,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prelude::*;
-use servers2::{self, spmc, ServerLog, ToReplicate, ToWorker, DistributeToWorkers};
+use servers2::{spmc, ServerLog};
 use hash::{HashMap, FxHasher};
 use socket_addr::Ipv4SocketAddr;
 
-use byteorder::{ByteOrder, LittleEndian};
-
 use mio;
 use mio::tcp::*;
-
-use buffer::Buffer;
 
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
@@ -224,7 +219,7 @@ pub fn run_with_replication(
             if let Ok(socket) = TcpStream::connect(ip) {
                 trace!("SERVER {} connected upstream on {:?}.",
                     this_server_num, socket.local_addr().unwrap());
-                socket.set_nodelay(true);
+                let _ = socket.set_nodelay(true);
                 upstream_admin_socket = Some(socket)
             } else {
                 //thread::yield_now()
@@ -558,7 +553,6 @@ mod tests {
 
     use socket_addr::Ipv4SocketAddr;
 
-    use prelude::*;
     use buffer::Buffer;
 
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
@@ -573,7 +567,9 @@ mod tests {
         ready: &AtomicUsize,
     ) -> ! {*/
 
+    #[allow(non_upper_case_globals)]
     const basic_addr: &'static [&'static str] = &["0.0.0.0:13490"];
+    #[allow(non_upper_case_globals)]
     const replicas_addr: &'static [&'static str] = &["0.0.0.0:13491", "0.0.0.0:13492"];
     static BASIC_SERVER_READY: AtomicUsize = ATOMIC_USIZE_INIT;
     static REPLICAS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
