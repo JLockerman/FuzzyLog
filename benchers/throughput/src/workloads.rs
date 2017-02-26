@@ -34,7 +34,7 @@ pub fn run_unreplicated_write_read(
     let clients = (0..clients_to_run).map(|_| {
         let admin_chain = (u32::MAX-1).into();
         let num_chains = total_clients as u32;
-        let chains = (1..(num_chains+1)*3).map(Into::into);
+        let chains = (1..(num_chains*3 + 1)).map(Into::into);
         let chains = chains.chain(iter::once(admin_chain));
         if server_addrs.len() > 1 {
                 LogHandle::spawn_tcp_log(
@@ -75,7 +75,7 @@ pub fn run_replicated_write_read(
     let clients = (0..clients_to_run).map(|_| {
         let admin_chain = (u32::MAX-1).into();
         let num_chains = total_clients as u32;
-        let chains = (1..(num_chains+1)*3).map(Into::into);
+        let chains = (1..(num_chains*3 + 1)).map(Into::into);
         let chains = chains.chain(iter::once(admin_chain));
         LogHandle::tcp_log_with_replication(
             lock_addr,

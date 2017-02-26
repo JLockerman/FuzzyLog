@@ -9,3 +9,14 @@ log = "0.3.2"
 num_cpus = "1"
 mio = "*"
 fuzzy_log = {path = "../.."}
+
+[profile.release]
+opt-level = 3
+debug = true
+rpath = false
+#lto = true
+lto = false
+#debug-assertions = false
+debug-assertions = true
+codegen-units = 1
+panic = 'abort'

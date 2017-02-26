@@ -16,11 +16,12 @@ rand = "0.3"
 opt-level = 3
 debug = true
 rpath = false
-lto = true
+#lto = true
+lto = false
 debug-assertions = false
 #debug-assertions = true
 codegen-units = 1
-panic = 'unwind'
+panic = 'abort'
 
 [features]
 default = ["fuzzy_log/no_trace", "log/max_level_info"]
