@@ -22,6 +22,7 @@ use buffer::Buffer;
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
 mod worker;
+mod per_socket;
 
 /*
   GC with parrallel readers plan:
