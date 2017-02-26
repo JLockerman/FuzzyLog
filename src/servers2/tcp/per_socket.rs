@@ -249,7 +249,10 @@ impl PerSocket {
                 }
                 match stream.write(&being_written[*bytes_written..]) {
                     Err(e) => if e.kind() == ErrorKind::WouldBlock { Ok(false) }
-                        else { Err(()) },
+                        else {
+                            error!("send error {:?}", e);
+                            Err(())
+                        },
                     Ok(i) if (*bytes_written + i) < to_write => {
                         *bytes_written = *bytes_written + i;
                         trace!("SOCKET sent {}B.", bytes_written);
@@ -458,7 +461,7 @@ fn send_packet(buffer: &Buffer, mut stream: &TcpStream, sent: usize) -> SendRes 
        Ok(i) if (sent + i) < bytes_to_write => SendRes::NeedsMore(sent + i),
        Ok(..) => SendRes::Done,
        Err(e) => if e.kind() == ErrorKind::WouldBlock { SendRes::NeedsMore(sent) }
-                 else { SendRes::Error },
+                 else { error!("send error {:?}", e); SendRes::Error },
    }
 }
 
@@ -473,7 +476,10 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, ext
     let bhs = base_header_size();
     if read < bhs {
         let r = stream.read(&mut buffer[read..bhs])
-            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else { Err(e) } )
+            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else {
+                error!("recv error {:?}", e);
+                Err(e)
+            })
             .ok();
         match r {
             Some(i) => read += i,
@@ -491,7 +497,10 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, ext
     assert!(header_size >= base_header_size());
     if read < header_size {
         let r = stream.read(&mut buffer[read..header_size])
-            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else { Err(e) } )
+            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else {
+                error!("recv error {:?}", e);
+                Err(e)
+            } )
             .ok();
         match r {
             Some(i) => read += i,
@@ -507,7 +516,10 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, ext
     debug_assert!(read <= size);
     if read < size {
         let r = stream.read(&mut buffer[read..size])
-            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else { Err(e) } )
+            .or_else(|e| if e.kind() == ErrorKind::WouldBlock { Ok(0) } else {
+                error!("recv error {:?}", e);
+                Err(e)
+            } )
             .ok();
         match r {
             Some(i) => {

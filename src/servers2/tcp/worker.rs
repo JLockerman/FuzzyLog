@@ -360,10 +360,13 @@ impl WorkerInner {
     ) {
         match socket_state.send_burst() {
             //TODO replace with wake function
-            Ok(true) => self.awake_io.push_back(token),
+            Ok(true) => {} //TODO self.awake_io.push_back(token),
             Ok(false) => {},
             //FIXME remove from map, log
-            Err(..) => { let _ = self.poll.deregister(socket_state.stream()); }
+            Err(e) => {
+                error!("send error @ {:?}", token);
+                let _ = self.poll.deregister(socket_state.stream());
+            }
         }
     }
 
@@ -376,20 +379,23 @@ impl WorkerInner {
         let packet = socket_state.recv_packet();
         match packet {
             //FIXME remove from map, log
-            RecvPacket::Err => { let _ = self.poll.deregister(socket_state.stream()); },
+            RecvPacket::Err => {
+                error!("recv error @ {:?}", token);
+                let _ = self.poll.deregister(socket_state.stream());
+            },
             RecvPacket::Pending => {},
             RecvPacket::FromClient(packet, src_addr) => {
                 trace!("WORKER {} finished recv from client.", self.worker_num);
                 let worker = self.worker_num;
                 self.send_to_log(packet, worker, token, src_addr);
-                self.awake_io.push_back(token)
+                //self.awake_io.push_back(token)
             }
             RecvPacket::FromUpstream(packet, src_addr, storage_loc) => {
                 trace!("WORKER {} finished recv from up.", self.worker_num);
                 //let (worker, work_tok) = self.next_hop(token, src_addr, socket_kind);
                 let worker = self.worker_num;
                 self.send_replication_to_log(packet, storage_loc, worker, token, src_addr);
-                self.awake_io.push_back(token)
+                //self.awake_io.push_back(token)
             }
         }
     }
