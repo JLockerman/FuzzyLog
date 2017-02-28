@@ -52,6 +52,7 @@ pub struct PerServer<Socket> {
     token: Token,
     got_new_message: bool,
     receiver: Ipv4SocketAddr,
+    stay_awake: bool,
 }
 
 #[derive(Debug)]
@@ -98,6 +99,7 @@ where C: AsyncStoreClient {
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
         }
+        let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
         let (to_store, from_client) = mio::channel::channel();
         event_loop.register(&from_client,
@@ -113,7 +115,7 @@ where C: AsyncStoreClient {
             num_chain_servers: num_chain_servers,
             lock_token: lock_token,
             client: client,
-            awake_io: Default::default(),
+            awake_io: awake_io,
             from_client: from_client,
             is_unreplicated: true,
         }, to_store))
@@ -160,6 +162,7 @@ where C: AsyncStoreClient {
             let receiver = servers[i+num_chain_servers].receiver;
             servers[i].receiver = receiver;
         }
+        let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
         let (to_store, from_client) = mio::channel::channel();
         event_loop.register(&from_client,
@@ -175,7 +178,7 @@ where C: AsyncStoreClient {
             num_chain_servers: num_chain_servers,
             lock_token: lock_token,
             client: client,
-            awake_io: Default::default(),
+            awake_io: awake_io,
             from_client: from_client,
             is_unreplicated: false,
         }, to_store))
@@ -206,6 +209,7 @@ where C: AsyncStoreClient {
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
         }
+        let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
         let (to_store, from_client) = mio::channel::channel();
         event_loop.register(&from_client,
@@ -217,7 +221,7 @@ where C: AsyncStoreClient {
             sent_writes: Default::default(),
             sent_reads: Default::default(),
             waiting_buffers: Default::default(),
-            awake_io: Default::default(),
+            awake_io: awake_io,
             servers: servers,
             num_chain_servers: num_chain_servers,
             lock_token: lock_token,
@@ -245,6 +249,7 @@ impl PerServer<TcpStream> {
             token: Token(::std::usize::MAX),
             got_new_message: false,
             receiver: Ipv4SocketAddr::from_socket_addr(local_addr),
+            stay_awake: true,
         })
     }
 
@@ -273,6 +278,7 @@ impl PerServer<UdpConnection> {
             token: Token(::std::usize::MAX),
             got_new_message: false,
             receiver: Ipv4SocketAddr::nil(),
+            stay_awake: true,
         })
     }
 
@@ -288,10 +294,12 @@ where PerServer<S>: Connected,
         trace!("CLIENT start.");
         let mut events = mio::Events::with_capacity(1024);
         loop {
-            poll.poll(&mut events, None).expect("worker poll failed");
+            //poll.poll(&mut events, None).expect("worker poll failed");
+            let _ = poll.poll(&mut events, None);
             self.handle_new_events(events.iter());
 
             'work: loop {
+                //TODO add recv queue to this loop?
                 let ops_before_poll = self.awake_io.len();
                 for _ in 0..ops_before_poll {
                     let server = self.awake_io.pop_front().unwrap();
@@ -300,8 +308,13 @@ where PerServer<S>: Connected,
                 if self.awake_io.is_empty() {
                     break 'work
                 }
-                poll.poll(&mut events, Some(Duration::new(0, 0))).expect("worker poll failed");
+                let _ = poll.poll(&mut events, Some(Duration::new(0, 1)));
                 self.handle_new_events(events.iter());
+            }
+            #[cfg(debug_assertions)]
+            for s in self.servers.iter() {
+                debug_assert!(!s.stay_awake,
+                    "Token {:?} sleep @ stay_awake: {}", s.token, s.stay_awake);
             }
         }
     }// end fn run
@@ -420,11 +433,13 @@ where PerServer<S>: Connected,
         trace!("CLIENT handle server {:?} event", server);
         self.servers[server].got_new_message = false;
         //TODO pass in whether a read or write is ready?
-        let mut stay_awake = false;
+        self.servers[server].stay_awake = false;
+        //let mut stay_awake = false;
         let token = Token(server);
+        debug_assert_eq!(token, self.servers[server].token);
         let finished_recv = self.servers[server].recv_packet().expect("cannot recv");
         if let Some(packet) = finished_recv {
-            stay_awake = true;
+            //stay_awake = true;
             let kind = packet.entry().kind;
             trace!("CLIENT got a {:?} from {:?}", kind, token);
             if kind.contains(EntryKind::ReadSuccess) {
@@ -437,7 +452,7 @@ where PerServer<S>: Connected,
             else if kind.layout() == EntryLayout::Read
                 && !kind.contains(EntryKind::TakeLock) {
                 //A read that found an usused entry still contains useful data
-                self.handle_completed_read(token, &packet)
+                self.handle_completed_read(token, &packet);
             }
             //TODO use option instead
             else {
@@ -452,32 +467,44 @@ where PerServer<S>: Connected,
             let finished_send = self.servers[server].send_next_burst();
             if finished_send {
                 trace!("CLIENT finished a send to {:?}", token);
-                stay_awake = true;
-                for sent in self.servers[server].being_sent.drain(..) {
-                    let layout = sent.layout();
-                    if layout == EntryLayout::Read {
-                        let read_loc = sent.read_loc();
-                        self.sent_reads.insert(read_loc);
-                        self.waiting_buffers.push_back(sent.take())
-                    }
-                    else if !sent.is_unlock() {
-                        let id = sent.id();
-                        self.sent_writes.insert(id, sent);
-                    }
-                }
+                //stay_awake = true;
+                //TODO used to be drain being_sent
             }
         }
 
-        if stay_awake && self.servers[server].got_new_message == false {
+        for sent in self.servers[server].being_sent.drain(..) {
+            let layout = sent.layout();
+            if layout == EntryLayout::Read {
+                let read_loc = sent.read_loc();
+                self.sent_reads.insert(read_loc);
+                self.waiting_buffers.push_back(sent.take())
+            }
+            else if !sent.is_unlock() {
+                let id = sent.id();
+                self.sent_writes.insert(id, sent);
+            }
+        }
+
+        if self.servers[server].stay_awake == true {
             self.awake_io.push_back(server)
         }
+
+        //if stay_awake && self.servers[server].got_new_message == false {
+        //    self.awake_io.push_back(server)
+        //}
     } // end fn handle_server_event
 
     fn handle_completion(&mut self, token: Token, num_chain_servers: usize, packet: &Buffer) {
+        //FIXME remove
+        //let mut was_needed = self.sent_writes.contains_key(&packet.entry().id);
         let write_completed = self.handle_completed_write(token, num_chain_servers, packet);
         if write_completed {
             self.handle_completed_read(token, packet);
         }
+        //FIXME remove
+        //if !was_needed {
+            //println!("Uneeded fetch @ {:?}: {:?}", token, packet.entry());
+        //}
     }
 
     //TODO I should probably return the buffer on recv_packet, and pass it into here
@@ -589,12 +616,15 @@ where PerServer<S>: Connected,
         }
     }// end handle_completed_write
 
-    fn handle_completed_read(&mut self, token: Token, packet: &Buffer) {
+    fn handle_completed_read(&mut self, token: Token, packet: &Buffer) -> bool {
         trace!("CLIENT handle completed read?");
-        if token == self.lock_token() { return }
+        if token == self.lock_token() { return false }
+        //FIXME remove
+        let mut was_needed = false;
         for &oi in packet.entry().locs() {
             //trace!("CLIENT completed read @ {:?}", oi);
             if self.sent_reads.remove(&oi) {
+                was_needed |= true;
                 trace!("CLIENT read needed completion @ {:?}", oi);
                 //TODO validate correct id for failing read
                 //TODO num copies?
@@ -605,6 +635,7 @@ where PerServer<S>: Connected,
                 self.client.on_finished_read(oi, v);
             }
         }
+        was_needed
     }
 
     fn handle_redo(&mut self, token: Token, kind: EntryKind::Kind, packet: &Buffer) {
@@ -877,6 +908,7 @@ impl Connected for PerServer<TcpStream> {
         trace!("CLIENT finished recv");
         self.bytes_read = 0;
         let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
+        self.stay_awake = true;
         //let buff = mem::replace(&mut self.read_buffer, Buffer::new());
         Ok(Some(buff))
     }
@@ -896,8 +928,7 @@ impl Connected for PerServer<TcpStream> {
         use std::io::ErrorKind;
         //FIXME add specialcase for really big send...
 
-        if self.being_written.first_bytes().is_empty()
-        && self.awaiting_send.is_empty() {
+        if self.being_written.is_empty() && self.awaiting_send.is_empty() {
             trace!("FFFFF empty send @ {:?}", self.token);
             return false
         }
@@ -924,6 +955,7 @@ impl Connected for PerServer<TcpStream> {
             self.being_written.swap_if_needed();
         }
 
+        //DEBUG ME
         while !self.awaiting_send.is_empty() {
             let being_written = &mut self.being_written;
             let addr = self.receiver;
@@ -934,10 +966,14 @@ impl Connected for PerServer<TcpStream> {
             self.being_sent.push_back(msg);
         }
 
+        self.stay_awake = true;
+
         return true
     }
 
     fn add_send(&mut self, to_send: WriteState) -> bool {
+        self.stay_awake = true;
+        //DEBUG ME
         if !self.awaiting_send.is_empty() {
             trace!("FFFFF add to wait");
             self.awaiting_send.push_back(to_send);
@@ -967,6 +1003,7 @@ impl Connected for PerServer<TcpStream> {
         locks: Rc<Box<[OrderIndex]>>,
         num_servers: usize,
     ) {
+        self.stay_awake = true;
         let len = msg.borrow().len();
         if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {
             let is_data;
@@ -1017,6 +1054,7 @@ impl Connected for PerServer<TcpStream> {
 
     fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
         //unlike other reqs here we send the unlock first to minimize the contention window
+        self.stay_awake = true;
         let can_write = {
             let b = buffer.borrow();
             self.being_written.try_fill(&b[..], self.receiver)
@@ -1035,6 +1073,10 @@ impl Connected for PerServer<TcpStream> {
     }
 
     fn needs_to_write(&self) -> bool {
+        debug_assert!(!(self.being_written.first_bytes().is_empty()
+            && !self.being_written.second.is_empty()));
+        debug_assert!(!(self.being_written.is_empty()
+            && !self.awaiting_send.is_empty()));
         !self.being_written.first_bytes().is_empty()
     }
 }
@@ -1054,6 +1096,7 @@ impl Connected for PerServer<UdpConnection> {
         if let Some((read, _)) = read {
             if read > 0 {
                 let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
+                self.stay_awake = true;
                 return Ok(Some(buff))
             }
         }
@@ -1076,6 +1119,7 @@ impl Connected for PerServer<UdpConnection> {
             f @ &WriteState::MultiServer(..) => Some(f.clone_multi()),
             _ => None,
         };
+        self.stay_awake = true;
         //TODO front or back?
         self.awaiting_send.push_front(failed);
         to_ret
@@ -1093,6 +1137,7 @@ impl Connected for PerServer<UdpConnection> {
                 .expect("cannot write")
             );
             if let Some(sent) = sent {
+                self.stay_awake = true;
                 self.being_sent.push_back(packet);
                 return sent > 0
             }
@@ -1216,11 +1261,13 @@ impl Connected for PerServer<UdpConnection> {
     }
 
     fn add_single_server_send(&mut self, msg: Vec<u8>) -> bool {
+        self.stay_awake = true;
         self.awaiting_send.push_back(WriteState::SingleServer(msg));
         true
     }
 
     fn add_send(&mut self, to_send: WriteState) -> bool {
+        self.stay_awake = true;
         self.awaiting_send.push_back(to_send);
         true
     }
@@ -1318,6 +1365,10 @@ impl DoubleBuffer {
 
     fn is_filling_first(&self) -> bool {
         self.second.len() == 0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.first.is_empty() && self.second.is_empty()
     }
 }
 

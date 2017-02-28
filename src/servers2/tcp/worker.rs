@@ -151,8 +151,7 @@ impl Worker {
     pub fn run(mut self) -> ! {
         let mut events = mio::Events::with_capacity(1024);
         loop {
-            self.inner.poll.poll(&mut events, Some(Duration::from_millis(1)))
-                .expect("worker poll failed");
+            let _ = self.inner.poll.poll(&mut events, Some(Duration::from_millis(1)));
             let new_events = events.len();
             self.handle_new_events(events.iter());
 
@@ -179,8 +178,7 @@ impl Worker {
                 if self.inner.awake_io.is_empty() {
                     break 'work
                 }
-                self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)))
-                    .expect("worker poll failed");
+                let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)));
                 self.handle_new_events(events.iter());
             }
             #[cfg(debug_assertions)]

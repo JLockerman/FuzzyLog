@@ -183,14 +183,13 @@ pub fn run_with_replication(
         } else {
             trace!("SERVER {} connected downstream.", this_server_num);
             let _ = socket.set_keepalive_ms(Some(1000));
-            //TODO benchmark
             let _ = socket.set_nodelay(true);
             downstream_admin_socket = Some(socket)
         }
     }
     while next_server_ip.is_some() && downstream_admin_socket.is_none() {
         trace!("SERVER {} waiting for downstream {:?}.", this_server_num, next_server);
-        poll.poll(&mut events, None).unwrap();
+        let _ = poll.poll(&mut events, None);
         for event in events.iter() {
             match event.token() {
                 ACCEPT => {
@@ -202,7 +201,6 @@ pub fn run_with_replication(
                         } else {
                             trace!("SERVER {} connected downstream.", this_server_num);
                             let _ = socket.set_keepalive_ms(Some(1000));
-                            //TODO benchmark
                             let _ = socket.set_nodelay(true);
                             downstream_admin_socket = Some(socket)
                         }
@@ -234,7 +232,7 @@ pub fn run_with_replication(
     let mut downstream = Vec::with_capacity(num_downstream);
     let mut upstream = Vec::with_capacity(num_upstream);
     while downstream.len() + 1 < num_downstream {
-        poll.poll(&mut events, None).unwrap();
+        let _ = poll.poll(&mut events, None);
         for event in events.iter() {
             match event.token() {
                 ACCEPT => {
@@ -243,11 +241,12 @@ pub fn run_with_replication(
                         Ok((socket, addr)) => if Some(addr.ip()) == next_server_ip {
                             trace!("SERVER {} add downstream.", this_server_num);
                             let _ = socket.set_keepalive_ms(Some(1000));
-                            //TODO benchmark
                             let _ = socket.set_nodelay(true);
                             downstream.push(socket)
                         } else {
                             trace!("SERVER got other connection {:?}", addr);
+                            let _ = socket.set_keepalive_ms(Some(1000));
+                            let _ = socket.set_nodelay(true);
                             other_sockets.push((socket, addr))
                         }
                     }
@@ -259,7 +258,10 @@ pub fn run_with_replication(
 
     if let Some(ref ip) = prev_server_ip {
         for _ in 1..num_upstream {
-            upstream.push(TcpStream::connect(ip).expect("cannot connect upstream"))
+            let up = TcpStream::connect(ip).expect("cannot connect upstream");
+            let _ = up.set_keepalive_ms(Some(1000));
+            let _ = up.set_nodelay(true);
+            upstream.push(up)
         }
     }
 
@@ -268,6 +270,9 @@ pub fn run_with_replication(
     assert_eq!(downstream.len(), num_downstream);
     assert_eq!(upstream.len(), num_upstream);
     let (log_to_dist, dist_from_log) = spmc::channel();
+
+    //FIXME
+    if !other_sockets.is_empty() { unimplemented!() }
 
     trace!("SERVER {} {} up, {} down.", this_server_num, num_upstream, num_downstream);
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
@@ -335,7 +340,7 @@ pub fn run_with_replication(
     let mut next_worker = 0usize;
     trace!("SERVER start server loop");
     loop {
-        poll.poll(&mut events, None).unwrap();
+        let _ = poll.poll(&mut events, None);
         for event in events.iter() {
             match event.token() {
                 ACCEPT => {
@@ -344,7 +349,6 @@ pub fn run_with_replication(
                         Ok((socket, addr)) => {
                             trace!("SERVER accepting client @ {:?}", addr);
                             let _ = socket.set_keepalive_ms(Some(1000));
-                            //TODO benchmark
                             let _ = socket.set_nodelay(true);
                             //TODO oveflow
                             let tok = get_next_token(&mut next_token);
@@ -386,6 +390,7 @@ pub fn run_with_replication(
                             WorkerToDist::ToClient(addr, buffer) => {
                                 trace!("DIST {} looking for worker for {}.",
                                     this_server_num, addr);
+                                //FIXME this is racey, if we don't know who gets the message it fails
                                 let (worker, token) = worker_for_client[&addr].clone();
                                 (worker, token, buffer, addr, 0)
                             }
@@ -480,6 +485,8 @@ fn negotiate_num_upstreams(
                     trace!("upstream refused reconnect attempt {}", refusals);
                     thread::sleep(Duration::from_millis(1));
                     **socket = TcpStream::connect(&remote_addr).unwrap();
+                    let _ = socket.set_keepalive_ms(Some(1000));
+                    let _ = socket.set_nodelay(true);
                 }
                 Err(e) => panic!("write fail {:?}", e),
                 Ok(..) => break 'write,
@@ -581,6 +588,7 @@ mod tests {
         start_servers(basic_addr, &BASIC_SERVER_READY);
         trace!("TCP test write start");
         let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
+        let _ = stream.set_nodelay(true);
         let mut buffer = Buffer::empty();
         buffer.fill_from_entry_contents(EntryContents::Data(&12i32, &[]));
         {
@@ -602,6 +610,7 @@ mod tests {
         start_servers(basic_addr, &BASIC_SERVER_READY);
         trace!("TCP test write_read start");
         let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
+        let _ = stream.set_nodelay(true);
         let mut buffer = Buffer::empty();
         buffer.fill_from_entry_contents(EntryContents::Data(&92u64, &[]));
         {

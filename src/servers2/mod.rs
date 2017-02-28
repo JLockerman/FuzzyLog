@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+//use std::collections::HashSet;
 use std::{mem, ptr, slice};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ where ToWorkers: DistributeToWorkers<T> {
     //TODO per chain locks...
     total_servers: u32,
     this_server_num: u32,
-    _seen_ids: HashSet<Uuid>,
+    //_seen_ids: HashSet<Uuid>,
     to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
     _pd: PhantomData<T>,
 }
@@ -123,7 +123,7 @@ where ToWorkers: DistributeToWorkers<T> {
             this_server_num, total_servers);
         ServerLog {
             log: Default::default(),
-            _seen_ids: HashSet::new(),
+            //_seen_ids: HashSet::new(),
             this_server_num: this_server_num,
             total_servers: total_servers,
             to_workers: to_workers,
@@ -271,7 +271,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     self.to_workers.send_to_worker(Reply(buffer, t));
                     return
                 }
-                debug_assert!(self._seen_ids.insert(buffer.entry().id));
+                //debug_assert!(self._seen_ids.insert(buffer.entry().id));
 
                 trace!("SERVER {:?} appending at {:?}",
                     self.this_server_num, buffer.entry().locs());
@@ -481,7 +481,7 @@ where ToWorkers: DistributeToWorkers<T> {
             ToReplicate::Multi(buffer, multi_storage, senti_storage) => {
                 trace!("SERVER {:?} replicate multiput", self.this_server_num);
 
-                debug_assert!(self._seen_ids.insert(buffer.entry().id));
+                //debug_assert!(self._seen_ids.insert(buffer.entry().id));
                 //FIXME this needs to be aware of locks...
                 //      but I think only unlocks, the primary
                 //      will ensure that locks happen in order...
