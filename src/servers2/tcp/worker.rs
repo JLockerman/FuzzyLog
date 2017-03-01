@@ -58,7 +58,22 @@ struct WorkerInner {
     has_downstream: bool,
     //waiting_for_log: usize,
 
-    // print_data: HashMap<&'static str, u64>,
+    print_data: WorkerData,
+}
+
+counters! {
+    struct WorkerData {
+        from_dist_N: u64,
+        from_dist_D: u64,
+        from_dist_T: u64,
+        from_log: u64,
+        finished_send: u64,
+        finished_recv_from_client: u64,
+        finished_recv_from_up: u64,
+        new_to_log: u64,
+        to_log: u64,
+        rep_to_log: u64,
+    }
 }
 
 /*
@@ -147,7 +162,7 @@ impl Worker {
                 downstream_workers: downstream_workers,
                 num_workers: num_workers,
                 has_downstream: has_downstream,
-                // print_data: Default::default(),
+                print_data: Default::default(),
                 //waiting_for_log: 0,
             }
         }
@@ -156,18 +171,22 @@ impl Worker {
     pub fn run(mut self) -> ! {
         let mut events = mio::Events::with_capacity(1024);
         loop {
-            //let _ = self.inner.poll.poll(&mut events, Some(Duration::from_secs(10)));
-            //let _ = self.inner.poll.poll(&mut events, None);
+            #[cfg(feature = "print_stats")]
+            let _ = self.inner.poll.poll(&mut events, Some(Duration::from_secs(10)));
+            #[cfg(not(feature = "print_stats"))]
             let _ = self.inner.poll.poll(&mut events, None);
             //let new_events = events.len();
-            // if events.len() == 0 {
-            //     println!("Worker {:?}: {:?}",
-            //         self.inner.worker_num, self.inner.print_data);
-            //     for (&t, ps) in self.clients.iter() {
-            //         println!("Worker ({:?}, {:?}): {:?}",
-            //             self.inner.worker_num, t, ps.print_data());
-            //     }
-            // }
+            #[cfg(feature = "print_stats")]
+            {
+                if events.len() == 0 {
+                    println!("Worker {:?}: {:#?}",
+                        self.inner.worker_num, self.inner.print_data);
+                    for (&t, ps) in self.clients.iter() {
+                        println!("Worker ({:?}, {:?}): {:#?}",
+                            self.inner.worker_num, t, ps.print_data());
+                    }
+            }
+            }
             self.handle_new_events(events.iter());
 
             // if new_events == 0 {
@@ -228,7 +247,7 @@ impl Worker {
                 match self.inner.from_dist.try_recv() {
                     None => {},
                     Some(DistToWorker::NewClient(tok, stream)) => {
-                        // *self.inner.print_data.entry("from dist N").or_insert(0) += 1;
+                        self.inner.print_data.from_dist_N(1);
                         self.inner.poll.register(
                             &stream,
                             tok,
@@ -246,7 +265,7 @@ impl Worker {
                         self.inner.awake_io.push_back(tok);
                     },
                     Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
-                        // *self.inner.print_data.entry("from dist D").or_insert(0) += 1;
+                        self.inner.print_data.from_dist_D(1);
                         trace!("WORKER {} recv downstream from dist for {}.",
                             self.inner.worker_num, src_addr);
                         {
@@ -261,7 +280,7 @@ impl Worker {
                         self.inner.awake_io.push_back(DOWNSTREAM);
                     }
                     Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
-                        // *self.inner.print_data.entry("from dist T").or_insert(0) += 1;
+                        self.inner.print_data.from_dist_T(1);
                         debug_assert_eq!(
                             Ipv4SocketAddr::from_socket_addr(
                                     self.clients[&tok].stream().peer_addr().unwrap()
@@ -292,7 +311,7 @@ impl Worker {
         //if self.inner.waiting_for_log == 0 { return false }
         if let Some(log_work) = self.inner.from_log.try_recv() {
             //self.inner.waiting_for_log -= 1;
-            // *self.inner.print_data.entry("from log").or_insert(0) += 1;
+            self.inner.print_data.from_log(1);
             let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
             if let Some((buffer, bytes, (wk, token, src_addr), storage_loc)) = to_send {
                 trace!("WORKER {} recv from log for {}.",
@@ -397,7 +416,7 @@ impl WorkerInner {
     ) {
         match socket_state.send_burst() {
             //TODO replace with wake function
-            Ok(true) => { /* *self.print_data.entry("finished send").or_insert(0) += 1;*/ } //TODO self.awake_io.push_back(token),
+            Ok(true) => { self.print_data.finished_send(1); } //TODO self.awake_io.push_back(token),
             Ok(false) => {},
             //FIXME remove from map, log
             Err(e) => {
@@ -423,14 +442,14 @@ impl WorkerInner {
             RecvPacket::Pending => {},
             RecvPacket::FromClient(packet, src_addr) => {
                 trace!("WORKER {} finished recv from client.", self.worker_num);
-                // *self.print_data.entry("finished recv from client").or_insert(0) += 1;
+                self.print_data.finished_recv_from_client(1);
                 let worker = self.worker_num;
                 self.send_to_log(packet, worker, token, src_addr);
                 //self.awake_io.push_back(token)
             }
             RecvPacket::FromUpstream(packet, src_addr, storage_loc) => {
                 trace!("WORKER {} finished recv from up.", self.worker_num);
-                // *self.print_data.entry("finished recv from up").or_insert(0) += 1;
+                self.print_data.finished_recv_from_up(1);
                 //let (worker, work_tok) = self.next_hop(token, src_addr, socket_kind);
                 let worker = self.worker_num;
                 self.send_replication_to_log(packet, storage_loc, worker, token, src_addr);
@@ -501,8 +520,8 @@ impl WorkerInner {
             }
             _ => None,
         };
-        // *self.print_data.entry("new to log").or_insert(0) += 1;
-        // *self.print_data.entry("to log").or_insert(0) += 1;
+        self.print_data.new_to_log(1);
+        self.print_data.to_log(1);
         //self.waiting_for_log += 1;
         let to_send = ToLog::New(buffer, storage, (worker_num, token, src_addr));
         self.to_log.send(to_send).unwrap();
@@ -542,8 +561,8 @@ impl WorkerInner {
             },
             _ => unreachable!(),
         };
-        // *self.print_data.entry("rep to log").or_insert(0) += 1;
-        // *self.print_data.entry("to log").or_insert(0) += 1;
+        self.print_data.rep_to_log(1);
+        self.print_data.to_log(1);
         //self.waiting_for_log += 1;
         let to_send = ToLog::Replication(to_send, (worker_num, token, src_addr));
         self.to_log.send(to_send).unwrap();

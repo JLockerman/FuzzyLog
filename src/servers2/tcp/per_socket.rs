@@ -33,6 +33,8 @@ pub enum PerSocket {
         bytes_read: usize,
         stream: TcpStream,
         needs_to_stay_awake: bool,
+
+        print_data: PerSocketData,
     },
     Downstream {
         being_written: Vec<u8>,
@@ -40,6 +42,8 @@ pub enum PerSocket {
         stream: TcpStream,
         pending: VecDeque<Vec<u8>>,
         needs_to_stay_awake: bool,
+
+        print_data: PerSocketData,
     },
     //FIXME Client should be divided into reader and writer?
     Client {
@@ -51,6 +55,18 @@ pub enum PerSocket {
         pending: VecDeque<Vec<u8>>,
         needs_to_stay_awake: bool,
 
+        print_data: PerSocketData,
+    }
+}
+
+counters! {
+    struct PerSocketData {
+        packets_recvd: u64,
+        bytes_recvd: u64,
+        bytes_sent: u64,
+        sends: u64,
+        sends_added: u64,
+        bytes_to_send: u64,
     }
 }
 
@@ -122,6 +138,7 @@ impl PerSocket {
             bytes_written: 0,
             pending: Default::default(),
             needs_to_stay_awake: true,
+            print_data: Default::default(),
         }
     }
 
@@ -131,6 +148,7 @@ impl PerSocket {
             bytes_read: 0,
             stream: stream,
             needs_to_stay_awake: true,
+            print_data: Default::default(),
         }
     }
 
@@ -141,6 +159,7 @@ impl PerSocket {
             pending: Default::default(),
             stream: stream,
             needs_to_stay_awake: true,
+            print_data: Default::default(),
         }
     }
 
@@ -159,13 +178,15 @@ impl PerSocket {
         trace!("SOCKET try recv");
         match self {
             &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream,
-                ref mut needs_to_stay_awake} => {
+                ref mut needs_to_stay_awake, ref mut print_data} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
                     trace!("SOCKET recv actual");
-                    let recv = recv_packet(&mut read_buffer, stream, *bytes_read, mem::size_of::<u64>());
+                    //TODO audit
+                    let recv = recv_packet(&mut read_buffer, stream, *bytes_read, mem::size_of::<u64>(), print_data);
                     match recv {
                         //TODO send to log
                         RecvRes::Done(src_addr) => {
+                            print_data.packets_recvd(1);
                             *bytes_read = 0;
                             trace!("SOCKET recevd replication for {}.", src_addr);
                             let entry_size = read_buffer.entry_size();
@@ -195,13 +216,15 @@ impl PerSocket {
                 }
             }
             &mut Client {ref mut being_read, ref mut bytes_read, ref stream,
-                ref mut needs_to_stay_awake, ..} => {
+                ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
                     trace!("SOCKET recv actual");
-                    let recv = recv_packet(&mut read_buffer, stream, *bytes_read, 0);
+                    let recv = recv_packet(&mut read_buffer, stream, *bytes_read, 0, print_data);
                     match recv {
                         //TODO send to log
                         RecvRes::Done(src_addr) => {
+                            print_data.packets_recvd(1);
+                            print_data.bytes_recvd(*bytes_read as u64);
                             *bytes_read = 0;
                             trace!("SOCKET recevd for {}.", src_addr);
                             *needs_to_stay_awake = true;
@@ -234,11 +257,14 @@ impl PerSocket {
     pub fn send_burst(&mut self) -> Result<ShouldContinue, ()> {
         use self::PerSocket::*;
         match self {
-            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake}
-            | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ..} => {
+            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data}
+            | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 trace!("SOCKET send actual.");
                 let to_write = being_written.len();
                 if to_write == 0 {
+                    for p in pending.iter() {
+                        assert!(p.is_empty())
+                    }
                     trace!("SOCKET empty write.");
                     return Ok(false)
                 }
@@ -250,6 +276,7 @@ impl PerSocket {
                         },
                     Ok(i) if (*bytes_written + i) < to_write => {
                         *bytes_written = *bytes_written + i;
+                        print_data.bytes_sent(i as u64);
                         trace!("SOCKET sent {}B.", bytes_written);
                         Ok(false)
                     },
@@ -258,6 +285,8 @@ impl PerSocket {
                         *needs_to_stay_awake = true;
                         //Done with burst check if more bursts to be sent
                         debug_assert_eq!(*bytes_written + i, being_written.len());
+                        print_data.sends(1);
+                        print_data.bytes_sent(i as u64);
                         being_written.clear();
                         *bytes_written = 0;
                         if let Some(buffer) = pending.pop_front() {
@@ -307,9 +336,11 @@ impl PerSocket {
         trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
-            &mut Downstream {ref mut being_written, ref mut pending, ..}
-            | &mut Client {ref mut being_written, ref mut pending, ..} => {
+            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data, ..}
+            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data, ..} => {
                 trace!("SOCKET send down {}B", to_write.len());
+                print_data.sends_added(1);
+                print_data.bytes_to_send(to_write.len() as u64);
                 //FIXME send src_addr
                 //TODO if being_written is empty try to send immediately, place remainder
                 let no_other_inhabited_buffer =
@@ -408,6 +439,17 @@ impl PerSocket {
             }
         }
     }
+
+    pub fn print_data(&self) -> &PerSocketData {
+        use self::PerSocket::*;
+        match self {
+            &Downstream {ref print_data, ..}
+            | &Client {ref print_data, ..}
+            | &Upstream {ref print_data, ..} => {
+                print_data
+            }
+        }
+    }
 }
 
 /*enum SendRes {
@@ -432,8 +474,13 @@ enum RecvRes {
     NeedsMore(usize),
 }
 
-fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, extra: usize)
- -> RecvRes {
+fn recv_packet(
+    buffer: &mut Buffer,
+    mut stream: &TcpStream,
+    mut read: usize,
+    extra: usize,
+    print_data: &mut PerSocketData,
+)  -> RecvRes {
     let bhs = base_header_size();
     if read < bhs {
         let r = stream.read(&mut buffer[read..bhs])
@@ -443,7 +490,10 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, ext
             })
             .ok();
         match r {
-            Some(i) => read += i,
+            Some(i) => {
+                print_data.bytes_recvd(i as u64);
+                read += i
+            },
             None => return RecvRes::Error,
         }
         if read < bhs {
@@ -464,7 +514,10 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, ext
             } )
             .ok();
         match r {
-            Some(i) => read += i,
+            Some(i) => {
+                print_data.bytes_recvd(i as u64);
+                read += i
+            },
             None => return RecvRes::Error,
         }
         if read < header_size {
@@ -488,6 +541,7 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream, mut read: usize, ext
                     "read {} wanted to read {}: {} - {}",
                     i, (size - read), size, read
                 );
+                print_data.bytes_recvd(i as u64);
                 read += i
             },
             None => return RecvRes::Error,

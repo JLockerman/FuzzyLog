@@ -368,9 +368,9 @@ where PerServer<S>: Connected,
 
     #[cfg(feature = "print_stats")]
     fn print_stats(&self) {
-        println!("store: {:?}", self.print_data);
+        println!("store: {:#?}", self.print_data);
         for ps in self.servers.iter() {
-            println!("store {:?}: {:?}", ps.token, ps.print_data);
+            println!("store {:?}: {:#?}", ps.token, ps.print_data);
         }
     }
 
