@@ -25,4 +25,4 @@ panic = 'abort'
 
 [features]
 default = ["fuzzy_log/no_trace", "log/max_level_info"]
-
+print_stats = ["fuzzy_log/print_stats"]

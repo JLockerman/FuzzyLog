@@ -332,11 +332,11 @@ where PerServer<S>: Connected,
             //poll.poll(&mut events, None).expect("worker poll failed");
             //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
             let timeout =
-                if cfg!(print_stats) { Some(Duration::from_secs(10)) }
+                if cfg!(feature = "print_stats") { Some(Duration::from_secs(10)) }
                 else { None };
             let _ = poll.poll(&mut events, timeout);
 
-            #[cfg(print_stats)]
+            #[cfg(feature = "print_stats")]
             {
                 if events.len() == 0 {
                    self.print_stats()
@@ -366,7 +366,7 @@ where PerServer<S>: Connected,
         }
     }// end fn run
 
-    #[cfg(print_stats)]
+    #[cfg(feature = "print_stats")]
     fn print_stats(&self) {
         println!("store: {:?}", self.print_data);
         for ps in self.servers.iter() {
@@ -375,7 +375,7 @@ where PerServer<S>: Connected,
     }
 
     #[allow(dead_code)]
-    #[cfg(not(print_stats))]
+    #[cfg(not(feature = "print_stats"))]
     #[inline(always)]
     fn print_stats(&self) {}
 

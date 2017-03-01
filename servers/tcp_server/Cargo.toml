@@ -20,3 +20,6 @@ lto = false
 debug-assertions = true
 codegen-units = 1
 panic = 'abort'
+
+[features]
+print_stats = ["fuzzy_log/print_stats"]

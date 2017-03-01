@@ -136,10 +136,10 @@ impl ThreadLog {
                 // num_msgs += 1;
             }
             else {
-                #[cfg(print_stats)]
+                #[cfg(feature = "print_stats")]
                 {
-                    println!("no log activity for 10s, msgs handled {}, {:?}", num_msgs, self.print_data);
-                    thread::yield_now()
+                    println!("no log activity for 10s, {:?}",
+                        self.print_data);
                 }
             }
         }
