@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prelude::*;
-use servers2::{spmc, ServerLog};
+use servers2::{spmc, spsc, ServerLog};
 use hash::{HashMap, FxHasher};
 use socket_addr::Ipv4SocketAddr;
 
@@ -269,7 +269,7 @@ pub fn run_with_replication(
     upstream_admin_socket.take().map(|s| upstream.push(s));
     assert_eq!(downstream.len(), num_downstream);
     assert_eq!(upstream.len(), num_upstream);
-    let (log_to_dist, dist_from_log) = spmc::channel();
+    //let (log_to_dist, dist_from_log) = spmc::channel();
 
     //FIXME
     if !other_sockets.is_empty() { unimplemented!() }
@@ -283,8 +283,8 @@ pub fn run_with_replication(
         let to_dist   = workers_to_dist.clone();
         //let from_log  = recv_from_log.clone();
         let to_log = workers_to_log.clone();
-        let (to_worker, from_log) = spmc::channel();
-        let (dist_to_worker, from_dist) = spmc::channel();
+        let (to_worker, from_log) = spsc::channel();
+        let (dist_to_worker, from_dist) = spsc::channel();
         let upstream = upstream.pop();
         let downstream = downstream.pop();
         thread::spawn(move ||
@@ -306,14 +306,14 @@ pub fn run_with_replication(
     }
     assert_eq!(dist_to_workers.len(), num_workers);
 
-    log_to_workers.push(log_to_dist);
+    //log_to_workers.push(log_to_dist);
 
-    poll.register(
-        &dist_from_log,
-        DIST_FROM_LOG,
-        mio::Ready::readable(),
-        mio::PollOpt::level()
-    ).expect("cannot pol from log on dist");
+    // poll.register(
+        // &dist_from_log,
+        // DIST_FROM_LOG,
+        // mio::Ready::readable(),
+        // mio::PollOpt::level()
+    // ).expect("cannot pol from log on dist");
 
     thread::spawn(move || {
         let mut log = ServerLog::new(this_server_num, total_chain_servers, log_to_workers);

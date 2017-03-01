@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use servers2::{self, spmc, ToReplicate, ToWorker, DistributeToWorkers};
+use servers2::{self, spmc, spsc, ToReplicate, ToWorker, DistributeToWorkers};
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
@@ -45,9 +45,9 @@ pub struct Worker {
 #[allow(dead_code)]
 struct WorkerInner {
     awake_io: VecDeque<mio::Token>,
-    from_dist: spmc::Receiver<DistToWorker>,
+    from_dist: spsc::Receiver<DistToWorker>,
     to_dist: mio::channel::Sender<WorkerToDist>,
-    from_log: spmc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+    from_log: spsc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
     to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
     ip_to_worker: HashMap<Ipv4SocketAddr, (WorkerNum, mio::Token)>,
     worker_num: WorkerNum,
@@ -56,6 +56,9 @@ struct WorkerInner {
     poll: mio::Poll,
     is_unreplicated: bool,
     has_downstream: bool,
+    //waiting_for_log: usize,
+
+    // print_data: HashMap<&'static str, u64>,
 }
 
 /*
@@ -76,9 +79,9 @@ State machine:
 impl Worker {
 
     pub fn new(
-        from_dist: spmc::Receiver<DistToWorker>,
+        from_dist: spsc::Receiver<DistToWorker>,
         to_dist: mio::channel::Sender<WorkerToDist>,
-        from_log: spmc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+        from_log: spsc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
         to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
         upstream: Option<TcpStream>,
         downstream: Option<TcpStream>,
@@ -144,6 +147,8 @@ impl Worker {
                 downstream_workers: downstream_workers,
                 num_workers: num_workers,
                 has_downstream: has_downstream,
+                // print_data: Default::default(),
+                //waiting_for_log: 0,
             }
         }
     }
@@ -151,36 +156,56 @@ impl Worker {
     pub fn run(mut self) -> ! {
         let mut events = mio::Events::with_capacity(1024);
         loop {
-            let _ = self.inner.poll.poll(&mut events, Some(Duration::from_millis(1)));
-            let new_events = events.len();
+            //let _ = self.inner.poll.poll(&mut events, Some(Duration::from_secs(10)));
+            //let _ = self.inner.poll.poll(&mut events, None);
+            let _ = self.inner.poll.poll(&mut events, None);
+            //let new_events = events.len();
+            // if events.len() == 0 {
+            //     println!("Worker {:?}: {:?}",
+            //         self.inner.worker_num, self.inner.print_data);
+            //     for (&t, ps) in self.clients.iter() {
+            //         println!("Worker ({:?}, {:?}): {:?}",
+            //             self.inner.worker_num, t, ps.print_data());
+            //     }
+            // }
             self.handle_new_events(events.iter());
 
-            if new_events == 0 {
-                assert!(self.inner.awake_io.is_empty());
-                println!("no new events @ {:?}", self.inner.worker_num);
-                for (tok, pc) in self.clients.iter_mut() {
-                    self.inner.handle_burst(*tok, pc);
-                }
-                if !self.inner.awake_io.is_empty() {
-                    println!("ERROR bad sleep @ {:?}", self.inner.worker_num);
-                }
-            }
+            // if new_events == 0 {
+                // assert!(self.inner.awake_io.is_empty());
+                // println!("no new events @ {:?}", self.inner.worker_num);
+                // for (tok, pc) in self.clients.iter_mut() {
+                    // self.inner.handle_burst(*tok, pc);
+                // }
+                // if !self.inner.awake_io.is_empty() {
+                    // println!("ERROR bad sleep @ {:?}", self.inner.worker_num);
+                // }
+            // }
 
+            /*'from_log: loop {
+                self.handle_from_log();
+
+                if self.inner.waiting_for_log == 0 {
+                    break 'from_log
+                }
+            }*/
             'work: loop {
-                let ops_before_poll = self.inner.awake_io.len();
-                for _ in 0..ops_before_poll {
-                    let token = self.inner.awake_io.pop_front().unwrap();
-                    if let HashEntry::Occupied(o) = self.clients.entry(token) {
-                        self.inner.handle_burst(token, o.into_mut());
-                    }
-                }
 
-                if self.inner.awake_io.is_empty() {
-                    break 'work
+                    let ops_before_poll = self.inner.awake_io.len();
+                    for _ in 0..ops_before_poll {
+                        let token = self.inner.awake_io.pop_front().unwrap();
+                        if let HashEntry::Occupied(o) = self.clients.entry(token) {
+                            self.inner.handle_burst(token, o.into_mut());
+                        }
+                    }
+
+                    //TODO add yield if spends too long waiting for log?
+                    if self.inner.awake_io.is_empty() /*&& self.inner.waiting_for_log == 0*/ {
+                        break 'work
+                    }
+
+                    let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 0)));
+                    self.handle_new_events(events.iter());
                 }
-                let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)));
-                self.handle_new_events(events.iter());
-            }
             #[cfg(debug_assertions)]
             for (tok, c) in self.clients.iter() {
                 debug_assert!(!(c.needs_to_stay_awake() && !c.is_backpressured()),
@@ -193,68 +218,9 @@ impl Worker {
     fn handle_new_events(&mut self, events: mio::EventsIter) {
         'event: for event in events {
             let token = event.token();
-            if token == FROM_LOG {
-                if let Some(log_work) = self.inner.from_log.try_recv() {
-                    let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
-                    if let Some((buffer, bytes, (wk, token, src_addr), storage_loc)) = to_send {
-                        trace!("WORKER {} recv from log for {}.",
-                            self.inner.worker_num, src_addr);
-                        debug_assert_eq!(wk, self.inner.worker_num);
-                        let worker_tok = if src_addr != Ipv4SocketAddr::nil() {
-                            self.inner.next_hop(token, src_addr)
-                        } else {
-                            Some((self.inner.worker_num, token))
-                        };
-                        let (worker, tok) = match worker_tok {
-                            None => {
-                                self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
-                                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
-                                self.inner.awake_io.push_back(token);
-                                continue 'event
-                            }
-                            Some((ref worker, ref tok))
-                            if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
-                                self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
-                                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
-                                self.inner.awake_io.push_back(token);
-                                self.inner.awake_io.push_back(*tok);
-                                continue 'event
-                            }
-                            Some((worker, tok)) => {
-                                (worker, tok)
-                            }
-                        };
-                        if worker != self.inner.worker_num {
-                            assert_eq!(tok, DOWNSTREAM);
-                            self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
-                            self.clients.get_mut(&token).unwrap().return_buffer(buffer);
-                            self.inner.awake_io.push_back(token);
-                            self.inner.awake_io.push_back(tok);
-                            continue 'event
-                        }
-                        if tok == DOWNSTREAM {
-                            {
-                                let client = self.clients.get_mut(&tok).unwrap();
-                                client.add_downstream_send(bytes);
-                                client.add_downstream_send(src_addr.bytes());
-                                let mut storage_log_bytes: [u8; 8] = [0; 8];
-                                LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                                client.add_downstream_send(&storage_log_bytes);
-                            }
-                            self.clients.get_mut(&token).unwrap().return_buffer(buffer);
-                            self.inner.awake_io.push_back(token);
-                        }
-                        else {
-                            //self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
-                            self.clients.get_mut(&tok).unwrap()
-                                .add_downstream_send(buffer.entry_slice());
-                            self.clients.get_mut(&token).unwrap().return_buffer(buffer);
-                            self.inner.awake_io.push_back(token);
-                        }
-                        //TODO replace with wake function
-                        self.inner.awake_io.push_back(tok);
-                    }
-                }
+
+            if token == FROM_LOG /*&& self.inner.waiting_for_log > 0*/ {
+                self.handle_from_log();
                 continue 'event
             }
 
@@ -262,6 +228,7 @@ impl Worker {
                 match self.inner.from_dist.try_recv() {
                     None => {},
                     Some(DistToWorker::NewClient(tok, stream)) => {
+                        // *self.inner.print_data.entry("from dist N").or_insert(0) += 1;
                         self.inner.poll.register(
                             &stream,
                             tok,
@@ -279,6 +246,7 @@ impl Worker {
                         self.inner.awake_io.push_back(tok);
                     },
                     Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
+                        // *self.inner.print_data.entry("from dist D").or_insert(0) += 1;
                         trace!("WORKER {} recv downstream from dist for {}.",
                             self.inner.worker_num, src_addr);
                         {
@@ -293,6 +261,7 @@ impl Worker {
                         self.inner.awake_io.push_back(DOWNSTREAM);
                     }
                     Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
+                        // *self.inner.print_data.entry("from dist T").or_insert(0) += 1;
                         debug_assert_eq!(
                             Ipv4SocketAddr::from_socket_addr(
                                     self.clients[&tok].stream().peer_addr().unwrap()
@@ -317,6 +286,78 @@ impl Worker {
             }
         }
     }// end handle_new_events
+
+    #[inline(always)]
+    fn handle_from_log(&mut self) -> bool {
+        //if self.inner.waiting_for_log == 0 { return false }
+        if let Some(log_work) = self.inner.from_log.try_recv() {
+            //self.inner.waiting_for_log -= 1;
+            // *self.inner.print_data.entry("from log").or_insert(0) += 1;
+            let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
+            if let Some((buffer, bytes, (wk, token, src_addr), storage_loc)) = to_send {
+                trace!("WORKER {} recv from log for {}.",
+                    self.inner.worker_num, src_addr);
+                debug_assert_eq!(wk, self.inner.worker_num);
+                let worker_tok = if src_addr != Ipv4SocketAddr::nil() {
+                    self.inner.next_hop(token, src_addr)
+                } else {
+                    Some((self.inner.worker_num, token))
+                };
+                let (worker, tok) = match worker_tok {
+                    None => {
+                        self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
+                        self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                        self.inner.awake_io.push_back(token);
+                        return true
+                    }
+                    Some((ref worker, ref tok))
+                    if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
+                        self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
+                        self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                        self.inner.awake_io.push_back(token);
+                        self.inner.awake_io.push_back(*tok);
+                        return true
+                    }
+                    Some((worker, tok)) => {
+                        (worker, tok)
+                    }
+                };
+                if worker != self.inner.worker_num {
+                    assert_eq!(tok, DOWNSTREAM);
+                    self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
+                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    self.inner.awake_io.push_back(token);
+                    self.inner.awake_io.push_back(tok);
+                    return true
+                }
+                if tok == DOWNSTREAM {
+                    {
+                        let client = self.clients.get_mut(&tok).unwrap();
+                        client.add_downstream_send(bytes);
+                        client.add_downstream_send(src_addr.bytes());
+                        let mut storage_log_bytes: [u8; 8] = [0; 8];
+                        LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                        client.add_downstream_send(&storage_log_bytes);
+                    }
+                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    self.inner.awake_io.push_back(token);
+                }
+                else {
+                    //self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
+                    self.clients.get_mut(&tok).unwrap()
+                        .add_downstream_send(buffer.entry_slice());
+                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    self.inner.awake_io.push_back(token);
+                }
+                //TODO replace with wake function
+                self.inner.awake_io.push_back(tok);
+            }
+            true
+        }
+        else {
+            false
+        }
+    }// end handle_from_log
 }
 
 impl WorkerInner {
@@ -356,7 +397,7 @@ impl WorkerInner {
     ) {
         match socket_state.send_burst() {
             //TODO replace with wake function
-            Ok(true) => {} //TODO self.awake_io.push_back(token),
+            Ok(true) => { /* *self.print_data.entry("finished send").or_insert(0) += 1;*/ } //TODO self.awake_io.push_back(token),
             Ok(false) => {},
             //FIXME remove from map, log
             Err(e) => {
@@ -382,12 +423,14 @@ impl WorkerInner {
             RecvPacket::Pending => {},
             RecvPacket::FromClient(packet, src_addr) => {
                 trace!("WORKER {} finished recv from client.", self.worker_num);
+                // *self.print_data.entry("finished recv from client").or_insert(0) += 1;
                 let worker = self.worker_num;
                 self.send_to_log(packet, worker, token, src_addr);
                 //self.awake_io.push_back(token)
             }
             RecvPacket::FromUpstream(packet, src_addr, storage_loc) => {
                 trace!("WORKER {} finished recv from up.", self.worker_num);
+                // *self.print_data.entry("finished recv from up").or_insert(0) += 1;
                 //let (worker, work_tok) = self.next_hop(token, src_addr, socket_kind);
                 let worker = self.worker_num;
                 self.send_replication_to_log(packet, storage_loc, worker, token, src_addr);
@@ -458,6 +501,9 @@ impl WorkerInner {
             }
             _ => None,
         };
+        // *self.print_data.entry("new to log").or_insert(0) += 1;
+        // *self.print_data.entry("to log").or_insert(0) += 1;
+        //self.waiting_for_log += 1;
         let to_send = ToLog::New(buffer, storage, (worker_num, token, src_addr));
         self.to_log.send(to_send).unwrap();
     }
@@ -496,6 +542,9 @@ impl WorkerInner {
             },
             _ => unreachable!(),
         };
+        // *self.print_data.entry("rep to log").or_insert(0) += 1;
+        // *self.print_data.entry("to log").or_insert(0) += 1;
+        //self.waiting_for_log += 1;
         let to_send = ToLog::Replication(to_send, (worker_num, token, src_addr));
         self.to_log.send(to_send).unwrap();
     }
@@ -503,7 +552,7 @@ impl WorkerInner {
 }
 
 impl DistributeToWorkers<(usize, mio::Token, Ipv4SocketAddr)>
-for Vec<spmc::Sender<ToWorker<(usize, mio::Token, Ipv4SocketAddr)>>> {
+for Vec<spsc::Sender<ToWorker<(usize, mio::Token, Ipv4SocketAddr)>>> {
     fn send_to_worker(&mut self, msg: ToWorker<(usize, mio::Token, Ipv4SocketAddr)>) {
         let (which_queue, token, _) = msg.get_associated_data();
         trace!("SERVER   sending to worker {} {:?} ", which_queue, token);
