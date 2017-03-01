@@ -47,6 +47,19 @@ pub struct ThreadLog {
     cache: BufferCache,
     chains_currently_being_read: IsRead,
     num_snapshots: usize,
+
+    print_data: PrintData,
+}
+
+counters!{
+    struct PrintData {
+        snap: u64,
+        append: u64,
+        write_done: u64,
+        read_done: u64,
+        ret: u64,
+        shut: u64,
+    }
 }
 
 struct MultiSearchState {
@@ -106,13 +119,29 @@ impl ThreadLog {
             cache: BufferCache::new(),
             chains_currently_being_read: Rc::new(ReadHandle),
             num_snapshots: 0,
+            print_data: Default::default(),
         }
     }
 
     pub fn run(mut self) {
+        // use std::thread;
+        use std::time::Duration;
+        //FIXME remove
+        //let mut num_msgs = 0;
         loop {
-            let msg = self.from_outside.recv().expect("outside is gone");
-            if !self.handle_message(msg) { return }
+            //let msg = self.from_outside.recv().expect("outside is gone");
+            if let Ok(msg) = self.from_outside.recv_timeout(Duration::from_secs(10)) {
+            //if let Ok(msg) = self.from_outside.recv() {
+                if !self.handle_message(msg) { return }
+                // num_msgs += 1;
+            }
+            else {
+                #[cfg(print_stats)]
+                {
+                    println!("no log activity for 10s, msgs handled {}, {:?}", num_msgs, self.print_data);
+                    thread::yield_now()
+                }
+            }
         }
     }
 
@@ -126,6 +155,7 @@ impl ThreadLog {
     fn handle_from_client(&mut self, msg: FromClient) -> bool {
         match msg {
             SnapshotAndPrefetch(chain) => {
+                self.print_data.snap(1);
                 trace!("FUZZY snapshot");
                 self.num_snapshots = self.num_snapshots.saturating_add(1);
                 //FIXME
@@ -145,6 +175,7 @@ impl ThreadLog {
                 true
             }
             PerformAppend(msg) => {
+                self.print_data.append(1);
                 {
                     let layout = bytes_as_entry(&msg).kind.layout();
                     assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
@@ -153,10 +184,12 @@ impl ThreadLog {
                 true
             }
             ReturnBuffer(buffer) => {
+                self.print_data.ret(1);
                 self.cache.cache_buffer(buffer);
                 true
             }
             Shutdown => {
+                self.print_data.shut(1);
                 //TODO send shutdown
                 false
             }
@@ -165,9 +198,14 @@ impl ThreadLog {
 
     fn handle_from_store(&mut self, msg: FromStore) -> bool {
         match msg {
-            WriteComplete(id, locs) =>
-                self.finished_writes.send((id, locs)).expect("client is gone"),
-            ReadComplete(loc, msg) => self.handle_completed_read(loc, msg),
+            WriteComplete(id, locs) => {
+                self.print_data.write_done(1);
+                self.finished_writes.send((id, locs)).expect("client is gone")
+            },
+            ReadComplete(loc, msg) => {
+                self.print_data.read_done(1);
+                self.handle_completed_read(loc, msg)
+            },
         }
         true
     }
