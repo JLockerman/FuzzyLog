@@ -184,8 +184,11 @@ impl Worker {
                     for (&t, ps) in self.clients.iter() {
                         println!("Worker ({:?}, {:?}): {:#?}",
                             self.inner.worker_num, t, ps.print_data());
+                        assert!(!(ps.needs_to_stay_awake() && !ps.is_backpressured()),
+                            "Token {:?} sleep @ stay_awake: {}, backpressure: {}",
+                            t, ps.needs_to_stay_awake(), ps.is_backpressured());
                     }
-            }
+                }
             }
             self.handle_new_events(events.iter());
 
@@ -208,23 +211,22 @@ impl Worker {
                 }
             }*/
             'work: loop {
-
-                    let ops_before_poll = self.inner.awake_io.len();
-                    for _ in 0..ops_before_poll {
-                        let token = self.inner.awake_io.pop_front().unwrap();
-                        if let HashEntry::Occupied(o) = self.clients.entry(token) {
-                            self.inner.handle_burst(token, o.into_mut());
-                        }
+                let ops_before_poll = self.inner.awake_io.len();
+                for _ in 0..ops_before_poll {
+                    let token = self.inner.awake_io.pop_front().unwrap();
+                    if let HashEntry::Occupied(o) = self.clients.entry(token) {
+                        self.inner.handle_burst(token, o.into_mut());
                     }
-
-                    //TODO add yield if spends too long waiting for log?
-                    if self.inner.awake_io.is_empty() /*&& self.inner.waiting_for_log == 0*/ {
-                        break 'work
-                    }
-
-                    let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 0)));
-                    self.handle_new_events(events.iter());
                 }
+
+                //TODO add yield if spends too long waiting for log?
+                if self.inner.awake_io.is_empty() /*&& self.inner.waiting_for_log == 0*/ {
+                    break 'work
+                }
+
+                let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)));
+                self.handle_new_events(events.iter());
+            }
             #[cfg(debug_assertions)]
             for (tok, c) in self.clients.iter() {
                 debug_assert!(!(c.needs_to_stay_awake() && !c.is_backpressured()),
@@ -270,11 +272,13 @@ impl Worker {
                             self.inner.worker_num, src_addr);
                         {
                             let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
-                            client.add_downstream_send(buffer);
-                            client.add_downstream_send(src_addr.bytes());
+                            //client.add_downstream_send(buffer);
+                            //client.add_downstream_send(src_addr.bytes());
                             let mut storage_log_bytes: [u8; 8] = [0; 8];
                             LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                            client.add_downstream_send(&storage_log_bytes)
+                            //client.add_downstream_send(&storage_log_bytes)
+                            client.add_downstream_send3(
+                                buffer, src_addr.bytes(), &storage_log_bytes);
                         }
                         //TODO replace with wake function
                         self.inner.awake_io.push_back(DOWNSTREAM);
@@ -349,17 +353,21 @@ impl Worker {
                     self.inner.awake_io.push_back(tok);
                     return true
                 }
+
                 if tok == DOWNSTREAM {
                     {
                         let client = self.clients.get_mut(&tok).unwrap();
-                        client.add_downstream_send(bytes);
-                        client.add_downstream_send(src_addr.bytes());
+                        //client.add_downstream_send(bytes);
+                        //client.add_downstream_send(src_addr.bytes());
                         let mut storage_log_bytes: [u8; 8] = [0; 8];
                         LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                        client.add_downstream_send(&storage_log_bytes);
+                        //client.add_downstream_send(&storage_log_bytes);
+                        client.add_downstream_send3(
+                                bytes, src_addr.bytes(), &storage_log_bytes);
                     }
                     self.clients.get_mut(&token).unwrap().return_buffer(buffer);
                     self.inner.awake_io.push_back(token);
+                    self.inner.awake_io.push_back(tok);
                 }
                 else {
                     //self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
@@ -367,9 +375,8 @@ impl Worker {
                         .add_downstream_send(buffer.entry_slice());
                     self.clients.get_mut(&token).unwrap().return_buffer(buffer);
                     self.inner.awake_io.push_back(token);
+                    self.inner.awake_io.push_back(tok);
                 }
-                //TODO replace with wake function
-                self.inner.awake_io.push_back(tok);
             }
             true
         }
@@ -393,6 +400,7 @@ impl WorkerInner {
             &mut Client {..} => (true, true),
         };
         socket_state.wake();
+
         if send {
             trace!("WORKER {} will try to send.", self.worker_num);
             //FIXME need to disinguish btwn to client and to upstream
@@ -403,6 +411,7 @@ impl WorkerInner {
             //FIXME need to disinguish btwn from client and from upstream
             self.recv_packet(token, socket_state)
         }
+
         if socket_state.needs_to_stay_awake() {
             self.awake_io.push_back(token)
         }
