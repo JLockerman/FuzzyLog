@@ -17,6 +17,7 @@ pub mod tcp;
 pub mod udp;
 
 pub mod spmc;
+pub mod spsc;
 
 //TODO remove `pub`, it only exists for testing purposes
 pub mod trie;

@@ -8,6 +8,8 @@ use mio::{self, Evented, Poll, PollOpt, Registration, SetReadiness, Token};
 
 use lazycell::{LazyCell, AtomicLazyCell};
 
+// XXX XXX THIS DOES NOT WORK
+
 // based heavily on mio::channel
 
 pub fn channel<V: Send>() -> (Sender<V>, Receiver<V>) {
@@ -60,7 +62,8 @@ where V: Send {
             s @ Stolen::Abort | s @ Stolen::Data(..) => return s,
             s @ Stolen::Empty => {
                 if let Some(notifier) = self.notifier.borrow() {
-                    if !notifier.readiness().is_readable() {
+                    //FIXME is this right?
+                    if notifier.readiness().is_readable() {
                         notifier.set_readiness(mio::Ready::none()).unwrap();
                         let _ = self.sleepers.send(self.notifier.clone());
                     }

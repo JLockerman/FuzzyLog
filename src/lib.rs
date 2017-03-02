@@ -39,6 +39,8 @@ extern crate env_logger;
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;
 
+#[macro_use] mod counter_macro;
+
 #[macro_use]
 mod general_tests;
 

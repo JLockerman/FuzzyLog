@@ -39,6 +39,17 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     from_client: mio::channel::Receiver<Vec<u8>>,
     client: C,
     is_unreplicated: bool,
+
+    print_data: StorePrintData,
+}
+
+counters!{
+    struct StorePrintData {
+        from_client: u64,
+        finished_recvs: u64,
+        finished_sends: u64,
+        being_sent: u64,
+    }
 }
 
 pub struct PerServer<Socket> {
@@ -53,6 +64,20 @@ pub struct PerServer<Socket> {
     got_new_message: bool,
     receiver: Ipv4SocketAddr,
     stay_awake: bool,
+
+    print_data: PerServerPrintData,
+}
+
+counters!{
+    struct PerServerPrintData {
+        finished_appends: u64,
+        finished_read: u64,
+        redo: u64,
+        packets_recvd: u64,
+        bytes_recvd: u64,
+        bytes_sent: u64,
+        packets_sending: u64,
+    }
 }
 
 #[derive(Debug)]
@@ -118,6 +143,8 @@ where C: AsyncStoreClient {
             awake_io: awake_io,
             from_client: from_client,
             is_unreplicated: true,
+
+            print_data: Default::default(),
         }, to_store))
     }
 
@@ -181,6 +208,8 @@ where C: AsyncStoreClient {
             awake_io: awake_io,
             from_client: from_client,
             is_unreplicated: false,
+
+            print_data: Default::default(),
         }, to_store))
     }
 }
@@ -228,6 +257,8 @@ where C: AsyncStoreClient {
             client: client,
             from_client: from_client,
             is_unreplicated: true,
+
+            print_data: Default::default(),
         }, to_store))
     }
 }
@@ -250,6 +281,8 @@ impl PerServer<TcpStream> {
             got_new_message: false,
             receiver: Ipv4SocketAddr::from_socket_addr(local_addr),
             stay_awake: true,
+
+            print_data: Default::default(),
         })
     }
 
@@ -279,6 +312,8 @@ impl PerServer<UdpConnection> {
             got_new_message: false,
             receiver: Ipv4SocketAddr::nil(),
             stay_awake: true,
+
+            print_data: Default::default(),
         })
     }
 
@@ -293,9 +328,35 @@ where PerServer<S>: Connected,
     pub fn run(mut self, poll: mio::Poll) -> ! {
         trace!("CLIENT start.");
         let mut events = mio::Events::with_capacity(1024);
+        let mut timeout_idx = 0;
         loop {
+            const TIMEOUTS: [(u64, u32); 9] =
+                [(0, 100_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
+                (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0), (10, 0)];
             //poll.poll(&mut events, None).expect("worker poll failed");
-            let _ = poll.poll(&mut events, None);
+            //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
+            let timeout = TIMEOUTS[timeout_idx];
+            let timeout = Duration::new(timeout.0, timeout.1);
+            let _ = poll.poll(&mut events, Some(timeout));
+            if events.len() == 0 {
+                #[cfg(feature = "print_stats")]
+                {
+                    if TIMEOUTS[timeout_idx].0 >= 10 {
+                        self.print_stats()
+                    }
+                }
+                if timeout_idx + 1 < TIMEOUTS.len() {
+                    timeout_idx += 1
+                }
+                for ps in self.servers.iter() {
+                    self.awake_io.push_back(ps.token.0)
+                }
+            } else {
+                if timeout_idx > 0 {
+                    timeout_idx -= 1
+                }
+            }
+
             self.handle_new_events(events.iter());
 
             'work: loop {
@@ -318,6 +379,19 @@ where PerServer<S>: Connected,
             }
         }
     }// end fn run
+
+    #[cfg(feature = "print_stats")]
+    fn print_stats(&self) {
+        println!("store: {:#?}", self.print_data);
+        for ps in self.servers.iter() {
+            println!("store {:?}: {:#?}", ps.token, ps.print_data);
+        }
+    }
+
+    #[allow(dead_code)]
+    #[cfg(not(feature = "print_stats"))]
+    #[inline(always)]
+    fn print_stats(&self) {}
 
     fn handle_new_events(&mut self, events: mio::EventsIter) {
         for event in events {
@@ -345,6 +419,7 @@ where PerServer<S>: Connected,
             //TODO Err(TryRecvError::Disconnected) => panic!("client disconnected.")
             Err(TryRecvError::Disconnected) => return false,
         };
+        self.print_data.from_client(1);
         let new_msg_kind = Entry::<()>::wrap_bytes(&msg).kind.layout();
         match new_msg_kind {
             EntryLayout::Read => {
@@ -439,6 +514,7 @@ where PerServer<S>: Connected,
         debug_assert_eq!(token, self.servers[server].token);
         let finished_recv = self.servers[server].recv_packet().expect("cannot recv");
         if let Some(packet) = finished_recv {
+            self.print_data.finished_recvs(1);
             //stay_awake = true;
             let kind = packet.entry().kind;
             trace!("CLIENT got a {:?} from {:?}", kind, token);
@@ -463,6 +539,7 @@ where PerServer<S>: Connected,
 
         if self.servers[server].needs_to_write() {
             trace!("CLIENT write");
+            self.print_data.finished_sends(1);
             //let num_chain_servers = self.num_chain_servers;
             let finished_send = self.servers[server].send_next_burst();
             if finished_send {
@@ -473,6 +550,7 @@ where PerServer<S>: Connected,
         }
 
         for sent in self.servers[server].being_sent.drain(..) {
+            self.print_data.being_sent(1);
             let layout = sent.layout();
             if layout == EntryLayout::Read {
                 let read_loc = sent.read_loc();
@@ -513,6 +591,8 @@ where PerServer<S>: Connected,
         let id = packet.entry().id;
         let unreplicated = self.is_unreplicated;
         trace!("CLIENT handle completed write?");
+        //FIXME remove extra index?
+        self.servers[token.0].print_data.finished_appends(1);
         //TODO for multistage writes check if we need to do more work...
         if let Some(v) = self.sent_writes.remove(&id) {
             trace!("CLIENT write needed completion");
@@ -619,6 +699,8 @@ where PerServer<S>: Connected,
     fn handle_completed_read(&mut self, token: Token, packet: &Buffer) -> bool {
         trace!("CLIENT handle completed read?");
         if token == self.lock_token() { return false }
+        //FIXME remove extra index?
+        self.servers[token.0].print_data.finished_read(1);
         //FIXME remove
         let mut was_needed = false;
         for &oi in packet.entry().locs() {
@@ -639,6 +721,7 @@ where PerServer<S>: Connected,
     }
 
     fn handle_redo(&mut self, token: Token, kind: EntryKind::Kind, packet: &Buffer) {
+        self.servers[token.0].print_data.redo(1);
         let write_state = match kind.layout() {
             EntryLayout::Data | EntryLayout::Multiput | EntryLayout::Sentinel => {
                 let id = packet.entry().id;
@@ -862,9 +945,12 @@ impl Connected for PerServer<TcpStream> {
         if self.bytes_read < bhs {
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..bhs]);
             match r {
-                Ok(i) => self.bytes_read += i,
+                Ok(i) => {
+                    self.stay_awake = true;
+                    self.bytes_read += i
+                },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => return Ok(None),
+                    ErrorKind::WouldBlock => return Ok(None),
                     _ => return Err(e),
                 }
             }
@@ -878,9 +964,12 @@ impl Connected for PerServer<TcpStream> {
         if self.bytes_read < header_size {
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..header_size]);
             match r {
-                Ok(i) => self.bytes_read += i,
+                Ok(i) => {
+                    self.stay_awake = true;
+                    self.bytes_read += i
+                },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => return Ok(None),
+                    ErrorKind::WouldBlock  => return Ok(None),
                     _ => return Err(e),
                 }
             }
@@ -893,9 +982,12 @@ impl Connected for PerServer<TcpStream> {
         if self.bytes_read < size {
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..size]);
             match r {
-                Ok(i) => self.bytes_read += i,
+                Ok(i) => {
+                    self.stay_awake = true;
+                    self.bytes_read += i
+                },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => return Ok(None),
+                    ErrorKind::WouldBlock => return Ok(None),
                     _ => return Err(e),
                 }
             }
@@ -906,6 +998,10 @@ impl Connected for PerServer<TcpStream> {
         debug_assert!(self.read_buffer.packet_fits());
         debug_assert_eq!(self.bytes_read, self.read_buffer.entry_size());
         trace!("CLIENT finished recv");
+        {
+            self.print_data.packets_recvd(1);
+            self.print_data.bytes_recvd(self.bytes_read as u64);
+        }
         self.bytes_read = 0;
         let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
         self.stay_awake = true;
@@ -937,9 +1033,13 @@ impl Connected for PerServer<TcpStream> {
             match self.stream.write(
                 &self.being_written.first_bytes()[self.bytes_sent..]
             ) {
-                Ok(i) => self.bytes_sent += i,
+                Ok(i) => {
+                    self.print_data.bytes_sent(i as u64);
+                    self.stay_awake = true;
+                    self.bytes_sent += i
+                },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                    ErrorKind::WouldBlock => {
                         trace!("FFFFF would block @ {:?}", self.token);
                     }
                     _ => panic!("CLIENT send error {}", e),
@@ -962,6 +1062,7 @@ impl Connected for PerServer<TcpStream> {
             let added = self.awaiting_send.front().unwrap()
                 .with_packet(|p| being_written.try_fill(p, addr));
             if !added { break }
+            self.print_data.packets_sending(1);
             let msg = self.awaiting_send.pop_front().unwrap();
             self.being_sent.push_back(msg);
         }
@@ -983,6 +1084,7 @@ impl Connected for PerServer<TcpStream> {
         let can_write = to_send.with_packet(|p|
             self.being_written.try_fill(p, self.receiver));
         if can_write {
+            self.print_data.packets_sending(1);
             trace!("FFFFF add to buffer");
             self.being_sent.push_back(to_send)
         } else {
@@ -1006,6 +1108,7 @@ impl Connected for PerServer<TcpStream> {
         self.stay_awake = true;
         let len = msg.borrow().len();
         if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {
+            self.print_data.packets_sending(1);
             let is_data;
             {
                 let mut ts = msg.borrow_mut();
@@ -1060,6 +1163,7 @@ impl Connected for PerServer<TcpStream> {
             self.being_written.try_fill(&b[..], self.receiver)
         };
         if can_write {
+            self.print_data.packets_sending(1);
             //FIXME this is unneeded
             self.being_sent.push_back(WriteState::UnlockServer(buffer))
         } else {

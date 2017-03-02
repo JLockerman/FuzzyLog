@@ -35,17 +35,20 @@ def mirror(cmd=''):
 #      so you need to input the server addrs twice once comma separated for -H
 #      once '^' separated for chain_hosts
 @parallel
-def run_chain(chain_hosts, port="13289", trace="", workers="", debug=""):
+def run_chain(chain_hosts, port="13289", trace="", workers="", debug="", stats=""):
     with settings(hide('warnings'), warn_only=True):
         run("pkill tcp_server")
     host_index = index_of_host()
     cmd = "cd servers/tcp_server && "
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
+    cmd += "RUST_BACKTRACE=1 cargo run "
     if debug == "":
-        cmd += "RUST_BACKTRACE=1 cargo run --release -- " + port
-    else:
-        cmd += "RUST_BACKTRACE=1 cargo run -- " + port
+        cmd += "--release "
+    if stats != "":
+        cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
+    cmd += "-- " + port
+
     chain_hosts = chain_hosts.split("^")
     if host_index > 0:
         #prev_host = network.normalize(env.all_hosts[host_index-1])[1]
@@ -69,7 +72,7 @@ def kill_server():
 # or of the form <chain head addr>-<chain tail addr>(^<chain head addr>-<chain tail addr>)*
 # where <server addr> is of the form <server ip>:<port>
 @parallel
-def run_clients(num_clients, servers, jobsize="1000", num_writes="100000", trace="", debug=""):
+def run_clients(num_clients, servers, jobsize="1000", num_writes="100000", trace="", debug="",stats=""):
     with settings(warn_only=True):
         run('pkill fuzzy_log_throughput_bench')
     cmd = "cd benchers/throughput && "
@@ -81,6 +84,8 @@ def run_clients(num_clients, servers, jobsize="1000", num_writes="100000", trace
         cmd += "cargo run "
     if trace != "":
         cmd += "--no-default-features "
+    if stats != "":
+        cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
     cmd += "-- "
 
     servers = servers.replace("^", " ")
