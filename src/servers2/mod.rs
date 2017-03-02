@@ -49,9 +49,6 @@ pub type BufferSlice = Buffer;
 
 pub enum ToWorker<T: Send + Sync> {
     Write(BufferSlice, AppendSlot<Entry<()>>, T),
-    MultiWrite(Arc<BufferSlice>, AppendSlot<Entry<()>>, Arc<(AtomicIsize, T)>, ),
-    SentinelWrite(Arc<BufferSlice>, AppendSlot<Entry<()>>, Arc<(AtomicIsize, T)>),
-    //TODO replace MultiWrite and SentinelWrite with:
     MultiReplica {
         buffer: BufferSlice,
         //multi_storage: *mut u8,
@@ -84,8 +81,6 @@ where T: Send + Sync {
             &mut Write(_, _, ref mut t) | &mut Read(_, _, ref mut t)
             | &mut EmptyRead(_, _, ref mut t) | &mut Reply(_, ref mut t)
             | &mut MultiReplica{ref mut t, ..} => f(t),
-            &mut MultiWrite(_, _, ref mut at) | &mut SentinelWrite(_, _, ref mut at) =>
-                { Arc::get_mut(at).map(|t| f(&mut t.1)); },
         }
     }
 }
@@ -95,7 +90,6 @@ where T: Copy + Send + Sync {
     fn get_associated_data(&self) -> T {
         match self {
             &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
-            &MultiWrite(_, _, ref at) | &SentinelWrite(_, _, ref at) => at.1,
             &MultiReplica{t, ..} => t,
         }
     }
@@ -248,7 +242,7 @@ where ToWorkers: DistributeToWorkers<T> {
     fn handle_new_multiappend(
         &mut self,
         kind: EntryKind::Kind,
-        mut buffer: BufferSlice,
+        buffer: BufferSlice,
         storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>,
         t: T
     ) {
@@ -676,26 +670,6 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             Some((buffer, &[], t, 0))
         },
 
-        MultiWrite(buffer, slot, marker) => {
-            trace!("WORKER {} finish multi part", worker_num);
-            let ret = unsafe { extend_lifetime(slot.finish_append(buffer.entry()).bytes()) };
-            return_if_last(buffer, marker, worker_num).map(|(b, t, l)| (b, ret, t, l))
-        },
-
-        SentinelWrite(buffer, slot, marker) => {
-            trace!("WORKER finish sentinel part");
-            let ret = {
-                let e = buffer.entry();
-                unsafe {
-                    let ret = slot.finish_append_with(e, |e| {
-                        e.kind.remove(EntryKind::Multiput);
-                        e.kind.insert(EntryKind::Sentinel);
-                    }).bytes();
-                    extend_lifetime(ret)
-                }
-            };
-            return_if_last(buffer, marker, worker_num).map(|(b, t, l)| (b, ret, t, l))
-        },
         MultiReplica {
             buffer, multi_storage, senti_storage, t, num_places,
         } => unsafe {
