@@ -416,8 +416,8 @@ where V: Storeable {
     }
 
     pub fn flush_completed_appends(&mut self) {
-        while let Ok(..) = self.finished_writes.try_recv() {
-            self.num_async_writes -= 1;
+        if self.num_async_writes > 0 {
+            self.num_async_writes -= self.finished_writes.try_iter().map(|_| 1).sum();
         }
     }
 

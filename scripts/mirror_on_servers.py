@@ -46,7 +46,7 @@ def run_chain(chain_hosts, port="13289", trace="", workers="", debug="", stats="
     if debug == "":
         cmd += "--release "
     if stats != "":
-        cmd += "--features \"print_stats\" "
+        cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
     cmd += "-- " + port
 
     chain_hosts = chain_hosts.split("^")
@@ -85,7 +85,7 @@ def run_clients(num_clients, servers, jobsize="1000", num_writes="100000", trace
     if trace != "":
         cmd += "--no-default-features "
     if stats != "":
-        cmd += "--features \"print_stats\" "
+        cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
     cmd += "-- "
 
     servers = servers.replace("^", " ")
