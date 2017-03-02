@@ -172,10 +172,10 @@ impl Worker {
         let mut events = mio::Events::with_capacity(1024);
         let mut timeout_idx = 0;
         loop {
-            //10µs, 100µs, 1ms, 10ms, 100ms, 1s, 10s
-            const TIMEOUTS: [(u64, u32); 8] =
+            //10µs, 100µs, 500µs, 1ms, 10ms, 100ms, 1s, 10s, 10s
+            const TIMEOUTS: [(u64, u32); 9] =
                 [(0, 10_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
-                (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0)];
+                (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0), (10, 0)];
             //#[cfg(feature = "print_stats")]
             //let _ = self.inner.poll.poll(&mut events, Some(Duration::from_secs(10)));
             //#[cfg(not(feature = "print_stats"))]
@@ -186,7 +186,7 @@ impl Worker {
             if events.len() == 0 {
                 #[cfg(feature = "print_stats")]
                 {
-                    if timeout_idx > TIMEOUTS.len() - 1 {
+                    if TIMEOUTS[timeout_idx].0 >= 10 {
                         println!("Worker {:?}: {:#?}",
                             self.inner.worker_num, self.inner.print_data);
                         for (&t, ps) in self.clients.iter() {
@@ -205,7 +205,9 @@ impl Worker {
                     self.inner.awake_io.push_back(t)
                 }
             } else {
-                timeout_idx = 0
+                if timeout_idx > 0 {
+                    timeout_idx -= 1
+                }
             }
             //let new_events = events.len();
 

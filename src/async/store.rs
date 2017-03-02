@@ -330,9 +330,9 @@ where PerServer<S>: Connected,
         let mut events = mio::Events::with_capacity(1024);
         let mut timeout_idx = 0;
         loop {
-            const TIMEOUTS: [(u64, u32); 8] =
+            const TIMEOUTS: [(u64, u32); 9] =
                 [(0, 100_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
-                (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0)];
+                (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0), (10, 0)];
             //poll.poll(&mut events, None).expect("worker poll failed");
             //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
             let timeout = TIMEOUTS[timeout_idx];
@@ -341,7 +341,7 @@ where PerServer<S>: Connected,
             if events.len() == 0 {
                 #[cfg(feature = "print_stats")]
                 {
-                    if timeout_idx > TIMEOUTS.len() - 1 {
+                    if TIMEOUTS[timeout_idx].0 >= 10 {
                         self.print_stats()
                     }
                 }
@@ -352,7 +352,9 @@ where PerServer<S>: Connected,
                     self.awake_io.push_back(ps.token.0)
                 }
             } else {
-                timeout_idx = 0
+                if timeout_idx > 0 {
+                    timeout_idx -= 1
+                }
             }
 
             self.handle_new_events(events.iter());
