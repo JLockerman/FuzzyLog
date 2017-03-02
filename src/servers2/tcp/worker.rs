@@ -204,6 +204,8 @@ impl Worker {
                 for (&t, _) in self.clients.iter() {
                     self.inner.awake_io.push_back(t)
                 }
+                self.handle_from_log();
+                //TODO add call to handle_from_dist()
             } else {
                 if timeout_idx > 0 {
                     timeout_idx -= 1
@@ -331,7 +333,7 @@ impl Worker {
         }
     }// end handle_new_events
 
-    #[inline(always)]
+    //#[inline(always)]
     fn handle_from_log(&mut self) -> bool {
         //if self.inner.waiting_for_log == 0 { return false }
         if let Some(log_work) = self.inner.from_log.try_recv() {
