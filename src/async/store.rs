@@ -328,19 +328,31 @@ where PerServer<S>: Connected,
     pub fn run(mut self, poll: mio::Poll) -> ! {
         trace!("CLIENT start.");
         let mut events = mio::Events::with_capacity(1024);
+        let mut timeout_idx = 0;
         loop {
+            const TIMEOUTS: [(u64, u32); 8] =
+                [(0, 100_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
+                (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0)];
             //poll.poll(&mut events, None).expect("worker poll failed");
             //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
-            let timeout =
-                if cfg!(feature = "print_stats") { Some(Duration::from_secs(10)) }
-                else { None };
-            let _ = poll.poll(&mut events, timeout);
-
-            #[cfg(feature = "print_stats")]
-            {
-                if events.len() == 0 {
-                   self.print_stats()
+            let timeout = TIMEOUTS[timeout_idx];
+            let timeout = Duration::new(timeout.0, timeout.1);
+            let _ = poll.poll(&mut events, Some(timeout));
+            if events.len() == 0 {
+                #[cfg(feature = "print_stats")]
+                {
+                    if timeout_idx > TIMEOUTS.len() - 1 {
+                        self.print_stats()
+                    }
                 }
+                if timeout_idx + 1 < TIMEOUTS.len() {
+                    timeout_idx += 1
+                }
+                for ps in self.servers.iter() {
+                    self.awake_io.push_back(ps.token.0)
+                }
+            } else {
+                timeout_idx = 0
             }
 
             self.handle_new_events(events.iter());
@@ -931,9 +943,12 @@ impl Connected for PerServer<TcpStream> {
         if self.bytes_read < bhs {
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..bhs]);
             match r {
-                Ok(i) => self.bytes_read += i,
+                Ok(i) => {
+                    self.stay_awake = true;
+                    self.bytes_read += i
+                },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => return Ok(None),
+                    ErrorKind::WouldBlock => return Ok(None),
                     _ => return Err(e),
                 }
             }
@@ -947,9 +962,12 @@ impl Connected for PerServer<TcpStream> {
         if self.bytes_read < header_size {
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..header_size]);
             match r {
-                Ok(i) => self.bytes_read += i,
+                Ok(i) => {
+                    self.stay_awake = true;
+                    self.bytes_read += i
+                },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => return Ok(None),
+                    ErrorKind::WouldBlock  => return Ok(None),
                     _ => return Err(e),
                 }
             }
@@ -962,9 +980,12 @@ impl Connected for PerServer<TcpStream> {
         if self.bytes_read < size {
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..size]);
             match r {
-                Ok(i) => self.bytes_read += i,
+                Ok(i) => {
+                    self.stay_awake = true;
+                    self.bytes_read += i
+                },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => return Ok(None),
+                    ErrorKind::WouldBlock => return Ok(None),
                     _ => return Err(e),
                 }
             }
@@ -1012,10 +1033,11 @@ impl Connected for PerServer<TcpStream> {
             ) {
                 Ok(i) => {
                     self.print_data.bytes_sent(i as u64);
+                    self.stay_awake = true;
                     self.bytes_sent += i
                 },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                    ErrorKind::WouldBlock => {
                         trace!("FFFFF would block @ {:?}", self.token);
                     }
                     _ => panic!("CLIENT send error {}", e),
