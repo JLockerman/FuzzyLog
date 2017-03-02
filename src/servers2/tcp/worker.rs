@@ -170,26 +170,45 @@ impl Worker {
 
     pub fn run(mut self) -> ! {
         let mut events = mio::Events::with_capacity(1024);
+        let mut timeout_idx = 0;
         loop {
-            #[cfg(feature = "print_stats")]
-            let _ = self.inner.poll.poll(&mut events, Some(Duration::from_secs(10)));
-            #[cfg(not(feature = "print_stats"))]
-            let _ = self.inner.poll.poll(&mut events, None);
-            //let new_events = events.len();
-            #[cfg(feature = "print_stats")]
-            {
-                if events.len() == 0 {
-                    println!("Worker {:?}: {:#?}",
-                        self.inner.worker_num, self.inner.print_data);
-                    for (&t, ps) in self.clients.iter() {
-                        println!("Worker ({:?}, {:?}): {:#?}",
-                            self.inner.worker_num, t, ps.print_data());
-                        assert!(!(ps.needs_to_stay_awake() && !ps.is_backpressured()),
-                            "Token {:?} sleep @ stay_awake: {}, backpressure: {}",
-                            t, ps.needs_to_stay_awake(), ps.is_backpressured());
+            //10µs, 100µs, 1ms, 10ms, 100ms, 1s, 10s
+            const TIMEOUTS: [(u64, u32); 8] =
+                [(0, 10_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
+                (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0)];
+            //#[cfg(feature = "print_stats")]
+            //let _ = self.inner.poll.poll(&mut events, Some(Duration::from_secs(10)));
+            //#[cfg(not(feature = "print_stats"))]
+            //let _ = self.inner.poll.poll(&mut events, None);
+            let timeout = TIMEOUTS[timeout_idx];
+            let timeout = Duration::new(timeout.0, timeout.1);
+            let _ = self.inner.poll.poll(&mut events, Some(timeout));
+            if events.len() == 0 {
+                #[cfg(feature = "print_stats")]
+                {
+                    if timeout_idx > TIMEOUTS.len() - 1 {
+                        println!("Worker {:?}: {:#?}",
+                            self.inner.worker_num, self.inner.print_data);
+                        for (&t, ps) in self.clients.iter() {
+                            println!("Worker ({:?}, {:?}): {:#?}, {:#?}",
+                                self.inner.worker_num, t, ps.print_data(),ps.more_data());
+                            assert!(!(ps.needs_to_stay_awake() && !ps.is_backpressured()),
+                                "Token {:?} sleep @ stay_awake: {}, backpressure: {}",
+                                t, ps.needs_to_stay_awake(), ps.is_backpressured());
+                        }
                     }
                 }
+                if timeout_idx + 1 < TIMEOUTS.len() {
+                    timeout_idx += 1
+                }
+                for (&t, _) in self.clients.iter() {
+                    self.inner.awake_io.push_back(t)
+                }
+            } else {
+                timeout_idx = 0
             }
+            //let new_events = events.len();
+
             self.handle_new_events(events.iter());
 
             // if new_events == 0 {

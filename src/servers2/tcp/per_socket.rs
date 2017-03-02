@@ -191,10 +191,10 @@ impl PerSocket {
                             print_data.packets_recvd(1);
                             *bytes_read = 0;
                             trace!("SOCKET recevd replication for {}.", src_addr);
+                            *needs_to_stay_awake = true;
                             let entry_size = read_buffer.entry_size();
                             let end = entry_size + mem::size_of::<u64>();
                             let storage_loc = LittleEndian::read_u64(&read_buffer[entry_size..end]);
-                            *needs_to_stay_awake = true;
                             print_data.read_buffers_sent(1);
                             RecvPacket::FromUpstream(read_buffer, src_addr, storage_loc)
                         },
@@ -446,6 +446,105 @@ impl PerSocket {
             }
         }
     }
+
+    pub fn more_data(&self) -> MoreData {
+        use self::PerSocket::*;
+        match self {
+            &Upstream {
+                ref being_read,
+                ref bytes_read,
+                ref stream,
+                ref needs_to_stay_awake,
+                ..
+            } =>
+                MoreData::new(
+                    being_read.len(),
+                    *bytes_read,
+                    0, 0, 0,
+                    *needs_to_stay_awake
+                ),
+
+            &Downstream {
+                ref being_written,
+                ref bytes_written,
+                ref pending,
+                ref needs_to_stay_awake,
+                ..
+            } =>
+                MoreData::new(
+                    0, 0,
+                    being_written.first_bytes().len(),
+                    *bytes_written,
+                    pending.len(),
+                    *needs_to_stay_awake
+                ),
+
+            &Client {
+                ref being_read,
+                ref bytes_read,
+                ref being_written,
+                ref bytes_written,
+                ref pending,
+                ref needs_to_stay_awake,
+                ..
+            } =>
+                MoreData::new(
+                    being_read.len(),
+                    *bytes_read,
+                    being_written.first_bytes().len(),
+                    *bytes_written,
+                    pending.len(),
+                    *needs_to_stay_awake
+                ),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MoreData {
+    #[cfg(feature = "print_stats")]
+    num_read_buffers: usize,
+    #[cfg(feature = "print_stats")]
+    bytes_read: usize,
+    #[cfg(feature = "print_stats")]
+    being_written_first_len: usize,
+    #[cfg(feature = "print_stats")]
+    bytes_written: usize,
+    #[cfg(feature = "print_stats")]
+    num_pending: usize,
+    #[cfg(feature = "print_stats")]
+    needs_to_stay_awake: bool,
+}
+
+impl MoreData {
+    #[cfg(feature = "print_stats")]
+    fn new(
+        num_read_buffers: usize,
+        bytes_read: usize,
+        being_written_first_len: usize,
+        bytes_written: usize,
+        num_pending: usize,
+        needs_to_stay_awake: bool
+    ) -> Self {
+        MoreData {
+            num_read_buffers: num_read_buffers,
+            bytes_read: bytes_read,
+            being_written_first_len: being_written_first_len,
+            bytes_written: bytes_written,
+            num_pending: num_pending,
+            needs_to_stay_awake: needs_to_stay_awake
+        }
+    }
+
+    #[cfg(not(feature = "print_stats"))]
+    fn new(
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: bool
+    ) -> Self { MoreData {} }
 }
 
 /*enum SendRes {

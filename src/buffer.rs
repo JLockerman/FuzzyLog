@@ -5,37 +5,37 @@ use hash::HashMap;
 #[derive(Debug, Clone)]
 pub struct Buffer {
     inner: Vec<u8>,
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     no_drop: bool,
 }
 
 impl Buffer {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn new() -> Self {
         Buffer { inner: vec![0u8; 8192], no_drop: false }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn new() -> Self {
         Buffer { inner: vec![0u8; 8192] }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn empty() -> Self {
         Buffer { inner: Vec::new(), no_drop: false }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn empty() -> Self {
         Buffer { inner: Vec::new(), }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn no_drop() -> Self {
         Buffer { inner: Vec::new(), no_drop: true }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn no_drop() -> Self {
         Buffer { inner: Vec::new() }
     }
@@ -113,7 +113,7 @@ impl Buffer {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature="debug_no_drop"))]
 impl Drop for Buffer {
     fn drop(&mut self) {
         if !::std::thread::panicking() && self.no_drop {
