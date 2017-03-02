@@ -625,18 +625,18 @@ where ToWorkers: DistributeToWorkers<T> {
 }
 
 fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
--> Option<(Buffer, &'static [u8], T, u64)> {
+-> (Buffer, &'static [u8], T, u64) {
     match msg {
         Reply(buffer, t) => {
             trace!("WORKER {} finish reply", worker_num);
-            Some((buffer, &[], t, 0))
+            (buffer, &[], t, 0)
         },
 
         Write(buffer, slot, t) => unsafe {
             trace!("WORKER {} finish write", worker_num);
             let loc = slot.loc();
             let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
-            Some((buffer, ret, t, loc))
+            (buffer, ret, t, loc)
         },
 
         Read(read, mut buffer, t) => {
@@ -645,7 +645,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             //FIXME needless copy
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
-            Some((buffer, bytes, t, 0))
+            (buffer, bytes, t, 0)
         },
 
         EmptyRead(last_valid_loc, mut buffer, t) => {
@@ -667,7 +667,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             }
             buffer.ensure_len();
             trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
-            Some((buffer, &[], t, 0))
+            (buffer, &[], t, 0)
         },
 
         MultiReplica {
@@ -711,7 +711,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             let ret = slice::from_raw_parts(multi_storage, len);
             //TODO is re right for sentinel only writes?
             if remaining_senti_places.len() == 0 {
-                return Some((buffer, ret, t, 0))
+                return (buffer, ret, t, 0)
             }
             else {
                 let e = buffer.entry();
@@ -733,40 +733,9 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
 
             }
             //TODO is re right for sentinel only writes?
-            Some((buffer, ret, t, 0))
+            (buffer, ret, t, 0)
         },
     }
-}
-
-fn return_if_last<T: Send + Sync>(
-    mut buffer: Arc<Buffer>,
-    mut marker: Arc<(AtomicIsize, T)>,
-    worker_num: usize,
-)
--> Option<(Buffer, T, u64)> {
-    let old = marker.0.fetch_sub(1, Ordering::AcqRel);
-    if old == 1 {
-        //FIXME I don't think this is needed...
-        if marker.0.compare_and_swap(0, -1, Ordering::AcqRel) == 0 {
-            trace!("WORKER {} finish last part", worker_num);
-            let marker_inner;
-            let buffer_inner;
-            loop {
-                match Arc::try_unwrap(marker) {
-                    Ok(i) => { marker_inner = i; break }
-                    Err(a) => marker = a,
-                }
-            }
-            loop {
-                match Arc::try_unwrap(buffer) {
-                    Ok(i) => { buffer_inner = i; break }
-                    Err(a) => buffer = a,
-                }
-            }
-            return Some((buffer_inner, marker_inner.1, 0))
-        }
-    }
-    return None
 }
 
 unsafe fn extend_lifetime<'a, 'b, V: ?Sized>(v: &'a V) -> &'b V {

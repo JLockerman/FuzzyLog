@@ -65,11 +65,10 @@ impl MioHandler for Server {
                         let to_pop = self.from_log.borrow().len();
                         for _ in 0..to_pop {
                             let wrk = self.from_log.borrow_mut().pop_front().unwrap();
-                            if let Some((buffer, ..)) = servers2::handle_to_worker(wrk, 0) {
-                                mem::replace(&mut self.buffer, buffer);
-                                self.write_packet(&addr);
-                                trace!("SERVER finished write to {:?}", addr);
-                            }
+                            let (buffer, ..) = servers2::handle_to_worker(wrk, 0);
+                            mem::replace(&mut self.buffer, buffer);
+                            self.write_packet(&addr);
+                            trace!("SERVER finished write to {:?}", addr);
                         }
                     }
                 } else {
