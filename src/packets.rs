@@ -69,7 +69,7 @@ pub mod EntryKind {
     #![allow(non_upper_case_globals)]
     bitflags! {
         #[derive(RustcDecodable, RustcEncodable)]
-        flags Kind: u8 {
+        flags Kind: u16 {
             const Invalid = 0x0,
             const Data = 0x1,
             const Multiput = 0x2,
@@ -90,6 +90,8 @@ pub mod EntryKind {
             const ReadSenti = Sentinel.bits | ReadSuccess.bits,
             //const GotValue = Read.bits | Success.bits,
             const NoValue = Read.bits,
+
+            const NewMultiPut = 0x100,
         }
     }
 
@@ -153,7 +155,7 @@ pub struct Entry<V: ?Sized, F: ?Sized = [u8; MAX_DATA_LEN2]> {
     pub _pd: PhantomData<V>,
     pub id: Uuid,
     pub kind: EntryKind::Kind,
-    pub _padding: [u8; 3],
+    pub _padding: [u8; 2],
     pub data_bytes: u16,
     pub dependency_bytes: u16,
     pub flex: F,
