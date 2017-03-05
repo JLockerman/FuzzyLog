@@ -91,6 +91,18 @@ pub mod c_binidings {
         p2: u64,
     }
 
+    #[repr(C)]
+    pub struct WriteLocations {
+        pub num_locs: usize,
+        pub locs: *mut OrderIndex,
+    }
+
+    #[repr(C)]
+    pub struct WriteIdAndLocs {
+        pub write_id: WriteId,
+        pub locs: WriteLocations,
+    }
+
     impl WriteId {
         fn from_uuid(id: Uuid) -> Self {
             let bytes = id.as_bytes();
@@ -236,6 +248,44 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
+    pub extern "C" fn causal_append(
+        dag: *mut DAG,
+        data: *const u8,
+        data_size: usize,
+        inhabits: *mut colors,
+        depends_on: *mut colors,
+        happens_after: *mut OrderIndex,
+        num_happens_after: usize,
+    ) -> WriteId {
+        assert!(data_size == 0 || data != ptr::null());
+        assert!(inhabits != ptr::null_mut());
+        assert!(colors_valid(inhabits));
+
+        let (dag, data, inhabits, happens_after) = unsafe {
+            let colors: *mut order = (*inhabits).mycolors as *mut _;
+            let s = slice::from_raw_parts_mut(colors, (*inhabits).numcolors);
+            let h = slice::from_raw_parts_mut(happens_after, num_happens_after);
+            (dag.as_mut().expect("need to provide a valid DAGHandle"),
+                slice::from_raw_parts(data, data_size),
+                s,
+                h)
+        };
+        let depends_on: &mut [order] = unsafe {
+            if depends_on != ptr::null_mut() {
+                assert!(colors_valid(depends_on));
+                let s = slice::from_raw_parts_mut((*depends_on).mycolors, (*depends_on).numcolors);
+                mem::transmute(s)
+            }
+            else {
+                &mut []
+            }
+        };
+
+        let id = dag.causal_color_append(data, inhabits, depends_on, happens_after);
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn wait_for_all_appends(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         dag.wait_for_all_appends();
@@ -255,6 +305,15 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn wait_for_a_specific_append_and_locations(
+        dag: *mut DAG, write_id: WriteId
+    ) -> WriteLocations {
+        let locs = dag.as_mut().expect("need to provide a valid DAGHandle")
+            .wait_for_a_specific_append(write_id.to_uuid()).unwrap();
+        build_write_locs(locs)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn try_wait_for_any_append(dag: *mut DAG) -> WriteId {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         let id = dag.try_wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
@@ -262,9 +321,40 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn try_wait_for_any_append_and_location(dag: *mut DAG)
+    -> WriteIdAndLocs {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        match dag.try_wait_for_any_append() {
+            None => WriteIdAndLocs {
+                write_id: WriteId::nil(),
+                locs: WriteLocations { num_locs: 0, locs: ptr::null_mut() },
+            },
+            Some((id, locs)) => WriteIdAndLocs {
+                write_id: WriteId::from_uuid(id),
+                locs: build_write_locs(locs),
+            },
+        }
+
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn flush_completed_appends(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         dag.flush_completed_appends();
+    }
+
+    unsafe fn build_write_locs(locs: Vec<OrderIndex>) -> WriteLocations {
+        let num_locs = locs.len();
+        let my_locs = ::libc::malloc(mem::size_of::<OrderIndex>() * num_locs) as *mut _;
+        assert!(my_locs != ptr::null_mut());
+        let s = slice::from_raw_parts_mut(my_locs, num_locs);
+        for i in 0..num_locs {
+            s[i] = locs[i];
+        }
+        WriteLocations {
+            num_locs: num_locs,
+            locs: my_locs,
+        }
     }
 
 
@@ -309,6 +399,19 @@ pub mod c_binidings {
     pub extern "C" fn snapshot(dag: *mut DAG) {
         let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
         dag.take_snapshot();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn snapshot_colors(dag: *mut DAG, colors: *mut colors) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        assert!(colors != ptr::null_mut());
+        assert!(colors_valid(colors));
+        let colors = {
+            let num_colors = (*colors).numcolors;
+            let colors: *mut order = (*colors).mycolors as *mut _;
+            slice::from_raw_parts_mut(colors, num_colors)
+        };
+        dag.snapshot_colors(colors);
     }
 
     #[no_mangle]

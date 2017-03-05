@@ -35,7 +35,7 @@ out/start: $(DELOS_RUST_LOC)/examples/c_linking/target/release/libc_link.a $(C_S
 rust_code: $(DELOS_RUST_LOC)/examples/c_linking/target/release/libc_link.a
 
 
-$(DELOS_RUST_LOC)/examples/c_linking/target/release/libc_link.a: $(DELOS_RUST_LOC)/src/*
+$(DELOS_RUST_LOC)/examples/c_linking/target/release/libc_link.a: $(shell find $(DELOS_RUST_LOC)/src/ -type f)
 	@echo "Building fuzzy log @ $(DELOS_RUST_LOC)/examples/c_linking/"
 	@{ cd $(DELOS_RUST_LOC)/examples/c_linking/ && cargo build --release; } || \
 	{ echo "\033[0;31mHave you set DELOS_RUST_LOC?\033[0m" && exit 1; }
