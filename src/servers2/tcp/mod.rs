@@ -271,9 +271,6 @@ pub fn run_with_replication(
     assert_eq!(upstream.len(), num_upstream);
     //let (log_to_dist, dist_from_log) = spmc::channel();
 
-    //FIXME
-    if !other_sockets.is_empty() { unimplemented!() }
-
     trace!("SERVER {} {} up, {} down.", this_server_num, num_upstream, num_downstream);
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
@@ -338,6 +335,24 @@ pub fn run_with_replication(
     let mut next_token = FIRST_CLIENT_TOKEN;
     //let mut buffer_cache = VecDeque::new();
     let mut next_worker = 0usize;
+
+    for (socket, addr) in other_sockets {
+        let tok = get_next_token(&mut next_token);
+        let worker = if is_unreplicated {
+            let worker = next_worker;
+            next_worker = next_worker.wrapping_add(1);
+            if next_worker >= dist_to_workers.len() {
+                next_worker = 0;
+            }
+            worker
+        } else {
+            worker_for_ip(addr.ip(), num_workers as u64)
+        };
+        dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
+        worker_for_client.insert(
+            Ipv4SocketAddr::from_socket_addr(addr), (worker, tok));
+    }
+
     trace!("SERVER start server loop");
     loop {
         let _ = poll.poll(&mut events, None);

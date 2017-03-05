@@ -30,6 +30,16 @@ typedef struct fuzzy_log_location {
 	LocationInColor entry;
 } fuzzy_log_location;
 
+typedef struct write_locations {
+	size_t num_locs;
+	fuzzy_log_location *locs;
+} write_locations;
+
+typedef struct write_id_and_locs {
+	write_id id;
+	write_locations locations;
+} write_id_and_locs;
+
 static write_id WRITE_ID_NIL = {.p1 = 0, .p2 = 0};
 
 //! Creates a new DAGHandle for a server group.
@@ -258,6 +268,25 @@ write_id try_wait_for_any_append(DAGHandle *handle);
 //!     The DAGHandle being worked through.
 //!
 void wait_for_a_specific_append(DAGHandle *handle, write_id id);
+
+//! Waits for an append with a specified id to be ACK'd,
+//! returning the location(s) to which it was appended.
+//!
+//! @return the write_locations of the write that completed,
+//!         note that field locs is malloc'd and should be free'd
+//!
+write_locations wait_for_a_specific_append_and_locations(DAGHandle *handle, write_id id);
+
+//! Checks if there are any ACK'd appends,
+//! and if so returns its write_id and the location(s) to which it was appended,
+//! or .write_id == WRITE_ID_NIL if the append has not yet finished.
+//!
+//! @return the write_locations of the write that completed,
+//!         or {.write_id = WRITE_ID_NIL, ...}
+//!         note that iff write_id is non nil
+//!         the field locs is malloc'd and should be free'd
+//!
+write_id_and_locs try_wait_for_any_append_and_location(DAGHandle *handle);
 
 //! If there is no unread updates attempts to take a snapshot of the interesting
 //! colors

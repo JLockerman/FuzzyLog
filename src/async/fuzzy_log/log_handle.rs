@@ -328,7 +328,15 @@ where V: Storeable {
         trace!("inhabits   {:?}", inhabits);
         trace!("depends_on {:?}", depends_on);
         inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
         depends_on.sort();
+        assert!(
+            depends_on.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
         let _no_snapshot = inhabits == depends_on || depends_on.len() == 0;
         // if we're performing a single colour append we might be able fuzzy_log.append
         // instead of multiappend
@@ -362,6 +370,10 @@ where V: Storeable {
         }
 
         inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
         let id = if inhabits.len() == 1 {
             self.async_append(inhabits[0].into(), data, deps)
         } else {
@@ -372,6 +384,41 @@ where V: Storeable {
             loc = self.wait_for_a_specific_append(id).map(|v| v[0]);
         }
         (id, loc)
+    }
+
+    pub fn causal_color_append(
+        &mut self,
+        data: &V,
+        inhabits: &mut [order],
+        depends_on: &mut [order],
+        happens_after: &mut [OrderIndex],
+    ) -> Uuid {
+        if inhabits.len() == 0 {
+            return Uuid::nil()
+        }
+
+        inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
+        depends_on.sort();
+        assert!(
+            depends_on.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
+        if depends_on.len() > 0 {
+            trace!("causal dependent append");
+            self.async_dependent_multiappend(&*inhabits, &*depends_on, data, happens_after)
+        }
+        else if inhabits.len() == 1 {
+            trace!("causal single append");
+            self.async_append(inhabits[0].into(), data, happens_after)
+        }
+        else {
+            trace!("causal multi append");
+            self.async_multiappend(&*inhabits, data, happens_after)
+        }
     }
 
     pub fn wait_for_all_appends(&mut self) {
@@ -471,6 +518,7 @@ where V: Storeable {
         id
     }
 
+    // A multiappend which does not induce a read dependency on the foreign chain
     pub fn no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
     -> Vec<OrderIndex> {
         //TODO no-alloc?
