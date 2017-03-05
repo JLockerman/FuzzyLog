@@ -293,6 +293,12 @@ write_id_and_locs try_wait_for_any_append_and_location(DAGHandle *handle);
 //  unread data
 void snapshot(DAGHandle *handle);
 
+//! Take a snapshot of the supplied colors
+//!
+//! @param colors the colors to be snapshotted
+//!
+void snapshot_colors(DAGHandle *handle, struct colors *colors);
+
 
 //! Closes and frees a DAGHandle
 void close_dag_handle(DAGHandle *handle);

@@ -283,6 +283,11 @@ where V: Storeable {
             .unwrap();
     }
 
+    pub fn snapshot_colors(&mut self, colors: &[order]) {
+        let colors = colors.to_vec();
+        self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
+    }
+
     pub fn take_snapshot(&mut self) {
         self.num_snapshots = self.num_snapshots.saturating_add(1);
         self.to_log.send(Message::FromClient(SnapshotAndPrefetch(0.into())))
