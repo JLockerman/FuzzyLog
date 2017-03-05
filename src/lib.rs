@@ -437,6 +437,19 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn snapshot_colors(dag: *mut DAG, colors: *mut colors) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        assert!(colors != ptr::null_mut());
+        assert!(colors_valid(colors));
+        let colors = {
+            let num_colors = (*colors).numcolors;
+            let colors: *mut order = (*colors).mycolors as *mut _;
+            slice::from_raw_parts_mut(colors, num_colors)
+        };
+        dag.snapshot_colors(colors);
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn close_dag_handle(dag: *mut DAG) {
         assert!(dag != ptr::null_mut());
         Box::from_raw(dag);

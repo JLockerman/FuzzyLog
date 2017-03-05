@@ -81,6 +81,7 @@ pub enum FromStore {
 pub enum FromClient {
     //TODO
     SnapshotAndPrefetch(order),
+    MultiSnapshotAndPrefetch(Vec<order>),
     PerformAppend(Vec<u8>),
     ReturnBuffer(Vec<u8>),
     Shutdown,
@@ -174,6 +175,13 @@ impl ThreadLog {
                 }
                 true
             }
+            MultiSnapshotAndPrefetch(chains) => {
+                for chain in chains {
+                    self.fetch_snapshot(chain);
+                    self.prefetch(chain);
+                }
+                true
+            },
             PerformAppend(msg) => {
                 self.print_data.append(1);
                 {
