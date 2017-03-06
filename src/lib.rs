@@ -380,7 +380,7 @@ pub mod c_binidings {
                     let mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
                     let s = slice::from_raw_parts_mut(mycolors, numcolors);
                     for i in 0..numcolors {
-                        let e: entry = inhabited_colors[i].1;
+                        let e: order = inhabited_colors[i].0;
                         s[i] = e.into();
                     }
                     //ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
