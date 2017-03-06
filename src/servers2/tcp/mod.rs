@@ -280,7 +280,7 @@ pub fn run_with_replication(
         let to_dist   = workers_to_dist.clone();
         //let from_log  = recv_from_log.clone();
         let to_log = workers_to_log.clone();
-        let (to_worker, from_log) = spsc::channel();
+        let (to_worker, from_log) = mio::channel::channel();
         let (dist_to_worker, from_dist) = spsc::channel();
         let upstream = upstream.pop();
         let downstream = downstream.pop();

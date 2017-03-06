@@ -47,7 +47,7 @@ struct WorkerInner {
     awake_io: VecDeque<mio::Token>,
     from_dist: spsc::Receiver<DistToWorker>,
     to_dist: mio::channel::Sender<WorkerToDist>,
-    from_log: spsc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+    from_log: mio::channel::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
     to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
     ip_to_worker: HashMap<Ipv4SocketAddr, (WorkerNum, mio::Token)>,
     worker_num: WorkerNum,
@@ -96,7 +96,7 @@ impl Worker {
     pub fn new(
         from_dist: spsc::Receiver<DistToWorker>,
         to_dist: mio::channel::Sender<WorkerToDist>,
-        from_log: spsc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+        from_log: mio::channel::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
         to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
         upstream: Option<TcpStream>,
         downstream: Option<TcpStream>,
@@ -336,7 +336,7 @@ impl Worker {
     //#[inline(always)]
     fn handle_from_log(&mut self) -> bool {
         //if self.inner.waiting_for_log == 0 { return false }
-        if let Some(log_work) = self.inner.from_log.try_recv() {
+        if let Ok(log_work) = self.inner.from_log.try_recv() {
             //self.inner.waiting_for_log -= 1;
             self.inner.print_data.from_log(1);
             let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
@@ -603,10 +603,10 @@ impl WorkerInner {
 }
 
 impl DistributeToWorkers<(usize, mio::Token, Ipv4SocketAddr)>
-for Vec<spsc::Sender<ToWorker<(usize, mio::Token, Ipv4SocketAddr)>>> {
+for Vec<mio::channel::Sender<ToWorker<(usize, mio::Token, Ipv4SocketAddr)>>> {
     fn send_to_worker(&mut self, msg: ToWorker<(usize, mio::Token, Ipv4SocketAddr)>) {
         let (which_queue, token, _) = msg.get_associated_data();
         trace!("SERVER   sending to worker {} {:?} ", which_queue, token);
-        self[which_queue].send(msg)
+        let _ = self[which_queue].send(msg);
     }
 }
