@@ -19,6 +19,7 @@ pub mod udp;
 pub mod spmc;
 pub mod spsc;
 
+mod skeens;
 //TODO remove `pub`, it only exists for testing purposes
 pub mod trie;
 pub mod byte_trie;
@@ -49,19 +50,32 @@ pub type BufferSlice = Buffer;
 
 pub enum ToWorker<T: Send + Sync> {
     Write(BufferSlice, AppendSlot<Entry<()>>, T),
+
+    //TODO shrink?
     MultiReplica {
         buffer: BufferSlice,
-        //multi_storage: *mut u8,
-        //senti_storage: *mut u8,
         multi_storage: *mut u8,
         senti_storage: *mut u8,
         t: T,
         num_places: usize,
     },
+
+    Skeens1 {
+        buffer: BufferSlice,
+        storage: *const (Box<[u8]>, Box<[u8]>),
+        t: T,
+    },
+
+    SkeensFinished {
+        storage: *const (Box<[u8]>, Box<[u8]>),
+        t: T,
+    },
+
     //FIXME we don't have a good way to make pointers send...
     Read(&'static Entry<()>, BufferSlice, T),
     EmptyRead(entry, BufferSlice, T),
     Reply(BufferSlice, T),
+    ReturnBuffer(BufferSlice)
 }
 
 #[derive(Debug)]
@@ -70,6 +84,11 @@ pub enum WhichMulti {
     Senti,
     Both,
 }
+
+//enum PendingAppend {
+//    Single(*const u8, T),
+//    Multi(*const (Box<[u8]>, Box<[u8]>), t),
+//}
 
 impl<T> ToWorker<T>
 where T: Send + Sync {
@@ -80,7 +99,10 @@ where T: Send + Sync {
         match self {
             &mut Write(_, _, ref mut t) | &mut Read(_, _, ref mut t)
             | &mut EmptyRead(_, _, ref mut t) | &mut Reply(_, ref mut t)
-            | &mut MultiReplica{ref mut t, ..} => f(t),
+            | &mut MultiReplica{ref mut t, ..}
+            | &mut Skeens1{ref mut t, ..} | &mut SkeensFinished{ref mut t, ..}
+            => f(t),
+            &mut ReturnBuffer(..) => (),
         }
     }
 }
@@ -91,6 +113,8 @@ where T: Copy + Send + Sync {
         match self {
             &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
             &MultiReplica{t, ..} => t,
+            &Skeens1{t, ..} | &SkeensFinished{t, ..} => t,
+            &ReturnBuffer(..) => unimplemented!(), //FIXME
         }
     }
 }
@@ -106,7 +130,7 @@ pub enum ToReplicate {
     UnLock(BufferSlice),
 }
 
-impl<T: Send + Sync, ToWorkers> ServerLog<T, ToWorkers>
+impl<T: Send + Sync + Copy, ToWorkers> ServerLog<T, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
 
     fn new(this_server_num: u32, total_servers: u32, to_workers: ToWorkers)
@@ -182,6 +206,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 let this_server_num = self.this_server_num;
                 let slot = {
                     let log = self.ensure_chain(chain);
+                    log.check_skeens_single();
                     if log.is_locked() {
                         trace!("SERVER append during lock {:?} @ {:?}",
                             log.lock_pair(), chain,
@@ -242,11 +267,86 @@ where ToWorkers: DistributeToWorkers<T> {
     fn handle_new_multiappend(
         &mut self,
         kind: EntryKind::Kind,
-        buffer: BufferSlice,
+        mut buffer: BufferSlice,
         storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>,
         t: T
     ) {
-        unimplemented!()
+        trace!("SERVER {:?} new-style multiput {:?}", self.this_server_num, kind);
+        assert!(kind.contains(EntryKind::TakeLock));
+        if kind.contains(EntryKind::Unlock) {
+            self.new_multiappend_round2(kind, &mut buffer, t);
+            self.to_workers.send_to_worker(ReturnBuffer(buffer))
+        } else {
+            let storage = Box::into_raw(storage.unwrap());
+            self.new_multiappend_round1(kind, &mut buffer, storage, t);
+            self.to_workers.send_to_worker(
+                Skeens1 { buffer: buffer, storage: storage, t: t }
+            );
+        }
+    }
+
+    fn new_multiappend_round1(
+        &mut self,
+        kind: EntryKind::Kind,
+        buffer: &mut BufferSlice,
+        storage: *const (Box<[u8]>, Box<[u8]>),
+        t: T
+    ) {
+        trace!("SERVER {:?} new-style multiput Round 1 {:?}", self.this_server_num, kind);
+        let val = buffer.entry_mut();
+        let locs = val.locs_mut();
+        for i in 0..locs.len() {
+            if locs[i] == OrderIndex(0.into(), 0.into()) {
+                continue
+            }
+
+            let chain = locs[i].0;
+            if self.stores_chain(chain) {
+                let chain = self.ensure_chain(chain);
+                let local_timestamp = chain.timestamp_for_multi(storage, t);
+                let local_timestamp = entry::from(local_timestamp as u32);
+                locs[i].1 = local_timestamp;
+            } else {
+                locs[i].1 = entry::from(0);
+            }
+        }
+    }
+
+    fn new_multiappend_round2(
+        &mut self,
+        kind: EntryKind::Kind,
+        buffer: &mut BufferSlice,
+        t: T
+    ) {
+        trace!("SERVER {:?} new-style multiput Round 2 {:?}", self.this_server_num, kind);
+        // In round two we flush some the queues... an possibly a partial entry...
+        let val = buffer.entry_mut();
+        let max_timestamp = val.lock_num();
+        let locs = val.locs_mut();
+        let mut is_sentinel = false;
+        for i in 0..locs.len() {
+            if locs[i] == OrderIndex(0.into(), 0.into()) {
+                is_sentinel = true;
+                continue
+            }
+
+            let chain = locs[i].0;
+            if self.stores_chain(chain) {
+                //let chain = self.ensure_chain(chain);
+                let chain = self.log.entry(chain).or_insert_with(|| {
+                    let mut t = Trie::new();
+                    t.append(&EntryContents::Data(&(), &[]).clone_entry());
+                    t
+                });
+                let to_workers = &mut self.to_workers;
+                chain.finish_multi(max_timestamp, |storage, t|
+                    to_workers.send_to_worker(
+                        SkeensFinished {storage: storage, t: t}
+                ));
+            } else {
+                locs[i].1 = entry::from(0);
+            }
+        }
     }
 
     //////////////////////
@@ -258,6 +358,7 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>,
         t: T
     ) {
+        trace!("SERVER {:?} old-style multiput {:?}", self.this_server_num, kind);
         if kind.contains(EntryKind::Unlock) {
             {
                 let mut all_unlocked = true;
@@ -735,6 +836,10 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             //TODO is re right for sentinel only writes?
             (buffer, ret, t, 0)
         },
+
+        Skeens1{..} => unimplemented!(),
+        SkeensFinished{..} => unimplemented!(),
+        ReturnBuffer(..) => unimplemented!(),
     }
 }
 
