@@ -33,7 +33,17 @@ where ToWorkers: DistributeToWorkers<T> {
     //_seen_ids: HashSet<Uuid>,
     to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
     _pd: PhantomData<T>,
+
+    print_data: LogData,
 }
+
+counters! {
+    struct LogData {
+        msgs_recvd: u64,
+        msgs_sent: u64,
+    }
+}
+
 
 pub trait DistributeToWorkers<T: Send + Sync> {
     fn send_to_worker(&mut self, msg: ToWorker<T>);
@@ -146,15 +156,21 @@ where ToWorkers: DistributeToWorkers<T> {
             this_server_num: this_server_num,
             total_servers: total_servers,
             to_workers: to_workers,
-            _pd: PhantomData
+            _pd: PhantomData,
+            print_data: Default::default(),
         }
     }
 
+    #[cfg(feature = "print_stats")]
+    fn print_stats(&self) {
+        println!("{:?}, {:?}", self.print_data, self.this_server_num);
+    }
 
     //FIXME pass buffer-slice so we can read batches
     //FIXME we don't want the log thread free'ing, return storage on lock failure?
     //TODO replace T with U and T: ReturnAs<U> so we don't have to send as much data
     fn handle_op(&mut self, mut buffer: BufferSlice, storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>, t: T) {
+        self.print_data.msgs_recvd(1);
         let kind = buffer.entry().kind;
         match kind.layout() {
             EntryLayout::Multiput | EntryLayout::Sentinel =>
@@ -172,21 +188,28 @@ where ToWorkers: DistributeToWorkers<T> {
                         trace!("SERVER {:?} Read Vacant chain {:?}",
                             self.this_server_num, chain);
                         match buffer.entry().kind {
-                            EntryKind::Read => self.to_workers.send_to_worker(
-                                EmptyRead(entry::from(0), buffer, t)),
+                            EntryKind::Read => {
+                                self.print_data.msgs_sent(1);
+                                self.to_workers.send_to_worker(
+                                    EmptyRead(entry::from(0), buffer, t))
+                            },
                             _ => trace!("SERVER {:?} nop {:?}",
                                 self.this_server_num, buffer.entry().kind)
                         }
                     }
                     Some(log) => match log.get(u32::from(index) as u64) {
-                        None => self.to_workers.send_to_worker(
+                        None => {
+                            self.print_data.msgs_sent(1);
+                            self.to_workers.send_to_worker(
                             //FIXME needs 64 entries
-                            EmptyRead(entry::from((log.len() - 1) as u32), buffer, t)),
+                                EmptyRead(entry::from((log.len() - 1) as u32), buffer, t))
+                        },
                         Some(packet) => {
                             trace!("SERVER {:?} Read Occupied entry {:?} {:?}",
                                 self.this_server_num, (chain, index), packet.id);
                             //FIXME
                             let packet = unsafe { extend_lifetime(packet) };
+                            self.print_data.msgs_sent(1);
                             self.to_workers.send_to_worker(Read(packet, buffer, t))
                         }
                     },
@@ -229,8 +252,14 @@ where ToWorkers: DistributeToWorkers<T> {
                     }
                 };
                 match slot {
-                    Some(slot) => self.to_workers.send_to_worker(Write(buffer, slot, t)),
-                    None => self.to_workers.send_to_worker(Reply(buffer, t)),
+                    Some(slot) => {
+                        self.print_data.msgs_sent(1);
+                        self.to_workers.send_to_worker(Write(buffer, slot, t))
+                    },
+                    None => {
+                        self.print_data.msgs_sent(1);
+                        self.to_workers.send_to_worker(Reply(buffer, t))
+                    },
                 }
 
             }
@@ -275,10 +304,12 @@ where ToWorkers: DistributeToWorkers<T> {
         assert!(kind.contains(EntryKind::TakeLock));
         if kind.contains(EntryKind::Unlock) {
             self.new_multiappend_round2(kind, &mut buffer, t);
+            self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(ReturnBuffer(buffer))
         } else {
             let storage = Box::into_raw(storage.unwrap());
             self.new_multiappend_round1(kind, &mut buffer, storage, t);
+            self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(
                 Skeens1 { buffer: buffer, storage: storage, t: t }
             );
@@ -339,10 +370,13 @@ where ToWorkers: DistributeToWorkers<T> {
                     t
                 });
                 let to_workers = &mut self.to_workers;
-                chain.finish_multi(max_timestamp, |storage, t|
+                let print_data = &mut self.print_data;
+                chain.finish_multi(max_timestamp, |storage, t| {
+                    print_data.msgs_sent(1);
                     to_workers.send_to_worker(
                         SkeensFinished {storage: storage, t: t}
-                ));
+                    )
+                });
             } else {
                 locs[i].1 = entry::from(0);
             }
@@ -386,6 +420,8 @@ where ToWorkers: DistributeToWorkers<T> {
                     trace!("SERVER {} failed unlock {:?}", self.this_server_num, val.locs());
                 }
             };
+
+            self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(Reply(buffer, t));
             return
         }
@@ -488,6 +524,7 @@ where ToWorkers: DistributeToWorkers<T> {
             lock_failed
         };
         if lock_failed {
+            self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(Reply(buffer, t));
             return
         }
@@ -553,6 +590,7 @@ where ToWorkers: DistributeToWorkers<T> {
             }
         }
 
+        self.print_data.msgs_sent(1);
         self.to_workers.send_to_worker(
             MultiReplica {
                 buffer: buffer,
@@ -611,6 +649,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     }
                 };
 
+                self.print_data.msgs_sent(1);
                 self.to_workers.send_to_worker(Write(buffer, slot, t))
             },
 
@@ -698,6 +737,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     }
                 }
 
+                self.print_data.msgs_sent(1);
                 self.to_workers.send_to_worker(
                     MultiReplica {
                         buffer: buffer,
