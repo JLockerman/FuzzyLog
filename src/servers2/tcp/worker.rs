@@ -198,14 +198,20 @@ impl Worker {
                         }
                     }
                 }
-                if timeout_idx + 1 < TIMEOUTS.len() {
-                    timeout_idx += 1
-                }
                 for (&t, _) in self.clients.iter() {
                     self.inner.awake_io.push_back(t)
                 }
                 self.handle_from_log();
-                //TODO add call to handle_from_dist()
+                if !self.inner.awake_io.is_empty() {
+                    if timeout_idx + 1 < TIMEOUTS.len() {
+                        timeout_idx += 1
+                    }
+                } else {
+                    if timeout_idx > 0 {
+                       timeout_idx -= 1
+                    }
+                }
+                //FIXME add call to handle_from_dist()
             } else {
                 if timeout_idx > 0 {
                     timeout_idx -= 1
