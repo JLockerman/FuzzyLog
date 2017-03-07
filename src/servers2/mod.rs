@@ -670,12 +670,14 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
         },
 
         MultiWrite(buffer, slot, marker) => {
+            unreachable!();
             trace!("WORKER {} finish multi part", worker_num);
             let ret = unsafe { extend_lifetime(slot.finish_append(buffer.entry()).bytes()) };
             return_if_last(buffer, marker, worker_num).map(|(b, t, l)| (b, ret, t, l))
         },
 
         SentinelWrite(buffer, slot, marker) => {
+            unreachable!();
             trace!("WORKER finish sentinel part");
             let ret = {
                 let e = buffer.entry();
