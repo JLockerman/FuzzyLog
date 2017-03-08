@@ -198,14 +198,20 @@ impl Worker {
                         }
                     }
                 }
-                if timeout_idx + 1 < TIMEOUTS.len() {
-                    timeout_idx += 1
-                }
                 for (&t, _) in self.clients.iter() {
                     self.inner.awake_io.push_back(t)
                 }
                 self.handle_from_log();
-                //TODO add call to handle_from_dist()
+                if !self.inner.awake_io.is_empty() {
+                    if timeout_idx + 1 < TIMEOUTS.len() {
+                        timeout_idx += 1
+                    }
+                } else {
+                    if timeout_idx > 0 {
+                       timeout_idx -= 1
+                    }
+                }
+                //FIXME add call to handle_from_dist()
             } else {
                 if timeout_idx > 0 {
                     timeout_idx -= 1
@@ -334,10 +340,9 @@ impl Worker {
     }// end handle_new_events
 
     //#[inline(always)]
-    fn handle_from_log(&mut self) -> bool {
+    fn handle_from_log(&mut self) {
         //if self.inner.waiting_for_log == 0 { return false }
-        //TODO should be while let?
-        if let Some(log_work) = self.inner.from_log.try_recv() {
+        while let Some(log_work) = self.inner.from_log.try_recv() {
             //self.inner.waiting_for_log -= 1;
             self.inner.print_data.from_log(1);
             let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
@@ -354,7 +359,7 @@ impl Worker {
                     self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
                     self.clients.get_mut(&token).unwrap().return_buffer(buffer);
                     self.inner.awake_io.push_back(token);
-                    return true
+                    return
                 }
                 Some((ref worker, ref tok))
                 if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
@@ -362,7 +367,7 @@ impl Worker {
                     self.clients.get_mut(&token).unwrap().return_buffer(buffer);
                     self.inner.awake_io.push_back(token);
                     self.inner.awake_io.push_back(*tok);
-                    return true
+                    return
                 }
                 Some((worker, tok)) => {
                     (worker, tok)
@@ -374,7 +379,7 @@ impl Worker {
                 self.clients.get_mut(&token).unwrap().return_buffer(buffer);
                 self.inner.awake_io.push_back(token);
                 self.inner.awake_io.push_back(tok);
-                return true
+                return
             }
 
             if tok == DOWNSTREAM {
@@ -400,10 +405,6 @@ impl Worker {
                 self.inner.awake_io.push_back(token);
                 self.inner.awake_io.push_back(tok);
             }
-            true
-        }
-        else {
-            false
         }
     }// end handle_from_log
 }

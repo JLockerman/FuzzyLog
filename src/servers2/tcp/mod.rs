@@ -329,12 +329,23 @@ pub fn run_with_replication(
 
     thread::spawn(move || {
         let mut log = ServerLog::new(this_server_num, total_chain_servers, log_to_workers);
+        #[cfg(not(feature = "print_stats"))]
         for to_log in recv_from_workers.iter() {
             match to_log {
                 ToLog::New(buffer, storage, st) => log.handle_op(buffer, storage, st),
                 ToLog::Replication(tr, st) => log.handle_replication(tr, st),
             }
-
+        }
+        #[cfg(feature = "print_stats")]
+        loop {
+            use std::sync::mpsc::RecvTimeoutError;
+            let msg = recv_from_workers.recv_timeout(Duration::from_secs(10));
+            match msg {
+                Ok(ToLog::New(buffer, storage, st)) => log.handle_op(buffer, storage, st),
+                Ok(ToLog::Replication(tr, st)) => log.handle_replication(tr, st),
+                Err(RecvTimeoutError::Timeout) => log.print_stats(),
+                Err(RecvTimeoutError::Disconnected) => panic!("log disconnected"),
+            }
         }
     });
 
