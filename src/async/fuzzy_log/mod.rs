@@ -340,11 +340,11 @@ impl ThreadLog {
             });
             if self.finshed_reading() {
                 trace!("FUZZY finished reading all chains");
-                //FIXME add is_snapshoting to PerColor so this doesn't race?
-                trace!("FUZZY finished reading");
                 //TODO do we need a better system?
                 let num_completeds = mem::replace(&mut self.num_snapshots, 0);
                 //assert!(num_completeds > 0);
+                //FIXME add is_snapshoting to PerColor so this doesn't race?
+                trace!("FUZZY finished reading {:?} snaps", num_completeds);
                 for _ in 0..num_completeds {
                     let _ = self.ready_reads.send(vec![]);
                 }

@@ -284,11 +284,13 @@ where V: Storeable {
     }
 
     pub fn snapshot_colors(&mut self, colors: &[order]) {
+        trace!("HANDLE send snap {:?}.", colors);
         let colors = colors.to_vec();
         self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
     }
 
     pub fn take_snapshot(&mut self) {
+        trace!("HANDLE send all snap.");
         self.num_snapshots = self.num_snapshots.saturating_add(1);
         self.to_log.send(Message::FromClient(SnapshotAndPrefetch(0.into())))
             .unwrap();
@@ -297,6 +299,7 @@ where V: Storeable {
     //TODO return two/three slices?
     pub fn get_next(&mut self) -> Option<(&V, &[OrderIndex])> {
         if self.num_snapshots == 0 {
+            trace!("HANDLE read with no snap.");
             return None
         }
 
@@ -310,12 +313,16 @@ where V: Storeable {
                 break 'recv
             }
 
+            trace!("HANDLE finished snap.");
+            assert!(self.num_snapshots > 0);
             self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
             if self.num_snapshots == 0 {
+                trace!("HANDLE finished all snaps.");
                 return None
             }
         }
 
+        trace!("HANDLE got val.");
         let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
         Some((val, locs))
     }
