@@ -193,9 +193,42 @@ fuzzy_log_location no_remote_append(DAGHandle *handle, char *data,
 //!
 //! @return An id which uniquely identifies the write.
 //!
-fuzzy_log_location async_no_remote_append(DAGHandle *handle, char *data,
+write_id async_no_remote_append(DAGHandle *handle, char *data,
 	size_t data_size, struct colors* inhabits, fuzzy_log_location *deps,
 	size_t num_deps);
+
+
+//! An async append which allows for happens-after edges.
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param data
+//!     The data contained within the node.
+//!
+//! @param data_size
+//!     The size, in bytes, of data.
+//!
+//! @param inhabits
+//!     The colors which the new node shall be colored with. Must be non-empty.
+//!
+//! @param depends_on
+//!     The colors which the new node should happen-after. May be empty.
+//!
+//! @param happens_after
+//!     Specific entries in the log which this append must happen after.
+//!
+//! @param num_happens_after
+//!		The number of entries this happens after.
+//!
+//! @return An id which uniquely identifies the write.
+//!
+write_id async_causal_append(
+	DAGHandle *handle,
+	char *data, size_t data_size,
+	struct colors* inhabits,
+	struct colors* depends_on,
+	fuzzy_log_location *happens_after, size_t num_happens_after);
 
 //! Reads a valid next node from the new nodes discovered with the latests
 //! snapshot. If there are no such nodes (i.e. all new nodes have been read)
