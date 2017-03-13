@@ -248,7 +248,7 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub extern "C" fn causal_append(
+    pub extern "C" fn async_causal_append(
         dag: *mut DAG,
         data: *const u8,
         data_size: usize,
