@@ -430,6 +430,29 @@ pub mod c_binidings {
         }
     }
 
+    #[repr(C)]
+    pub struct Vals {
+        data: *const u8,
+        locs: *const OrderIndex,
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn get_next2(
+        dag: *mut DAG,
+        data_read: *mut usize,
+        num_locs: *mut usize,
+    ) -> Vals {
+        assert!(data_read != ptr::null_mut());
+        let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
+        let val = dag.get_next();
+        let (data, locs) = val.unwrap_or((&[], &[]));
+
+        ptr::write(data_read, data.len());
+        ptr::write(num_locs, locs.len());
+
+        Vals { data: data.as_ptr(), locs: locs.as_ptr() }
+    }
+
     #[no_mangle]
     pub extern "C" fn snapshot(dag: *mut DAG) {
         let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
