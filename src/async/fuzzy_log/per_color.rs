@@ -21,6 +21,7 @@ pub struct PerColor {
     last_read_sent_to_server: entry,
     //TODO is this necessary first_buffered: entry,
     last_returned_to_client: entry,
+    last_gotten_from_server: entry,
     blocked_on_new_snapshot: Option<Vec<u8>>,
     //TODO this is where is might be nice to have a more structured id format
     found_but_unused_multiappends: HashMap<Uuid, entry>,
@@ -66,6 +67,7 @@ impl PerColor {
             last_read_sent_to_server: 0.into(),
             //outstanding_reads: 0,
             last_returned_to_client: 0.into(),
+            last_gotten_from_server: 0.into(),
             blocked_on_new_snapshot: None,
             found_but_unused_multiappends: Default::default(),
             is_being_read: None,
@@ -105,11 +107,14 @@ impl PerColor {
     pub fn overread_at(&mut self, index: entry) {
         // The conditional is needed because sends we sent before reseting
         // last_read_sent_to_server race future calls to this function
+        trace!("FUZZY overread {:?}, {:?} >= {:?} && > {:?}",
+            self.chain, self.last_read_sent_to_server, index, self.last_returned_to_client);
         if self.last_read_sent_to_server >= index
             && self.last_read_sent_to_server > self.last_returned_to_client {
             trace!("FUZZY resetting read loc for {:?} from {:?} to {:?}",
                 self.chain, self.last_read_sent_to_server, index - 1);
-            self.last_read_sent_to_server = index - 1;
+            //self.last_read_sent_to_server = index - 1;
+            self.last_read_sent_to_server = self.last_gotten_from_server;
         }
     }
 
@@ -200,6 +205,14 @@ impl PerColor {
         });
         if let Some(true) = finished {
             self.is_being_read = None
+        }
+    }
+
+    #[inline(always)]
+    pub fn got_read(&mut self, index: entry) {
+        self.decrement_outstanding_reads();
+        if index == self.last_gotten_from_server + 1 {
+            self.last_gotten_from_server = index
         }
     }
 
