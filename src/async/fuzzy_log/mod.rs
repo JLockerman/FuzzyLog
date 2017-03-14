@@ -285,7 +285,8 @@ impl ThreadLog {
                 //TODO check that read is needed?
                 //TODO no-alloc?
                 self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.decrement_outstanding_reads());
+                    s.got_read(read_loc.1));
+                    //s.decrement_outstanding_reads());
                 let packet = Rc::new(msg);
                 self.add_blockers_at(read_loc, &packet);
                 self.try_returning_at(read_loc, packet);
@@ -293,7 +294,8 @@ impl ThreadLog {
             EntryLayout::Multiput if kind.contains(EntryKind::NoRemote) => {
                 trace!("FUZZY read is atom");
                 self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.decrement_outstanding_reads());
+                    s.got_read(read_loc.1));
+                    //s.decrement_outstanding_reads());
                 let packet = Rc::new(msg);
                 self.add_blockers_at(read_loc, &packet);
                 self.try_returning_at(read_loc, packet);
@@ -302,7 +304,8 @@ impl ThreadLog {
                 trace!("FUZZY read is multi");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
                 self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.decrement_outstanding_reads());
+                    s.got_read(read_loc.1));
+                    //s.decrement_outstanding_reads());
                 let is_sentinel = layout == EntryLayout::Sentinel;
                 let search_status = self.update_multi_part_read(read_loc, msg, is_sentinel);
                 match search_status {
@@ -702,6 +705,7 @@ impl ThreadLog {
                 (1, pc.increment_horizon())
             }
             else {
+                trace!("FUZZY {:?} needs no more reads", chain);
                 (0, None)
             }
         };
