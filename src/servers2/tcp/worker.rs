@@ -357,14 +357,14 @@ impl Worker {
             let (worker, tok) = match worker_tok {
                 None => {
                     self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
-                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                     self.inner.awake_io.push_back(token);
                     return
                 }
                 Some((ref worker, ref tok))
                 if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
                     self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
-                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                     self.inner.awake_io.push_back(token);
                     self.inner.awake_io.push_back(*tok);
                     return
@@ -376,7 +376,7 @@ impl Worker {
             if worker != self.inner.worker_num {
                 assert_eq!(tok, DOWNSTREAM);
                 self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
-                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                 self.inner.awake_io.push_back(token);
                 self.inner.awake_io.push_back(tok);
                 return
@@ -393,15 +393,17 @@ impl Worker {
                     client.add_downstream_send3(
                             bytes, src_addr.bytes(), &storage_log_bytes);
                 }
-                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                 self.inner.awake_io.push_back(token);
                 self.inner.awake_io.push_back(tok);
             }
             else {
                 //self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
-                self.clients.get_mut(&tok).unwrap()
-                    .add_downstream_send(buffer.entry_slice());
-                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                buffer.map(|b| {
+                    self.clients.get_mut(&tok).unwrap()
+                        .add_downstream_send(b.entry_slice());
+                    self.clients.get_mut(&token).unwrap().return_buffer(b)
+                });
                 self.inner.awake_io.push_back(token);
                 self.inner.awake_io.push_back(tok);
             }

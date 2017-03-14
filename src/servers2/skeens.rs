@@ -10,6 +10,8 @@ use linked_hash_map::LinkedHashMap;
 
 use hash::HashMap;
 
+use super::SkeensMultiStorage;
+
 #[derive(Debug)]
 pub struct SkeensState<T: Copy> {
     waiting_for_max_timestamp: LinkedHashMap<Uuid, WaitingForMax<T>>,
@@ -19,14 +21,16 @@ pub struct SkeensState<T: Copy> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum SkeensAppendRes {
+#[must_use]
+pub enum SkeensAppendRes {
     OldPhase1(u64),
     Phase2(u64),
     NewAppend(u64),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum SkeensSetMaxRes {
+#[must_use]
+pub enum SkeensSetMaxRes {
     NeedsFlush,
     Ok,
     Duplicate(u64),
@@ -75,12 +79,11 @@ impl<T: Copy> SkeensState<T> {
                 SkeensAppendRes::NewAppend(timestamp)
             },
         }
-
     }
 
     //AKA skeens1
     pub fn add_multi_append(
-        &mut self, id: Uuid, storage: *const (Box<[u8]>, Box<[u8]>), t: T
+        &mut self, id: Uuid, storage: SkeensMultiStorage, t: T
     ) -> SkeensAppendRes {
         use linked_hash_map::Entry::*;
 
@@ -190,10 +193,10 @@ impl<T: Copy> SkeensState<T> {
 
 #[derive(Debug)]
 enum WaitingForMax<T> {
-    GotMaxMulti{timestamp: u64, storage: *const (Box<[u8]>, Box<[u8]>), t: T},
+    GotMaxMulti{timestamp: u64, storage: SkeensMultiStorage, t: T},
     SimpleSingle{timestamp: u64, storage: *const u8, t: T},
     Single{multi_timestamp: u64, single_num: u64, storage: *const u8, t: T},
-    Multi{timestamp: u64, storage: *const (Box<[u8]>, Box<[u8]>), t: T},
+    Multi{timestamp: u64, storage: SkeensMultiStorage, t: T},
 }
 
 enum Timestamp {
@@ -211,9 +214,9 @@ impl<T: Copy> WaitingForMax<T> {
 
             &mut Single{multi_timestamp, ..} => return Err(multi_timestamp),
 
-            &mut Multi{timestamp, storage, t} => {
+            &mut Multi{timestamp, ref storage, t} => {
                 assert!(max_timestamp >= timestamp);
-                GotMaxMulti{timestamp: max_timestamp, storage: storage, t: t}
+                GotMaxMulti{timestamp: max_timestamp, storage: storage.clone(), t: t}
             },
         };
         Ok(())
@@ -257,7 +260,7 @@ impl<T: Copy> WaitingForMax<T> {
 
 #[derive(Debug)]
 pub enum GotMax<T> {
-    Multi{timestamp: u64, storage: *const (Box<[u8]>, Box<[u8]>), t: T, id: Uuid},
+    Multi{timestamp: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
     SimpleSingle{timestamp: u64, storage: *const u8, t: T},
     Single{multi_timestamp: u64, single_num: u64, storage: *const u8, t: T},
 }
@@ -379,9 +382,10 @@ impl<T> PartialEq for GotMax<T> {
     fn eq(&self, other: &Self) -> bool {
         use self::GotMax::*;
         match (self, other) {
-            (&Multi{timestamp: my_ts, id: ref my_id, storage: my_s, ..},
-                &Multi{timestamp: other_ts, id: ref other_id, storage: other_s, ..})
-            => my_ts == other_ts && my_id == other_id && my_s == other_s,
+            (&Multi{timestamp: my_ts, id: ref my_id, storage: ref my_s, ..},
+                &Multi{timestamp: other_ts, id: ref other_id, storage: ref other_s, ..})
+            => my_ts == other_ts && my_id == other_id
+                && &**my_s as *const _ == &**other_s as *const _,
 
             (&SimpleSingle{timestamp: my_ts, storage: my_s, ..},
                 &SimpleSingle{timestamp: other_ts, storage: other_s, ..})

@@ -66,7 +66,9 @@ impl MioHandler for Server {
                         for _ in 0..to_pop {
                             let wrk = self.from_log.borrow_mut().pop_front().unwrap();
                             let (buffer, ..) = servers2::handle_to_worker(wrk, 0);
-                            mem::replace(&mut self.buffer, buffer);
+                            if let Some(buffer) = buffer {
+                                mem::replace(&mut self.buffer, buffer);
+                            }
                             self.write_packet(&addr);
                             trace!("SERVER finished write to {:?}", addr);
                         }

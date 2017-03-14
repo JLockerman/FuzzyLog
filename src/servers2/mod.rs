@@ -1,5 +1,7 @@
 //use std::collections::HashSet;
+use std::cell::UnsafeCell;
 use std::{mem, ptr, slice};
+use std::rc::Rc;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
@@ -7,6 +9,7 @@ use std::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 use prelude::*;
 use buffer::Buffer;
 
+use servers2::skeens::{SkeensState, SkeensAppendRes, SkeensSetMaxRes, GotMax};
 use servers2::trie::{AppendSlot, Trie};
 
 use hash::HashMap;
@@ -24,9 +27,9 @@ mod skeens;
 pub mod trie;
 pub mod byte_trie;
 
-struct ServerLog<T: Send + Sync, ToWorkers>
+struct ServerLog<T: Send + Sync + Copy, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
-    log: HashMap<order, Trie<Entry<()>>>,
+    log: HashMap<order, Chain<T>>,
     //TODO per chain locks...
     total_servers: u32,
     this_server_num: u32,
@@ -44,6 +47,20 @@ counters! {
     }
 }
 
+struct Chain<T: Copy> {
+    trie: Trie<Entry<()>>,
+    skeens: SkeensState<T>,
+}
+
+
+impl<T: Copy> Chain<T> {
+    fn new() -> Self {
+        Chain {
+            trie: Trie::new(),
+            skeens: SkeensState::new(),
+        }
+    }
+}
 
 pub trait DistributeToWorkers<T: Send + Sync> {
     fn send_to_worker(&mut self, msg: ToWorker<T>);
@@ -72,12 +89,28 @@ pub enum ToWorker<T: Send + Sync> {
 
     Skeens1 {
         buffer: BufferSlice,
-        storage: *const (Box<[u8]>, Box<[u8]>),
+        storage: SkeensMultiStorage,
         t: T,
     },
 
     SkeensFinished {
-        storage: *const (Box<[u8]>, Box<[u8]>),
+        index: u64,
+        trie_slot: *mut *const u8,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
+    SingleSkeens {
+        buffer: BufferSlice,
+        storage: *mut u8,
+        storage_loc: u64,
+        t: T,
+    },
+
+    DelayedSingle {
+        index: u64,
+        trie_slot: *mut *const u8,
+        storage: *const u8,
         t: T,
     },
 
@@ -87,6 +120,8 @@ pub enum ToWorker<T: Send + Sync> {
     Reply(BufferSlice, T),
     ReturnBuffer(BufferSlice)
 }
+
+type SkeensMultiStorage = Rc<UnsafeCell<(Box<[u64]>, Box<[u8]>, Box<[u8]>)>>;
 
 #[derive(Debug)]
 pub enum WhichMulti {
@@ -111,6 +146,7 @@ where T: Send + Sync {
             | &mut EmptyRead(_, _, ref mut t) | &mut Reply(_, ref mut t)
             | &mut MultiReplica{ref mut t, ..}
             | &mut Skeens1{ref mut t, ..} | &mut SkeensFinished{ref mut t, ..}
+            | &mut SingleSkeens {ref mut t, ..} | &mut DelayedSingle {ref mut t, .. }
             => f(t),
             &mut ReturnBuffer(..) => (),
         }
@@ -124,6 +160,7 @@ where T: Copy + Send + Sync {
             &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
             &MultiReplica{t, ..} => t,
             &Skeens1{t, ..} | &SkeensFinished{t, ..} => t,
+            &SingleSkeens {t, ..} | &DelayedSingle {t, .. } => t,
             &ReturnBuffer(..) => unimplemented!(), //FIXME
         }
     }
@@ -197,12 +234,12 @@ where ToWorkers: DistributeToWorkers<T> {
                                 self.this_server_num, buffer.entry().kind)
                         }
                     }
-                    Some(log) => match log.get(u32::from(index) as u64) {
+                    Some(lg) => match lg.trie.get(u32::from(index) as u64) {
                         None => {
                             self.print_data.msgs_sent(1);
                             self.to_workers.send_to_worker(
                             //FIXME needs 64 entries
-                                EmptyRead(entry::from((log.len() - 1) as u32), buffer, t))
+                                EmptyRead(entry::from((lg.trie.len() - 1) as u32), buffer, t))
                         },
                         Some(packet) => {
                             trace!("SERVER {:?} Read Occupied entry {:?} {:?}",
@@ -230,6 +267,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 let slot = {
                     let log = self.ensure_chain(chain);
                     log.check_skeens_single();
+                    let log = &mut log.trie;
                     if log.is_locked() {
                         trace!("SERVER append during lock {:?} @ {:?}",
                             log.lock_pair(), chain,
@@ -284,6 +322,8 @@ where ToWorkers: DistributeToWorkers<T> {
         t: T
     ) {
         if kind.contains(EntryKind::NewMultiPut) {
+            //FIXME
+            let storage = Default::default();
             self.handle_new_multiappend(kind, buffer, storage, t)
         }
         else {
@@ -297,7 +337,7 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryKind::Kind,
         mut buffer: BufferSlice,
-        storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Option<SkeensMultiStorage>,
         t: T
     ) {
         trace!("SERVER {:?} new-style multiput {:?}", self.this_server_num, kind);
@@ -307,8 +347,8 @@ where ToWorkers: DistributeToWorkers<T> {
             self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(ReturnBuffer(buffer))
         } else {
-            let storage = Box::into_raw(storage.unwrap());
-            self.new_multiappend_round1(kind, &mut buffer, storage, t);
+            let storage = storage.unwrap();
+            self.new_multiappend_round1(kind, &mut buffer, &storage, t);
             self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(
                 Skeens1 { buffer: buffer, storage: storage, t: t }
@@ -320,12 +360,14 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryKind::Kind,
         buffer: &mut BufferSlice,
-        storage: *const (Box<[u8]>, Box<[u8]>),
+        storage: &SkeensMultiStorage,
         t: T
     ) {
         trace!("SERVER {:?} new-style multiput Round 1 {:?}", self.this_server_num, kind);
-        let val = buffer.entry_mut();
-        let locs = val.locs_mut();
+        let val = buffer.entry();
+        let locs = val.locs();
+        let timestamps = &mut unsafe { &mut (&mut *storage.get()).0 }[..locs.len()];
+        let id = val.id;
         for i in 0..locs.len() {
             if locs[i] == OrderIndex(0.into(), 0.into()) {
                 continue
@@ -334,11 +376,11 @@ where ToWorkers: DistributeToWorkers<T> {
             let chain = locs[i].0;
             if self.stores_chain(chain) {
                 let chain = self.ensure_chain(chain);
-                let local_timestamp = chain.timestamp_for_multi(storage, t);
-                let local_timestamp = entry::from(local_timestamp as u32);
-                locs[i].1 = local_timestamp;
+                //FIXME handle repeat skeens-1
+                let local_timestamp = chain.timestamp_for_multi(id, storage.clone(), t).unwrap();
+                timestamps[i] = local_timestamp;
             } else {
-                locs[i].1 = entry::from(0);
+                timestamps[i] = 0;
             }
         }
     }
@@ -352,6 +394,7 @@ where ToWorkers: DistributeToWorkers<T> {
         trace!("SERVER {:?} new-style multiput Round 2 {:?}", self.this_server_num, kind);
         // In round two we flush some the queues... an possibly a partial entry...
         let val = buffer.entry_mut();
+        let id = val.id;
         let max_timestamp = val.lock_num();
         let locs = val.locs_mut();
         let mut is_sentinel = false;
@@ -363,20 +406,42 @@ where ToWorkers: DistributeToWorkers<T> {
 
             let chain = locs[i].0;
             if self.stores_chain(chain) {
-                //let chain = self.ensure_chain(chain);
-                let chain = self.log.entry(chain).or_insert_with(|| {
+                //let chain = self.ensure_trie(chain);
+                let chain = self.log.get_mut(&chain)
+                    .expect("cannot have skeens-2 as the first op on a chain");
+                    /*.or_insert_with(|| {
                     let mut t = Trie::new();
                     t.append(&EntryContents::Data(&(), &[]).clone_entry());
-                    t
-                });
+                    Chain{ trie: t, skeens: SkeensState::new() }
+                });*/
                 let to_workers = &mut self.to_workers;
                 let print_data = &mut self.print_data;
-                chain.finish_multi(max_timestamp, |storage, t| {
-                    print_data.msgs_sent(1);
-                    to_workers.send_to_worker(
-                        SkeensFinished {storage: storage, t: t}
-                    )
-                });
+                chain.finish_multi(id, max_timestamp,
+                    |finished| match finished {
+                        FinishSkeens::Multi(index, trie_slot, storage, t) => {
+                            print_data.msgs_sent(1);
+                            to_workers.send_to_worker(
+                                SkeensFinished {
+                                    index: index,
+                                    trie_slot: trie_slot,
+                                    storage: storage,
+                                    t: t
+                                }
+                            )
+                        },
+                        FinishSkeens::Single(index, trie_slot, storage, t) => {
+                            print_data.msgs_sent(1);
+                            to_workers.send_to_worker(
+                                DelayedSingle {
+                                    index: index,
+                                    trie_slot: trie_slot,
+                                    storage: storage,
+                                    t: t
+                                }
+                            )
+                        },
+                    }
+                );
             } else {
                 locs[i].1 = entry::from(0);
             }
@@ -406,7 +471,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         }
                         let chain = locs[i].0;
                         if self.stores_chain(chain) {
-                            let chain = self.ensure_chain(chain);
+                            let chain = self.ensure_trie(chain);
                             all_unlocked &= chain.unlock(u32::from(locs[i].1)
                                 as u64);
                         }
@@ -460,7 +525,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 if self.stores_chain(chain) {
                     //FIXME handle duplicates
                     let next_entry = {
-                        let chain = self.ensure_chain(chain);
+                        let chain = self.ensure_trie(chain);
                         if kind.contains(EntryKind::TakeLock) {
                             if chain.cannot_lock(u32::from(locs[i].1) as u64) {
                                 //the lock that failed is always the first MAX
@@ -495,7 +560,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     if self.stores_chain(chain) {
                         //FIXME handle duplicates
                         let next_entry = {
-                            let chain = self.ensure_chain(chain);
+                            let chain = self.ensure_trie(chain);
                             if kind.contains(EntryKind::TakeLock) {
                                 if chain.cannot_lock(u32::from(locs[i].1) as u64) {
                                     trace!("SERVER wrong lock {} @ {:?}",
@@ -558,7 +623,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     assert!(index != entry::from(0));
                     unsafe {
                         let ptr = {
-                            let chain = self.ensure_chain(chain);
+                            let chain = self.ensure_trie(chain);
                             if kind.contains(EntryKind::TakeLock) {
                                 chain.increment_lock();
                             }
@@ -576,7 +641,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         assert!(index != entry::from(0));
                         unsafe {
                             let ptr = {
-                                let chain = self.ensure_chain(chain);
+                                let chain = self.ensure_trie(chain);
                                 if kind.contains(EntryKind::TakeLock) {
                                     chain.increment_lock()
                                 }
@@ -608,12 +673,16 @@ where ToWorkers: DistributeToWorkers<T> {
         chain % self.total_servers == self.this_server_num.into()
     }
 
-    fn ensure_chain(&mut self, chain: order) -> &mut Trie<Entry<()>> {
+    fn ensure_chain(&mut self, chain: order) -> &mut Chain<T> {
         self.log.entry(chain).or_insert_with(|| {
             let mut t = Trie::new();
             t.append(&EntryContents::Data(&(), &[]).clone_entry());
-            t
+            Chain{ trie: t, skeens: SkeensState::new() }
         })
+    }
+
+    fn ensure_trie(&mut self, chain: order) -> &mut Trie<Entry<()>> {
+        &mut self.ensure_chain(chain).trie
     }
 
     #[allow(dead_code)]
@@ -639,7 +708,7 @@ where ToWorkers: DistributeToWorkers<T> {
 
                 let this_server_num = self.this_server_num;
                 let slot = {
-                    let log = self.ensure_chain(loc.0);
+                    let log = self.ensure_trie(loc.0);
                     let size = buffer.entry_size();
                     trace!("SERVER {:?} replicating entry {:?}",
                         this_server_num, loc);
@@ -709,7 +778,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     if self.stores_chain(chain) {
                         assert!(index != entry::from(0));
                         unsafe {
-                            let ptr = self.ensure_chain(chain)
+                            let ptr = self.ensure_trie(chain)
                                 .prep_append_at(
                                     u32::from(index) as u64,
                                     ptr::null(),
@@ -725,7 +794,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         if self.stores_chain(chain) {
                             assert!(index != entry::from(0));
                             unsafe {
-                                let ptr = self.ensure_chain(chain)
+                                let ptr = self.ensure_trie(chain)
                                     .prep_append_at(
                                         u32::from(index) as u64,
                                         ptr::null(),
@@ -765,19 +834,97 @@ where ToWorkers: DistributeToWorkers<T> {
     }
 }
 
+enum FinishSkeens<T> {
+    Single(u64, *mut *const u8, *const u8, T),
+    Multi(u64, *mut *const u8, SkeensMultiStorage, T),
+}
+
+impl<T: Copy> Chain<T> {
+    fn check_skeens_single(&mut self) {
+        unimplemented!()
+    }
+
+    fn timestamp_for_multi(
+        &mut self, id: Uuid, storage: SkeensMultiStorage, t: T
+    ) -> Result<u64, u64> {
+        match self.skeens.add_multi_append(id, storage, t) {
+            SkeensAppendRes::OldPhase1(ts) | SkeensAppendRes::NewAppend(ts)
+                => Ok(ts),
+            SkeensAppendRes::Phase2(ts) => Err(ts),
+        }
+    }
+
+    fn finish_multi<F>(
+        &mut self, id: Uuid, max_timestamp: u64, mut on_finish: F)
+    where F: FnMut(FinishSkeens<T>) { //Ret val?
+        use self::FinishSkeens::*;
+        let r = self.skeens.set_max_timestamp(id, max_timestamp);
+        match r {
+            SkeensSetMaxRes::Ok => unimplemented!(),
+            SkeensSetMaxRes::Duplicate(u64) => unimplemented!(),
+            SkeensSetMaxRes::NotWaiting => unimplemented!(),
+            SkeensSetMaxRes::NeedsFlush => {
+                let trie = &mut self.trie;
+                self.skeens.flush_got_max_timestamp(|g| {
+                    match g {
+                        GotMax::Single{..} => unimplemented!(),
+                        GotMax::SimpleSingle{storage, t, ..} => unsafe {
+                            let (loc, ptr) = trie.prep_append(ptr::null());
+                            let id = Entry::<()>::wrap_byte(&*storage).id;
+                            on_finish(Single(loc, ptr, storage, t));
+                            id
+                        },
+                        GotMax::Multi{storage, t, id, ..} => unsafe {
+                            let (loc, ptr) = trie.prep_append(ptr::null());
+                            on_finish(Multi(loc, ptr, storage, t));
+                            id
+                        },
+                    }
+                })
+            }
+        }
+    }
+}
+
 fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
--> (Buffer, &'static [u8], T, u64) {
+-> (Option<Buffer>, &'static [u8], T, u64) {
     match msg {
         Reply(buffer, t) => {
             trace!("WORKER {} finish reply", worker_num);
-            (buffer, &[], t, 0)
+            (Some(buffer), &[], t, 0)
         },
 
         Write(buffer, slot, t) => unsafe {
             trace!("WORKER {} finish write", worker_num);
             let loc = slot.loc();
             let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
-            (buffer, ret, t, loc)
+            (Some(buffer), ret, t, loc)
+        },
+
+        SingleSkeens { buffer, storage, storage_loc, t, } => unsafe {
+            {
+                let b = buffer.entry_slice();
+                ptr::copy_nonoverlapping(b.as_ptr(), storage, b.len());
+            }
+            //TODO...
+            (Some(buffer), panic!(), t, storage_loc)
+        },
+
+        // Safety, since both the original append and the delayed portion
+        // get finished by the same worker this does not race
+        // the storage_loc is sent with the first round
+        DelayedSingle { index, trie_slot, storage, t, } => unsafe {
+            trace!("WORKER {} finish delayed single", worker_num);
+            let len = {
+                let storage = storage as *mut u8;
+                let e = Entry::<()>::wrap_mut(&mut *storage);
+                e.locs_mut()[0].1 = entry::from(index as u32);
+                e.entry_size()
+            };
+            let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
+            (*trie_entry).store(storage as *mut u8, Ordering::Release);
+            let ret = slice::from_raw_parts(storage, len);
+            (None, ret, t, 0)
         },
 
         Read(read, mut buffer, t) => {
@@ -786,7 +933,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             //FIXME needless copy
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
-            (buffer, bytes, t, 0)
+            (Some(buffer), bytes, t, 0)
         },
 
         EmptyRead(last_valid_loc, mut buffer, t) => {
@@ -808,7 +955,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             }
             buffer.ensure_len();
             trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
-            (buffer, &[], t, 0)
+            (Some(buffer), &[], t, 0)
         },
 
         MultiReplica {
@@ -852,7 +999,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             let ret = slice::from_raw_parts(multi_storage, len);
             //TODO is re right for sentinel only writes?
             if remaining_senti_places.len() == 0 {
-                return (buffer, ret, t, 0)
+                return (Some(buffer), ret, t, 0)
             }
             else {
                 let e = buffer.entry();
@@ -874,7 +1021,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
 
             }
             //TODO is re right for sentinel only writes?
-            (buffer, ret, t, 0)
+            (Some(buffer), ret, t, 0)
         },
 
         Skeens1{..} => unimplemented!(),

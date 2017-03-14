@@ -6,7 +6,6 @@ use storeables::Storeable;
 use packets::Entry as Packet;
 
 use servers2::byte_trie::Trie as Alloc;
-use servers2::skeens::SkeensState;
 
 //XXX UGH this is going to be wildly unsafe...
 
@@ -25,7 +24,6 @@ struct RootTable<V> {
     next_entry: u64,
     alloc: AllocPtr,
     next_timestamp: u64,
-    //skeens: SkeensState,
     last_lock: u64,
     //FIXME if we want to do lock handoff we need to know until where we can read...
     last_unlock: u64,
@@ -314,19 +312,6 @@ where V: Storeable {
             ::std::ptr::write(&mut t.root.alloc, AllocPtr::new());
             t
         }
-    }
-
-    pub fn check_skeens_single(&mut self) {
-        unimplemented!()
-    }
-
-    pub fn timestamp_for_multi<T>(&mut self, storage: *const (Box<[u8]>, Box<[u8]>), t: T) -> u64 {
-        unimplemented!()
-    }
-
-    pub fn finish_multi<T, F>(&mut self, max_timestamp: u64, mut f: F)
-    where F: FnMut(*const (Box<[u8]>, Box<[u8]>), T) {
-        f(unimplemented!(), unimplemented!())
     }
 
     pub fn append(&mut self, data: &Packet<V>) -> TrieIndex {
