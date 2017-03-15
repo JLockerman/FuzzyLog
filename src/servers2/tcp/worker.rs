@@ -541,21 +541,30 @@ impl WorkerInner {
         src_addr: Ipv4SocketAddr,
     ) {
         trace!("WORKER {} send to log", self.worker_num);
-        let kind = buffer.entry().kind.layout();
+        let k = buffer.entry().kind;
+        let kind = k.layout();
         let storage = match kind {
-            EntryLayout::Multiput | EntryLayout::Sentinel => {
-                let (size, senti_size) = {
+            EntryLayout::Multiput | EntryLayout::Sentinel => unsafe {
+                let (size, senti_size, num_locs, has_senti) = {
                     let e = buffer.entry();
-                    (e.entry_size(), e.sentinel_entry_size())
+                    let locs = e.locs();
+                    let num_locs = locs.len();
+                    //FIXME
+                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
+                    (e.entry_size(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
-                unsafe {
+                if k.contains(EntryKind::NewMultiPut) {
+                    let senti_size = if has_senti { Some(senti_size) } else { None };
+                    let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                    Troption::Left(storage)
+                } else {
                     let mut m = Vec::with_capacity(size);
                     let mut s = Vec::with_capacity(senti_size);
                     m.set_len(size);
                     s.set_len(senti_size);
                     Troption::Right(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
                 }
-            }
+            },
             _ => Troption::None,
         };
         self.print_data.new_to_log(1);

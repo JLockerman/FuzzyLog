@@ -1,5 +1,6 @@
 //use std::collections::HashSet;
 use std::cell::UnsafeCell;
+use std::collections::VecDeque;
 use std::{mem, ptr, slice};
 //use std::rc::Rc;
 use std::marker::PhantomData;
@@ -26,6 +27,9 @@ mod skeens;
 //TODO remove `pub`, it only exists for testing purposes
 pub mod trie;
 pub mod byte_trie;
+
+#[cfg(test)]
+mod tests;
 
 struct ServerLog<T: Send + Sync + Copy, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
@@ -69,6 +73,12 @@ pub trait DistributeToWorkers<T: Send + Sync> {
 impl<T: Send + Sync> DistributeToWorkers<T> for spmc::Sender<ToWorker<T>> {
     fn send_to_worker(&mut self, msg: ToWorker<T>) {
         self.send(msg)
+    }
+}
+
+impl DistributeToWorkers<()> for VecDeque<ToWorker<()>> {
+    fn send_to_worker(&mut self, msg: ToWorker<()>) {
+        self.push_front(msg);
     }
 }
 
@@ -128,6 +138,25 @@ pub struct SkeensMultiStorage(
 );
 
 unsafe impl Send for SkeensMultiStorage {}
+
+impl SkeensMultiStorage {
+    fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
+        unsafe {
+            let mut locs = Vec::with_capacity(num_locs);
+            let mut data = Vec::with_capacity(entry_size);
+            locs.set_len(num_locs);
+            data.set_len(entry_size);
+            let locs = &mut *Box::into_raw(locs.into_boxed_slice());
+            let data = &mut *Box::into_raw(data.into_boxed_slice());
+            let senti = sentinel_size.map(|s| {
+                let mut senti = Vec::with_capacity(s);
+                senti.set_len(s);
+                &mut *Box::into_raw(senti.into_boxed_slice())
+            }).unwrap_or(&mut []);
+            SkeensMultiStorage(Arc::new(UnsafeCell::new((locs, data, senti))))
+        }
+    }
+}
 
 impl ::std::ops::Deref for SkeensMultiStorage {
     type Target = UnsafeCell<(&'static mut [u64], &'static mut [u8], &'static mut [u8])>;
