@@ -39,6 +39,7 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     from_client: mio::channel::Receiver<Vec<u8>>,
     client: C,
     is_unreplicated: bool,
+    new_multi: bool,
 
     print_data: StorePrintData,
 }
@@ -88,6 +89,17 @@ pub enum WriteState {
         Rc<RefCell<HashSet<usize>>>,
         Rc<Box<[OrderIndex]>>,
         bool,
+    ),
+    Skeens1(
+        Rc<RefCell<Vec<u8>>>,
+        Rc<RefCell<HashSet<usize>>>,
+        Rc<RefCell<Box<[u64]>>>,
+        bool,
+    ),
+    Skeens2(
+        Rc<RefCell<Vec<u8>>>,
+        Rc<RefCell<HashSet<usize>>>,
+        u64,
     ),
     UnlockServer(Rc<RefCell<Vec<u8>>>),
 }
@@ -143,6 +155,7 @@ where C: AsyncStoreClient {
             awake_io: awake_io,
             from_client: from_client,
             is_unreplicated: true,
+            new_multi: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -208,6 +221,7 @@ where C: AsyncStoreClient {
             awake_io: awake_io,
             from_client: from_client,
             is_unreplicated: false,
+            new_multi: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -257,6 +271,7 @@ where C: AsyncStoreClient {
             client: client,
             from_client: from_client,
             is_unreplicated: true,
+            new_multi: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -443,8 +458,17 @@ where PerServer<S>: Connected,
                     let chain = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
                     let s = self.write_server_for_chain(chain);
                     self.add_single_server_send(s, msg)
-                }
-                else {
+                } else if self.new_multi {
+                    let mut msg = msg;
+                    {
+                        let e = Entry::<()>::wrap_bytes_mut(&mut msg);
+                        e.kind.insert(EntryKind::TakeLock | EntryKind::NewMultiPut);
+                        e.locs_mut().into_iter()
+                            .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
+                    }
+                    self.add_skeens1(msg);
+                    true
+                } else {
                     let mut msg = msg;
                     Entry::<()>::wrap_bytes_mut(&mut msg).locs_mut().into_iter()
                         .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
@@ -478,6 +502,76 @@ where PerServer<S>: Connected,
             }
         }
         written
+    }
+
+    fn add_skeens1(&mut self, msg: Vec<u8>) {
+        debug_assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
+        let timestamps = Rc::new(RefCell::new(
+            (0..Entry::<()>::wrap_bytes(&msg).locs().len())
+                .map(|_| 0u64).collect::<Vec<_>>().into_boxed_slice()
+        ));
+        let servers = self.get_servers_for_multi(&msg);
+        let mut remaining_servers: HashSet<usize> = Default::default();
+        remaining_servers.reserve(servers.len());
+        for &writer in servers.iter() {
+            remaining_servers.insert(self.read_server_for_write_server(writer));
+        }
+        trace!("CLIENT multi to {:?}", remaining_servers);
+        let remaining_servers = Rc::new(RefCell::new(remaining_servers));
+        let msg = Rc::new(RefCell::new(msg));
+        for s in servers {
+            let per_server = &mut self.servers[s];
+            per_server.add_skeens1(
+                msg.clone(),
+                remaining_servers.clone(),
+                timestamps.clone(),
+                self.num_chain_servers,
+            );
+            if !per_server.got_new_message {
+                per_server.got_new_message = true;
+                self.awake_io.push_back(s)
+            }
+        }
+    }
+
+    fn add_skeens2(&mut self, mut buf: Rc<RefCell<Vec<u8>>>, max_ts: u64) {
+        let servers = match Rc::get_mut(&mut buf) {
+            None => unreachable!(),
+            Some(mut buf) => {
+                let buf = buf.get_mut();
+                let server = self.get_servers_for_multi(&buf);
+                let size = {
+                    let e = Entry::<()>::wrap_bytes_mut(buf);
+                    e.kind.remove(EntryKind::Multiput);
+                    e.kind.insert(EntryKind::Sentinel);
+                    e.kind.insert(EntryKind::Unlock | EntryKind::NewMultiPut);
+                    e.data_bytes = 0;
+                    e.dependency_bytes = 0;
+                    unsafe { e.as_multi_entry_mut().flex.lock = max_ts };
+                    e.entry_size()
+                };
+                unsafe { buf.set_len(size) };
+                server
+            }
+        };
+        let mut remaining_servers: HashSet<usize> = Default::default();
+        remaining_servers.reserve(servers.len());
+        for &writer in servers.iter() {
+            remaining_servers.insert(self.read_server_for_write_server(writer));
+        }
+        let remaining_servers = Rc::new(RefCell::new(remaining_servers));
+        for s in servers {
+            let per_server = &mut self.servers[s];
+            per_server.add_skeens2(
+                buf.clone(),
+                remaining_servers.clone(),
+                max_ts,
+            );
+            if !per_server.got_new_message {
+                per_server.got_new_message = true;
+                self.awake_io.push_back(s)
+            }
+        }
     }
 
     fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
@@ -662,6 +756,80 @@ where PerServer<S>: Connected,
                         }
                     }
                 }
+
+                WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel) => {
+                    trace!("CLIENT finished sk1 section");
+                    let ready_for_skeens2 = {
+                        let mut ts = timestamps.borrow_mut();
+                        for (i, oi) in packet.entry().locs().iter().enumerate() {
+                            if oi.0 != order::from(0)
+                                && read_server_for_chain(oi.0, self.num_chain_servers, unreplicated) == token.0 {
+                                ts[i] = u32::from(oi.1) as u64;
+                            }
+                        }
+                        let mut r = remaining_servers.borrow_mut();
+                        r.remove(&token.0);
+                        let finished_writes = r.is_empty();
+                        if finished_writes {
+                            //TODO assert!(Rc::get_mut(&mut buf).is_some());
+                            //let locs = buf.locs().to_vec();
+                            trace!("CLIENT finished skeens1 {:?}", timestamps);
+                            let max_ts = timestamps.borrow().iter().cloned().max().unwrap();
+                            Some(max_ts)
+                        } else { None }
+                    };
+                    match ready_for_skeens2 {
+                        Some(max_ts) => {
+                            self.add_skeens2(buf, max_ts);
+                            //TODO
+                            return false
+                        }
+                        None => {
+                            self.sent_writes.insert(id,
+                                WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel));
+                            return false
+                        }
+                    }
+                }
+
+                WriteState::Skeens2(buf, remaining_servers, max_ts) => {
+                    trace!("CLIENT finished sk2 section");
+                    let ready_to_unlock = {
+                        let mut b = buf.borrow_mut();
+                        let filled = fill_locs(&mut b, packet.entry(),
+                            token, self.num_chain_servers, unreplicated);
+                        let mut r = remaining_servers.borrow_mut();
+                        if r.remove(&token.0) {
+                            assert!(filled > 0, "no fill for {:?}", token);
+                        }
+                        let finished_writes = r.is_empty();
+                        if finished_writes {
+                            //TODO assert!(Rc::get_mut(&mut buf).is_some());
+                            //let locs = buf.locs().to_vec();
+                            let locs = Entry::<()>::wrap_bytes(&b).locs().to_vec();
+                            Some(locs)
+                        } else { None }
+                    };
+                    match ready_to_unlock {
+                        Some(locs) => {
+                            /*{
+                                Entry::<()>::wrap_bytes_mut(&mut buf.borrow_mut())
+                                    .locs_mut()
+                                    .copy_from_slice(&locks)
+                            }*/
+                            trace!("CLIENT finished sk multi at {:?}", locs);
+                            //TODO
+                            self.client.on_finished_write(id, locs);
+                            return true
+                        }
+                        None => {
+                            self.sent_writes.insert(id,
+                                WriteState::Skeens2(buf, remaining_servers, max_ts));
+                            return false
+                        }
+                    }
+                }
+
                 WriteState::SingleServer(mut buf) => {
                     assert!(token != self.lock_token());
                     trace!("CLIENT finished single server");
@@ -925,6 +1093,21 @@ pub trait Connected {
         self.add_send(send)
     }
 
+    fn add_skeens1(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        timestamps: Rc<RefCell<Box<[u64]>>>,
+        num_servers: usize,
+    );
+
+    fn add_skeens2(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        max_timestamp: u64,
+    );
+
     fn needs_to_write(&self) -> bool;
 }
 
@@ -1097,6 +1280,96 @@ impl Connected for PerServer<TcpStream> {
     fn add_single_server_send(&mut self, msg: Vec<u8>) -> bool {
         let send = WriteState::SingleServer(msg);
         self.add_send(send)
+    }
+
+    fn add_skeens1(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        timestamps: Rc<RefCell<Box<[u64]>>>,
+        num_servers: usize,
+    ) {
+        self.stay_awake = true;
+        let len = msg.borrow().len();
+        if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {
+            self.print_data.packets_sending(1);
+            let is_data;
+            {
+                let mut ts = msg.borrow_mut();
+                let send_end = {
+                    let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
+                    {
+                        is_data = e.locs().into_iter()
+                            .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
+                            .any(|oi| is_write_server_for(oi.0, self.token, num_servers));
+                        let kind = &mut e.kind;
+                        debug_assert!(kind.layout() == EntryLayout::Multiput
+                            || kind.layout() == EntryLayout::Sentinel);
+                        debug_assert!(kind.contains(EntryKind::TakeLock));
+                        if is_data {
+                            kind.remove(EntryKind::Lock);
+                            debug_assert_eq!(kind.layout(), EntryLayout::Multiput);
+                        }
+                        else {
+                            kind.insert(EntryKind::Lock);
+                            debug_assert_eq!(kind.layout(), EntryLayout::Sentinel);
+                        }
+                        kind.insert(EntryKind::TakeLock);
+                    }
+                    if !is_data {
+                        debug_assert!(e.locs().contains(&OrderIndex(0.into(), 0.into())));
+                    }
+                    e.entry_size()
+                };
+                //Since sentinels have a different size than multis, we need to truncate
+                //for those sends
+                let sent = self.being_written.try_fill(&ts[..send_end], self.receiver);
+                debug_assert!(sent);
+            }
+            self.being_sent.push_back(WriteState::Skeens1(
+                msg, remaining_servers, timestamps, !is_data
+            ))
+        } else {
+            let is_sentinel = {
+                let ts = msg.borrow();
+                !Entry::<()>::wrap_bytes(&*ts)
+                    .locs().into_iter()
+                    .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
+                    .any(|oi| is_write_server_for(oi.0, self.token, num_servers))
+            };
+            self.awaiting_send.push_back(
+                WriteState::Skeens1(msg, remaining_servers, timestamps, is_sentinel)
+            );
+        }
+    }
+
+    fn add_skeens2(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        max_timestamp: u64,
+    ) {
+        self.stay_awake = true;
+        let len = msg.borrow().len();
+        if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {
+            self.print_data.packets_sending(1);
+            {
+                let ts = msg.borrow();
+                let send_end = {
+                    let e = Entry::<()>::wrap_bytes(&*ts);
+                    e.entry_size()
+                };
+                let sent = self.being_written.try_fill(&ts[..send_end], self.receiver);
+                debug_assert!(sent);
+            }
+            self.being_sent.push_back(WriteState::Skeens2(
+                msg, remaining_servers, max_timestamp
+            ))
+        } else {
+            self.awaiting_send.push_front(
+                WriteState::Skeens2(msg, remaining_servers, max_timestamp)
+            );
+        }
     }
 
     fn add_multi(&mut self,
@@ -1376,7 +1649,28 @@ impl Connected for PerServer<UdpConnection> {
         true
     }
 
-     #[allow(unused_variables)]
+    #[allow(unused_variables)]
+    fn add_skeens1(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        timestamps: Rc<RefCell<Box<[u64]>>>,
+        num_servers: usize,
+    ) {
+        unimplemented!()
+    }
+
+    #[allow(unused_variables)]
+    fn add_skeens2(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        max_timestamp: u64,
+    ) {
+        unimplemented!()
+    }
+
+    #[allow(unused_variables)]
     fn add_multi(&mut self,
         msg: Rc<RefCell<Vec<u8>>>,
         remaining_servers: Rc<RefCell<HashSet<usize>>>,
@@ -1501,7 +1795,24 @@ impl WriteState {
                 }
                 f(&*b)
             },
-            &UnlockServer(ref buf) => {
+
+            &Skeens1(ref buf, _, _, is_sentinel) => {
+                let mut b = buf.borrow_mut();
+                {
+                    let e = Entry::<()>::wrap_bytes_mut(&mut *b);
+                    if is_sentinel {
+                        e.kind.remove(EntryKind::Multiput);
+                        e.kind.insert(EntryKind::Sentinel);
+                    }
+                    else {
+                        e.kind.remove(EntryKind::Sentinel);
+                        e.kind.insert(EntryKind::Multiput);
+                    }
+                }
+                f(&*b)
+            },
+
+            &UnlockServer(ref buf) | &Skeens2(ref buf, ..) => {
                 let b = buf.borrow_mut();
                 f(&*b)
             },
@@ -1512,8 +1823,10 @@ impl WriteState {
         use self::WriteState::*;
         match self {
             SingleServer(buf) | ToLockServer(buf) => buf,
-            MultiServer(buf, ..) | UnlockServer(buf) =>
-                Rc::try_unwrap(buf).expect("taking from non unique WriteState").into_inner()
+            MultiServer(buf, ..) | UnlockServer(buf)
+            | Skeens1(buf, ..) | Skeens2(buf, ..) =>
+                Rc::try_unwrap(buf).expect("taking from non unique WriteState")
+                    .into_inner()
         }
     }
 
