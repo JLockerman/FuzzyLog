@@ -100,6 +100,7 @@ pub enum ToWorker<T: Send + Sync> {
         t: T,
     },
 
+    //This is not racey b/c both this and DelayedSingle single get sent to the same thread
     SingleSkeens {
         buffer: BufferSlice,
         storage: *mut u8,
@@ -305,10 +306,29 @@ where ToWorkers: DistributeToWorkers<T> {
                     chain, self.this_server_num, self.total_servers);
 
                 let this_server_num = self.this_server_num;
-                let slot = {
+                let delay = {
                     let log = self.ensure_chain(chain);
-                    log.check_skeens_single();
-                    let log = &mut log.trie;
+                    if log.needs_skeens_single() {
+                        let s = log.handle_skeens_single(&mut buffer);
+                        Some(s)
+                    } else {
+                        None
+                    }
+                };
+                if let Some((slot, storage_loc)) = delay {
+                    self.print_data.msgs_sent(1);
+                    let msg = SingleSkeens {
+                        buffer: buffer,
+                        storage: slot,
+                        storage_loc: storage_loc,
+                        t: t,
+                    };
+                    self.to_workers.send_to_worker(msg);
+                    return
+                }
+
+                let slot = {
+                    let log = self.ensure_trie(chain);
                     if log.is_locked() {
                         trace!("SERVER append during lock {:?} @ {:?}",
                             log.lock_pair(), chain,
@@ -879,8 +899,16 @@ enum FinishSkeens<T> {
 }
 
 impl<T: Copy> Chain<T> {
-    fn check_skeens_single(&mut self) {
-        unimplemented!()
+    fn needs_skeens_single(&mut self) -> bool {
+        !self.skeens.is_empty()
+    }
+
+    fn handle_skeens_single(&mut self, buffer: &mut BufferSlice) -> (*mut u8, u64) {
+        let val = buffer.entry_mut();
+        val.kind.insert(EntryKind::ReadSuccess);
+        let size = val.entry_size();
+        let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
+        unsafe { self.trie.reserve_space(size) }
     }
 
     fn timestamp_for_multi(
@@ -899,7 +927,7 @@ impl<T: Copy> Chain<T> {
         use self::FinishSkeens::*;
         let r = self.skeens.set_max_timestamp(id, max_timestamp);
         match r {
-            SkeensSetMaxRes::Ok => unimplemented!(),
+            SkeensSetMaxRes::Ok => {},
             SkeensSetMaxRes::Duplicate(u64) => unimplemented!(),
             SkeensSetMaxRes::NotWaiting => unimplemented!(),
             SkeensSetMaxRes::NeedsFlush => {

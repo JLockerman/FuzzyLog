@@ -347,6 +347,11 @@ where V: Storeable {
         }
     }
 
+    pub unsafe fn reserve_space(&mut self, size: usize) -> (*mut u8, u64) {
+        let (val_ptr, loc) = self.root.alloc.prep_append(size);
+        (val_ptr.as_mut_ptr(), loc)
+    }
+
     pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet<V>> {
         let (val_ptr, loc): (*mut u8, ByteLoc) = {
             let (val_ptr, loc) = self.root.alloc.prep_append(size);
