@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prelude::*;
-use servers2::{spmc, spsc, ServerLog};
+use servers2::{spsc, ServerLog};
 use hash::{HashMap, FxHasher};
 use socket_addr::Ipv4SocketAddr;
 

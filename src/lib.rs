@@ -5,6 +5,7 @@
 #[cfg(test)] #[macro_use] extern crate grabbag_macros;
 #[macro_use] extern crate log;
 #[macro_use] extern crate newtype_derive;
+#[macro_use] extern crate packet_macro;
 
 #[cfg(feature = "dynamodb_tests")]
 extern crate hyper;

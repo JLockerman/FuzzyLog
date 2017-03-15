@@ -1,10 +1,10 @@
 //use std::collections::HashSet;
 use std::cell::UnsafeCell;
 use std::{mem, ptr, slice};
-use std::rc::Rc;
+//use std::rc::Rc;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use prelude::*;
 use buffer::Buffer;
@@ -94,7 +94,7 @@ pub enum ToWorker<T: Send + Sync> {
     },
 
     SkeensFinished {
-        index: u64,
+        loc: OrderIndex,
         trie_slot: *mut *const u8,
         storage: SkeensMultiStorage,
         t: T,
@@ -121,7 +121,20 @@ pub enum ToWorker<T: Send + Sync> {
     ReturnBuffer(BufferSlice)
 }
 
-type SkeensMultiStorage = Rc<UnsafeCell<(Box<[u64]>, Box<[u8]>, Box<[u8]>)>>;
+#[derive(Clone, Debug)]
+pub struct SkeensMultiStorage(
+    Arc<UnsafeCell<(&'static mut [u64], &'static mut [u8], &'static mut [u8])>>
+);
+
+unsafe impl Send for SkeensMultiStorage {}
+
+impl ::std::ops::Deref for SkeensMultiStorage {
+    type Target = UnsafeCell<(&'static mut [u64], &'static mut [u8], &'static mut [u8])>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
 
 #[derive(Debug)]
 pub enum WhichMulti {
@@ -177,6 +190,29 @@ pub enum ToReplicate {
     UnLock(BufferSlice),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Troption<L, R> {
+    None,
+    Left(L),
+    Right(R),
+}
+
+impl<L, R> Troption<L, R> {
+    fn unwrap_left(self) -> L {
+        match self {
+            Troption::Left(l) => l,
+            _ => unreachable!(),
+        }
+    }
+
+    fn unwrap_right(self) -> R {
+        match self {
+            Troption::Right(r) => r,
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl<T: Send + Sync + Copy, ToWorkers> ServerLog<T, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
 
@@ -206,7 +242,12 @@ where ToWorkers: DistributeToWorkers<T> {
     //FIXME pass buffer-slice so we can read batches
     //FIXME we don't want the log thread free'ing, return storage on lock failure?
     //TODO replace T with U and T: ReturnAs<U> so we don't have to send as much data
-    fn handle_op(&mut self, mut buffer: BufferSlice, storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>, t: T) {
+    fn handle_op(
+        &mut self,
+        mut buffer: BufferSlice,
+        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
+        t: T
+    ) {
         self.print_data.msgs_recvd(1);
         let kind = buffer.entry().kind;
         match kind.layout() {
@@ -318,12 +359,10 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryKind::Kind,
         mut buffer: BufferSlice,
-        storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
         t: T
     ) {
         if kind.contains(EntryKind::NewMultiPut) {
-            //FIXME
-            let storage = Default::default();
             self.handle_new_multiappend(kind, buffer, storage, t)
         }
         else {
@@ -337,7 +376,7 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryKind::Kind,
         mut buffer: BufferSlice,
-        storage: Option<SkeensMultiStorage>,
+        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
         t: T
     ) {
         trace!("SERVER {:?} new-style multiput {:?}", self.this_server_num, kind);
@@ -347,7 +386,7 @@ where ToWorkers: DistributeToWorkers<T> {
             self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(ReturnBuffer(buffer))
         } else {
-            let storage = storage.unwrap();
+            let storage = storage.unwrap_left();
             self.new_multiappend_round1(kind, &mut buffer, &storage, t);
             self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(
@@ -404,10 +443,10 @@ where ToWorkers: DistributeToWorkers<T> {
                 continue
             }
 
-            let chain = locs[i].0;
-            if self.stores_chain(chain) {
+            let chain_num = locs[i].0;
+            if self.stores_chain(chain_num) {
                 //let chain = self.ensure_trie(chain);
-                let chain = self.log.get_mut(&chain)
+                let chain = self.log.get_mut(&chain_num)
                     .expect("cannot have skeens-2 as the first op on a chain");
                     /*.or_insert_with(|| {
                     let mut t = Trie::new();
@@ -422,7 +461,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 SkeensFinished {
-                                    index: index,
+                                    loc: OrderIndex(chain_num, (index as u32).into()),
                                     trie_slot: trie_slot,
                                     storage: storage,
                                     t: t
@@ -454,7 +493,7 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryKind::Kind,
         mut buffer: BufferSlice,
-        storage: Option<Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
         t: T
     ) {
         trace!("SERVER {:?} old-style multiput {:?}", self.this_server_num, kind);
@@ -598,7 +637,7 @@ where ToWorkers: DistributeToWorkers<T> {
         trace!("SERVER {:?} appending at {:?}",
             self.this_server_num, buffer.entry().locs());
 
-        let (multi_storage, senti_storage) = *storage.unwrap();
+        let (multi_storage, senti_storage) = *storage.unwrap_right();
         let multi_storage = unsafe {
             debug_assert_eq!(multi_storage.len(), buffer.entry_size());
             (*Box::into_raw(multi_storage)).as_mut_ptr()
@@ -901,13 +940,17 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             (Some(buffer), ret, t, loc)
         },
 
-        SingleSkeens { buffer, storage, storage_loc, t, } => unsafe {
+        SingleSkeens { mut buffer, storage, storage_loc, t, } => unsafe {
             {
-                let b = buffer.entry_slice();
-                ptr::copy_nonoverlapping(b.as_ptr(), storage, b.len());
+                let e = buffer.entry_mut();
+                e.kind.insert(EntryKind::ReadSuccess);
+                {
+                    let b = e.bytes();
+                    ptr::copy_nonoverlapping(b.as_ptr(), storage, b.len());
+                }
+                e.kind.insert(EntryKind::Skeens1Queued);
             }
-            //TODO...
-            (Some(buffer), panic!(), t, storage_loc)
+            (Some(buffer), &[], t, storage_loc)
         },
 
         // Safety, since both the original append and the delayed portion
@@ -1024,8 +1067,57 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             (Some(buffer), ret, t, 0)
         },
 
-        Skeens1{..} => unimplemented!(),
-        SkeensFinished{..} => unimplemented!(),
+        Skeens1{mut buffer, storage, t} => unsafe {
+            {
+                let e = buffer.entry_mut();
+                e.kind.insert(EntryKind::ReadSuccess);
+                let &mut (ref mut ts, ref mut st0, ref mut st1) = &mut (*storage.get());
+                let num_ts = ts.len();
+                st0.copy_from_slice(e.bytes());
+                e.kind.insert(EntryKind::Sentinel);
+                if st1.len() > 0 {
+                    st1.copy_from_slice(e.bytes());
+                }
+                {
+                    let locs = &mut e.locs_mut()[..num_ts];
+                    for i in 0..num_ts {
+                        locs[i].1 = entry::from(ts[i] as u32)
+                    }
+                }
+                e.kind.insert(EntryKind::Skeens1Queued);
+            }
+            (Some(buffer), &[], t, 0)
+        },
+        SkeensFinished{loc, trie_slot, storage, t,} => unsafe {
+            let chain = loc.0;
+            let &mut (ref mut ts, ref mut st0, ref mut st1) = &mut (*storage.get());
+            let is_sentinel = {
+                let st0 = Entry::<()>::wrap_bytes_mut(st0);
+                let st0_l = st0.locs_mut();
+                let i = st0_l.iter().position(|oi| oi.0 == chain).unwrap();
+                //FIXME atomic?
+                st0_l[i].1 = loc.1;
+                if st1.len() > 0 {
+                    Entry::<()>::wrap_bytes_mut(st1).locs_mut()[i].1 = loc.1;
+                    let s_i = st0_l.iter()
+                        .position(|oi| oi == &OrderIndex(0.into(), 0.into()));
+                    i > s_i.unwrap()
+                }
+                else {
+                    false
+                }
+            };
+            let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
+            {
+                let to_store: *mut u8 = if is_sentinel {
+                    st1.as_mut_ptr()
+                } else {
+                    st0.as_mut_ptr()
+                };
+                (*trie_entry).store(to_store, Ordering::Release);
+            }
+            (None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0)
+        },
         ReturnBuffer(..) => unimplemented!(),
     }
 }

@@ -12,7 +12,7 @@ use mio;
 use mio::deprecated::{EventLoop, Handler as MioHandler};
 use mio::udp::UdpSocket;
 
-use servers2::{self, ServerLog, ToWorker, DistributeToWorkers};
+use servers2::{self, ServerLog, ToWorker, DistributeToWorkers, Troption};
 use buffer::Buffer;
 
 const SOCKET_TOKEN: mio::Token = mio::Token(0);
@@ -56,10 +56,10 @@ impl MioHandler for Server {
                                     let mut s = Vec::with_capacity(senti_size);
                                     m.set_len(size);
                                     s.set_len(senti_size);
-                                    Some(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
+                                    Troption::Right(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
                                 }
                             }
-                            _ => None,
+                            _ => Troption::None,
                         };
                         self.log.handle_op(buff, storage, ());
                         let to_pop = self.from_log.borrow().len();

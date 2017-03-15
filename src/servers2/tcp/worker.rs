@@ -1,9 +1,13 @@
+#![allow(non_snake_case)]
 
 use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use servers2::{self, spmc, spsc, ToReplicate, ToWorker, DistributeToWorkers};
+use servers2::{
+    self, spsc, ToReplicate, ToWorker,
+    DistributeToWorkers, Troption, SkeensMultiStorage,
+};
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
@@ -33,7 +37,7 @@ pub enum DistToWorker {
 
 pub enum ToLog<T> {
     //TODO test different layouts.
-    New(Buffer, Option<Box<(Box<[u8]>, Box<[u8]>)>>, T),
+    New(Buffer, Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>, T),
     Replication(ToReplicate, T)
 }
 
@@ -549,10 +553,10 @@ impl WorkerInner {
                     let mut s = Vec::with_capacity(senti_size);
                     m.set_len(size);
                     s.set_len(senti_size);
-                    Some(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
+                    Troption::Right(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
                 }
             }
-            _ => None,
+            _ => Troption::None,
         };
         self.print_data.new_to_log(1);
         self.print_data.to_log(1);

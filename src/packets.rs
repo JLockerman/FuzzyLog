@@ -92,6 +92,7 @@ pub mod EntryKind {
             const NoValue = Read.bits,
 
             const NewMultiPut = 0x100,
+            const Skeens1Queued = 0x200,
         }
     }
 
@@ -141,6 +142,57 @@ pub mod EntryKind {
         }
     }
 }
+/*
+packet! {
+    enum ServerToClient {
+        tag: u16,
+        EmptyRead: 0x3 => {
+            id: Uuid,
+            _padding: [u8; 2],
+            data_bytes: u16,
+            dependency_bytes: u16,
+            loc: OrderIndex,
+            horizon: OrderIndex
+        },
+        SingletonRead: 0x81 => {
+            id: Uuid,
+            _padding: [u8; 2],
+            data_bytes: u16,
+            dependency_bytes: u16,
+            loc: OrderIndex,
+            data: [u8 | data_bytes],
+            deps: [u8 | dependency_bytes],
+        },
+        MultiRead: 0x82 => {
+            id: Uuid,
+            _padding: [u8; 2],
+            data_bytes: u16,
+            dependency_bytes: u16,
+            lock: u64,
+            _padding2: [u8; 6],
+            cols: u16,
+            locs: [OrderIndex | cols],
+            data: [u8 | data_bytes],
+            deps: [u8 | dependency_bytes],
+        },
+        SentiRead: 0x86 => {
+            id: Uuid,
+            _padding: [u8; 2],
+            data_bytes: u16,
+            dependency_bytes: u16,
+            lock: u64,
+            _padding2: [u8; 6],
+            cols: u16,
+            locs: [OrderIndex | cols],
+            deps: [u8 | dependency_bytes],
+        },
+        Skeens1: 0x100 => {
+            id: Uuid,
+            num_timestamps: u16,
+            timestamps: [u64 | num_timestamps],
+        }
+    }
+}*/
 
 pub const MAX_DATA_LEN: usize = 4096 - 8 - (4 + 8 + 16); //TODO
 
@@ -153,8 +205,8 @@ pub const MAX_DATA_LEN2: usize = 4096 - 24; //TODO
 #[repr(C)] //TODO
 pub struct Entry<V: ?Sized, F: ?Sized = [u8; MAX_DATA_LEN2]> {
     pub _pd: PhantomData<V>,
-    pub id: Uuid,
     pub kind: EntryKind::Kind,
+    pub id: Uuid,
     pub _padding: [u8; 2],
     pub data_bytes: u16,
     pub dependency_bytes: u16,
@@ -907,7 +959,6 @@ mod test {
     pub struct PrimEntry<V, F: ?Sized = [u8; MAX_DATA_LEN2]> {
         _pd: PhantomData<V>,
         pub id: [u64; 2],
-        pub kind: EntryKind::Kind,
         pub _padding: [u8; 1],
         pub data_bytes: u16,
         pub dependency_bytes: u16,
@@ -1004,4 +1055,63 @@ mod test {
             assert_eq!(ent1, ent2);
         }
     }
+/*
+    #[test]
+    fn new_packets_multi() {
+        test_(
+            &[12, 31,123],
+            &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())],
+            &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]
+        );
+        test_(
+            &[33,34],
+            &[],
+            &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]
+        );
+        fn test_(data0: &[u8], deps0: &[OrderIndex], cols0: &[OrderIndex]) {
+            let id0 = Uuid::new_v4();
+            let mut ent1 = Vec::new();
+            EntryContents::Multiput{
+                data: data0,
+                uuid: &id0,
+                deps: deps0,
+                columns: cols0,
+            }.fill_vec(&mut ent1);
+            ent1[0] |= 0x80;
+            let r = unsafe { ServerToClient::Ref::wrap(&*ent1) };
+            println!("{:?}", r);
+            match r {
+                ServerToClient::Ref::MultiRead{
+                    id,
+                    _padding,
+                    data_bytes,
+                    dependency_bytes,
+                    lock,
+                    cols,
+                    locs,
+                    data,
+                    deps,
+                    ..
+                } => {
+                    println!("{:?}", ent1);
+                    assert_eq!(id, &id0);
+                    assert_eq!(*data_bytes as usize, data.len());
+                    assert_eq!(
+                        *dependency_bytes as usize,
+                        deps0.len() * mem::size_of::<OrderIndex>()
+                    );
+                    assert_eq!(*cols as usize, cols0.len());
+                    assert_eq!(locs, cols0);
+                    assert_eq!(data, data0);
+                    let d: &[u8] = unsafe {
+                        let len = deps0.len() * mem::size_of::<OrderIndex>();
+                        slice::from_raw_parts(deps0.as_ptr() as *const _, len)
+                    };
+                    assert_eq!(deps, d);
+                },
+                _ => unreachable!(),
+            }
+        }
+    }
+    */
 }
