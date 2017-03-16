@@ -844,13 +844,22 @@ where PerServer<S>: Connected,
                     trace!("CLIENT finished sk2 section");
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
-                        let filled = fill_locs(&mut b, packet.entry(),
-                            token, self.num_chain_servers, unreplicated);
-                        let mut r = remaining_servers.borrow_mut();
-                        //if r.remove(&token.0) {
-                        //    assert!(filled > 0, "no fill for {:?}", token);
-                        //}
-                        let finished_writes = unimplemented!();
+                        let mut finished_writes = true;
+                        {
+                            let locs = Entry::<()>::wrap_bytes_mut(&mut *b).locs_mut();
+                            let fill_from = packet.entry().locs();
+                            //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
+                            for (i, &loc) in fill_from.into_iter().enumerate() {
+                                if locs[i].0 != order::from(0) {
+                                    if read_server_for_chain(loc.0, self.num_chain_servers, unreplicated) == token.0
+                                        && loc.1 != entry::from(0) {
+                                        locs[i] = loc;
+                                    } else if locs[i].1 == entry::from(0) {
+                                        finished_writes = false
+                                    }
+                                }
+                            }
+                        };
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
