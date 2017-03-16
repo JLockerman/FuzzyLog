@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prelude::*;
-use servers2::{spmc, spsc, ServerLog};
+use servers2::{spsc, ServerLog};
 use hash::{HashMap, FxHasher};
 use socket_addr::Ipv4SocketAddr;
 
@@ -96,6 +96,21 @@ mod per_socket;
         fill hole down chain
       else write in progress,
         read again
+*/
+
+/*
+  Finishing up chain-replication
+    1. Add unique client-ID instead of using ack socket addr
+       this will make it much easier to reconfig the tail
+       plus it'll prevent errors when clients exchange ack addr  on reconfig
+       and it'll make switching to IPv6 easier
+
+    2. store which appends have not finished at the tail in upstreams
+       this will make updating a new middle much easier
+       this would also help with the CRAQ optimization
+       just storing which addrs we're waiting for an ack should suffice
+       can use list, might want to switch to send-downstream based on chain,
+       instead of the current send-downstream based on receiver
 */
 
 //Dist tokens

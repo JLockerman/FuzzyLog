@@ -71,6 +71,26 @@ static inline DAGHandle *new_dag_handle_for_single_server(const char *chain_serv
 	return new_dag_handle(NULL, 1, chain_server_ips, interesting_colors);
 }
 
+//! Creates a new DAGHandle for a server group
+//! which uses the skeens based multiappend protocol.
+//!
+//!
+//! @param num_chain_servers
+//!     The number of chain servers in the server group.
+//!
+//! @param chain_server_ips
+//!     The IP address of every chain server in the server group.
+//!     NOTE Currently the ordering of the IP addresses must be the same as the
+//!     ordering of the servers.
+//!
+//! @param interesting_colors
+//!     The colors this DAGHandle is interested in reading.
+//!
+DAGHandle *new_dag_handle_with_skeens(
+	size_t num_chain_servers, const char * const* chain_server_ips,
+	struct colors *interesting_colors
+);
+
 //! Creates a new DAGHandle for a server group based on a config file.
 DAGHandle *new_dag_handle_from_config(const char *config_filename,
 	struct colors *interesting_colors);

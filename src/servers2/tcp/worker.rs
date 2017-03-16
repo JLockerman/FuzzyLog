@@ -1,9 +1,13 @@
+#![allow(non_snake_case)]
 
 use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use servers2::{self, spmc, spsc, ToReplicate, ToWorker, DistributeToWorkers};
+use servers2::{
+    self, spsc, ToReplicate, ToWorker,
+    DistributeToWorkers, Troption, SkeensMultiStorage,
+};
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
@@ -33,7 +37,7 @@ pub enum DistToWorker {
 
 pub enum ToLog<T> {
     //TODO test different layouts.
-    New(Buffer, Option<Box<(Box<[u8]>, Box<[u8]>)>>, T),
+    New(Buffer, Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>, T),
     Replication(ToReplicate, T)
 }
 
@@ -345,10 +349,19 @@ impl Worker {
         while let Some(log_work) = self.inner.from_log.try_recv() {
             //self.inner.waiting_for_log -= 1;
             self.inner.print_data.from_log(1);
-            let to_send = servers2::handle_to_worker(log_work, self.inner.worker_num);
-            let (buffer, bytes, (wk, token, src_addr), storage_loc) = to_send.unwrap();
-            trace!("WORKER {} recv from log for {}.",
-                self.inner.worker_num, src_addr);
+            let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
+            let (buffer, bytes, (wk, token, src_addr), storage_loc, just_ret) = work_res;
+            trace!("WORKER {} recv from log for {}.", self.inner.worker_num, src_addr);
+            if just_ret {
+                buffer.map(|b| {
+                    trace!("WORKER {} just ret {:?}",
+                        self.inner.worker_num, b.entry().kind);
+                    self.clients.get_mut(&token).unwrap().return_buffer(b)
+                });
+                self.inner.awake_io.push_back(token);
+                continue
+            }
+            //FIXME change returns to continues...
             debug_assert_eq!(wk, self.inner.worker_num);
             let worker_tok = if src_addr != Ipv4SocketAddr::nil() {
                 self.inner.next_hop(token, src_addr)
@@ -358,17 +371,19 @@ impl Worker {
             let (worker, tok) = match worker_tok {
                 None => {
                     self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
-                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                     self.inner.awake_io.push_back(token);
-                    return
+                    continue
                 }
                 Some((ref worker, ref tok))
                 if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
                     self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
-                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                     self.inner.awake_io.push_back(token);
-                    self.inner.awake_io.push_back(*tok);
-                    return
+                    if token != *tok {
+                       self.inner.awake_io.push_back(*tok);
+                    }
+                    continue
                 }
                 Some((worker, tok)) => {
                     (worker, tok)
@@ -376,14 +391,18 @@ impl Worker {
             };
             if worker != self.inner.worker_num {
                 assert_eq!(tok, DOWNSTREAM);
+                trace!("WORKER {:?} send other DOWNSTREAM", self.inner.worker_num);
                 self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
-                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                 self.inner.awake_io.push_back(token);
-                self.inner.awake_io.push_back(tok);
-                return
+                if token != tok {
+                    self.inner.awake_io.push_back(tok);
+                }
+                continue
             }
 
             if tok == DOWNSTREAM {
+                trace!("WORKER {:?} send DOWNSTREAM", self.inner.worker_num);
                 {
                     let client = self.clients.get_mut(&tok).unwrap();
                     //client.add_downstream_send(bytes);
@@ -394,17 +413,30 @@ impl Worker {
                     client.add_downstream_send3(
                             bytes, src_addr.bytes(), &storage_log_bytes);
                 }
-                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                //FIXME send correct
+                buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                 self.inner.awake_io.push_back(token);
-                self.inner.awake_io.push_back(tok);
+                if token != tok {
+                    self.inner.awake_io.push_back(tok);
+                }
             }
             else {
                 //self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
-                self.clients.get_mut(&tok).unwrap()
-                    .add_downstream_send(buffer.entry_slice());
-                self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                trace!("WORKER {:?} send to client {:?}", self.inner.worker_num, tok);
+                match buffer {
+                    Some(b) => {
+                        self.clients.get_mut(&tok).unwrap()
+                            .add_downstream_send(b.entry_slice());
+                        self.clients.get_mut(&token).unwrap().return_buffer(b)
+                    }
+                    None => {
+                        self.clients.get_mut(&tok).unwrap().add_downstream_send(bytes);
+                    },
+                }
                 self.inner.awake_io.push_back(token);
-                self.inner.awake_io.push_back(tok);
+                if token != tok {
+                    self.inner.awake_io.push_back(tok);
+                }
             }
         }
     }// end handle_from_log
@@ -536,22 +568,31 @@ impl WorkerInner {
         src_addr: Ipv4SocketAddr,
     ) {
         trace!("WORKER {} send to log", self.worker_num);
-        let kind = buffer.entry().kind.layout();
+        let k = buffer.entry().kind;
+        let kind = k.layout();
         let storage = match kind {
-            EntryLayout::Multiput | EntryLayout::Sentinel => {
-                let (size, senti_size) = {
+            EntryLayout::Multiput | EntryLayout::Sentinel => unsafe {
+                let (size, senti_size, num_locs, has_senti) = {
                     let e = buffer.entry();
-                    (e.entry_size(), e.sentinel_entry_size())
+                    let locs = e.locs();
+                    let num_locs = locs.len();
+                    //FIXME
+                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
+                    (e.entry_size(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
-                unsafe {
+                if k.contains(EntryKind::NewMultiPut) {
+                    let senti_size = if has_senti { Some(senti_size) } else { None };
+                    let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                    Troption::Left(storage)
+                } else {
                     let mut m = Vec::with_capacity(size);
                     let mut s = Vec::with_capacity(senti_size);
                     m.set_len(size);
                     s.set_len(senti_size);
-                    Some(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
+                    Troption::Right(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
                 }
-            }
-            _ => None,
+            },
+            _ => Troption::None,
         };
         self.print_data.new_to_log(1);
         self.print_data.to_log(1);

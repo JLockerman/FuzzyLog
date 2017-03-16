@@ -1,7 +1,6 @@
 
-use std::{mem, ptr};
-
 use std::marker::PhantomData;
+use std::{mem, ptr};
 
 use storeables::Storeable;
 use packets::Entry as Packet;
@@ -24,6 +23,7 @@ struct RootTable<V> {
     l6: Shortcut<ValEdge>,
     next_entry: u64,
     alloc: AllocPtr,
+    next_timestamp: u64,
     last_lock: u64,
     //FIXME if we want to do lock handoff we need to know until where we can read...
     last_unlock: u64,
@@ -345,6 +345,11 @@ where V: Storeable {
                     _pd: Default::default()}
             }
         }
+    }
+
+    pub unsafe fn reserve_space(&mut self, size: usize) -> (*mut u8, u64) {
+        let (val_ptr, loc) = self.root.alloc.prep_append(size);
+        (val_ptr.as_mut_ptr(), loc)
     }
 
     pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet<V>> {
