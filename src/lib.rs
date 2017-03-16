@@ -160,6 +160,28 @@ pub mod c_binidings {
             colors.into_iter().cloned().map(order::from)))
     }
 
+    #[no_mangle]
+    pub unsafe extern "C" fn new_dag_handle_with_skeens(
+        num_chain_ips: usize, chain_server_ips: *const *const c_char, color: *const colors
+    ) -> Box<DAG> {
+        assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
+        //assert_eq!(num_ips, 1, "Multiple servers are not yet supported via the C API");
+        assert!(chain_server_ips != ptr::null());
+        assert!(unsafe {*chain_server_ips != ptr::null()});
+        assert!(num_chain_ips >= 1);
+        assert!(color != ptr::null());
+        assert!(colors_valid(color));
+        let _ = ::env_logger::init();
+        let server_addrs = slice::from_raw_parts(chain_server_ips, num_chain_ips)
+            .into_iter().map(|&s|
+                CStr::from_ptr(s).to_str().expect("invalid IP string")
+                    .parse().expect("invalid IP addr")
+            ).collect::<Vec<SocketAddr>>();
+        let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
+        Box::new(LogHandle::new_tcp_log(server_addrs.into_iter(),
+            colors.into_iter().cloned().map(order::from)))
+    }
+
     //NOTE currently can only use 31bits of return value
     #[no_mangle]
     pub extern "C" fn do_append(dag: *mut DAG, data: *const u8, data_size: usize,
