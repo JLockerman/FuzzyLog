@@ -129,7 +129,7 @@ pub enum ToWorker<T: Send + Sync> {
     Read(&'static Entry<()>, BufferSlice, T),
     EmptyRead(entry, BufferSlice, T),
     Reply(BufferSlice, T),
-    ReturnBuffer(BufferSlice)
+    ReturnBuffer(BufferSlice, T)
 }
 
 #[derive(Clone, Debug)]
@@ -191,7 +191,7 @@ where T: Send + Sync {
             | &mut Skeens1{ref mut t, ..} | &mut SkeensFinished{ref mut t, ..}
             | &mut SingleSkeens {ref mut t, ..} | &mut DelayedSingle {ref mut t, .. }
             => f(t),
-            &mut ReturnBuffer(..) => (),
+            &mut ReturnBuffer(_, ref mut t) => f(t),
         }
     }
 }
@@ -204,7 +204,7 @@ where T: Copy + Send + Sync {
             &MultiReplica{t, ..} => t,
             &Skeens1{t, ..} | &SkeensFinished{t, ..} => t,
             &SingleSkeens {t, ..} | &DelayedSingle {t, .. } => t,
-            &ReturnBuffer(..) => unimplemented!(), //FIXME
+            &ReturnBuffer(_, t) => t,
         }
     }
 }
@@ -433,7 +433,7 @@ where ToWorkers: DistributeToWorkers<T> {
         if kind.contains(EntryKind::Unlock) {
             self.new_multiappend_round2(kind, &mut buffer, t);
             self.print_data.msgs_sent(1);
-            self.to_workers.send_to_worker(ReturnBuffer(buffer))
+            self.to_workers.send_to_worker(ReturnBuffer(buffer, t))
         } else {
             let storage = storage.unwrap_left();
             self.new_multiappend_round1(kind, &mut buffer, &storage, t);
@@ -471,6 +471,8 @@ where ToWorkers: DistributeToWorkers<T> {
                 timestamps[i] = 0;
             }
         }
+        trace!("SERVER {:?} new-style multiput Round 1 timestamps {:?}",
+            self.this_server_num, timestamps);
     }
 
     fn new_multiappend_round2(
@@ -479,12 +481,14 @@ where ToWorkers: DistributeToWorkers<T> {
         buffer: &mut BufferSlice,
         t: T
     ) {
-        trace!("SERVER {:?} new-style multiput Round 2 {:?}", self.this_server_num, kind);
         // In round two we flush some the queues... an possibly a partial entry...
         let val = buffer.entry_mut();
         let id = val.id;
         let max_timestamp = val.lock_num();
         let locs = val.locs_mut();
+        trace!("SERVER {:?} new-style multiput Round 2 {:?} mts {:?}",
+            self.this_server_num, kind, max_timestamp
+        );
         let mut is_sentinel = false;
         for i in 0..locs.len() {
             if locs[i] == OrderIndex(0.into(), 0.into()) {
@@ -507,6 +511,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 chain.finish_multi(id, max_timestamp,
                     |finished| match finished {
                         FinishSkeens::Multi(index, trie_slot, storage, t) => {
+                            trace!("server finish sk multi");
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 SkeensFinished {
@@ -518,6 +523,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             )
                         },
                         FinishSkeens::Single(index, trie_slot, storage, t) => {
+                            trace!("server finish sk single");
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 DelayedSingle {
@@ -956,21 +962,24 @@ impl<T: Copy> Chain<T> {
         use self::FinishSkeens::*;
         let r = self.skeens.set_max_timestamp(id, max_timestamp);
         match r {
-            SkeensSetMaxRes::Ok => {},
+            SkeensSetMaxRes::Ok => trace!("multi with ts {:?} must wait", max_timestamp),
             SkeensSetMaxRes::Duplicate(u64) => unimplemented!(),
             SkeensSetMaxRes::NotWaiting => unimplemented!(),
             SkeensSetMaxRes::NeedsFlush => {
+                trace!("multi flush due to {:?}", max_timestamp);
                 let trie = &mut self.trie;
                 self.skeens.flush_got_max_timestamp(|g| {
                     match g {
                         GotMax::Single{..} => unimplemented!(),
-                        GotMax::SimpleSingle{storage, t, ..} => unsafe {
+                        GotMax::SimpleSingle{storage, t, timestamp, ..} => unsafe {
+                            trace!("flush single {:?}", timestamp);
                             let (loc, ptr) = trie.prep_append(ptr::null());
                             let id = Entry::<()>::wrap_byte(&*storage).id;
                             on_finish(Single(loc, ptr, storage, t));
                             id
                         },
-                        GotMax::Multi{storage, t, id, ..} => unsafe {
+                        GotMax::Multi{storage, t, id, timestamp, ..} => unsafe {
+                            trace!("flush multi {:?}", timestamp);
                             let (loc, ptr) = trie.prep_append(ptr::null());
                             on_finish(Multi(loc, ptr, storage, t));
                             id
@@ -983,18 +992,18 @@ impl<T: Copy> Chain<T> {
 }
 
 fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
--> (Option<Buffer>, &'static [u8], T, u64) {
+-> (Option<Buffer>, &'static [u8], T, u64, bool) {
     match msg {
         Reply(buffer, t) => {
             trace!("WORKER {} finish reply", worker_num);
-            (Some(buffer), &[], t, 0)
+            (Some(buffer), &[], t, 0, false)
         },
 
         Write(buffer, slot, t) => unsafe {
             trace!("WORKER {} finish write", worker_num);
             let loc = slot.loc();
             let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
-            (Some(buffer), ret, t, loc)
+            (Some(buffer), ret, t, loc, false)
         },
 
         SingleSkeens { mut buffer, storage, storage_loc, t, } => unsafe {
@@ -1007,7 +1016,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 }
                 e.kind.insert(EntryKind::Skeens1Queued);
             }
-            (Some(buffer), &[], t, storage_loc)
+            (Some(buffer), &[], t, storage_loc, true)
         },
 
         // Safety, since both the original append and the delayed portion
@@ -1024,7 +1033,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
             (*trie_entry).store(storage as *mut u8, Ordering::Release);
             let ret = slice::from_raw_parts(storage, len);
-            (None, ret, t, 0)
+            (None, ret, t, 0, false)
         },
 
         Read(read, mut buffer, t) => {
@@ -1033,7 +1042,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             //FIXME needless copy
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
-            (Some(buffer), bytes, t, 0)
+            (Some(buffer), bytes, t, 0, false)
         },
 
         EmptyRead(last_valid_loc, mut buffer, t) => {
@@ -1055,7 +1064,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             }
             buffer.ensure_len();
             trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
-            (Some(buffer), &[], t, 0)
+            (Some(buffer), &[], t, 0, false)
         },
 
         MultiReplica {
@@ -1099,7 +1108,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             let ret = slice::from_raw_parts(multi_storage, len);
             //TODO is re right for sentinel only writes?
             if remaining_senti_places.len() == 0 {
-                return (Some(buffer), ret, t, 0)
+                return (Some(buffer), ret, t, 0, false)
             }
             else {
                 let e = buffer.entry();
@@ -1121,7 +1130,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
 
             }
             //TODO is re right for sentinel only writes?
-            (Some(buffer), ret, t, 0)
+            (Some(buffer), ret, t, 0, false)
         },
 
         Skeens1{mut buffer, storage, t} => unsafe {
@@ -1129,6 +1138,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 let e = buffer.entry_mut();
                 e.kind.insert(EntryKind::ReadSuccess);
                 let &mut (ref mut ts, ref mut st0, ref mut st1) = &mut (*storage.get());
+                trace!("WORKER {} finish skeens1 {:?}", worker_num, ts);
                 let num_ts = ts.len();
                 st0.copy_from_slice(e.bytes());
                 e.kind.insert(EntryKind::Sentinel);
@@ -1143,9 +1153,10 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 }
                 e.kind.insert(EntryKind::Skeens1Queued);
             }
-            (Some(buffer), &[], t, 0)
+            (Some(buffer), &[], t, 0, false)
         },
         SkeensFinished{loc, trie_slot, storage, t,} => unsafe {
+            trace!("WORKER {} finish skeens2 @ {:?}", worker_num, loc);
             let chain = loc.0;
             let &mut (ref mut ts, ref mut st0, ref mut st1) = &mut (*storage.get());
             let is_sentinel = {
@@ -1173,9 +1184,12 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 };
                 (*trie_entry).store(to_store, Ordering::Release);
             }
-            (None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0)
+            (None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0, false)
         },
-        ReturnBuffer(..) => unimplemented!(),
+        ReturnBuffer(buffer, t) => {
+            trace!("WORKER {} return buffer", worker_num);
+            (Some(buffer), &[], t, 0, true)
+        },
     }
 }
 

@@ -161,6 +161,50 @@ where C: AsyncStoreClient {
         }, to_store))
     }
 
+    pub fn new_tcp<I>(
+        chain_servers: I, client: C,
+        event_loop: &mut mio::Poll
+    ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    where I: IntoIterator<Item=SocketAddr> {
+        //TODO assert no duplicates
+        let mut servers = try!(chain_servers
+            .into_iter()
+            .map(PerServer::tcp)
+            .collect::<Result<Vec<_>, _>>());
+        assert!(servers.len() > 0);
+        let num_chain_servers = servers.len();
+        for (i, server) in servers.iter_mut().enumerate() {
+            server.token = Token(i);
+            event_loop.register(server.connection(), server.token,
+                mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
+                mio::PollOpt::edge())
+                .expect("could not reregister client socket")
+        }
+        let awake_io = servers.iter().map(|s| s.token.0).collect();
+        let from_client_token = Token(servers.len());
+        let (to_store, from_client) = mio::channel::channel();
+        event_loop.register(&from_client,
+            from_client_token,
+            mio::Ready::readable() | mio::Ready::error(),
+            mio::PollOpt::level()
+        ).expect("could not reregister client channel");
+        Ok((AsyncTcpStore {
+            sent_writes: Default::default(),
+            sent_reads: Default::default(),
+            waiting_buffers: Default::default(),
+            servers: servers,
+            num_chain_servers: num_chain_servers,
+            lock_token: Token(::std::usize::MAX),
+            client: client,
+            awake_io: awake_io,
+            from_client: from_client,
+            is_unreplicated: true,
+            new_multi: true,
+
+            print_data: Default::default(),
+        }, to_store))
+    }
+
     pub fn replicated_tcp<I>(
         lock_server: Option<SocketAddr>,
         chain_servers: I,
@@ -613,7 +657,7 @@ where PerServer<S>: Connected,
             let kind = packet.entry().kind;
             trace!("CLIENT got a {:?} from {:?}", kind, token);
             if kind.contains(EntryKind::ReadSuccess) {
-                if !kind.contains(EntryKind::Unlock) {
+                if !kind.contains(EntryKind::Unlock) || kind.contains(EntryKind::NewMultiPut) {
                     let num_chain_servers = self.num_chain_servers;
                     self.handle_completion(token, num_chain_servers, &packet)
                 }
@@ -696,6 +740,7 @@ where PerServer<S>: Connected,
                 //         server.send_lock+data
                 WriteState::ToLockServer(mut msg) => {
                     trace!("CLIENT finished lock");
+                    assert!(!self.new_multi);
                     assert_eq!(token, self.lock_token());
                     {
                         let e = Entry::<()>::wrap_bytes_mut(&mut msg);
@@ -718,6 +763,7 @@ where PerServer<S>: Connected,
                     return false
                 }
                 WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel) => {
+                    assert!(!self.new_multi);
                     assert!(token != self.lock_token());
                     trace!("CLIENT finished multi section");
                     let ready_to_unlock = {
@@ -758,6 +804,7 @@ where PerServer<S>: Connected,
                 }
 
                 WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel) => {
+                    assert!(self.new_multi);
                     trace!("CLIENT finished sk1 section");
                     let ready_for_skeens2 = {
                         let mut ts = timestamps.borrow_mut();
@@ -773,8 +820,8 @@ where PerServer<S>: Connected,
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
-                            trace!("CLIENT finished skeens1 {:?}", timestamps);
-                            let max_ts = timestamps.borrow().iter().cloned().max().unwrap();
+                            trace!("CLIENT finished skeens1 {:?}", ts);
+                            let max_ts = ts.iter().cloned().max().unwrap();
                             Some(max_ts)
                         } else { None }
                     };
@@ -793,16 +840,17 @@ where PerServer<S>: Connected,
                 }
 
                 WriteState::Skeens2(buf, remaining_servers, max_ts) => {
+                    assert!(self.new_multi);
                     trace!("CLIENT finished sk2 section");
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
                         let filled = fill_locs(&mut b, packet.entry(),
                             token, self.num_chain_servers, unreplicated);
                         let mut r = remaining_servers.borrow_mut();
-                        if r.remove(&token.0) {
-                            assert!(filled > 0, "no fill for {:?}", token);
-                        }
-                        let finished_writes = r.is_empty();
+                        //if r.remove(&token.0) {
+                        //    assert!(filled > 0, "no fill for {:?}", token);
+                        //}
+                        let finished_writes = unimplemented!();
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
@@ -831,7 +879,7 @@ where PerServer<S>: Connected,
                 }
 
                 WriteState::SingleServer(mut buf) => {
-                    assert!(token != self.lock_token());
+                    //assert!(token != self.lock_token());
                     trace!("CLIENT finished single server");
                     fill_locs(&mut buf, packet.entry(), token, self.num_chain_servers, unreplicated);
                     let locs = packet.entry().locs().to_vec();
@@ -866,7 +914,7 @@ where PerServer<S>: Connected,
 
     fn handle_completed_read(&mut self, token: Token, packet: &Buffer) -> bool {
         trace!("CLIENT handle completed read?");
-        if token == self.lock_token() { return false }
+        if !self.new_multi && token == self.lock_token() { return false }
         //FIXME remove extra index?
         self.servers[token.0].print_data.finished_read(1);
         //FIXME remove
@@ -1054,6 +1102,7 @@ where PerServer<S>: Connected,
     }
 
     fn lock_token(&self) -> Token {
+        debug_assert!(!self.new_multi);
         debug_assert!(self.num_chain_servers < self.servers.len());
         //Token(self.num_chain_servers * 2)
         self.lock_token
@@ -1349,6 +1398,7 @@ impl Connected for PerServer<TcpStream> {
         remaining_servers: Rc<RefCell<HashSet<usize>>>,
         max_timestamp: u64,
     ) {
+        trace!("Add Skeens2");
         self.stay_awake = true;
         let len = msg.borrow().len();
         if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {

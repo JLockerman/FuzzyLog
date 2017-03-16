@@ -512,7 +512,12 @@ macro_rules! async_tests {
 
         //TODO test append after prefetch but before read
     );
-    () => ( async_tests!(tcp); async_tests!(udp); async_tests!(rtcp); );
+    () => {
+        async_tests!(tcp);
+        async_tests!(udp);
+        async_tests!(stcp);
+        async_tests!(rtcp);
+    };
     (tcp) => (
         mod tcp {
             async_tests!(test new_thread_log);
@@ -624,6 +629,56 @@ macro_rules! async_tests {
             }
         }
     );
+    (stcp) => {
+        mod stcp {
+            async_tests!(test new_thread_log);
+
+            #[allow(non_upper_case_globals)]
+            const addr_strs: &'static [&'static str] = &["0.0.0.0:13490", "0.0.0.0:13491"];
+
+            fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                LogHandle::new_tcp_log(
+                    addr_strs.into_iter().map(|s| s.parse().unwrap()),
+                    interesting_chains.into_iter(),
+                )
+            }
+
+
+            fn start_tcp_servers()
+            {
+                use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+                use std::{thread, iter};
+
+                use mio;
+
+                static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+
+                for (i, &addr_str) in addr_strs.iter().enumerate() {
+                    let addr = addr_str.parse().expect("invalid inet address");
+                    let acceptor = mio::tcp::TcpListener::bind(&addr);
+                    if let Ok(acceptor) = acceptor {
+                        thread::spawn(move || {
+                            trace!("starting server");
+                            ::servers2::tcp::run(
+                                acceptor,
+                                i as u32,
+                                addr_strs.len() as u32,
+                                1,
+                                &SERVERS_READY,
+                            )
+                        });
+                    }
+                    else {
+                        trace!("server already started");
+                    }
+                }
+
+                while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() {}
+            }
+        }
+    };
     (rtcp) => {
         mod rtcp {
             use std::sync::{Arc, Mutex};

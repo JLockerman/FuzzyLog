@@ -350,8 +350,18 @@ impl Worker {
             //self.inner.waiting_for_log -= 1;
             self.inner.print_data.from_log(1);
             let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
-            let (buffer, bytes, (wk, token, src_addr), storage_loc) = work_res;
+            let (buffer, bytes, (wk, token, src_addr), storage_loc, just_ret) = work_res;
             trace!("WORKER {} recv from log for {}.", self.inner.worker_num, src_addr);
+            if just_ret {
+                buffer.map(|b| {
+                    trace!("WORKER {} just ret {:?}",
+                        self.inner.worker_num, b.entry().kind);
+                    self.clients.get_mut(&token).unwrap().return_buffer(b)
+                });
+                self.inner.awake_io.push_back(token);
+                continue
+            }
+            //FIXME change returns to continues...
             debug_assert_eq!(wk, self.inner.worker_num);
             let worker_tok = if src_addr != Ipv4SocketAddr::nil() {
                 self.inner.next_hop(token, src_addr)
@@ -363,15 +373,17 @@ impl Worker {
                     self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
                     buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                     self.inner.awake_io.push_back(token);
-                    return
+                    continue
                 }
                 Some((ref worker, ref tok))
                 if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
                     self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, bytes)).ok().unwrap();
                     buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                     self.inner.awake_io.push_back(token);
-                    self.inner.awake_io.push_back(*tok);
-                    return
+                    if token != *tok {
+                       self.inner.awake_io.push_back(*tok);
+                    }
+                    continue
                 }
                 Some((worker, tok)) => {
                     (worker, tok)
@@ -379,14 +391,18 @@ impl Worker {
             };
             if worker != self.inner.worker_num {
                 assert_eq!(tok, DOWNSTREAM);
+                trace!("WORKER {:?} send other DOWNSTREAM", self.inner.worker_num);
                 self.inner.to_dist.send(WorkerToDist::Downstream(worker, src_addr, bytes, storage_loc)).ok().unwrap();
                 buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                 self.inner.awake_io.push_back(token);
-                self.inner.awake_io.push_back(tok);
-                return
+                if token != tok {
+                    self.inner.awake_io.push_back(tok);
+                }
+                continue
             }
 
             if tok == DOWNSTREAM {
+                trace!("WORKER {:?} send DOWNSTREAM", self.inner.worker_num);
                 {
                     let client = self.clients.get_mut(&tok).unwrap();
                     //client.add_downstream_send(bytes);
@@ -397,19 +413,30 @@ impl Worker {
                     client.add_downstream_send3(
                             bytes, src_addr.bytes(), &storage_log_bytes);
                 }
+                //FIXME send correct
                 buffer.map(|b| self.clients.get_mut(&token).unwrap().return_buffer(b));
                 self.inner.awake_io.push_back(token);
-                self.inner.awake_io.push_back(tok);
+                if token != tok {
+                    self.inner.awake_io.push_back(tok);
+                }
             }
             else {
                 //self.clients.get_mut(&tok).unwrap().add_send_buffer(buffer);
-                buffer.map(|b| {
-                    self.clients.get_mut(&tok).unwrap()
-                        .add_downstream_send(b.entry_slice());
-                    self.clients.get_mut(&token).unwrap().return_buffer(b)
-                });
+                trace!("WORKER {:?} send to client {:?}", self.inner.worker_num, tok);
+                match buffer {
+                    Some(b) => {
+                        self.clients.get_mut(&tok).unwrap()
+                            .add_downstream_send(b.entry_slice());
+                        self.clients.get_mut(&token).unwrap().return_buffer(b)
+                    }
+                    None => {
+                        self.clients.get_mut(&tok).unwrap().add_downstream_send(bytes);
+                    },
+                }
                 self.inner.awake_io.push_back(token);
-                self.inner.awake_io.push_back(tok);
+                if token != tok {
+                    self.inner.awake_io.push_back(tok);
+                }
             }
         }
     }// end handle_from_log

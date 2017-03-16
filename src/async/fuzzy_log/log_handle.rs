@@ -185,6 +185,45 @@ where V: Storeable {
         LogHandle::with_store(interesting_chains, make_store)
     }
 
+    pub fn new_tcp_log<S, C>(
+        chain_servers: S,
+        interesting_chains: C
+    ) -> Self
+    where S: IntoIterator<Item=SocketAddr>,
+          C: IntoIterator<Item=order>,
+    {
+        use std::thread;
+        use std::sync::{Arc, Mutex};
+
+        let chain_servers: Vec<_> = chain_servers.into_iter().collect();
+
+        let make_store = |client| {
+            let to_store_m = Arc::new(Mutex::new(None));
+            let tsm = to_store_m.clone();
+            thread::spawn(move || {
+                let mut event_loop = mio::Poll::new().unwrap();
+                let (store, to_store) = ::async::store::AsyncTcpStore::new_tcp(
+                    chain_servers.into_iter(),
+                    client,
+                    &mut event_loop
+                ).expect("could not start store.");
+                *tsm.lock().unwrap() = Some(to_store);
+                store.run(event_loop);
+            });
+            let to_store;
+            loop {
+                let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                if let Some(s) = ts {
+                    to_store = s;
+                    break
+                }
+            }
+            to_store
+        };
+
+        LogHandle::with_store(interesting_chains, make_store)
+    }
+
     pub fn spawn_tcp_log<S, C>(
         lock_server: SocketAddr,
         chain_servers: S,
