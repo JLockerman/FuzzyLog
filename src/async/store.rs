@@ -31,7 +31,7 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     awake_io: VecDeque<usize>,
     sent_writes: HashMap<Uuid, WriteState>,
     //sent_reads: HashMap<OrderIndex, Vec<u8>>,
-    sent_reads: HashSet<OrderIndex>,
+    sent_reads: HashMap<OrderIndex, u16>,
     waiting_buffers: VecDeque<Vec<u8>>,
     num_chain_servers: usize,
     lock_token: Token,
@@ -548,7 +548,7 @@ where PerServer<S>: Connected,
             let layout = sent.layout();
             if layout == EntryLayout::Read {
                 let read_loc = sent.read_loc();
-                self.sent_reads.insert(read_loc);
+                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
             }
             else if !sent.is_unlock() {
@@ -642,7 +642,7 @@ where PerServer<S>: Connected,
             let layout = sent.layout();
             if layout == EntryLayout::Read {
                 let read_loc = sent.read_loc();
-                self.sent_reads.insert(read_loc);
+                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
             }
             else if !sent.is_unlock() {
@@ -703,7 +703,7 @@ where PerServer<S>: Connected,
             let layout = sent.layout();
             if layout == EntryLayout::Read {
                 let read_loc = sent.read_loc();
-                self.sent_reads.insert(read_loc);
+                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
             }
             else if !sent.is_unlock() {
@@ -933,6 +933,8 @@ where PerServer<S>: Connected,
     }// end handle_completed_write
 
     fn handle_completed_read(&mut self, token: Token, packet: &Buffer) -> bool {
+        use std::collections::hash_map::Entry::Occupied;
+
         trace!("CLIENT handle completed read?");
         if !self.new_multi && token == self.lock_token() { return false }
         //FIXME remove extra index?
@@ -941,7 +943,22 @@ where PerServer<S>: Connected,
         let mut was_needed = false;
         for &oi in packet.entry().locs() {
             //trace!("CLIENT completed read @ {:?}", oi);
-            if self.sent_reads.remove(&oi) {
+            let needed = match self.sent_reads.entry(oi) {
+                Occupied(mut oe) => {
+                    let needed = if oe.get() > &0 {
+                        *oe.get_mut() -= 1;
+                        true
+                    } else {
+                        false
+                    };
+                    if oe.get() == &0 {
+                        oe.remove();
+                    }
+                    needed
+                }
+                _ => false,
+            };
+            if needed {
                 was_needed |= true;
                 trace!("CLIENT read needed completion @ {:?}", oi);
                 //TODO validate correct id for failing read
@@ -965,7 +982,7 @@ where PerServer<S>: Connected,
             }
             EntryLayout::Read => {
                 let read_loc = packet.entry().locs()[0];
-                if self.sent_reads.contains(&read_loc) {
+                if self.sent_reads.contains_key(&read_loc) {
                     let mut b = self.waiting_buffers.pop_front()
                         .unwrap_or_else(|| Vec::with_capacity(50));
                     {
