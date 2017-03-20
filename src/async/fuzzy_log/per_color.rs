@@ -209,11 +209,13 @@ impl PerColor {
     }
 
     #[inline(always)]
-    pub fn got_read(&mut self, index: entry) {
+    pub fn got_read(&mut self, index: entry) -> bool {
         self.decrement_outstanding_reads();
         if index == self.last_gotten_from_server + 1 {
             self.last_gotten_from_server = index
         }
+
+        index > self.last_returned_to_client
     }
 
     pub fn has_read_state(&self) -> bool {
