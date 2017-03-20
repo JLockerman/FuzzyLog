@@ -520,7 +520,9 @@ fn negotiate_num_upstreams(
         'write: loop {
             let r = blocking_write(socket, &to_write);
             match r {
-                Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::ConnectionRefused
+                    || e.kind() == io::ErrorKind::NotConnected => {
                     if refusals >= 60000 { panic!("write fail {:?}", e) }
                     refusals += 1;
                     trace!("upstream refused reconnect attempt {}", refusals);
