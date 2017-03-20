@@ -247,6 +247,32 @@ write_id async_causal_append(
 	struct colors* depends_on,
 	fuzzy_log_location *happens_after, size_t num_happens_after);
 
+//! An async append which allows for nodes which happens-after the seen entries
+//! of a color
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param data
+//!     The data contained within the node.
+//!
+//! @param data_size
+//!     The size, in bytes, of data.
+//!
+//! @param inhabits
+//!     The colors which the new node shall be colored with. Must be non-empty.
+//!
+//! @param happens_after
+//!     The colors which the new node should causally happen-after. May be empty.
+//!
+//! @return An id which uniquely identifies the write.
+//!
+write_id async_simple_causal_append(
+	DAGHandle *handle,
+	char *data, size_t data_size,
+	struct colors* inhabits,
+	struct colors* happens_after);
+
 //! Reads a valid next node from the new nodes discovered with the latests
 //! snapshot. If there are no such nodes (i.e. all new nodes have been read)
 //! data_read and inhabits_out->numcolors will be set to 0.

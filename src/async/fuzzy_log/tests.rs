@@ -6,7 +6,7 @@ macro_rules! async_tests {
         use async::fuzzy_log::*;
         use async::fuzzy_log::log_handle::LogHandle;
 
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         //TODO move to crate root under cfg...
         extern crate env_logger;
@@ -508,6 +508,77 @@ macro_rules! async_tests {
                 );
                 assert_eq!(lh.get_next(), None);
             }
+        }
+
+        #[test]
+        #[inline(never)]
+        pub fn test_simple_causal1() {
+            trace!("TEST simple causal 1");
+
+            let mut lh = $new_thread_log::<i32>(vec![67.into(), 68.into(), 69.into()]);
+            let mut lh2 = $new_thread_log::<i32>(vec![67.into(), 68.into(), 69.into()]);
+
+            let _ = lh.append(67.into(), &63,  &[]);
+            let _ = lh.append(68.into(), &-2,  &[]);
+            let _ = lh.append(68.into(), &-56, &[]);
+            lh.snapshot(68.into());
+            lh.snapshot(67.into());
+
+            while let Some(..) = lh.get_next() {}
+            let id = lh.simple_causal_append(&111, &mut [69.into()], &mut [67.into(), 68.into()]);
+            lh.wait_for_all_appends();
+
+
+            let _ = lh2.snapshot(69.into());
+
+            let mut seen = HashSet::new();
+
+            while let Some((_, locs)) = lh2.get_next() {
+                for &loc in locs {
+                    seen.insert(loc);
+                }
+            }
+
+            let should_see =
+                [OrderIndex(67.into(), 1.into()),
+                OrderIndex(68.into(), 1.into()),
+                OrderIndex(68.into(), 2.into()),
+                OrderIndex(69.into(), 1.into())].into_iter().cloned().collect();
+
+            assert_eq!(seen, should_see);
+        }
+
+        #[test]
+        #[inline(never)]
+        pub fn test_simple_causal2() {
+            trace!("TEST simple causal 2");
+
+            let mut lh = $new_thread_log::<i32>(vec![70.into(), 71.into(), 72.into()]);
+
+            let _ = lh.append(70.into(), &63,  &[]);
+            let _ = lh.append(71.into(), &-2,  &[]);
+            let _ = lh.append(71.into(), &-56, &[]);
+            let id = lh.simple_causal_append(&111, &mut [72.into()], &mut [70.into(), 71.into()]);
+            lh.wait_for_all_appends();
+
+
+            let _ = lh.snapshot(72.into());
+
+            let mut seen = HashSet::new();
+
+            while let Some((_, locs)) = lh.get_next() {
+                for &loc in locs {
+                    seen.insert(loc);
+                }
+            }
+
+            let should_see =
+                [OrderIndex(70.into(), 1.into()),
+                OrderIndex(71.into(), 1.into()),
+                OrderIndex(71.into(), 2.into()),
+                OrderIndex(72.into(), 1.into())].into_iter().cloned().collect();
+
+            assert_eq!(seen, should_see);
         }
 
         //TODO test append after prefetch but before read

@@ -309,6 +309,40 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn async_simple_causal_append(
+        dag: *mut DAG,
+        data: *const u8,
+        data_size: usize,
+        inhabits: *mut colors,
+        happens_after: *mut colors,
+    ) -> WriteId {
+        assert!(data_size == 0 || data != ptr::null());
+        assert!(inhabits != ptr::null_mut());
+        assert!(colors_valid(inhabits));
+
+        let (dag, data, inhabits) = {
+            let colors: *mut order = (*inhabits).mycolors as *mut _;
+            let s = slice::from_raw_parts_mut(colors, (*inhabits).numcolors);
+            (
+                dag.as_mut().expect("need to provide a valid DAGHandle"),
+                slice::from_raw_parts(data, data_size),
+                s,
+            )
+        };
+        let happens_after = {
+            if happens_after != ptr::null_mut() {
+                assert!(colors_valid(happens_after));
+                slice::from_raw_parts_mut((*happens_after).mycolors as *mut _, (*happens_after).numcolors)
+            } else {
+                &mut []
+            }
+        };
+
+        let id = dag.simple_causal_append(data, inhabits, happens_after);
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn wait_for_all_appends(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         dag.wait_for_all_appends();
