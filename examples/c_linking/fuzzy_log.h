@@ -455,7 +455,7 @@ void start_fuzzy_log_server_thread_from_group(const char * server_ip,
 
 
 static inline void start_fuzzy_log_servers(uint32_t num_servers,
-	const char * const server_ips[num_servers])
+	const char ** server_ips)
 {
 	for(uint32_t i = 0; i < num_servers; i++)
 		start_fuzzy_log_server_thread_from_group(server_ips[i], i, num_servers);
