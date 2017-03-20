@@ -390,7 +390,7 @@ where PerServer<S>: Connected,
         let mut timeout_idx = 0;
         loop {
             const TIMEOUTS: [(u64, u32); 9] =
-                [(0, 100_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
+                [(0, 10_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
                 (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0), (10, 0)];
             //poll.poll(&mut events, None).expect("worker poll failed");
             //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
@@ -404,11 +404,22 @@ where PerServer<S>: Connected,
                         self.print_stats()
                     }
                 }
-                if timeout_idx + 1 < TIMEOUTS.len() {
-                    timeout_idx += 1
-                }
                 for ps in self.servers.iter() {
                     self.awake_io.push_back(ps.token.0)
+                }
+                'new_reqs: loop {
+                    if !self.handle_new_requests_from_client() {
+                        break 'new_reqs
+                    }
+                }
+                if !self.awake_io.is_empty() {
+                    if timeout_idx + 1 < TIMEOUTS.len() {
+                        timeout_idx += 1
+                    }
+                } else {
+                    if timeout_idx > 0 {
+                       timeout_idx -= 1
+                    }
                 }
             } else {
                 if timeout_idx > 0 {
