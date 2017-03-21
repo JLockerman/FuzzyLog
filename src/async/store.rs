@@ -170,7 +170,7 @@ where C: AsyncStoreClient {
         trace!("Starting Store server addrs:");
         let mut servers = try!(chain_servers
             .into_iter()
-            .inspect(|addr| trace!("{:?}"))
+            .inspect(|addr| trace!("{:?}", addr))
             .map(PerServer::tcp)
             .collect::<Result<Vec<_>, _>>());
         assert!(servers.len() > 0);
