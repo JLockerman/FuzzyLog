@@ -200,6 +200,7 @@ where V: Storeable {
         use std::sync::{Arc, Mutex};
 
         let chain_servers: Vec<_> = chain_servers.into_iter().collect();
+        trace!("LogHandle for servers {:?}", chain_servers);
 
         let make_store = |client| {
             let to_store_m = Arc::new(Mutex::new(None));

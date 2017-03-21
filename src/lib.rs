@@ -172,6 +172,7 @@ pub mod c_binidings {
         assert!(color != ptr::null());
         assert!(colors_valid(color));
         let _ = ::env_logger::init();
+        trace!("Lib num chain servers {:?}", num_chain_ips);
         let server_addrs = slice::from_raw_parts(chain_server_ips, num_chain_ips)
             .into_iter().map(|&s|
                 CStr::from_ptr(s).to_str().expect("invalid IP string")
