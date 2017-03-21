@@ -167,12 +167,15 @@ where C: AsyncStoreClient {
     ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
+        trace!("Starting Store server addrs:");
         let mut servers = try!(chain_servers
             .into_iter()
+            .inspect(|addr| trace!("{:?}"))
             .map(PerServer::tcp)
             .collect::<Result<Vec<_>, _>>());
         assert!(servers.len() > 0);
         let num_chain_servers = servers.len();
+        trace!("Client {:?} servers", num_chain_servers);
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
             event_loop.register(server.connection(), server.token,
@@ -502,8 +505,9 @@ where PerServer<S>: Connected,
             }
             EntryLayout::Data => {
                 let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
-                trace!("CLIENT got write {:?}", loc);
                 let s = self.write_server_for_chain(loc);
+                trace!("CLIENT got write {:?}, server {:?}:{:?}",
+                    loc, s, self.num_chain_servers);
                 //TODO if writeable write?
                 self.add_single_server_send(s, msg)
             }
@@ -539,6 +543,7 @@ where PerServer<S>: Connected,
         assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
         //let per_server = self.server_for_token_mut(Token(server));
         let per_server = &mut self.servers[server];
+        debug_assert_eq!(per_server.token, Token(server));
         let written = per_server.add_single_server_send(msg);
         if !per_server.got_new_message {
             per_server.got_new_message = true;
@@ -1968,7 +1973,7 @@ impl WriteState {
 }
 
 fn write_server_for_chain(chain: order, num_servers: usize) -> usize {
-    <u32 as From<order>>::from(chain) as usize % num_servers
+    (<u32 as From<order>>::from(chain) % (num_servers as u32)) as usize
 }
 
 fn read_server_for_chain(chain: order, num_servers: usize, unreplicated: bool) -> usize {
