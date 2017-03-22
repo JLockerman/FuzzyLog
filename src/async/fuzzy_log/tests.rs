@@ -801,6 +801,7 @@ macro_rules! async_tests {
 
             fn start_tcp_servers() {
                 use std::net::{IpAddr, Ipv4Addr};
+                use std::time::Duration;
                 const addr_strs: &'static [&'static str] = &[&"0.0.0.0:13395", &"0.0.0.0:13396"];
 
                 static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
@@ -830,6 +831,7 @@ macro_rules! async_tests {
                 }
 
                 while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() {}
+                thread::sleep(Duration::from_millis(100));
             }
         }
     };

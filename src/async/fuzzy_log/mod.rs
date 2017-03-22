@@ -16,10 +16,11 @@ use self::FromClient::*;
 
 use hash::HashMap;
 
-use self::per_color::{PerColor, IsRead, ReadHandle};
+use self::per_color::{PerColor, IsRead, ReadHandle, NextToFetch};
 
 pub mod log_handle;
 mod per_color;
+mod range_tree;
 
 #[cfg(test)]
 mod tests;
@@ -227,18 +228,40 @@ impl ThreadLog {
     fn prefetch(&mut self, chain: order) {
         //TODO allow new chains?
         //TODO how much to fetch
-        let num_to_fetch = {
+        let to_fetch = {
             let pc = &mut self.per_chains.get_mut(&chain).expect("boring server read");
             pc.increment_outstanding_snapshots(&self.chains_currently_being_read);
-            let num_to_fetch = pc.num_to_fetch();
-            let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
-            let currently_buffering = pc.currently_buffering();
-            //FIXME use outstanding reads
-            if currently_buffering < num_to_fetch { num_to_fetch - currently_buffering }
-            else { 0 }
+            let next = pc.next_range_to_fetch();
+            match next {
+                NextToFetch::None => None,
+                NextToFetch::AboveHorizon(low, high) => {
+                    let num_to_fetch = (high - low) + 1;
+                    let num_to_fetch = std::cmp::min(num_to_fetch, MAX_PREFETCH);
+                    let currently_buffering = pc.currently_buffering();
+                    if num_to_fetch == 0 {
+                        None
+                    } else if currently_buffering < num_to_fetch {
+                        let num_to_fetch = num_to_fetch - currently_buffering;
+                        let high = std::cmp::min(high, low + num_to_fetch - 1);
+                        Some((low, high))
+                    } else { None }
+                },
+                NextToFetch::BelowHorizon(low, high) => {
+                    let num_to_fetch = (high - low) + 1;
+                    let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
+                    let currently_buffering = pc.currently_buffering();
+                    if num_to_fetch == 0 {
+                        None
+                    } else if currently_buffering < num_to_fetch {
+                        let num_to_fetch = num_to_fetch - currently_buffering;
+                        let high = std::cmp::min(high, high + num_to_fetch - 1);
+                        Some((low, high))
+                    } else { None }
+                },
+            }
         };
-        for _ in 0..num_to_fetch {
-            self.fetch_next(chain)
+        if let Some((low, high)) = to_fetch {
+            self.fetch_next(chain, low, high)
         }
     }
 
@@ -260,7 +283,7 @@ impl ThreadLog {
                     //     it might be better to switch to a buffer per-chain model
                     self.per_chains.get_mut(&read_loc.0).map(|s| {
                         s.overread_at(read_loc.1);
-                        s.decrement_outstanding_reads();
+                        //s.decrement_outstanding_reads();
                     });
                 }
                 else {
@@ -350,7 +373,7 @@ impl ThreadLog {
                 pc.set_finished_reading();
             });
             if self.finshed_reading() {
-                trace!("FUZZY finished reading all chains");
+                trace!("FUZZY finished reading all chains after {:?}", read_loc.0);
                 //TODO do we need a better system?
                 let num_completeds = mem::replace(&mut self.num_snapshots, 0);
                 //assert!(num_completeds > 0);
@@ -360,6 +383,8 @@ impl ThreadLog {
                     let _ = self.ready_reads.send(vec![]);
                 }
                 self.cache.flush();
+            } else {
+                trace!("FUZZY chains other than {:?} not finished", read_loc.0);
             }
         }
         else {
@@ -443,15 +468,15 @@ impl ThreadLog {
         let deps = bytes_as_entry(packet).dependencies();
         for &OrderIndex(chain, index) in deps {
             let unblocked;
-            let num_to_fetch: u32 = {
+            let to_fetch: NextToFetch = {
                 let pc = self.per_chains.get_mut(&chain)
                     .expect("tried reading uninteresting chain");
                 unblocked = pc.update_horizon(index);
-                pc.num_to_fetch()
+                pc.next_range_to_fetch()
             };
-            trace!("FUZZY blocker {:?} needs {:?} additional reads", chain, num_to_fetch);
-            for _ in 0..num_to_fetch {
-                self.fetch_next(chain)
+            trace!("FUZZY blocker {:?} needs additional reads {:?}", chain, to_fetch);
+            if let NextToFetch::BelowHorizon(low, high) = to_fetch {
+                self.fetch_next(chain, low, high)
             }
             if let Some(val) = unblocked {
                 let locs = self.return_entry(val);
@@ -703,25 +728,29 @@ impl ThreadLog {
         //TODO num_to_fetch
         let (num_to_fetch, unblocked) = {
             let pc = self.per_chains.entry(chain).or_insert_with(|| PerColor::new(chain));
-            let num_to_fetch = pc.num_to_fetch();
+            let to_fetch = pc.next_range_to_fetch();
             //TODO should fetch == number of multis searching for
-            if num_to_fetch > 0 {
-                trace!("FUZZY {:?} needs {:?} additional reads", chain, num_to_fetch);
-                (num_to_fetch, None)
-            } else if pc.has_more_multi_search_than_outstanding_reads() {
-                trace!("FUZZY {:?} updating horizon due to multi search", chain);
-                (1, pc.increment_horizon())
-            }
-            else {
-                trace!("FUZZY {:?} needs no more reads", chain);
-                (0, None)
+            match to_fetch {
+                NextToFetch::BelowHorizon(low, high) => {
+                    trace!("FUZZY {:?} needs additional reads {:?}", chain, (low, high));
+                    (Some((low, high)), None)
+                },
+                NextToFetch::AboveHorizon(low, _)
+                    if pc.has_more_multi_search_than_outstanding_reads() => {
+                    trace!("FUZZY {:?} updating horizon due to multi search", chain);
+                    (Some((low, low)), pc.increment_horizon())
+                },
+                _ => {
+                    trace!("FUZZY {:?} needs no more reads", chain);
+                    (None, None)
+                },
             }
         };
 
-        for _ in 0..num_to_fetch {
+        if let Some((low, high)) = num_to_fetch {
             //FIXME check if we have a cached version before issuing fetch
             //      laking this can cause unsound behzvior on multipart reads
-            self.fetch_next(chain)
+            self.fetch_next(chain, low, high)
         }
 
         if let Some(unblocked) = unblocked {
@@ -833,19 +862,21 @@ impl ThreadLog {
         Some(locs)
     }
 
-    fn fetch_next(&mut self, chain: order) {
-        let next = {
+    fn fetch_next(&mut self, chain: order, low: u32, high: u32) {
+        {
             let per_chain = &mut self.per_chains.get_mut(&chain)
                 .expect("fetching uninteresting chain");
             //assert!(per_chain.last_read_sent_to_server < per_chain.last_snapshot,
             //    "last_read_sent_to_server {:?} >= {:?} last_snapshot @ fetch_next",
             //    per_chain.last_read_sent_to_server, per_chain.last_snapshot,
             //);
-            per_chain.increment_fetch(&self.chains_currently_being_read)
+            per_chain.fetching_range((low.into(), high.into()),
+                &self.chains_currently_being_read)
         };
-        let packet = self.make_read_packet(chain, next);
-
-        self.to_store.send(packet).expect("store hung up");
+        for next in low..high+1 {
+            let packet = self.make_read_packet(chain, next.into());
+            self.to_store.send(packet).expect("store hung up");
+        }
     }
 
     fn make_read_packet(&mut self, chain: order, index: entry) -> Vec<u8> {
