@@ -250,7 +250,10 @@ impl<T: Copy> WaitingForMax<T> {
             &mut Single{multi_timestamp, ..} => return Err(multi_timestamp),
 
             &mut Multi{timestamp, ref storage, t} => {
-                assert!(max_timestamp >= timestamp);
+                assert!(max_timestamp >= timestamp,
+                    "max_timestamp >= timestamp {:?} >= {:?}",
+                    max_timestamp, timestamp
+                );
                 GotMaxMulti{timestamp: max_timestamp, storage: storage.clone(), t: t}
             },
         };
