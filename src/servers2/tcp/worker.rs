@@ -202,8 +202,10 @@ impl Worker {
                         }
                     }
                 }
-                for (&t, _) in self.clients.iter() {
-                    self.inner.awake_io.push_back(t)
+                if timeout_idx > 1 {
+                    for (&t, _) in self.clients.iter() {
+                        self.inner.awake_io.push_back(t)
+                    }
                 }
                 self.handle_from_log();
                 if !self.inner.awake_io.is_empty() {

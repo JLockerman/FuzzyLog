@@ -407,12 +407,14 @@ where PerServer<S>: Connected,
                         self.print_stats()
                     }
                 }
-                for ps in self.servers.iter() {
-                    self.awake_io.push_back(ps.token.0)
-                }
-                'new_reqs: loop {
-                    if !self.handle_new_requests_from_client() {
-                        break 'new_reqs
+                if timeout_idx > 1 {
+                    for ps in self.servers.iter() {
+                        self.awake_io.push_back(ps.token.0)
+                    }
+                    'new_reqs: loop {
+                        if !self.handle_new_requests_from_client() {
+                            break 'new_reqs
+                        }
                     }
                 }
                 if !self.awake_io.is_empty() {
