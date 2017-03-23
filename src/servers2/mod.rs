@@ -56,16 +56,6 @@ struct Chain<T: Copy> {
     skeens: SkeensState<T>,
 }
 
-
-impl<T: Copy> Chain<T> {
-    fn new() -> Self {
-        Chain {
-            trie: Trie::new(),
-            skeens: SkeensState::new(),
-        }
-    }
-}
-
 pub trait DistributeToWorkers<T: Send + Sync> {
     fn send_to_worker(&mut self, msg: ToWorker<T>);
 }
@@ -327,7 +317,7 @@ where ToWorkers: DistributeToWorkers<T> {
             /////////////////////////////////////////////////
 
             EntryLayout::Data => {
-                trace!("SERVER {:?} Append", self.this_server_num);
+                trace!("SERVER {:?} Single Append", self.this_server_num);
 
                 let chain = buffer.entry().locs()[0].0;
                 debug_assert!(self.stores_chain(chain),
@@ -338,7 +328,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 let delay = {
                     let log = self.ensure_chain(chain);
                     if log.needs_skeens_single() {
-                        let s = log.handle_skeens_single(&mut buffer);
+                        let s = log.handle_skeens_single(&mut buffer, t);
                         Some(s)
                     } else {
                         None
@@ -938,12 +928,15 @@ impl<T: Copy> Chain<T> {
         !self.skeens.is_empty()
     }
 
-    fn handle_skeens_single(&mut self, buffer: &mut BufferSlice) -> (*mut u8, u64) {
+    fn handle_skeens_single(&mut self, buffer: &mut BufferSlice, t: T) -> (*mut u8, u64) {
         let val = buffer.entry_mut();
         val.kind.insert(EntryKind::ReadSuccess);
         let size = val.entry_size();
+        let id = val.id;
         let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
-        unsafe { self.trie.reserve_space(size) }
+        let (slot, storage_loc) = unsafe { self.trie.reserve_space(size) };
+        self.skeens.add_single_append(id, slot as *const _, t);
+        (slot, storage_loc)
     }
 
     fn timestamp_for_multi(
@@ -974,15 +967,16 @@ impl<T: Copy> Chain<T> {
                         GotMax::SimpleSingle{storage, t, timestamp, ..} => unsafe {
                             trace!("flush single {:?}", timestamp);
                             let (loc, ptr) = trie.prep_append(ptr::null());
-                            let id = Entry::<()>::wrap_byte(&*storage).id;
+                            //println!("s id {:?} ts {:?}", id, timestamp);
                             on_finish(Single(loc, ptr, storage, t));
-                            id
+                            None
                         },
                         GotMax::Multi{storage, t, id, timestamp, ..} => unsafe {
                             trace!("flush multi {:?}", timestamp);
+                            //println!("m id {:?} ts {:?}", id, timestamp);
                             let (loc, ptr) = trie.prep_append(ptr::null());
                             on_finish(Multi(loc, ptr, storage, t));
-                            id
+                            Some(id)
                         },
                     }
                 })

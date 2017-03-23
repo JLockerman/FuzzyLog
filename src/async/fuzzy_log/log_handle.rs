@@ -6,9 +6,12 @@ use std::sync::mpsc;
 
 use mio;
 
+use hash::HashMap;
+
 use async::fuzzy_log::{Message, ThreadLog};
 use async::fuzzy_log::FromClient::*;
 use packets::{
+    entry,
     Entry,
     EntryContents,
     OrderIndex,
@@ -27,6 +30,7 @@ pub struct LogHandle<V: ?Sized> {
     finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
     //TODO finished_writes: ..
     curr_entry: Vec<u8>,
+    last_seen_entries: HashMap<order, entry>,
 }
 
 impl<V: ?Sized> Drop for LogHandle<V> {
@@ -196,6 +200,7 @@ where V: Storeable {
         use std::sync::{Arc, Mutex};
 
         let chain_servers: Vec<_> = chain_servers.into_iter().collect();
+        trace!("LogHandle for servers {:?}", chain_servers);
 
         let make_store = |client| {
             let to_store_m = Arc::new(Mutex::new(None));
@@ -313,6 +318,7 @@ where V: Storeable {
             curr_entry: Default::default(),
             num_snapshots: 0,
             num_async_writes: 0,
+            last_seen_entries: Default::default(),
         }
     }
 
@@ -363,6 +369,12 @@ where V: Storeable {
 
         trace!("HANDLE got val.");
         let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
+        for &OrderIndex(o, i) in locs {
+            let e = self.last_seen_entries.entry(o).or_insert(0.into());
+            if *e < i {
+                *e = i
+            }
+        }
         Some((val, locs))
     }
 
@@ -472,11 +484,39 @@ where V: Storeable {
         }
     }
 
+    pub fn simple_causal_append(
+        &mut self,
+        data: &V,
+        inhabits: &mut [order],
+        happens_after: &mut [order],
+    ) -> Uuid {
+        if inhabits.len() == 0 {
+            return Uuid::nil()
+        }
+
+        inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
+
+        let mut happens_after_entries = Vec::with_capacity(happens_after.len());
+
+        for o in happens_after {
+            let horizon = self.last_seen_entries.get(o).cloned().unwrap_or(0.into());
+            if horizon > entry::from(0) {
+                happens_after_entries.push(OrderIndex(*o, horizon));
+            }
+        }
+
+        self.causal_color_append(data, inhabits, &mut [], &mut happens_after_entries)
+    }
+
     pub fn wait_for_all_appends(&mut self) {
         trace!("HANDLE waiting for {} appends", self.num_async_writes);
         for i in 0..self.num_async_writes {
             //TODO return buffers here and cache them?
-            self.finished_writes.recv().unwrap();
+            self.recv_write().unwrap();
             trace!("HANDLE got {}", i);
         }
         trace!("HANDLE got all appends");
@@ -486,7 +526,7 @@ where V: Storeable {
     pub fn wait_for_a_specific_append(&mut self, write_id: Uuid) -> Option<Vec<OrderIndex>> {
         for _ in 0..self.num_async_writes {
             //TODO return buffers here and cache them?
-            let (id, locs) = self.finished_writes.recv().unwrap();
+            let (id, locs) = self.recv_write().unwrap();
             self.num_async_writes -= 1;
             if id == write_id {
                 return Some(locs)
@@ -499,7 +539,7 @@ where V: Storeable {
         if self.num_async_writes > 0 {
             self.num_async_writes -= 1;
             //TODO return buffers here and cache them?
-            return Some(self.finished_writes.recv().unwrap())
+            return Some(self.recv_write().unwrap())
         }
         None
     }
@@ -507,6 +547,15 @@ where V: Storeable {
     pub fn try_wait_for_any_append(&mut self) -> Option<(Uuid, Vec<OrderIndex>)> {
         if self.num_async_writes > 0 {
             let ret = self.finished_writes.try_recv().ok();
+            ret.as_ref().map(|&(ref id, ref locs)| {
+                for &OrderIndex(o, i) in locs {
+                    let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                    if *e < i {
+                        *e = i
+                    }
+                }
+                (id, locs)
+            });
             if ret.is_some() {
                 self.num_async_writes -= 1;
             }
@@ -519,8 +568,29 @@ where V: Storeable {
 
     pub fn flush_completed_appends(&mut self) {
         if self.num_async_writes > 0 {
-            self.num_async_writes -= self.finished_writes.try_iter().map(|_| 1).sum();
+            let last_seen_entries = &mut self.last_seen_entries;
+            self.num_async_writes -= self.finished_writes.try_iter().map(
+            |(id, locs)| {
+                for &OrderIndex(o, i) in &locs {
+                    let e = last_seen_entries.entry(o).or_insert(0.into());
+                    if *e < i {
+                        *e = i
+                    }
+                }
+            }).count();
         }
+    }
+
+    fn recv_write(&mut self) -> Result<(Uuid, Vec<OrderIndex>), ::std::sync::mpsc::RecvError> {
+        self.finished_writes.recv().map(|(id, locs)| {
+            for &OrderIndex(o, i) in &locs {
+                let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                if *e < i {
+                    *e = i
+                }
+            }
+            (id, locs)
+        })
     }
 
     //TODO add wait_and_snapshot(..)

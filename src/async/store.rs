@@ -31,7 +31,7 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     awake_io: VecDeque<usize>,
     sent_writes: HashMap<Uuid, WriteState>,
     //sent_reads: HashMap<OrderIndex, Vec<u8>>,
-    sent_reads: HashSet<OrderIndex>,
+    sent_reads: HashMap<OrderIndex, u16>,
     waiting_buffers: VecDeque<Vec<u8>>,
     num_chain_servers: usize,
     lock_token: Token,
@@ -167,12 +167,15 @@ where C: AsyncStoreClient {
     ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
+        trace!("Starting Store server addrs:");
         let mut servers = try!(chain_servers
             .into_iter()
+            .inspect(|addr| trace!("{:?}", addr))
             .map(PerServer::tcp)
             .collect::<Result<Vec<_>, _>>());
         assert!(servers.len() > 0);
         let num_chain_servers = servers.len();
+        trace!("Client {:?} servers", num_chain_servers);
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
             event_loop.register(server.connection(), server.token,
@@ -390,7 +393,7 @@ where PerServer<S>: Connected,
         let mut timeout_idx = 0;
         loop {
             const TIMEOUTS: [(u64, u32); 9] =
-                [(0, 100_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
+                [(0, 10_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
                 (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0), (10, 0)];
             //poll.poll(&mut events, None).expect("worker poll failed");
             //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
@@ -404,11 +407,22 @@ where PerServer<S>: Connected,
                         self.print_stats()
                     }
                 }
-                if timeout_idx + 1 < TIMEOUTS.len() {
-                    timeout_idx += 1
-                }
                 for ps in self.servers.iter() {
                     self.awake_io.push_back(ps.token.0)
+                }
+                'new_reqs: loop {
+                    if !self.handle_new_requests_from_client() {
+                        break 'new_reqs
+                    }
+                }
+                if !self.awake_io.is_empty() {
+                    if timeout_idx + 1 < TIMEOUTS.len() {
+                        timeout_idx += 1
+                    }
+                } else {
+                    if timeout_idx > 0 {
+                       timeout_idx -= 1
+                    }
                 }
             } else {
                 if timeout_idx > 0 {
@@ -491,8 +505,9 @@ where PerServer<S>: Connected,
             }
             EntryLayout::Data => {
                 let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
-                trace!("CLIENT got write {:?}", loc);
                 let s = self.write_server_for_chain(loc);
+                trace!("CLIENT got write {:?}, server {:?}:{:?}",
+                    loc, s, self.num_chain_servers);
                 //TODO if writeable write?
                 self.add_single_server_send(s, msg)
             }
@@ -528,6 +543,7 @@ where PerServer<S>: Connected,
         assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
         //let per_server = self.server_for_token_mut(Token(server));
         let per_server = &mut self.servers[server];
+        debug_assert_eq!(per_server.token, Token(server));
         let written = per_server.add_single_server_send(msg);
         if !per_server.got_new_message {
             per_server.got_new_message = true;
@@ -537,7 +553,7 @@ where PerServer<S>: Connected,
             let layout = sent.layout();
             if layout == EntryLayout::Read {
                 let read_loc = sent.read_loc();
-                self.sent_reads.insert(read_loc);
+                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
             }
             else if !sent.is_unlock() {
@@ -631,7 +647,7 @@ where PerServer<S>: Connected,
             let layout = sent.layout();
             if layout == EntryLayout::Read {
                 let read_loc = sent.read_loc();
-                self.sent_reads.insert(read_loc);
+                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
             }
             else if !sent.is_unlock() {
@@ -692,7 +708,7 @@ where PerServer<S>: Connected,
             let layout = sent.layout();
             if layout == EntryLayout::Read {
                 let read_loc = sent.read_loc();
-                self.sent_reads.insert(read_loc);
+                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
             }
             else if !sent.is_unlock() {
@@ -922,6 +938,8 @@ where PerServer<S>: Connected,
     }// end handle_completed_write
 
     fn handle_completed_read(&mut self, token: Token, packet: &Buffer) -> bool {
+        use std::collections::hash_map::Entry::Occupied;
+
         trace!("CLIENT handle completed read?");
         if !self.new_multi && token == self.lock_token() { return false }
         //FIXME remove extra index?
@@ -930,7 +948,22 @@ where PerServer<S>: Connected,
         let mut was_needed = false;
         for &oi in packet.entry().locs() {
             //trace!("CLIENT completed read @ {:?}", oi);
-            if self.sent_reads.remove(&oi) {
+            let needed = match self.sent_reads.entry(oi) {
+                Occupied(mut oe) => {
+                    let needed = if oe.get() > &0 {
+                        *oe.get_mut() -= 1;
+                        true
+                    } else {
+                        false
+                    };
+                    if oe.get() == &0 {
+                        oe.remove();
+                    }
+                    needed
+                }
+                _ => false,
+            };
+            if needed {
                 was_needed |= true;
                 trace!("CLIENT read needed completion @ {:?}", oi);
                 //TODO validate correct id for failing read
@@ -954,7 +987,7 @@ where PerServer<S>: Connected,
             }
             EntryLayout::Read => {
                 let read_loc = packet.entry().locs()[0];
-                if self.sent_reads.contains(&read_loc) {
+                if self.sent_reads.contains_key(&read_loc) {
                     let mut b = self.waiting_buffers.pop_front()
                         .unwrap_or_else(|| Vec::with_capacity(50));
                     {
@@ -1940,7 +1973,7 @@ impl WriteState {
 }
 
 fn write_server_for_chain(chain: order, num_servers: usize) -> usize {
-    <u32 as From<order>>::from(chain) as usize % num_servers
+    (<u32 as From<order>>::from(chain) % (num_servers as u32)) as usize
 }
 
 fn read_server_for_chain(chain: order, num_servers: usize, unreplicated: bool) -> usize {

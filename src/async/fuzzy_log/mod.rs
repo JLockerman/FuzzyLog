@@ -284,48 +284,56 @@ impl ThreadLog {
                 //assert!(read_loc.1 >= pc.first_buffered);
                 //TODO check that read is needed?
                 //TODO no-alloc?
-                self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.got_read(read_loc.1));
+                let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
+                    s.got_read(read_loc.1)).unwrap_or(false);
                     //s.decrement_outstanding_reads());
-                let packet = Rc::new(msg);
-                self.add_blockers_at(read_loc, &packet);
-                self.try_returning_at(read_loc, packet);
+                if needed {
+                    let packet = Rc::new(msg);
+                    self.add_blockers_at(read_loc, &packet);
+                    self.try_returning_at(read_loc, packet);
+                }
             }
             EntryLayout::Multiput if kind.contains(EntryKind::NoRemote) => {
                 trace!("FUZZY read is atom");
-                self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.got_read(read_loc.1));
+                let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
+                    s.got_read(read_loc.1)).unwrap_or(false);
                     //s.decrement_outstanding_reads());
-                let packet = Rc::new(msg);
-                self.add_blockers_at(read_loc, &packet);
-                self.try_returning_at(read_loc, packet);
+                if needed {
+                    //FIXME ensure other pieces get fetched if reading those chains
+                    let packet = Rc::new(msg);
+                    self.add_blockers_at(read_loc, &packet);
+                    self.try_returning_at(read_loc, packet);
+                }
             }
             layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
                 trace!("FUZZY read is multi");
                 debug_assert!(kind.contains(EntryKind::ReadSuccess));
-                self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.got_read(read_loc.1));
+                let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
+                    s.got_read(read_loc.1)).unwrap_or(false);
                     //s.decrement_outstanding_reads());
-                let is_sentinel = layout == EntryLayout::Sentinel;
-                let search_status = self.update_multi_part_read(read_loc, msg, is_sentinel);
-                match search_status {
-                    MultiSearch::InProgress | MultiSearch::EarlySentinel => {}
-                    MultiSearch::BeyondHorizon(..) => {
-                        //TODO better ooo reads
-                        self.per_chains.entry(read_loc.0)
-                            .or_insert_with(|| PerColor::new(read_loc.0))
-                            .overread_at(read_loc.1);
+                if needed {
+                    let is_sentinel = layout == EntryLayout::Sentinel;
+                    let search_status =
+                        self.update_multi_part_read(read_loc, msg, is_sentinel);
+                    match search_status {
+                        MultiSearch::InProgress | MultiSearch::EarlySentinel => {}
+                        MultiSearch::BeyondHorizon(..) => {
+                            //TODO better ooo reads
+                            self.per_chains.entry(read_loc.0)
+                                .or_insert_with(|| PerColor::new(read_loc.0))
+                                .overread_at(read_loc.1);
+                        }
+                        MultiSearch::Finished(msg) => {
+                            //TODO no-alloc?
+                            let packet = Rc::new(msg);
+                            //TODO it would be nice to fetch the blockers in parallel...
+                            //     we can add a fetch blockers call in update_multi_part_read
+                            //     which updates the horizon but doesn't actually add the block
+                            self.add_blockers(&packet);
+                            self.try_returning(packet);
+                        }
+                        MultiSearch::Repeat => {}
                     }
-                    MultiSearch::Finished(msg) => {
-                        //TODO no-alloc?
-                        let packet = Rc::new(msg);
-                        //TODO it would be nice to fetch the blockers in parallel...
-                        //     we can add a fetch blockers call in update_multi_part_read
-                        //     which updates the horizon but doesn't actually add the block
-                        self.add_blockers(&packet);
-                        self.try_returning(packet);
-                    }
-                    MultiSearch::Repeat => {}
                 }
             }
 
