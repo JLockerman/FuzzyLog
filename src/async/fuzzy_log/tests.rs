@@ -581,6 +581,60 @@ macro_rules! async_tests {
             assert_eq!(seen, should_see);
         }
 
+        #[test]
+        #[inline(never)]
+        pub fn test_multi_and_single() {
+            use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT, Ordering};
+            use std::thread;
+
+            let _ = env_logger::init();
+            trace!("TEST multi and single");
+
+            static NUM_APPENDS: AtomicIsize = ATOMIC_ISIZE_INIT;
+            static THREADS_STARTED: AtomicIsize = ATOMIC_ISIZE_INIT;
+
+            fn new_log<V>() -> LogHandle<V> {
+                let lh = $new_thread_log::<V>(vec![73.into(), 74.into()]);
+                THREADS_STARTED.fetch_add(1, Ordering::AcqRel);
+                while THREADS_STARTED.load(Ordering::Acquire) != 3 {}
+                lh
+            };
+
+            let h1 = thread::spawn(||{
+                let mut lh = new_log();
+                let mut j = 0;
+                for i in 1..32 {
+                    let _ = lh.multiappend(&[73.into(), 74.into()], &i, &[]);
+                    j += 1
+                }
+                NUM_APPENDS.fetch_add(j, Ordering::AcqRel);
+            });
+
+            let h2 = thread::spawn(||{
+                let mut lh = new_log();
+                let mut j = 0;
+                for i in 1..32 {
+                    let _ = lh.append(73.into(), &i, &[]);
+                    j += 1
+                }
+                NUM_APPENDS.fetch_add(j, Ordering::AcqRel);
+            });
+
+            let mut lh = new_log::<i32>();
+            h1.join();
+            h2.join();
+
+            lh.snapshot(73.into());
+            let num_appends = NUM_APPENDS.load(Ordering::Acquire);
+            for i in 0..num_appends {
+                assert!(lh.get_next().is_some(),
+                    "got {:?} out of {:?} appends",
+                    i, num_appends
+                );
+            }
+            assert_eq!(lh.get_next(), None);
+        }
+
         //TODO test append after prefetch but before read
     );
     () => {
