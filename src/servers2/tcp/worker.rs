@@ -246,17 +246,19 @@ impl Worker {
                 }
             }*/
             'work: loop {
-                let ops_before_poll = self.inner.awake_io.len();
-                for _ in 0..ops_before_poll {
-                    let token = self.inner.awake_io.pop_front().unwrap();
-                    if let HashEntry::Occupied(o) = self.clients.entry(token) {
-                        self.inner.handle_burst(token, o.into_mut());
+                for _ in 0..5 {
+                    let ops_before_poll = self.inner.awake_io.len();
+                    for _ in 0..ops_before_poll {
+                        let token = self.inner.awake_io.pop_front().unwrap();
+                        if let HashEntry::Occupied(o) = self.clients.entry(token) {
+                            self.inner.handle_burst(token, o.into_mut());
+                        }
                     }
-                }
 
-                //TODO add yield if spends too long waiting for log?
-                if self.inner.awake_io.is_empty() /*&& self.inner.waiting_for_log == 0*/ {
-                    break 'work
+                    //TODO add yield if spends too long waiting for log?
+                    if self.inner.awake_io.is_empty() /*&& self.inner.waiting_for_log == 0*/ {
+                        break 'work
+                    }
                 }
 
                 let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)));
