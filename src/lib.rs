@@ -44,6 +44,7 @@ pub mod local_store;
 pub mod udp_store;
 pub mod tcp_store;
 pub mod multitcp_store;
+pub mod skeens_store;
 pub mod servers;
 pub mod servers2;
 pub mod color_api;
