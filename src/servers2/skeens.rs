@@ -44,7 +44,7 @@ impl<T: Copy> SkeensState<T> {
             waiting_for_max_timestamp: Default::default(),
             got_max_timestamp: Default::default(),
             phase2_ids: Default::default(),
-            next_timestamp: 0,
+            next_timestamp: 1,
         }
     }
 

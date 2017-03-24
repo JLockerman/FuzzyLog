@@ -840,10 +840,15 @@ where PerServer<S>: Connected,
 
                         let mut ts = timestamps.borrow_mut();
                         //alt just do ts[i] = max(oi.1, ts[i])
-                        for (i, oi) in packet.entry().locs().iter().enumerate() {
+                        let e = packet.entry();
+                        for (i, oi) in e.locs().iter().enumerate() {
                             if oi.0 != order::from(0)
                                 && read_server_for_chain(oi.0, self.num_chain_servers, unreplicated) == token.0 {
+                                assert!(ts[i] == 0,
+                                    "repeat timestamp {:?} in {:#?}", oi, e);
                                 ts[i] = u32::from(oi.1) as u64;
+                                assert!(ts[i] > 0,
+                                    "bad timestamp {:?} in {:#?}", oi, e);
                             }
                         }
 
