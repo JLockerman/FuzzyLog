@@ -1140,8 +1140,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                     st1.copy_from_slice(e.bytes());
                 }
                 {
-                    let locs = &mut e.locs_mut()[..num_ts];
-                    for i in 0..num_ts {
+                    let locs = e.locs_mut();
+                    for i in 0..locs.len() {
                         locs[i].1 = entry::from(ts[i] as u32)
                     }
                 }

@@ -742,7 +742,10 @@ where PerServer<S>: Connected,
     //TODO I should probably return the buffer on recv_packet, and pass it into here
     fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize,
         packet: &Buffer) -> bool {
-        let id = packet.entry().id;
+        let (id, kind) = {
+            let e = packet.entry();
+            (e.id, e.kind)
+        };
         let unreplicated = self.is_unreplicated;
         trace!("CLIENT handle completed write?");
         //FIXME remove extra index?
@@ -820,24 +823,35 @@ where PerServer<S>: Connected,
                 }
 
                 WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel) => {
+                    if !kind.contains(EntryKind::Skeens1Queued) {
+                        error!("CLIENT bad skeens1 ack @ {:?}", token);
+                        return false
+                    }
                     assert!(self.new_multi);
                     trace!("CLIENT finished sk1 section");
                     let ready_for_skeens2 = {
+                        let mut r = remaining_servers.borrow_mut();
+                        if !r.remove(&token.0) {
+                            trace!("CLIENT repeat sk1 section");
+                            return false
+                        }
+                        let finished_writes = r.is_empty();
+                        mem::drop(r);
+
                         let mut ts = timestamps.borrow_mut();
+                        //alt just do ts[i] = max(oi.1, ts[i])
                         for (i, oi) in packet.entry().locs().iter().enumerate() {
                             if oi.0 != order::from(0)
                                 && read_server_for_chain(oi.0, self.num_chain_servers, unreplicated) == token.0 {
                                 ts[i] = u32::from(oi.1) as u64;
                             }
                         }
-                        let mut r = remaining_servers.borrow_mut();
-                        r.remove(&token.0);
-                        let finished_writes = r.is_empty();
+
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
-                            trace!("CLIENT finished skeens1 {:?}", ts);
                             let max_ts = ts.iter().cloned().max().unwrap();
+                            trace!("CLIENT finished skeens1 {:?} max {:?}", ts, max_ts);
                             Some(max_ts)
                         } else { None }
                     };

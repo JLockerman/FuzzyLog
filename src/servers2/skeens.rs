@@ -243,6 +243,7 @@ impl<T: Copy> WaitingForMax<T> {
 
     fn set_max_timestamp(&mut self, max_timestamp: u64) -> Result<(), u64> {
         use self::WaitingForMax::*;
+        use packets::Entry;
         *self = match self {
             &mut GotMaxMulti{timestamp, ..} | &mut SimpleSingle{timestamp, ..} =>
                 return Err(timestamp),
@@ -251,8 +252,12 @@ impl<T: Copy> WaitingForMax<T> {
 
             &mut Multi{timestamp, ref storage, t} => {
                 assert!(max_timestamp >= timestamp,
-                    "max_timestamp >= timestamp {:?} >= {:?}",
-                    max_timestamp, timestamp
+                    "max_timestamp >= timestamp {:?} >= {:?} @ {:?}, {:#?}",
+                    max_timestamp, timestamp, unsafe {&(*storage.get()).0},
+                    unsafe {
+                        let e = Entry::<()>::wrap_bytes((*storage.get()).1);
+                        (e.id, e.locs())
+                    }
                 );
                 GotMaxMulti{timestamp: max_timestamp, storage: storage.clone(), t: t}
             },
