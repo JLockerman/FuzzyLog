@@ -65,7 +65,7 @@ counters!{
 
 struct MultiSearchState {
     val: Vec<u8>,
-    pieces_remaining: usize,
+    //pieces_remaining: usize,
 }
 
 pub enum Message {
@@ -553,24 +553,20 @@ impl ThreadLog {
         mut msg: Vec<u8>,
         is_sentinel: bool)
     -> MultiSearch {
-        let (id, num_pieces) = {
+        let id = {
             let entr = bytes_as_entry(&msg);
             let id = entr.id;
             let locs = entr.locs();
-            let num_pieces = locs.into_iter()
-                .filter(|&&OrderIndex(o, _)| o != order::from(0))
-                .count();
-            trace!("FUZZY multi part read {:?} @ {:?}, {:?} pieces", id, locs, num_pieces);
-            (id, num_pieces)
+            trace!("FUZZY multi part read {:?} @ {:?}", id, locs);
+            id
         };
 
         //TODO this should never really occur...
-        if num_pieces == 1 {
-            return MultiSearch::Finished(msg)
-        }
+        // if num_pieces == 1 {
+        //     return MultiSearch::Finished(msg)
+        // }
 
         let is_later_piece = self.blocked_multiappends.contains_key(&id);
-        let mut omsg = None;
         if !is_later_piece && !is_sentinel {
             {
                 let pc = &self.per_chains[&read_loc.0];
@@ -586,36 +582,37 @@ impl ThreadLog {
                 }
             }
 
-            let mut pieces_remaining = num_pieces;
+            //let mut pieces_remaining = num_pieces;
             trace!("FUZZY first part of multi part read");
+            let mut finished = true;
             for &mut OrderIndex(o, ref mut i) in bytes_as_entry_mut(&mut msg).locs_mut() {
-                if o != order::from(0) {
-                    trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
-                    let early_sentinel = self.fetch_multi_parts(&id, o, *i);
-                    if let Some(loc) = early_sentinel {
-                        trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
-                        assert!(loc != entry::from(0));
-                        *i = loc;
-                        pieces_remaining -= 1
-                    } else if *i != entry::from(0) {
-                        trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
-                        pieces_remaining -= 1
-                    }
+                if o == order::from(0) { continue }
+
+                trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
+                let early_sentinel = self.fetch_multi_parts(&id, o, *i);
+                if let Some(loc) = early_sentinel {
+                    trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
+                    assert!(loc != entry::from(0));
+                    *i = loc;
+                } else if *i != entry::from(0) {
+                    trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
                 } else {
-                    trace!("FUZZY no need to fetch multi part @ {:?}", (o, *i));
+                    finished = false
                 }
             }
 
-            if pieces_remaining == 0 {
+            if finished {
                 trace!("FUZZY all sentinels had already been found for {:?}", read_loc);
                 return MultiSearch::Finished(msg)
             }
 
-            trace!("FUZZY {:?} waiting for {:?} pieces", read_loc, pieces_remaining);
+            //trace!("FUZZY {:?} waiting", read_loc, pieces_remaining);
             self.blocked_multiappends.insert(id, MultiSearchState {
                 val: msg,
-                pieces_remaining: pieces_remaining
+                //pieces_remaining: pieces_remaining
             });
+
+            return MultiSearch::InProgress
         }
         else if !is_later_piece && is_sentinel {
             trace!("FUZZY early sentinel");
@@ -624,50 +621,61 @@ impl ThreadLog {
                 .add_early_sentinel(id, read_loc.1);
             return MultiSearch::EarlySentinel
         }
-        else { omsg = Some(msg); trace!("FUZZY later part of multi part read"); }
+
+        trace!("FUZZY later part of multi part read");
 
         debug_assert!(self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1));
 
-        let was_blind_search;
-        let finished = {
-            if let hash_map::Entry::Occupied(mut found) = self.blocked_multiappends.entry(id) {
-                let finished = {
-                    let multi = found.get_mut();
-                    //FIXME ensure this only happens if debug assertions
-                    if let (Some(msg), false) = (omsg, is_sentinel) {
-                        unsafe { debug_assert_eq!(data_bytes(&multi.val), data_bytes(&msg)) }
-                    }
-                    let loc_ptr = bytes_as_entry_mut(&mut multi.val)
-                        .locs_mut().into_iter()
-                        .find(|&&mut OrderIndex(o, _)| o == read_loc.0)
-                        .unwrap();
-                    //FIXME
-                    was_blind_search = loc_ptr.1 == entry::from(0);
-                    if !was_blind_search {
-                        debug_assert_eq!(*loc_ptr, read_loc)
-                    } else {
-                        multi.pieces_remaining -= 1;
-                        trace!("FUZZY multi pieces remaining {:?}", multi.pieces_remaining);
-                        *loc_ptr = read_loc;
-                    }
 
-                    multi.pieces_remaining == 0
-                };
-                match finished {
-                    true => Some(found.remove().val),
-                    false => None,
+        let mut finished = true;
+        let mut found = match self.blocked_multiappends.entry(id) {
+            hash_map::Entry::Occupied(o) => o,
+            _ => unreachable!(),
+        };
+        {
+            let multi = found.get_mut();
+            if !is_sentinel {
+                unsafe {
+                    debug_assert_eq!(data_bytes(&multi.val), data_bytes(&msg))
                 }
             }
-            else { unreachable!() }
+            {
+                let my_locs = bytes_as_entry_mut(&mut multi.val).locs_mut();
+                {
+                    let locs = my_locs.iter_mut().zip(bytes_as_entry(&msg).locs().iter());
+                    for (my_loc, new_loc) in locs {
+                        assert_eq!(my_loc.0, new_loc.0);
+                        if my_loc.0 == order::from(0) { continue }
+
+                        if my_loc.1 == entry::from(0) && new_loc.1 != entry::from(0) {
+                            trace!("FUZZY finished blind seach for {:?}", new_loc);
+                            *my_loc = *new_loc;
+                            let pc = self.per_chains.entry(new_loc.0)
+                                .or_insert_with(|| PerColor::new(new_loc.0));
+                            pc.decrement_multi_search();
+                            pc.mark_as_already_fetched(new_loc.1);
+                        }
+                        else if my_loc.1 != entry::from(0) && new_loc.1!= entry::from(0) {
+                            debug_assert_eq!(*my_loc, *new_loc)
+                        }
+
+                        finished &= my_loc.1 != entry::from(0);
+                    }
+                }
+                trace!("FUZZY multi pieces remaining {:?}", my_locs);
+            }
+        }
+        let finished = match finished {
+            true => Some(found.remove().val),
+            false => None,
         };
 
-        //self.found_multi_part(read_loc.0, read_loc.1, was_blind_search);
-        if was_blind_search {
-            trace!("FUZZY finished blind seach for {:?}", read_loc);
-            let pc = self.per_chains.entry(read_loc.0)
-                .or_insert_with(|| PerColor::new(read_loc.0));
-            pc.decrement_multi_search();
-        }
+        // if was_blind_search {
+        //     trace!("FUZZY finished blind seach for {:?}", read_loc);
+        //     let pc = self.per_chains.entry(read_loc.0)
+        //         .or_insert_with(|| PerColor::new(read_loc.0));
+        //     pc.decrement_multi_search();
+        // }
 
         match finished {
             Some(val) => {
@@ -800,6 +808,7 @@ impl ThreadLog {
             }
 
             trace!("QQQQQ setting returned {:?}", (o, i));
+            assert!(i > entry::from(0));
             pc.set_returned(i);
             pc.is_interesting
         };
