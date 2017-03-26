@@ -60,10 +60,11 @@ impl RangeTree {
         self.num_outstanding += 1;
     }*/
 
-    pub fn set_point_as_recvd(&mut self, point: entry) {
+    pub fn set_point_as_recvd(&mut self, point: entry) -> bool {
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
-        self.set_point_as(point, Kind::GottenFromServer);
+        let r = self.set_point_as(point, Kind::GottenFromServer);
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
+        r
     }
 
     pub fn set_point_as_returned(&mut self, point: entry) {

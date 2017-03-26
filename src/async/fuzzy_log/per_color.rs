@@ -187,9 +187,9 @@ impl PerColor {
     }
 
     pub fn got_read(&mut self, index: entry) -> bool {
-        self.read_status.set_point_as_recvd(index);
+        self.read_status.set_point_as_recvd(index)
 
-        index > self.last_returned_to_client
+        //index > self.last_returned_to_client
     }
 
     pub fn has_read_state(&self) -> bool {
