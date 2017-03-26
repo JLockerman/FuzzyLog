@@ -608,9 +608,10 @@ where PerServer<S>: Connected,
                     e.data_bytes = 0;
                     e.dependency_bytes = 0;
                     unsafe { e.as_multi_entry_mut().flex.lock = max_ts };
+                    debug_assert_eq!(e.lock_num(), max_ts);
                     e.entry_size()
                 };
-                unsafe { buf.set_len(size) };
+                //unsafe { buf.set_len(size) };
                 server
             }
         };
@@ -784,6 +785,7 @@ where PerServer<S>: Connected,
                 WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel) => {
                     assert!(!self.new_multi);
                     assert!(token != self.lock_token());
+                    assert!(!self.new_multi);
                     trace!("CLIENT finished multi section");
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
@@ -827,12 +829,13 @@ where PerServer<S>: Connected,
                         error!("CLIENT bad skeens1 ack @ {:?}", token);
                         return false
                     }
+                    assert!(kind.contains(EntryKind::Multiput));
                     assert!(self.new_multi);
                     trace!("CLIENT finished sk1 section");
                     let ready_for_skeens2 = {
                         let mut r = remaining_servers.borrow_mut();
                         if !r.remove(&token.0) {
-                            trace!("CLIENT repeat sk1 section");
+                            error!("CLIENT repeat sk1 section");
                             return false
                         }
                         let finished_writes = r.is_empty();
@@ -841,12 +844,14 @@ where PerServer<S>: Connected,
                         let mut ts = timestamps.borrow_mut();
                         //alt just do ts[i] = max(oi.1, ts[i])
                         let e = packet.entry();
+                        debug_assert_eq!(id, e.id);
                         for (i, oi) in e.locs().iter().enumerate() {
                             if oi.0 != order::from(0)
                                 && read_server_for_chain(oi.0, self.num_chain_servers, unreplicated) == token.0 {
                                 assert!(ts[i] == 0,
                                     "repeat timestamp {:?} in {:#?}", oi, e);
-                                ts[i] = u32::from(oi.1) as u64;
+                                let t: entry = oi.1;
+                                ts[i] = u32::from(t) as u64;
                                 assert!(ts[i] > 0,
                                     "bad timestamp {:?} in {:#?}", oi, e);
                             }
@@ -856,6 +861,7 @@ where PerServer<S>: Connected,
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
                             let max_ts = ts.iter().cloned().max().unwrap();
+                            for t in ts.iter() { assert!(&max_ts >= t); }
                             trace!("CLIENT finished skeens1 {:?} max {:?}", ts, max_ts);
                             Some(max_ts)
                         } else { None }

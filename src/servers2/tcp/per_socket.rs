@@ -453,7 +453,6 @@ impl PerSocket {
             &Upstream {
                 ref being_read,
                 ref bytes_read,
-                ref stream,
                 ref needs_to_stay_awake,
                 ..
             } =>
@@ -656,7 +655,7 @@ fn recv_packet(
 
 //TODO remove Debug
 #[derive(Debug)]
-struct DoubleBuffer {
+pub struct DoubleBuffer {
     first: Vec<u8>,
     second: Vec<u8>,
 }
