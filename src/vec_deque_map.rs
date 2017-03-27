@@ -5,7 +5,7 @@ use std::fmt;
 use std::mem;
 use std::ops::{Index, IndexMut};
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct VecDequeMap<V> {
     //TODO it may be better to use a bitmask instead of Option<V>s
     //     say, have VecDequeMap<V> {
@@ -80,7 +80,7 @@ impl<V> VecDequeMap<V> {
         self.data[index].as_mut()
     }
 
-    pub fn front(&mut self) -> Option<&V> {
+    pub fn front(&self) -> Option<&V> {
         self.data.front().map(Option::as_ref).unwrap_or(None)
     }
 
@@ -101,6 +101,12 @@ impl<V> VecDequeMap<V> {
     }
 }
 
+impl<V> Default for VecDequeMap<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<A> Index<u64> for VecDequeMap<A> {
     type Output = A;
 
@@ -118,7 +124,8 @@ impl<A> IndexMut<u64> for VecDequeMap<A> {
 impl<V: fmt::Debug> fmt::Debug for VecDequeMap<V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map()
-        .entries(self.data.iter().enumerate().map(|(i, v)| ((i as u64 + self.start), v)))
+        .entries(self.data.iter().enumerate().map(|(i, v)|
+            ((i as u64 + self.start), v.as_ref().unwrap())))
         .finish()
     }
 }
