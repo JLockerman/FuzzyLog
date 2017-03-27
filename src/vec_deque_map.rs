@@ -99,6 +99,11 @@ impl<V> VecDequeMap<V> {
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
+
+    pub fn increment_start(&mut self) {
+        assert!(self.front().is_none());
+        self.start += 1;
+    }
 }
 
 impl<V> Default for VecDequeMap<V> {

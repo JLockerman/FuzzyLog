@@ -49,6 +49,15 @@ pub enum SkeensSetMaxRes {
     NotWaiting,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[must_use]
+pub enum SkeensReplicaionRes {
+    Phase2,
+    NewAppend,
+    NoNeedToWait,
+    Old,
+}
+
 impl<T: Copy> SkeensState<T> {
 
     pub fn new() -> Self {
@@ -100,6 +109,36 @@ impl<T: Copy> SkeensState<T> {
                 SkeensAppendRes::NewAppend(timestamp)
             },
         }
+    }
+
+    pub fn replicate_single_append(
+        &mut self, timestamp: Time, node_num: QueueIndex, id: Uuid, storage: *const u8, t: T
+    ) -> SkeensReplicaionRes {
+        debug_assert!({
+            // debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len());
+            if self.phase1_queue.is_empty() {
+                debug_assert!(self.got_max_timestamp.is_empty())
+            }
+            true
+        });
+        //FIXME check both maps
+
+        let start_index = self.phase1_queue.start_index();
+        if start_index > node_num { return SkeensReplicaionRes::Old }
+        if start_index == node_num {
+            self.phase1_queue.increment_start();
+            return SkeensReplicaionRes::NoNeedToWait
+        }
+
+        let s = WaitingForMax::Single{
+            timestamp: timestamp,
+            storage: storage,
+            node_num: node_num,
+            t: t
+        };
+        let old = self.phase1_queue.insert(node_num, s);
+        assert!(old.is_none());
+        SkeensReplicaionRes::NewAppend
     }
 
     //AKA skeens1
@@ -156,6 +195,34 @@ impl<T: Copy> SkeensState<T> {
         });
 
         ret
+    }
+
+    pub fn replicate_multi_append(
+        &mut self, timestamp: Time, node_num: QueueIndex, id: Uuid, storage: SkeensMultiStorage, t: T
+    ) -> SkeensReplicaionRes {
+        debug_assert!({
+            // debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len());
+            if self.phase1_queue.is_empty() {
+                debug_assert!(self.got_max_timestamp.is_empty())
+            }
+            true
+        });
+        //FIXME check both maps
+
+        let start_index = self.phase1_queue.start_index();
+        if start_index > node_num { return SkeensReplicaionRes::Old }
+
+        let m = WaitingForMax::Multi{
+            timestamp: timestamp,
+            storage: storage,
+            node_num: node_num,
+            t: t,
+            id: id,
+        };
+        let old = self.phase1_queue.insert(node_num, m);
+        assert!(old.is_none());
+        self.waiting_for_max_timestamp.insert(id, node_num);
+        SkeensReplicaionRes::NewAppend
     }
 
     //AKA skeens2
