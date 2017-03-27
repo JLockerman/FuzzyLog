@@ -72,10 +72,13 @@ impl<T: Copy> SkeensState<T> {
             },
             Vacant(v) => {
                 let timestamp = self.next_timestamp;
+                let node_num = self.num_nodes;
                 self.next_timestamp += 1;
+                self.num_nodes += 1;
                 v.insert(WaitingForMax::SimpleSingle{
                     timestamp: timestamp,
                     storage: storage,
+                    node_num: node_num,
                     t: t
                 });
                 SkeensAppendRes::NewAppend(timestamp)
@@ -109,9 +112,12 @@ impl<T: Copy> SkeensState<T> {
             },
             Vacant(v) => {
                 let timestamp = self.next_timestamp;
+                let node_num = self.num_nodes;
                 self.next_timestamp += 1;
+                self.num_nodes += 1;
                 v.insert(WaitingForMax::Multi{
                     timestamp: timestamp,
+                    node_num: node_num,
                     storage: storage,
                     t: t
                 });
@@ -228,10 +234,10 @@ impl<T: Copy> SkeensState<T> {
 }
 
 enum WaitingForMax<T> {
-    GotMaxMulti{timestamp: u64, storage: SkeensMultiStorage, t: T},
-    SimpleSingle{timestamp: u64, storage: *const u8, t: T},
-    Single{timestamp: u64, single_num: u64, storage: *const u8, t: T},
-    Multi{timestamp: u64, storage: SkeensMultiStorage, t: T},
+    GotMaxMulti{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T},
+    SimpleSingle{timestamp: u64, node_num: u64, storage: *const u8, t: T},
+    Single{timestamp: u64, node_num: u64, storage: *const u8, t: T},
+    Multi{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T},
 }
 
 enum Timestamp {
@@ -250,7 +256,7 @@ impl<T: Copy> WaitingForMax<T> {
 
             &mut Single{timestamp, ..} => return Err(timestamp),
 
-            &mut Multi{timestamp, ref storage, t} => {
+            &mut Multi{timestamp, node_num, ref storage, t, ..} => {
                 assert!(max_timestamp >= timestamp,
                     "max_timestamp >= timestamp {:?} >= {:?},",// @ {:?}, {:#?}",
                     max_timestamp, timestamp, /*unsafe {&(*storage.get()).0},
@@ -259,7 +265,7 @@ impl<T: Copy> WaitingForMax<T> {
                         (e.id, e.locs())
                     }*/
                 );
-                GotMaxMulti{timestamp: max_timestamp, storage: storage.clone(), t: t}
+                GotMaxMulti{timestamp: max_timestamp, node_num: node_num, storage: storage.clone(), t: t}
             },
         };
         Ok(())
@@ -270,13 +276,13 @@ impl<T: Copy> WaitingForMax<T> {
         match self {
             Multi{..} => unreachable!(),
 
-            SimpleSingle{timestamp, storage, t} =>
+            SimpleSingle{timestamp, storage, t, node_num: _} =>
                 GotMax::SimpleSingle{timestamp: timestamp, storage: storage, t: t},
 
-            Single{timestamp, single_num, storage, t} =>
-                GotMax::Single{timestamp: timestamp, single_num: single_num, storage: storage, t: t},
+            Single{timestamp, node_num, storage, t} =>
+                GotMax::Single{timestamp: timestamp, node_num: node_num, storage: storage, t: t},
 
-            GotMaxMulti{timestamp, storage, t} => {
+            GotMaxMulti{timestamp, storage, t, node_num: _} => {
                 GotMax::Multi{timestamp: timestamp, storage: storage, t: t, id: id}
             },
         }
@@ -304,32 +310,35 @@ impl<T: Copy> WaitingForMax<T> {
 impl<T> ::std::fmt::Debug for WaitingForMax<T> {
     fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
         match self {
-            &WaitingForMax::GotMaxMulti{ref timestamp, ref storage, ref t} => {
+            &WaitingForMax::GotMaxMulti{ref timestamp, ref node_num, ref storage, ref t} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::GotMaxMulti")
                     .field("timestamp", timestamp)
+                    .field("node_num", node_num)
                     .field("storage", &(&**storage as *const _))
                     .finish()
             },
-            &WaitingForMax::Multi{ref timestamp, ref storage, ref t} => {
+            &WaitingForMax::Multi{ref timestamp, ref node_num, ref storage, ref t} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::Multi")
                     .field("timestamp", timestamp)
+                    .field("node_num", node_num)
                     .field("storage", &(&**storage as *const _))
                     .finish()
             },
-            &WaitingForMax::SimpleSingle{ref timestamp, ref storage, ref t} => {
+            &WaitingForMax::SimpleSingle{ref timestamp, ref node_num, ref storage, ref t} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::SimpleSingle")
                     .field("timestamp", timestamp)
+                    .field("node_num", node_num)
                     .field("storage", storage)
                     .finish()
             },
-            &WaitingForMax::Single{ref timestamp, ref single_num, ref storage, ref t} => {
+            &WaitingForMax::Single{ref timestamp, ref node_num, ref storage, ref t} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::Single")
                     .field("timestamp", timestamp)
-                    .field("single_num", single_num)
+                    .field("node_num", node_num)
                     .field("storage", storage)
                     .finish()
             },
@@ -340,7 +349,7 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
 pub enum GotMax<T> {
     Multi{timestamp: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
     SimpleSingle{timestamp: u64, storage: *const u8, t: T},
-    Single{timestamp: u64, single_num: u64, storage: *const u8, t: T},
+    Single{timestamp: u64, node_num: u64, storage: *const u8, t: T},
 }
 
 impl<T> GotMax<T> {
@@ -403,11 +412,11 @@ impl<T> ::std::fmt::Debug for GotMax<T> {
                     .field("storage", storage)
                     .finish()
             },
-            &GotMax::Single{ref timestamp, ref single_num, ref storage, ref t} => {
+            &GotMax::Single{ref timestamp, ref node_num, ref storage, ref t} => {
                 let _ = t;
                 fmt.debug_struct("GotMax::Single")
                     .field("timestamp", timestamp)
-                    .field("single_num", single_num)
+                    .field("node_num", node_num)
                     .field("storage", storage)
                     .finish()
             },
@@ -473,8 +482,8 @@ impl<T> Ord for GotMax<T> {
                     o => o.reverse(),
                 },
 
-            (&Single{timestamp: my_timestamp, single_num: my_num, ..},
-                &Single{timestamp: other_timestamp, single_num: other_num, ..}) =>
+            (&Single{timestamp: my_timestamp, node_num: my_num, ..},
+                &Single{timestamp: other_timestamp, node_num: other_num, ..}) =>
                 match my_timestamp.cmp(&other_timestamp) {
                     Equal => my_num.cmp(&other_num).reverse(),
                     o => o.reverse(),
@@ -508,8 +517,8 @@ impl<T> PartialEq for GotMax<T> {
                 &SimpleSingle{timestamp: other_ts, storage: other_s, ..})
             => my_ts == other_ts && my_s == other_s,
 
-            (&Single{timestamp: my_m_ts, single_num: my_n, storage: my_s, ..},
-                &Single{timestamp: other_m_ts, single_num: other_n, storage: other_s, ..})
+            (&Single{timestamp: my_m_ts, node_num: my_n, storage: my_s, ..},
+                &Single{timestamp: other_m_ts, node_num: other_n, storage: other_s, ..})
             => my_m_ts == other_m_ts && my_n == other_n && my_s == other_s,
 
             (_, _) => false,
@@ -603,30 +612,30 @@ mod test {
     #[test]
     fn got_max_m_s_cmp() {
         assert_eq!(Multi{ timestamp: 1, storage: multi_storage(), t: (), id: Uuid::nil()}
-            .cmp(&Single{ timestamp: 1, single_num: 0, storage: null(), t: ()}),
+            .cmp(&Single{ timestamp: 1, node_num: 0, storage: null(), t: ()}),
             Greater
         );
         assert_eq!(Multi{ timestamp: 1, storage: multi_storage(), t: (), id: Uuid::nil()}
-            .cmp(&Single{ timestamp: 2, single_num: 200, storage: null(), t: ()}),
+            .cmp(&Single{ timestamp: 2, node_num: 200, storage: null(), t: ()}),
             Greater
         );
         assert_eq!(Multi{ timestamp: 3, storage: multi_storage(), t: (), id: Uuid::nil()}
-            .cmp(&Single{ timestamp: 2, single_num: 0, storage: null(), t: ()}),
+            .cmp(&Single{ timestamp: 2, node_num: 0, storage: null(), t: ()}),
             Less
         );
     }
 
     #[test]
     fn got_max_s_m_cmp() {
-        assert_eq!(Single{ timestamp: 1, single_num: 0, storage: null(), t: ()}
+        assert_eq!(Single{ timestamp: 1, node_num: 0, storage: null(), t: ()}
             .cmp(&Multi{ timestamp: 1, storage: multi_storage(), t: (), id: Uuid::nil()}),
             Less
         );
-        assert_eq!(Single{ timestamp: 1, single_num: 200,storage: null(), t: ()}
+        assert_eq!(Single{ timestamp: 1, node_num: 200,storage: null(), t: ()}
             .cmp(&Multi{ timestamp: 2, storage: multi_storage(), t: (), id: Uuid::nil()}),
             Greater
         );
-        assert_eq!(Single{ timestamp: 3, single_num: 0,storage: null(), t: ()}
+        assert_eq!(Single{ timestamp: 3, node_num: 0,storage: null(), t: ()}
             .cmp(&Multi{ timestamp: 2, storage: multi_storage(), t: (), id: Uuid::nil()}),
             Less
         );
@@ -634,29 +643,29 @@ mod test {
 
     #[test]
     fn got_max_s_s_cmp() {
-        assert_eq!(Single{ timestamp: 1, single_num: 200, storage: null(), t: ()}
-            .cmp(&Single{ timestamp: 1, single_num: 200, storage: null(), t: ()}),
+        assert_eq!(Single{ timestamp: 1, node_num: 200, storage: null(), t: ()}
+            .cmp(&Single{ timestamp: 1, node_num: 200, storage: null(), t: ()}),
             Equal
         );
-        assert_eq!(Single{ timestamp: 1, single_num: 200, storage: null(), t: ()}
-            .cmp(&Single{ timestamp: 2, single_num: 1, storage: null(), t: ()}),
+        assert_eq!(Single{ timestamp: 1, node_num: 200, storage: null(), t: ()}
+            .cmp(&Single{ timestamp: 2, node_num: 1, storage: null(), t: ()}),
             Greater
         );
-        assert_eq!(Single{ timestamp: 3, single_num: 1, storage: null(), t: ()}
-            .cmp(&Single{ timestamp: 2, single_num: 200, storage: null(), t: ()}),
+        assert_eq!(Single{ timestamp: 3, node_num: 1, storage: null(), t: ()}
+            .cmp(&Single{ timestamp: 2, node_num: 200, storage: null(), t: ()}),
             Less
         );
 
-        assert_eq!(Single{ timestamp: 5, single_num: 200, storage: null(), t: ()}
-            .cmp(&Single{ timestamp: 5, single_num: 200, storage: null(), t: ()}),
+        assert_eq!(Single{ timestamp: 5, node_num: 200, storage: null(), t: ()}
+            .cmp(&Single{ timestamp: 5, node_num: 200, storage: null(), t: ()}),
             Equal
         );
-        assert_eq!(Single{ timestamp: 5, single_num: 10, storage: null(), t: ()}
-            .cmp(&Single{ timestamp: 5, single_num: 200, storage: null(), t: ()}),
+        assert_eq!(Single{ timestamp: 5, node_num: 10, storage: null(), t: ()}
+            .cmp(&Single{ timestamp: 5, node_num: 200, storage: null(), t: ()}),
             Greater
         );
-        assert_eq!(Single{ timestamp: 5, single_num: 200, storage: null(), t: ()}
-            .cmp(&Single{ timestamp: 5, single_num: 5, storage: null(), t: ()}),
+        assert_eq!(Single{ timestamp: 5, node_num: 200, storage: null(), t: ()}
+            .cmp(&Single{ timestamp: 5, node_num: 5, storage: null(), t: ()}),
             Less
         );
     }
