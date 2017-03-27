@@ -89,7 +89,7 @@ impl<T: Copy> SkeensState<T> {
                 let timestamp = self.next_timestamp;
                 self.next_timestamp += 1;
                 let node_num = self.phase1_queue.push_index();
-                self.phase1_queue.push_back(WaitingForMax::SimpleSingle{
+                self.phase1_queue.push_back(WaitingForMax::Single{
                     timestamp: timestamp,
                     storage: storage,
                     node_num: node_num,

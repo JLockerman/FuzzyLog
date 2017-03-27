@@ -959,8 +959,8 @@ impl<T: Copy> Chain<T> {
                 let trie = &mut self.trie;
                 self.skeens.flush_got_max_timestamp(|g| {
                     match g {
-                        GotMax::Single{..} => unimplemented!(),
-                        GotMax::SimpleSingle{storage, t, timestamp, ..} => unsafe {
+                        GotMax::SimpleSingle{storage, t, timestamp, ..}
+                        | GotMax::Single{storage, t, timestamp, ..} => unsafe {
                             trace!("flush single {:?}", timestamp);
                             let (loc, ptr) = trie.prep_append(ptr::null());
                             //println!("s id {:?} ts {:?}", id, timestamp);
