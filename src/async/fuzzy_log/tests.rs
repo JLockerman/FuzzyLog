@@ -513,6 +513,7 @@ macro_rules! async_tests {
         #[test]
         #[inline(never)]
         pub fn test_simple_causal1() {
+            let _ = env_logger::init();
             trace!("TEST simple causal 1");
 
             let mut lh = $new_thread_log::<i32>(vec![67.into(), 68.into(), 69.into()]);
@@ -551,6 +552,7 @@ macro_rules! async_tests {
         #[test]
         #[inline(never)]
         pub fn test_simple_causal2() {
+            let _ = env_logger::init();
             trace!("TEST simple causal 2");
 
             let mut lh = $new_thread_log::<i32>(vec![70.into(), 71.into(), 72.into()]);

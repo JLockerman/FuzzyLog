@@ -40,6 +40,7 @@ impl RangeTree {
 
     pub fn new() -> Self {
         let mut map = BTreeMap::new();
+        map.insert(Range::new(0.into(), 0.into()), Kind::ReturnedToClient);
         map.insert(Range::new(1.into(), u32::MAX.into()), Kind::None);
         RangeTree {
             inner: map,
@@ -163,6 +164,21 @@ impl RangeTree {
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
     }
 
+    pub fn is_returned(&self, point: entry) -> bool {
+        match self.inner.get(&Range::point(point)) {
+            Some(&Kind::ReturnedToClient) => true,
+            _ => false,
+        }
+    }
+
+    pub fn next_return_is(&self, point: entry) -> bool {
+        match (self.inner.get(&Range::point(point - 1)), self.inner.get(&Range::point(point))) {
+            (_, Some(&Kind::ReturnedToClient)) => false,
+            (Some(&Kind::ReturnedToClient), _) => true,
+            _ => false,
+        }
+    }
+
     pub fn num_buffered(&self) -> usize {
         self.num_buffered
     }
@@ -243,13 +259,19 @@ impl RangeTree {
         let (_, _, valid, num_outstanding, num_buffered) = self.iter()
             .fold((0.into(), None, true, 0, 0),
             |(prev, prev_kind, prev_valid, mut num_outstanding, mut num_buffered), (r, k)| {
-            let valid = prev_valid && r.first() == prev + 1 && Some(k) != prev_kind;
-            match k {
-                &Kind::SentToServer => num_outstanding += r.len(),
-                &Kind::GottenFromServer => num_buffered += r.len(),
-                _ => {},
+            if let Some(kind) = prev_kind {
+                let valid = prev_valid && r.first() == prev + 1 && Some(k) != prev_kind;
+                match k {
+                    &Kind::SentToServer => num_outstanding += r.len(),
+                    &Kind::GottenFromServer => num_buffered += r.len(),
+                    _ => {},
+                }
+                (r.last(), Some(k), valid, num_outstanding, num_buffered)
             }
-            (r.last(), Some(k), valid, num_outstanding, num_buffered)
+            else {
+                let valid = prev_valid && r.first() == 0.into() && k == &Kind::ReturnedToClient;
+                (r.last(), Some(k), valid, num_outstanding, num_buffered)
+            }
         });
         valid
             && self.num_buffered() == num_buffered

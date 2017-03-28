@@ -312,8 +312,10 @@ impl ThreadLog {
                     //s.decrement_outstanding_reads());
                 if needed {
                     let packet = Rc::new(msg);
-                    self.add_blockers_at(read_loc, &packet);
-                    self.try_returning_at(read_loc, packet);
+                    let try_ret = self.add_blockers_at(read_loc, &packet);
+                    if try_ret {
+                        self.try_returning_at(read_loc, packet);
+                    }
                 }
             }
             EntryLayout::Multiput if kind.contains(EntryKind::NoRemote) => {
@@ -352,8 +354,10 @@ impl ThreadLog {
                             //TODO it would be nice to fetch the blockers in parallel...
                             //     we can add a fetch blockers call in update_multi_part_read
                             //     which updates the horizon but doesn't actually add the block
-                            self.add_blockers(&packet);
-                            self.try_returning(packet);
+                            let try_ret = self.add_blockers(&packet);
+                            if try_ret {
+                                self.try_returning(packet);
+                            }
                         }
                         MultiSearch::Repeat => {}
                     }
@@ -398,12 +402,33 @@ impl ThreadLog {
 
     /// Blocks a packet on entries a it depends on. Will increment the refcount for each
     /// blockage.
-    fn add_blockers(&mut self, packet: &ChainEntry) {
+    fn add_blockers(&mut self, packet: &ChainEntry) -> bool {
         //FIXME dependencies currently assumes you gave it the correct type
         //      this is unnecessary and should be changed
         let entr = bytes_as_entry(packet);
         let deps = entr.dependencies();
         let locs = entr.locs();
+        let mut needed = false;
+        let mut try_ret = false;
+        for &loc in locs {
+            if loc.0 == order::from(0) { continue }
+            let (is_next_in_chain, needs_to_be_returned);
+            {
+                let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
+                is_next_in_chain = pc.next_return_is(loc.1);
+                needs_to_be_returned = !pc.has_returned(loc.1);
+            }
+            needed |= needs_to_be_returned;
+            if !needs_to_be_returned { continue }
+
+            try_ret |= is_next_in_chain;
+            if !is_next_in_chain {
+                self.enqueue_packet(loc, packet.clone());
+            }
+        }
+        if !needed {
+            return false
+        }
         trace!("FUZZY checking {:?} for blockers in {:?}", locs, deps);
         for &OrderIndex(chain, index) in deps {
             let blocker_already_returned = self.per_chains.get_mut(&chain)
@@ -411,33 +436,36 @@ impl ThreadLog {
                 .has_returned(index);
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", locs, (chain, index));
+                try_ret = false;
                 //TODO no-alloc?
-                let blocked = self.blockers.entry(OrderIndex(chain, index))
-                    .or_insert_with(Vec::new);
-                blocked.push(packet.clone());
+                self.blockers.entry(OrderIndex(chain, index))
+                    .or_insert_with(Vec::new)
+                    .push(packet.clone());
+                self.fetch_blocker_at(chain, index);
             } else {
                 trace!("FUZZY read @ {:?} need not wait for {:?}", locs, (chain, index));
             }
         }
-        for &loc in locs {
-            if loc.0 == order::from(0) { continue }
-            let (is_next_in_chain, needs_to_be_returned) = {
-                let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
-                (pc.next_return_is(loc.1), !pc.has_returned(loc.1))
-            };
-            if !is_next_in_chain && needs_to_be_returned {
-                self.enqueue_packet(loc, packet.clone());
-            }
-        }
+        try_ret
     }
 
     /// Blocks a packet on entries a it depends on. Will increment the refcount for each
     /// blockage.
-    fn add_blockers_at(&mut self, loc: OrderIndex, packet: &ChainEntry) {
+    fn add_blockers_at(&mut self, loc: OrderIndex, packet: &ChainEntry) -> bool {
         //FIXME dependencies currently assumes you gave it the correct type
         //      this is unnecessary and should be changed
         let entr = bytes_as_entry(packet);
         let deps = entr.dependencies();
+        let (needed, mut try_ret);
+        {
+            let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
+            needed = !pc.has_returned(loc.1);
+            try_ret = pc.next_return_is(loc.1);
+        }
+        if !needed { return false }
+        if !try_ret {
+            self.enqueue_packet(loc, packet.clone());
+        }
         trace!("FUZZY checking {:?} for blockers in {:?}", loc, deps);
         for &OrderIndex(chain, index) in deps {
             let blocker_already_returned = self.per_chains.get_mut(&chain)
@@ -445,21 +473,17 @@ impl ThreadLog {
                 .has_returned(index);
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", loc, (chain, index));
+                try_ret = false;
                 //TODO no-alloc?
-                let blocked = self.blockers.entry(OrderIndex(chain, index))
-                    .or_insert_with(Vec::new);
-                blocked.push(packet.clone());
+                self.blockers.entry(OrderIndex(chain, index))
+                    .or_insert_with(Vec::new)
+                    .push(packet.clone());
+                self.fetch_blocker_at(chain, index);
             } else {
                 trace!("FUZZY read @ {:?} need not wait for {:?}", loc, (chain, index));
             }
         }
-        let (is_next_in_chain, needs_to_be_returned) = {
-            let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
-            (pc.next_return_is(loc.1), !pc.has_returned(loc.1))
-        };
-        if !is_next_in_chain && needs_to_be_returned {
-            self.enqueue_packet(loc, packet.clone());
-        }
+        try_ret
     }
 
     fn fetch_blockers_if_needed(&mut self, packet: &ChainEntry) {
@@ -467,21 +491,25 @@ impl ThreadLog {
         //FIXME only do if below last_snapshot?
         let deps = bytes_as_entry(packet).dependencies();
         for &OrderIndex(chain, index) in deps {
-            let unblocked;
-            let to_fetch: NextToFetch = {
-                let pc = self.per_chains.get_mut(&chain)
-                    .expect("tried reading uninteresting chain");
-                unblocked = pc.update_horizon(index);
-                pc.next_range_to_fetch()
-            };
-            trace!("FUZZY blocker {:?} needs additional reads {:?}", chain, to_fetch);
-            if let NextToFetch::BelowHorizon(low, high) = to_fetch {
-                self.fetch_next(chain, low, high)
-            }
-            if let Some(val) = unblocked {
-                let locs = self.return_entry(val);
-                if let Some(locs) = locs { self.stop_blocking_on(locs) }
-            }
+            self.fetch_blocker_at(chain, index)
+        }
+    }
+
+    fn fetch_blocker_at(&mut self, chain: order, index: entry) {
+        let unblocked;
+        let to_fetch: NextToFetch = {
+            let pc = self.per_chains.get_mut(&chain)
+                .expect("tried reading uninteresting chain");
+            unblocked = pc.update_horizon(index);
+            pc.next_range_to_fetch()
+        };
+        trace!("FUZZY blocker {:?} needs additional reads {:?}", chain, to_fetch);
+        if let NextToFetch::BelowHorizon(low, high) = to_fetch {
+            self.fetch_next(chain, low, high)
+        }
+        if let Some(val) = unblocked {
+            let locs = self.return_entry(val);
+            if let Some(locs) = locs { self.stop_blocking_on(locs) }
         }
     }
 
@@ -835,7 +863,10 @@ impl ThreadLog {
                 for &OrderIndex(o, i) in locs.into_iter() {
                     if o == order::from(0) { continue }
                     let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
-                    if pc.has_returned(i) { return None }
+                    if pc.has_returned(i) {
+                        trace!("FUZZY double return {:?} in {:?}", (o, i), locs);
+                        return None
+                    }
                     if !pc.is_within_snapshot(i) {
                         trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
                         should_block_on = Some(o);

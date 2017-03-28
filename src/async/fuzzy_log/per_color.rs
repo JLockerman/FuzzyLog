@@ -20,7 +20,6 @@ pub struct PerColor {
     //found_sentinels: HashSet<Uuid>,
     pub chain: order,
     last_snapshot: entry,
-    last_returned_to_client: entry,
     read_status: RangeTree,
     blocked_on_new_snapshot: Option<Vec<u8>>,
     //TODO this is where is might be nice to have a more structured id format
@@ -71,7 +70,6 @@ impl PerColor {
             chain: chain,
             last_snapshot: 0.into(),
             //outstanding_reads: 0,
-            last_returned_to_client: 0.into(),
             blocked_on_new_snapshot: None,
             found_but_unused_multiappends: Default::default(),
             read_status: RangeTree::new(),
@@ -103,11 +101,9 @@ impl PerColor {
     #[inline(always)]
     pub fn set_returned(&mut self, index: entry) {
         assert!(self.next_return_is(index));
-        assert!(index > self.last_returned_to_client);
         assert!(index <= self.last_snapshot);
         trace!("QQQQQ returning {:?}", (self.chain, index));
         self.read_status.set_point_as_returned(index);
-        self.last_returned_to_client = index;
         if self.is_finished() {
             trace!("QQQQQ {:?} is finished, ret, {:#?}, {:?}", self.chain, self.read_status, self.is_being_read);
             self.is_being_read = None
@@ -117,9 +113,8 @@ impl PerColor {
     pub fn overread_at(&mut self, index: entry) {
         // The conditional is needed because sends we sent before reseting
         // last_read_sent_to_server race future calls to this function
-        trace!("FUZZY overread {:?}, {:?}, {:?} >= {:?} && > {:?}",
-            self.chain, self.read_status, self.last_snapshot, index,
-            self.last_returned_to_client);
+        trace!("FUZZY overread {:?}, {:?}, {:?} >= {:?}",
+            self.chain, self.read_status, self.last_snapshot, index);
         self.read_status.set_point_as_none(index);
     }
 
@@ -202,14 +197,14 @@ impl PerColor {
     }
 
     pub fn has_returned(&self, index: entry) -> bool {
-        trace!{"QQQQQ last return for {:?}: {:?}", self.chain, self.last_returned_to_client};
-        index <= self.last_returned_to_client
+        trace!{"QQQQQ last return for {:?}: {:?}", self.chain, self.read_status};
+        self.read_status.is_returned(index)
     }
 
     pub fn next_return_is(&self, index: entry) -> bool {
         trace!("QQQQQ check {:?} next return for {:?}: {:?}",
-            index, self.chain, self.last_returned_to_client + 1);
-        index == self.last_returned_to_client + 1
+            index, self.chain, self.read_status);
+        self.read_status.next_return_is(index)
     }
 
     pub fn is_within_snapshot(&self, index: entry) -> bool {
@@ -313,9 +308,9 @@ impl PerColor {
         //      see TODO above
         const MAX_PIPELINED: u32 = 20000;
         //TODO switch to saturating sub?
-        assert!(self.last_returned_to_client <= self.last_snapshot,
-            "FUZZY returned value early. {:?} should be less than {:?}",
-            self.last_returned_to_client, self.last_snapshot);
+        //assert!(self.last_returned_to_client <= self.last_snapshot,
+        //    "FUZZY returned value early. {:?} should be less than {:?}",
+        //    self.last_returned_to_client, self.last_snapshot);
 
         let outstanding_reads = self.read_status.num_outstanding() as u32;
         if outstanding_reads >= MAX_PIPELINED {
@@ -391,7 +386,7 @@ impl PerColor {
     }
 
     pub fn finished_until_snapshot(&self) -> bool {
-        self.last_returned_to_client == self.last_snapshot
+        self.read_status.is_returned(self.last_snapshot)
             && !self.has_outstanding_snapshots()
     }
 
@@ -407,10 +402,9 @@ impl PerColor {
     }
 
     pub fn trace_unfinished(&self) {
-        trace!("chain {:?} finished? {:?}, last_ret {:?}, last_snap {:?}, {:#?}",
+        trace!("chain {:?} finished? {:?}, last_snap {:?}, {:?}",
             self.chain,
             self.is_being_read,
-            self.last_returned_to_client,
             self.last_snapshot,
             self.read_status,
         )
