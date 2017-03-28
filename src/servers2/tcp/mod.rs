@@ -520,9 +520,7 @@ fn negotiate_num_upstreams(
         'write: loop {
             let r = blocking_write(socket, &to_write);
             match r {
-                Err(ref e)
-                    if e.kind() == io::ErrorKind::ConnectionRefused
-                    || e.kind() == io::ErrorKind::NotConnected => {
+                Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
                     if refusals >= 60000 { panic!("write fail {:?}", e) }
                     refusals += 1;
                     trace!("upstream refused reconnect attempt {}", refusals);
@@ -530,6 +528,12 @@ fn negotiate_num_upstreams(
                     **socket = TcpStream::connect(&remote_addr).unwrap();
                     let _ = socket.set_keepalive_ms(Some(1000));
                     let _ = socket.set_nodelay(true);
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::NotConnected => {
+                    if refusals >= 60000 { panic!("write fail {:?}", e) }
+                    refusals += 1;
+                    trace!("upstream connection not ready {}", refusals);
+                    thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) => panic!("write fail {:?}", e),
                 Ok(..) => break 'write,

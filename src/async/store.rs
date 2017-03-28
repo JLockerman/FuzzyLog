@@ -946,7 +946,19 @@ where PerServer<S>: Connected,
         self.servers[token.0].print_data.finished_read(1);
         //FIXME remove
         let mut was_needed = false;
+        let is_sentinel = packet.entry().kind.layout() == EntryLayout::Sentinel;
+        let mut is_sentinel_loc = false;
         for &oi in packet.entry().locs() {
+            if oi == OrderIndex(0.into(), 0.into()) {
+                is_sentinel_loc = true;
+                continue
+            }
+            if is_sentinel && !is_sentinel_loc  {
+                // we don't want to return a sentinel for an actual multi;
+                // we need the data
+                //alt if is_sentinel != is_sentinel_loc
+                continue
+            }
             //trace!("CLIENT completed read @ {:?}", oi);
             let needed = match self.sent_reads.entry(oi) {
                 Occupied(mut oe) => {
