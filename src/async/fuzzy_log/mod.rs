@@ -25,7 +25,7 @@ mod range_tree;
 #[cfg(test)]
 mod tests;
 
-const MAX_PREFETCH: u32 = 8;
+const MAX_PREFETCH: u32 = 40;
 
 type ChainEntry = Rc<Vec<u8>>;
 
@@ -486,6 +486,7 @@ impl ThreadLog {
         try_ret
     }
 
+    // FIXME This is unneeded
     fn fetch_blockers_if_needed(&mut self, packet: &ChainEntry) {
         //TODO num_to_fetch
         //FIXME only do if below last_snapshot?
