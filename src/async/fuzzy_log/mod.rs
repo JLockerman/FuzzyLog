@@ -870,13 +870,21 @@ impl ThreadLog {
                     }
                     if !pc.is_within_snapshot(i) {
                         trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
-                        should_block_on = Some(o);
+                        should_block_on = Some((o, i));
                     }
                 }
             }
-            if let Some(o) = should_block_on {
-                let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
-                pc.block_on_snapshot(val);
+            if let Some((o, i)) = should_block_on {
+                let is_next;
+                {
+                    let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
+                    is_next = pc.next_return_is(i);
+                    if is_next {
+                        pc.block_on_snapshot(val);
+                        return None
+                    }
+                }
+                self.enqueue_packet(OrderIndex(o, i), Rc::new(val));
                 return None
             }
             let mut is_interesting = false;

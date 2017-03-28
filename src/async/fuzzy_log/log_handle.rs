@@ -504,7 +504,7 @@ where V: Storeable {
 
         for o in happens_after {
             let horizon = self.last_seen_entries.get(o).cloned().unwrap_or(0.into());
-            if horizon > entry::from(0) {
+            if horizon > entry::from(0) && inhabits.binary_search(o).is_err() {
                 happens_after_entries.push(OrderIndex(*o, horizon));
             }
         }
