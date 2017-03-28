@@ -286,9 +286,16 @@ impl PerColor {
             .find(|&&OrderIndex(o, _)| o == self.chain).unwrap().1 == self.last_snapshot + 1);
         assert!(self.blocked_on_new_snapshot.as_ref().map(|b|
             bytes_as_entry(b).id == bytes_as_entry(&val).id).unwrap_or(true),
-            "multiple next entries {:?} != {:?}",
-            self.blocked_on_new_snapshot.as_ref().map(|b| bytes_as_entry(b)),
-            bytes_as_entry(&val),
+            "multiple next entries {:?} != {:?} @ {:?}",
+            {
+                let e = self.blocked_on_new_snapshot.as_ref().map(|b| bytes_as_entry(b));
+                e.map(|e| (e, e.locs()))
+            },
+            {
+                let e = bytes_as_entry(&val);
+                (e, e.locs())
+            },
+            self.read_status
         );
         self.blocked_on_new_snapshot = Some(val)
     }
