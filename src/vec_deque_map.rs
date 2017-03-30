@@ -62,7 +62,7 @@ impl<V> VecDequeMap<V> {
         }
     }
 
-    fn get(&self, key: u64) -> Option<&V> {
+    pub fn get(&self, key: u64) -> Option<&V> {
         if key < self.start || self.data.is_empty() {
             return None
         }
@@ -71,7 +71,7 @@ impl<V> VecDequeMap<V> {
         self.data[index].as_ref()
     }
 
-    fn get_mut(&mut self, key: u64) -> Option<&mut V> {
+    pub fn get_mut(&mut self, key: u64) -> Option<&mut V> {
         if key < self.start || self.data.is_empty() {
             return None
         }

@@ -209,6 +209,8 @@ pub enum ToReplicate {
     //     ideally one with the layout { count, entry }
     //     since the entry's size is stored internally
     Multi(BufferSlice, Box<[u8]>, Box<[u8]>),
+    Skeens1(BufferSlice, SkeensMultiStorage),
+    Skeens2(BufferSlice),
     UnLock(BufferSlice),
 }
 
@@ -802,6 +804,14 @@ where ToWorkers: DistributeToWorkers<T> {
                 self.print_data.msgs_sent(1);
                 self.to_workers.send_to_worker(Write(buffer, slot, t))
             },
+
+            ToReplicate::Skeens1(..) => {
+                unimplemented!()
+            }
+
+            ToReplicate::Skeens2(..) => {
+                unimplemented!()
+            }
 
             ToReplicate::Multi(buffer, multi_storage, senti_storage) => {
                 trace!("SERVER {:?} replicate multiput", self.this_server_num);
