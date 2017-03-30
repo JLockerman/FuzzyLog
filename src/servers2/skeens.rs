@@ -95,7 +95,8 @@ impl<T: Copy> SkeensState<T> {
                     timestamp: timestamp,
                     storage: storage,
                     node_num: node_num,
-                    t: t
+                    t: t,
+                    id: id,
                 });
                 v.insert(AppendStatus::Singleton(node_num));
                 SkeensAppendRes::NewAppend(timestamp)
@@ -297,11 +298,12 @@ impl<T: Copy> SkeensState<T> {
             Occupied(o) => false,
             Vacant(v) => {
                 v.insert(AppendStatus::Singleton(node_num));
-                let s = WaitingForMax::Single{
+                let s = WaitingForMax::SimpleSingle{
                     timestamp: timestamp,
                     storage: storage,
                     node_num: node_num,
-                    t: t
+                    t: t,
+                    id: id,
                 };
                 let old = self.phase1_queue.insert(node_num, s);
                 assert!(old.is_none());
@@ -344,7 +346,7 @@ impl<T: Copy> SkeensState<T> {
     }
 
     fn replicate_round2<F>(&mut self, id: &Uuid, max_timestamp: u64, index: TrieIndex, mut f: F)
-    where F: FnMut(ReplicatedSkeens<T>) -> Option<Uuid> {
+    where F: FnMut(ReplicatedSkeens<T>) {
         let offset = match self.append_status.get(&id) {
             Some(&AppendStatus::Phase1(offset)) | Some(&AppendStatus::Singleton(offset)) =>
                 offset,
@@ -356,13 +358,13 @@ impl<T: Copy> SkeensState<T> {
         while self.phase1_queue.front().map(|w| w.has_replication()).unwrap_or(false) {
             let replica = self.phase1_queue.pop_front().unwrap();
             let (id, replica) = replica.to_replica();
-            let id2 = f(replica);
-            if let Some(id) = id.or(id2) {
-                //FIXME this should get delayed until the multi is fully complete
-                //      due to the failing path
-                let _old = self.append_status.remove(&id);
-                debug_assert!(_old.is_some(), "no skeen for {:?}", id);
-            }
+            //FIXME for non-single-server appends
+            //      this should get delayed until the multi is fully complete
+            //      due to the failing path,
+            //      here we should just update status to complete
+            let _old = self.append_status.remove(&id);
+            debug_assert!(_old.is_some(), "no skeen for {:?}", id);
+            f(replica);
         }
     }
 
@@ -387,12 +389,12 @@ pub enum ReplicatedSkeens<T> {
 
 enum WaitingForMax<T> {
     GotMaxMulti{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
-    SimpleSingle{timestamp: u64, node_num: u64, storage: *const u8, t: T},
-    Single{timestamp: u64, node_num: u64, storage: *const u8, t: T},
+    SimpleSingle{timestamp: u64, node_num: u64, storage: *const u8, t: T, id: Uuid},
+    Single{timestamp: u64, node_num: u64, storage: *const u8, t: T, id: Uuid},
     Multi{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
 
     ReplicatedMulti{max_timestamp: u64, index: TrieIndex, storage: SkeensMultiStorage, t: T, id: Uuid},
-    ReplicatedSingle{max_timestamp: u64, index: TrieIndex, storage: *const u8, t: T},
+    ReplicatedSingle{max_timestamp: u64, index: TrieIndex, storage: *const u8, t: T, id: Uuid},
 }
 
 enum Timestamp {
@@ -439,10 +441,10 @@ impl<T: Copy> WaitingForMax<T> {
     fn into_got_max(self) -> GotMax<T> {
         use self::WaitingForMax::*;
         match self {
-            SimpleSingle{timestamp, storage, t, node_num: _} =>
+            SimpleSingle{timestamp, storage, t, node_num: _, id: _} =>
                 GotMax::SimpleSingle{timestamp: timestamp, storage: storage, t: t},
 
-            Single{timestamp, node_num, storage, t} =>
+            Single{timestamp, node_num, storage, t, id: _} =>
                 GotMax::Single{timestamp: timestamp, node_num: node_num, storage: storage, t: t},
 
             GotMaxMulti{timestamp, storage, t, id: id, node_num: _} => {
@@ -472,14 +474,15 @@ impl<T: Copy> WaitingForMax<T> {
             &mut GotMaxMulti{..} | &mut ReplicatedMulti{..} | &mut ReplicatedSingle{..} =>
                 unreachable!(),
 
-            &mut Single{timestamp, node_num, storage, t}
-            | &mut SimpleSingle{timestamp, node_num, storage, t} => {
+            &mut Single{timestamp, node_num, storage, t, id}
+            | &mut SimpleSingle{timestamp, node_num, storage, t, id} => {
                 assert_eq!(max_timestamp, timestamp);
                 ReplicatedSingle{
                     max_timestamp: max_timestamp,
                     index: index,
                     storage: storage,
-                    t: t
+                    t: t,
+                    id: id,
                 }
             }
 
@@ -511,14 +514,14 @@ impl<T: Copy> WaitingForMax<T> {
         }
     }
 
-    fn to_replica(self) -> (Option<Uuid>, ReplicatedSkeens<T>) {
+    fn to_replica(self) -> (Uuid, ReplicatedSkeens<T>) {
         use self::WaitingForMax::*;
         match self {
-            ReplicatedSingle{max_timestamp, index, storage, t} =>
-                (None, ReplicatedSkeens::Single{index: index, storage: storage, t: t}),
+            ReplicatedSingle{max_timestamp, index, storage, t, id} =>
+                (id, ReplicatedSkeens::Single{index: index, storage: storage, t: t}),
 
             ReplicatedMulti{max_timestamp, index, storage, t, id} => {
-                (Some(id), ReplicatedSkeens::Multi{index: index, storage: storage, t: t})
+                (id, ReplicatedSkeens::Multi{index: index, storage: storage, t: t})
             },
 
             _ => unreachable!(),
@@ -561,17 +564,19 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
                     .field("storage", &(&**storage as *const _))
                     .finish()
             },
-            &WaitingForMax::SimpleSingle{ref timestamp, ref node_num, ref storage, ref t} => {
+            &WaitingForMax::SimpleSingle{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::SimpleSingle")
+                    .field("id", id)
                     .field("timestamp", timestamp)
                     .field("node_num", node_num)
                     .field("storage", storage)
                     .finish()
             },
-            &WaitingForMax::Single{ref timestamp, ref node_num, ref storage, ref t} => {
+            &WaitingForMax::Single{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::Single")
+                    .field("id", id)
                     .field("timestamp", timestamp)
                     .field("node_num", node_num)
                     .field("storage", storage)
@@ -590,11 +595,11 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
                     .finish()
             },
             &WaitingForMax::ReplicatedSingle{
-                ref max_timestamp, ref index, ref storage, ref t,// ref id
+                ref max_timestamp, ref index, ref storage, ref t, ref id
             } => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::ReplicatedSingle")
-                    //.field("id", id)
+                    .field("id", id)
                     .field("max_timestamp", max_timestamp)
                     .field("index", index)
                     .field("storage", storage)
