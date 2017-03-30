@@ -975,14 +975,12 @@ impl<T: Copy> Chain<T> {
                             let (loc, ptr) = trie.prep_append(ptr::null());
                             //println!("s id {:?} ts {:?}", id, timestamp);
                             on_finish(Single(loc, ptr, storage, t));
-                            None
                         },
                         GotMax::Multi{storage, t, id, timestamp, ..} => unsafe {
                             trace!("flush multi {:?}", timestamp);
                             //println!("m id {:?} ts {:?}", id, timestamp);
                             let (loc, ptr) = trie.prep_append(ptr::null());
                             on_finish(Multi(loc, ptr, storage, t));
-                            Some(id)
                         },
                     }
                 })
