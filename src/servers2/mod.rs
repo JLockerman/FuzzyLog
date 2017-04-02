@@ -397,10 +397,11 @@ where ToWorkers: DistributeToWorkers<T> {
     fn handle_multiappend(
         &mut self,
         kind: EntryKind::Kind,
-        mut buffer: BufferSlice,
+        buffer: BufferSlice,
         storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
         t: T
     ) {
+        //FXIME fastpath for single server appends
         if kind.contains(EntryKind::NewMultiPut) {
             self.handle_new_multiappend(kind, buffer, storage, t)
         }
@@ -421,7 +422,7 @@ where ToWorkers: DistributeToWorkers<T> {
         trace!("SERVER {:?} new-style multiput {:?}", self.this_server_num, kind);
         assert!(kind.contains(EntryKind::TakeLock));
         if kind.contains(EntryKind::Unlock) {
-            self.new_multiappend_round2(kind, &mut buffer, t);
+            self.new_multiappend_round2(kind, &mut buffer);
             self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(ReturnBuffer(buffer, t))
         } else {
@@ -447,19 +448,16 @@ where ToWorkers: DistributeToWorkers<T> {
         let timestamps = &mut unsafe { &mut (&mut *storage.get()).0 }[..locs.len()];
         let id = val.id;
         for i in 0..locs.len() {
-            if locs[i] == OrderIndex(0.into(), 0.into()) {
+            let chain = locs[i].0;
+            if chain == order::from(0) || !self.stores_chain(chain) {
+                timestamps[i] = 0;
                 continue
             }
 
-            let chain = locs[i].0;
-            if self.stores_chain(chain) {
-                let chain = self.ensure_chain(chain);
-                //FIXME handle repeat skeens-1
-                let local_timestamp = chain.timestamp_for_multi(id, storage.clone(), t).unwrap();
-                timestamps[i] = local_timestamp;
-            } else {
-                timestamps[i] = 0;
-            }
+            let chain = self.ensure_chain(chain);
+            //FIXME handle repeat skeens-1
+            let local_timestamp = chain.timestamp_for_multi(id, storage.clone(), t).unwrap();
+            timestamps[i] = local_timestamp;
         }
         trace!("SERVER {:?} new-style multiput Round 1 timestamps {:?}",
             self.this_server_num, timestamps);
@@ -469,7 +467,6 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryKind::Kind,
         buffer: &mut BufferSlice,
-        t: T
     ) {
         // In round two we flush some the queues... an possibly a partial entry...
         let val = buffer.entry_mut();
@@ -479,56 +476,51 @@ where ToWorkers: DistributeToWorkers<T> {
         trace!("SERVER {:?} new-style multiput Round 2 {:?} mts {:?}",
             self.this_server_num, kind, max_timestamp
         );
-        let mut is_sentinel = false;
         for i in 0..locs.len() {
-            if locs[i] == OrderIndex(0.into(), 0.into()) {
-                is_sentinel = true;
+            let chain_num = locs[i].0;
+            if chain_num == order::from(0) || !self.stores_chain(chain_num) {
+                locs[i].1 = entry::from(0);
                 continue
             }
 
-            let chain_num = locs[i].0;
-            if self.stores_chain(chain_num) {
-                //let chain = self.ensure_trie(chain);
-                let chain = self.log.get_mut(&chain_num)
-                    .expect("cannot have skeens-2 as the first op on a chain");
-                    /*.or_insert_with(|| {
-                    let mut t = Trie::new();
-                    t.append(&EntryContents::Data(&(), &[]).clone_entry());
-                    Chain{ trie: t, skeens: SkeensState::new() }
-                });*/
-                let to_workers = &mut self.to_workers;
-                let print_data = &mut self.print_data;
-                chain.finish_multi(id, max_timestamp,
-                    |finished| match finished {
-                        FinishSkeens::Multi(index, trie_slot, storage, t) => {
-                            trace!("server finish sk multi");
-                            print_data.msgs_sent(1);
-                            to_workers.send_to_worker(
-                                SkeensFinished {
-                                    loc: OrderIndex(chain_num, (index as u32).into()),
-                                    trie_slot: trie_slot,
-                                    storage: storage,
-                                    t: t
-                                }
-                            )
-                        },
-                        FinishSkeens::Single(index, trie_slot, storage, t) => {
-                            trace!("server finish sk single");
-                            print_data.msgs_sent(1);
-                            to_workers.send_to_worker(
-                                DelayedSingle {
-                                    index: index,
-                                    trie_slot: trie_slot,
-                                    storage: storage,
-                                    t: t
-                                }
-                            )
-                        },
-                    }
-                );
-            } else {
-                locs[i].1 = entry::from(0);
-            }
+            //let chain = self.ensure_trie(chain);
+            let chain = self.log.get_mut(&chain_num)
+                .expect("cannot have skeens-2 as the first op on a chain");
+                /*.or_insert_with(|| {
+                let mut t = Trie::new();
+                t.append(&EntryContents::Data(&(), &[]).clone_entry());
+                Chain{ trie: t, skeens: SkeensState::new() }
+            });*/
+            let to_workers = &mut self.to_workers;
+            let print_data = &mut self.print_data;
+            chain.finish_multi(id, max_timestamp,
+                |finished| match finished {
+                    FinishSkeens::Multi(index, trie_slot, storage, t) => {
+                        trace!("server finish sk multi");
+                        print_data.msgs_sent(1);
+                        to_workers.send_to_worker(
+                            SkeensFinished {
+                                loc: OrderIndex(chain_num, (index as u32).into()),
+                                trie_slot: trie_slot,
+                                storage: storage,
+                                t: t
+                            }
+                        )
+                    },
+                    FinishSkeens::Single(index, trie_slot, storage, t) => {
+                        trace!("server finish sk single");
+                        print_data.msgs_sent(1);
+                        to_workers.send_to_worker(
+                            DelayedSingle {
+                                index: index,
+                                trie_slot: trie_slot,
+                                storage: storage,
+                                t: t
+                            }
+                        )
+                    },
+                }
+            );
         }
     }
 
@@ -929,11 +921,9 @@ impl<T: Copy> Chain<T> {
     }
 
     fn handle_skeens_single(&mut self, buffer: &mut BufferSlice, t: T) -> (*mut u8, u64) {
-        let val = buffer.entry_mut();
-        val.kind.insert(EntryKind::ReadSuccess);
+        let val = buffer.entry();
         let size = val.entry_size();
         let id = val.id;
-        let l = unsafe { &mut val.as_data_entry_mut().flex.loc };
         let (slot, storage_loc) = unsafe { self.trie.reserve_space(size) };
         self.skeens.add_single_append(id, slot as *const _, t);
         (slot, storage_loc)
@@ -1140,8 +1130,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                     st1.copy_from_slice(e.bytes());
                 }
                 {
-                    let locs = &mut e.locs_mut()[..num_ts];
-                    for i in 0..num_ts {
+                    let locs = e.locs_mut();
+                    for i in 0..locs.len() {
                         locs[i].1 = entry::from(ts[i] as u32)
                     }
                 }

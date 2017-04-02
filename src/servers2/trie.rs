@@ -23,7 +23,6 @@ struct RootTable<V> {
     l6: Shortcut<ValEdge>,
     next_entry: u64,
     alloc: AllocPtr,
-    next_timestamp: u64,
     last_lock: u64,
     //FIXME if we want to do lock handoff we need to know until where we can read...
     last_unlock: u64,

@@ -44,7 +44,7 @@ impl<T: Copy> SkeensState<T> {
             waiting_for_max_timestamp: Default::default(),
             got_max_timestamp: Default::default(),
             phase2_ids: Default::default(),
-            next_timestamp: 0,
+            next_timestamp: 1,
         }
     }
 
@@ -145,10 +145,24 @@ impl<T: Copy> SkeensState<T> {
             self.next_timestamp = max_timestamp + 1
         }
 
-        if self.waiting_for_max_timestamp.front().map(|(&k, _)| k == sk2_id).unwrap_or(false) {
-            let _e = self.waiting_for_max_timestamp[&sk2_id]
-                .set_max_timestamp(max_timestamp);
-            debug_assert!(_e.is_ok());
+        let ret = match self.waiting_for_max_timestamp.entry(sk2_id) {
+            //TODO we could iterate over the queue instead of keeping a set of ids
+            Vacant(..) => {
+                match self.phase2_ids.get(&sk2_id) {
+                    Some(&timestamp) => SkeensSetMaxRes::Duplicate(timestamp),
+                    None => SkeensSetMaxRes::NotWaiting,
+                }
+            },
+            Occupied(o) => {
+                let s = o.into_mut();
+                match s.set_max_timestamp(max_timestamp) {
+                    Err(ts) => SkeensSetMaxRes::Duplicate(ts),
+                    Ok(..) => SkeensSetMaxRes::Ok,
+                }
+            },
+        };
+
+        if let SkeensSetMaxRes::Ok = ret {
             while !self.waiting_for_max_timestamp.is_empty()
                 && self.waiting_for_max_timestamp.front()
                     .map(|(_, v)| v.has_max()).unwrap_or(false) {
@@ -165,22 +179,6 @@ impl<T: Copy> SkeensState<T> {
                 SkeensSetMaxRes::Ok
             }
         }
-
-        if let Some(&timestamp) = self.phase2_ids.get(&sk2_id) {
-            return SkeensSetMaxRes::Duplicate(timestamp)
-        }
-
-        let ret = match self.waiting_for_max_timestamp.entry(sk2_id) {
-            //TODO we could iterate over the queue instead of keeping a set of ids
-            Vacant(..) => SkeensSetMaxRes::NotWaiting,
-            Occupied(o) => {
-                let s = o.into_mut();
-                match s.set_max_timestamp(max_timestamp) {
-                    Ok(..) => SkeensSetMaxRes::Ok,
-                    Err(ts) => SkeensSetMaxRes::Duplicate(ts),
-                }
-            },
-        };
 
         debug_assert!({
             //debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len(),
@@ -243,6 +241,7 @@ impl<T: Copy> WaitingForMax<T> {
 
     fn set_max_timestamp(&mut self, max_timestamp: u64) -> Result<(), u64> {
         use self::WaitingForMax::*;
+        use packets::Entry;
         *self = match self {
             &mut GotMaxMulti{timestamp, ..} | &mut SimpleSingle{timestamp, ..} =>
                 return Err(timestamp),
@@ -251,8 +250,12 @@ impl<T: Copy> WaitingForMax<T> {
 
             &mut Multi{timestamp, ref storage, t} => {
                 assert!(max_timestamp >= timestamp,
-                    "max_timestamp >= timestamp {:?} >= {:?}",
-                    max_timestamp, timestamp
+                    "max_timestamp >= timestamp {:?} >= {:?} @ {:?}, {:#?}",
+                    max_timestamp, timestamp, unsafe {&(*storage.get()).0},
+                    unsafe {
+                        let e = Entry::<()>::wrap_bytes((*storage.get()).1);
+                        (e.id, e.locs())
+                    }
                 );
                 GotMaxMulti{timestamp: max_timestamp, storage: storage.clone(), t: t}
             },
