@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 // use prelude::*;
 use buffer::Buffer;
 
-use servers2::skeens::{SkeensState, SkeensAppendRes, SkeensSetMaxRes, GotMax};
+use servers2::skeens::{SkeensState, SkeensAppendRes, SkeensSetMaxRes, GotMax, ReplicatedSkeens};
 use servers2::trie::{AppendSlot, Trie};
 
 use hash::HashMap;
@@ -117,6 +117,26 @@ pub enum ToWorker<T: Send + Sync> {
         t: T,
     },
 
+    Skeens1Replica {
+        buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
+    Skeens2MultiReplica {
+        loc: OrderIndex,
+        trie_slot: *mut *const u8,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
+    Skeens2SingleReplica {
+        loc: u64,
+        trie_slot: *mut *const u8,
+        storage: *const u8,
+        t: T,
+    },
+
     //FIXME we don't have a good way to make pointers send...
     Read(Entry<'static>, BufferSlice, T),
     EmptyRead(entry, BufferSlice, T),
@@ -210,7 +230,10 @@ pub enum ToReplicate {
     //     since the entry's size is stored internally
     Multi(BufferSlice, Box<[u8]>, Box<[u8]>),
     Skeens1(BufferSlice, SkeensMultiStorage),
-    Skeens2(BufferSlice),
+    SingleSkeens1(BufferSlice, StorageLoc),
+
+    Skeens2(BufferSlice, u64),
+
     UnLock(BufferSlice),
 }
 
@@ -805,12 +828,86 @@ where ToWorkers: DistributeToWorkers<T> {
                 self.to_workers.send_to_worker(Write(buffer, slot, t))
             },
 
-            ToReplicate::Skeens1(..) => {
-                unimplemented!()
+            ToReplicate::SingleSkeens1(buffer, storage_loc) => unsafe {
+                trace!("SERVER {:?} replicate skeens single", self.this_server_num);
+
+                let (id, OrderIndex(c, ts), size) = {
+                    let e = buffer.entry();
+                    (e.id, e.locs()[0], e.entry_size())
+                };
+                let c = self.ensure_chain(c);
+                let storage = self.trie.reserve_space_at(storage_loc, size);
+                self.replicate_single_append_round1(
+                    ts, node_num, id, storage, t
+                );
+                self.to_workers.send_to_worker(
+                    Skeens1SingleReplica {
+                        buffer: buffer,
+                        storage: storage,
+                        t: t,
+                    }
+                );
+            },
+
+            ToReplicate::Skeens1(buffer, storage) => {
+                trace!("SERVER {:?} replicate skeens multiput", self.this_server_num);
+                let id = buffer.entry().id;
+                for (&OrderIndex(o, i), &node_num) in buffer.locs_and_node_nums() {
+                    let c = self.ensure_chain(chain);
+                    c.skeens.replicate_multi_append_round1(
+                        u32::from(i) as u64, node_num, id, storage.clone(), t
+                    );
+                }
+                self.print_data.msgs_sent(1);
+                self.to_workers.send_to_worker(
+                    Skeens1Replica {
+                        buffer: buffer,
+                        storage: storage,
+                        t: t,
+                    }
+                );
             }
 
-            ToReplicate::Skeens2(..) => {
-                unimplemented!()
+            ToReplicate::Skeens2(buffer, max_timestamp) => {
+                use ReplicatedSkeens::*;
+
+                trace!("SERVER {:?} replicate skeens max", self.this_server_num);
+                let id = buffer.entry().id;
+                let max_timestamp = buffer.max_timestamp();
+                for (&OrderIndex(o, i), &node_num) in buffer.locs() {
+                    let c = self.ensure_chain(chain);
+                    c.replicate_round2(id, i, max_timestamp, |rep| match rep {
+                        Multi{index, storage, t} => {
+                            trace!("server finish sk multi rep");
+                            let slot = c.log.prep_append_at(index, ptr::null());
+                            print_data.msgs_sent(1);
+                            to_workers.send_to_worker(
+                                Skeens2MultiReplica {
+                                    loc: OrderIndex(chain_num, (index as u32).into()),
+                                    trie_slot: slot,
+                                    storage: storage,
+                                    t: t
+                                }
+                            )
+                        },
+                        Single{index, storage, t} => unsafe {
+                            trace!("server finish sk single rep");
+                            let size = buffer.entry_size();
+                            trace!("SERVER {:?} replicating entry {:?}",
+                                this_server_num, loc);
+                            let slot = c.log.prep_append_at(index, ptr::null());
+                            print_data.msgs_sent(1);
+                            to_workers.send_to_worker(
+                                Skeens2SingleReplica {
+                                    index: index,
+                                    trie_slot: slot,
+                                    storage: storage,
+                                    t: t
+                                }
+                            )
+                        }
+                    });
+                }
             }
 
             ToReplicate::Multi(buffer, multi_storage, senti_storage) => {
