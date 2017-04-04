@@ -939,7 +939,7 @@ where PerServer<S>: Connected,
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
             };
 
-            fn fill_locs(buf: &mut [u8], e: &Entry<()>,
+            fn fill_locs(buf: &mut [u8], e: &Entry,
                 server: Token, num_chain_servers: usize, unreplicated: bool) -> usize {
                 let locs = Entry::<()>::wrap_bytes_mut(buf).locs_mut();
                 let mut filled = 0;
@@ -1247,52 +1247,33 @@ impl Connected for PerServer<TcpStream> {
 
     fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error> {
         use std::io::ErrorKind;
-
-        //FIXME
-        assert!(self.read_buffer.buffer_len() >= 8192);
-
-        let bhs = base_header_size();
-        //TODO I should make a nb_read macro...
-        if self.bytes_read < bhs {
-            let r = self.stream.read(&mut self.read_buffer[self.bytes_read..bhs]);
-            match r {
-                Ok(i) => {
+        use packets::Packet::WrapErr;
+        loop {
+            let to_read = self.read_buffer.finished_at(self.bytes_read);
+            let size = match to_read {
+                Err(WrapErr::NotEnoughBytes(needs)) => needs,
+                Err(err) => panic!("{:?}", err),
+                Ok(..) => {
+                    debug_assert!(self.read_buffer.packet_fits());
+                    debug_assert_eq!(self.bytes_read, self.read_buffer.entry_size());
+                    trace!("CLIENT finished recv");
+                    {
+                        self.print_data.packets_recvd(1);
+                        self.print_data.bytes_recvd(self.bytes_read as u64);
+                    }
+                    self.bytes_read = 0;
+                    let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
                     self.stay_awake = true;
-                    self.bytes_read += i
+                    //let buff = mem::replace(&mut self.read_buffer, Buffer::new());
+                    return Ok(Some(buff))
                 },
-                Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock => return Ok(None),
-                    _ => return Err(e),
-                }
-            }
-            if self.bytes_read < bhs {
-                return Ok(None)
-            }
-        }
-
-        let header_size = self.read_buffer.entry().header_size();
-        assert!(header_size >= base_header_size());
-        if self.bytes_read < header_size {
-            let r = self.stream.read(&mut self.read_buffer[self.bytes_read..header_size]);
-            match r {
-                Ok(i) => {
-                    self.stay_awake = true;
-                    self.bytes_read += i
-                },
-                Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock  => return Ok(None),
-                    _ => return Err(e),
-                }
-            }
-            if self.bytes_read < header_size {
-                return Ok(None)
-            }
-        }
-
-        let size = self.read_buffer.entry().entry_size();
-        if self.bytes_read < size {
+            };
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..size]);
             match r {
+                Ok(i) if i == 0 => {
+                    self.stay_awake = true;
+                    return Ok(None)
+                },
                 Ok(i) => {
                     self.stay_awake = true;
                     self.bytes_read += i
@@ -1302,22 +1283,7 @@ impl Connected for PerServer<TcpStream> {
                     _ => return Err(e),
                 }
             }
-            if self.bytes_read < size {
-                return Ok(None)
-            }
         }
-        debug_assert!(self.read_buffer.packet_fits());
-        debug_assert_eq!(self.bytes_read, self.read_buffer.entry_size());
-        trace!("CLIENT finished recv");
-        {
-            self.print_data.packets_recvd(1);
-            self.print_data.bytes_recvd(self.bytes_read as u64);
-        }
-        self.bytes_read = 0;
-        let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
-        self.stay_awake = true;
-        //let buff = mem::replace(&mut self.read_buffer, Buffer::new());
-        Ok(Some(buff))
     }
 
     fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {

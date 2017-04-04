@@ -5,7 +5,8 @@
 #[cfg(test)] #[macro_use] extern crate grabbag_macros;
 #[macro_use] extern crate log;
 #[macro_use] extern crate newtype_derive;
-#[macro_use] extern crate packet_macro;
+#[macro_use] extern crate packet_macro_impl;
+#[macro_use] extern crate packet_macro2;
 
 #[cfg(feature = "dynamodb_tests")]
 extern crate hyper;
@@ -39,27 +40,29 @@ mod general_tests;
 
 pub mod storeables;
 pub mod packets;
-pub mod prelude;
-pub mod local_store;
+//pub mod prelude;
+/*pub mod local_store;
 pub mod udp_store;
 pub mod tcp_store;
 pub mod multitcp_store;
 pub mod skeens_store;
-pub mod servers;
+pub mod servers;*/
 pub mod servers2;
-pub mod color_api;
+//pub mod color_api;
+#[cfg(FIXME)]
 pub mod async;
 mod hash;
 pub mod socket_addr;
 //TODO only for testing, should be private
 pub mod buffer;
 
+#[cfg(FIXME)]
 pub mod c_binidings {
 
-    use prelude::*;
-    use local_store::LocalHorizon;
+    // use prelude::*;
+    use packets::*;
     //use tcp_store::TcpStore;
-    use multitcp_store::TcpStore;
+    // use multitcp_store::TcpStore;
     use async::fuzzy_log::log_handle::LogHandle;
 
     use std::collections::HashMap;
@@ -75,8 +78,6 @@ pub mod c_binidings {
 
     use byteorder::{ByteOrder, NativeEndian};
 
-    //pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
-    //pub type DAG = DAGHandle<[u8], Box<Store<[u8]>>, LocalHorizon>;
     pub type DAG = LogHandle<[u8]>;
     pub type ColorID = u32;
 
@@ -565,54 +566,30 @@ pub mod c_binidings {
     //    Old fuzzy log C bindings    //
     ////////////////////////////////////
 
-    pub type Log = FuzzyLog<[u8], TcpStore<[u8]>, LocalHorizon>;
+    type Log = ();
 
     #[no_mangle]
     pub extern "C" fn fuzzy_log_new(server_addr: *const c_char, relevent_chains: *const u32,
         num_relevent_chains: u16, callback: extern fn(*const u8, u16) -> u8) -> Box<Log> {
-        let mut callbacks = HashMap::new();
-        let relevent_chains = unsafe { slice::from_raw_parts(relevent_chains, num_relevent_chains as usize) };
-        for &chain in relevent_chains {
-            let callback: Box<Fn(&Uuid, &OrderIndex, &[u8]) -> bool> = Box::new(move |_, _, val| { callback(&val[0], val.len() as u16) != 0 });
-            callbacks.insert(chain.into(), callback);
-        }
-        let server_addr_str = unsafe { CStr::from_ptr(server_addr).to_str().expect("invalid IP string") };
-        //let ip_addr = server_addr_str.parse().expect("invalid IP addr");
-        let log = FuzzyLog::new(TcpStore::new(server_addr_str, server_addr_str).unwrap(), LocalHorizon::new(), callbacks);
-        Box::new(log)
+        unimplemented!()
     }
 
     #[no_mangle]
     pub extern "C" fn fuzzy_log_append(log: &mut Log,
         chain: u32, val: *const u8, len: u16, deps: *const OrderIndex, num_deps: u16) -> OrderIndex {
-        unsafe {
-            let val = slice::from_raw_parts(val, len as usize);
-            let deps = slice::from_raw_parts(deps, num_deps as usize);
-            log.append(chain.into(), val, deps)
-        }
+        unimplemented!()
     }
 
     #[no_mangle]
     pub extern "C" fn fuzzy_log_multiappend(log: &mut Log,
         chains: *mut OrderIndex, num_chains: u16,
         val: *const u8, len: u16, deps: *const OrderIndex, num_deps: u16) {
-        assert!(num_chains > 1);
-        unsafe {
-            let val = slice::from_raw_parts(val, len as usize);
-            let deps = slice::from_raw_parts(deps, num_deps as usize);
-            let chains = slice::from_raw_parts_mut(chains, num_chains as usize);
-            log.multiappend2(chains, val, deps);
-        }
+        unimplemented!()
     }
 
     #[no_mangle]
     pub extern "C" fn fuzzy_log_play_forward(log: &mut Log, chain: u32) -> OrderIndex {
-        if let Some(oi) = log.play_foward(order::from(chain)) {
-            oi
-        }
-        else {
-            OrderIndex(0.into(), 0.into())
-        }
+        unimplemented!()
     }
 
 }

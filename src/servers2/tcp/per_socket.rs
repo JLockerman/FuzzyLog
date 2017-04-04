@@ -1,4 +1,4 @@
-use prelude::*;
+// use prelude::*;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write, ErrorKind};
@@ -201,8 +201,7 @@ impl PerSocket {
                         //FIXME remove from map
                         RecvRes::Error => {
                             *bytes_read = 0;
-                            panic!("upstream read error");
-                            trace!("error; returned buffer now @ {}", being_read.len());
+                            error!("upstream; returned buffer now @ {}", being_read.len());
                             being_read.push_front(read_buffer);
                             RecvPacket::Err
                         },
@@ -436,6 +435,7 @@ impl PerSocket {
         }
     }
 
+    #[allow(dead_code)]
     pub fn print_data(&self) -> &PerSocketData {
         use self::PerSocket::*;
         match self {
@@ -447,6 +447,7 @@ impl PerSocket {
         }
     }
 
+    #[allow(dead_code)]
     pub fn more_data(&self) -> MoreData {
         use self::PerSocket::*;
         match self {
@@ -515,6 +516,7 @@ pub struct MoreData {
     needs_to_stay_awake: bool,
 }
 
+#[allow(dead_code)]
 impl MoreData {
     #[cfg(feature = "print_stats")]
     fn new(
@@ -577,80 +579,45 @@ fn recv_packet(
     stay_awake: &mut bool,
     print_data: &mut PerSocketData,
 )  -> RecvRes {
-    let bhs = base_header_size();
-    if read < bhs {
-        let r = stream.read(&mut buffer[read..bhs]);
-        match r {
-            Ok(i) => {
-                print_data.bytes_recvd(i as u64);
-                *stay_awake = true;
-                read += i
+    use packets::Packet::WrapErr;
+    loop {
+        trace!("WORKER recved {} bytes.", read);
+        let to_read = buffer.finished_at(read);
+        let size = match to_read {
+            Err(WrapErr::NotEnoughBytes(needs)) => needs,
+            Err(err) => panic!("{:?}", err),
+            Ok(size) if read < size + mem::size_of::<Ipv4SocketAddr>() + extra =>
+                size + mem::size_of::<Ipv4SocketAddr>() + extra,
+            Ok(..) => {
+                /*debug_assert_eq!(
+                    read, buffer.entry_size() + mem::size_of::<Ipv4SocketAddr>() + extra,//TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 },
+                    "entry_size {}", buffer.entry().entry_size()
+                );*/
+                let src_addr = Ipv4SocketAddr::from_slice(&buffer[read-6-extra..read-extra]);
+                trace!("WORKER finished recv {} bytes for {}.", read, src_addr);
+                //TODO ( if is_read { Some((receive_addr)) } else { None } )
+                return RecvRes::Done(src_addr)
             },
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {},
-            Err(e) => {
-                error!("recv error {:?}", e);
-                return RecvRes::Error
-            },
-        }
-        if read < bhs {
-            return RecvRes::NeedsMore(read)
-        }
-    }
-    trace!("WORKER recved {} bytes.", read);
-    let (header_size, _is_write) = {
-        let e = buffer.entry();
-        (e.header_size(), e.kind.layout().is_write())
-    };
-    assert!(header_size >= base_header_size());
-    if read < header_size {
-        let r = stream.read(&mut buffer[read..header_size]);
-        match r {
-            Ok(i) => {
-                print_data.bytes_recvd(i as u64);
-                *stay_awake = true;
-                read += i
-            },
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {},
-            Err(e) => {
-                error!("recv error {:?}", e);
-                return RecvRes::Error
-            },
-        }
-        if read < header_size {
-            return RecvRes::NeedsMore(read)
-        }
-    }
-
-    let size = buffer.entry().entry_size() + mem::size_of::<Ipv4SocketAddr>() + extra;//TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 };
-    //let size = buffer.entry_size() + 6;
-    debug_assert!(read <= size);
-    if read < size {
+        //TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 };
+        } + mem::size_of::<Ipv4SocketAddr>() + extra;
         let r = stream.read(&mut buffer[read..size]);
         match r {
+            Ok(0) => {
+                *stay_awake = true;
+                return RecvRes::NeedsMore(read)
+            },
             Ok(i) => {
                 print_data.bytes_recvd(i as u64);
                 *stay_awake = true;
                 read += i
             },
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {},
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => return RecvRes::NeedsMore(read),
             Err(e) => {
                 error!("recv error {:?}", e);
                 return RecvRes::Error
             },
         }
-        if read < size {
-            return RecvRes::NeedsMore(read);
-        }
     }
-    debug_assert!(buffer.packet_fits());
-    // assert!(payload_size >= header_size);
-    debug_assert_eq!(
-        read, buffer.entry_size() + mem::size_of::<Ipv4SocketAddr>() + extra,//TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 },
-        "entry_size {}", buffer.entry().entry_size()
-    );
-    let src_addr = Ipv4SocketAddr::from_slice(&buffer[read-6-extra..read-extra]);
-    trace!("WORKER finished recv {} bytes for {}.", read, src_addr);
-    RecvRes::Done(src_addr) //TODO ( if is_read { Some((receive_addr)) } else { None } )
 }
 
 //TODO remove Debug
@@ -665,6 +632,7 @@ const MAX_WRITE_BUFFER_SIZE: usize = 40000;
 //TODO move this and the one in async/store into a single file
 impl DoubleBuffer {
 
+    #[allow(dead_code)]
     fn new() -> Self {
         DoubleBuffer {
             first: Vec::new(),

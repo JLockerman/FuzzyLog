@@ -641,7 +641,7 @@ macro_rules! async_tests {
     );
     () => {
         async_tests!(tcp);
-        async_tests!(udp);
+        // async_tests!(udp);
         async_tests!(stcp);
         async_tests!(rtcp);
     };

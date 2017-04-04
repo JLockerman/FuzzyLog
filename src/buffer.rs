@@ -1,5 +1,6 @@
-use storeables::Storeable;
-use packets::{Entry, EntryContents};
+//use storeables::Storeable;
+use packets::{Entry, MutEntry, EntryContents, EntryContentsMut, EntryKind};
+use packets::Packet::WrapErr;
 use hash::HashMap;
 
 #[must_use]
@@ -41,13 +42,19 @@ impl Buffer {
         Buffer { inner: Vec::new() }
     }
 
-    pub fn fill_from_entry_contents<V>(&mut self, contents: EntryContents<V>) -> &mut Entry<V>
-    where V: Storeable {
+    pub fn fill_from_entry_contents(&mut self, contents: EntryContents) -> MutEntry {
         //FIXME Entry::fill_vec sets the vec len to be the size of the packet
         //      while Buffer has an invariant that len == cacpacity
         //      it might be better to pass a lambda into this function
         //      so we can reset the len at the end
-        contents.fill_vec(&mut self.inner)
+        let len = self.inner.len();
+        unsafe { self.inner.set_len(0) }
+        contents.fill_vec(&mut self.inner);
+        if self.inner.len() < self.inner.capacity() {
+            let cap = self.inner.capacity();
+            unsafe { self.inner.set_len(cap) }
+        }
+        self.entry_mut()
     }
 
     pub fn ensure_capacity(&mut self, capacity: usize) {
@@ -76,37 +83,63 @@ impl Buffer {
 
     pub fn entry_size(&self) -> usize {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        self.entry().entry_size()
+        self.contents().len()
     }
 
-    pub fn entry(&self) -> &Entry<()> {
+    pub fn entry(&self) -> Entry {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        Entry::<()>::wrap_bytes(&self[..])
+        unsafe {Entry::wrap(&self.inner[0])}
     }
 
-    pub fn entry_mut(&mut self) -> &mut Entry<()> {
+    pub fn entry_mut(&mut self) -> MutEntry {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         debug_assert!(self.packet_fits(), "packet size {}, buffer len {}", self.entry_size(), self.inner.len());
-        Entry::<()>::wrap_bytes_mut(&mut self[..])
+        unsafe {MutEntry::wrap(&mut self.inner[0])}
+    }
+
+    pub fn contents(&self) -> EntryContents {
+        unsafe { EntryContents::try_ref(&self.inner[..]).unwrap().0 }
+    }
+
+    pub fn contents_mut(&mut self) -> EntryContentsMut {
+        unsafe { EntryContentsMut::try_mut(&mut self.inner[..]).unwrap().0 }
+    }
+
+    pub fn finished_at(&self, len: usize) -> Result<usize, WrapErr> {
+        unsafe { EntryContents::try_ref(&self.inner[..len]).map(|(c, _)| c.len()) }
     }
 
     pub fn packet_fits(&self) -> bool {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        self.inner.len() >= Entry::<()>::wrap_bytes(&self[..]).entry_size()
+        //self.inner.len() >= Entry::<()>::wrap_bytes(&self[..]).entry_size()
+        unsafe { EntryContents::try_ref(&self.inner[..]).is_ok() }
+    }
+
+    pub fn to_sentinel(&mut self) {
+        //FIXME
+        //assert_eq!(EntryKind::from_bits(self.inner[0]), EntryKind::Multiput);
+        self.inner[0] = unsafe { ::std::mem::transmute(EntryKind::Sentinel) }
+    }
+
+    pub fn to_read(&mut self) {
+        //FIXME
+        //assert_eq!(EntryKind::from_bits(self.inner[0]), EntryKind::Multiput);
+        self.inner[0] = unsafe { ::std::mem::transmute(EntryKind::Read) }
     }
 
     pub fn get_lock_nums(&self) -> HashMap<usize, u64> {
-        use packets::OrderIndex;
-        debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        self.entry()
-            .locs()
-            .into_iter()
-            .cloned()
-            .map(|OrderIndex(o, i)| {
-                let (o, i): (u32, u32) = ((o - 1).into(), i.into());
-                (o as usize, i as u64)
-            })
-            .collect()
+        unimplemented!()
+        // use packets::OrderIndex;
+        // debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        // self.entry()
+        //     .locs()
+        //     .into_iter()
+        //     .cloned()
+        //     .map(|OrderIndex(o, i)| {
+        //         let (o, i): (u32, u32) = ((o - 1).into(), i.into());
+        //         (o as usize, i as u64)
+        //     })
+        //     .collect()
     }
 
     pub fn buffer_len(&self) -> usize {

@@ -309,7 +309,7 @@ pub mod test {
 
     use super::*;
 
-    use packets::EntryContents::Data;
+    use packets::SingletonBuilder as Data;
 
     use packets::{Entry as Packet, OrderIndex};
 

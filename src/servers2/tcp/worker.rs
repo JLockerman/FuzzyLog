@@ -11,6 +11,8 @@ use servers2::{
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
+use packets::{EntryLayout, OrderIndex, EntryFlag};
+
 use mio;
 use mio::tcp::*;
 
@@ -355,7 +357,7 @@ impl Worker {
             if just_ret {
                 buffer.map(|b| {
                     trace!("WORKER {} just ret {:?}",
-                        self.inner.worker_num, b.entry().kind);
+                        self.inner.worker_num, b.contents());
                     self.clients.get_mut(&token).unwrap().return_buffer(b)
                 });
                 self.inner.awake_io.push_back(token);
@@ -568,19 +570,22 @@ impl WorkerInner {
         src_addr: Ipv4SocketAddr,
     ) {
         trace!("WORKER {} send to log", self.worker_num);
-        let k = buffer.entry().kind;
+        let (k, f) = {
+            let c = buffer.contents();
+            (c.kind().clone(), c.flag().clone())
+        };
         let kind = k.layout();
         let storage = match kind {
             EntryLayout::Multiput | EntryLayout::Sentinel => unsafe {
                 let (size, senti_size, num_locs, has_senti) = {
-                    let e = buffer.entry();
+                    let e = buffer.contents();
                     let locs = e.locs();
                     let num_locs = locs.len();
                     //FIXME
                     let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
-                    (e.entry_size(), e.sentinel_entry_size(), num_locs, has_senti)
+                    (e.len(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
-                if k.contains(EntryKind::NewMultiPut) {
+                if f.contains(EntryFlag::NewMultiPut) {
                     let senti_size = if has_senti { Some(senti_size) } else { None };
                     let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
                     Troption::Left(storage)
@@ -610,7 +615,7 @@ impl WorkerInner {
         src_addr: Ipv4SocketAddr,
     ) {
         trace!("WORKER {} send replica to log", self.worker_num);
-        let kind = buffer.entry().kind.layout();
+        let kind = buffer.contents().kind().layout();
         let to_send = match kind {
             EntryLayout::Data => {
                 ToReplicate::Data(buffer, storage_addr)
@@ -621,8 +626,8 @@ impl WorkerInner {
             //TODO
             EntryLayout::Multiput | EntryLayout::Sentinel => {
                 let (size, senti_size) = {
-                    let e = buffer.entry();
-                    (e.entry_size(), e.sentinel_entry_size())
+                    let e = buffer.contents();
+                    (e.len(), e.sentinel_entry_size())
                 };
                 let (multi_storage, senti_storage) = unsafe {
                     let mut m = Vec::with_capacity(size);

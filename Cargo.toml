@@ -11,7 +11,8 @@ custom_derive = "0.1"
 deque = "0.3.1"
 grabbag_macros = "0.1"
 newtype_derive = "0.1"
-packet-macro = {path = "./packet-macro"}
+packet-macro2 = {path = "./packet-macro2"}
+packet-macro-impl = {path = "./packet-macro2/packet-macro-impl"}
 uuid = { version = "0.4", features = ["v4"] }
 lazycell = "0.5.0"
 libc = "0.2"

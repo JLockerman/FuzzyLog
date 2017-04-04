@@ -38,7 +38,7 @@ impl<V> Storeable for V { //TODO should V be Copy/Clone?
     }
 
     unsafe fn ref_to_slice(&self) -> &[u8] {
-        let ptr = self as *const _ as *const u8;
+        let ptr = self as *const V as *const u8;
         let size = self.size();
         slice::from_raw_parts(ptr, size)
     }
@@ -108,5 +108,29 @@ impl<V> Storeable for [V] {
 impl<V> UnStoreable for V { //TODO should V be Copy/Clone?
     fn size_from_bytes(_: &u8) -> usize {
         mem::size_of::<Self>()
+    }
+}
+
+#[test]
+fn store_u8() {
+    unsafe {
+        assert_eq!(32u8.ref_to_slice(), &[32]);
+        assert_eq!(0u8.ref_to_slice(), &[0]);
+        assert_eq!(255u8.ref_to_slice(), &[255]);
+    }
+}
+
+#[test]
+fn round_u32() {
+    unsafe {
+        assert_eq!(32u32.ref_to_slice().len(), 4);
+        assert_eq!(0u32.ref_to_slice().len(), 4);
+        assert_eq!(255u32.ref_to_slice().len(), 4);
+        assert_eq!(0xff0fbedu32.ref_to_slice().len(), 4);
+
+        assert_eq!(u32::unstore(&32u32.ref_to_slice()[0]), &32);
+        assert_eq!(u32::unstore(&0u32.ref_to_slice()[0]), &0);
+        assert_eq!(u32::unstore(&255u32.ref_to_slice()[0]), &255);
+        assert_eq!(u32::unstore(&0xff0fbedu32.ref_to_slice()[0]), &0xff0fbedu32);
     }
 }

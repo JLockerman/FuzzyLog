@@ -2,7 +2,9 @@
 use std::marker::PhantomData;
 use std::{mem, ptr};
 
-use storeables::Storeable;
+//use storeables::Storeable;
+//FIXME
+use packets::MutEntry as MutPacket;
 use packets::Entry as Packet;
 
 use servers2::byte_trie::Trie as Alloc;
@@ -10,16 +12,16 @@ use servers2::byte_trie::Trie as Alloc;
 //XXX UGH this is going to be wildly unsafe...
 
 
-pub struct Trie<V> {
+pub struct Trie {
     //TODO should this be boxed?
-    root: RootEdge<V>,
+    root: RootEdge,
 }
 
-type RootEdge<V> = Box<RootTable<V>>;
+type RootEdge = Box<RootTable>;
 
 //TODO it would be nice to intersperse the shortcuts of the two tries
 //     but it is to annoying to code.
-struct RootTable<V> {
+struct RootTable {
     l6: Shortcut<ValEdge>,
     next_entry: u64,
     alloc: AllocPtr,
@@ -32,7 +34,6 @@ struct RootTable<V> {
     l2: Shortcut<L3Edge>,
     l1: Shortcut<L2Edge>,
     array: [L1Edge; 16],
-    _pd: PhantomData<V>,
 }
 
 pub type ByteLoc = u64;
@@ -129,8 +130,7 @@ impl AllocPtr {
         AllocPtr { alloc: Alloc::new() }
     }
 
-    fn append<V>(&mut self, data: &Packet<V>) -> (*mut u8, ByteLoc)
-    where V: Storeable {
+    fn append(&mut self, data: Packet) -> (*mut u8, ByteLoc) {
         let bytes = data.bytes();
         let storage_size = bytes.len(); // FIXME
         let (append_to, loc) = self.prep_append(storage_size);
@@ -254,56 +254,51 @@ pub struct AppendSlot<V> {
 
 unsafe impl<V> Send for AppendSlot<V> where V: Sync {}
 
-impl<V> AppendSlot<Packet<V>>
-where V: Storeable {
-    pub unsafe fn finish_append(self, data: &Packet<V>) -> &Packet<V> {
+impl<'a> AppendSlot<Packet<'a>> {
+    pub unsafe fn finish_append(self, data: Packet) -> Packet {
         use std::sync::atomic::{AtomicPtr, Ordering};
 
         let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
         let bytes = data.bytes();
         let storage_size = bytes.len();
         assert_eq!(data_size, storage_size);
-        let wrote = {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, storage_size);
-            let data_ptr = data_ptr as *mut Packet<V>;
-            data_ptr.as_mut().unwrap()
-        };
+        ptr::copy_nonoverlapping::<u8>(bytes.as_ptr(), data_ptr, storage_size);
         //*trie_entry = data_ptr;
-        let trie_entry: *mut AtomicPtr<u8> = mem::transmute(trie_entry);
+        let trie_entry: *mut AtomicPtr<u8> =
+            mem::transmute::<*mut *const u8, *mut AtomicPtr<u8>>(trie_entry);
         //TODO mem barrier ordering
         (*trie_entry).store(data_ptr, Ordering::Release);
-        wrote
+        Packet::wrap(&*data_ptr)
     }
 
-    pub unsafe fn finish_append_with<F>(self, data: &Packet<V>, before_insert: F) -> &Packet<V>
-    where F: FnOnce(&mut Packet<V>) {
+    pub unsafe fn finish_append_with<F>(self, data: Packet, before_insert: F) -> Packet
+    where F: FnOnce(MutPacket) {
         use std::sync::atomic::{AtomicPtr, Ordering};
 
         let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
         let bytes = data.bytes();
         assert!(bytes.len() >= data_size);
-        let wrote = {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, data_size);
-            let data_ptr = data_ptr as *mut Packet<V>;
-            let wrote = data_ptr.as_mut().unwrap();
-            before_insert(wrote);
-            assert_eq!(wrote.entry_size(), data_size);
-            wrote
-        };
+        ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, data_size);
+        before_insert(MutPacket::wrap(&mut *data_ptr));
+        assert_eq!(Packet::wrap(&*data_ptr).bytes().len(), data_size);
         //*trie_entry = data_ptr;
         let trie_entry: *mut AtomicPtr<u8> = mem::transmute(trie_entry);
         //TODO mem barrier ordering
         (*trie_entry).store(data_ptr, Ordering::Release);
-        wrote
+        Packet::wrap(&*data_ptr)
     }
 
     pub fn loc(&self) -> ByteLoc {
         self.storage_loc
     }
+
+    pub unsafe fn extend_lifetime<'b>(self) -> AppendSlot<Packet<'b>> {
+        mem::transmute(self)
+    }
 }
 
-impl<V> Trie<Packet<V>>
-where V: Storeable {
+impl Trie
+ {
     pub fn new() -> Self {
         unsafe {
             //FIXME gratuitously unsafe
@@ -313,18 +308,18 @@ where V: Storeable {
         }
     }
 
-    pub fn append(&mut self, data: &Packet<V>) -> TrieIndex {
+    pub fn append(&mut self, data: Packet) -> TrieIndex {
         self._append(data).0
     }
 
-    fn _append(&mut self, data: &Packet<V>) -> (TrieIndex, &mut u8) {
+    fn _append(&mut self, data: Packet) -> (TrieIndex, &mut u8) {
         let (val_ptr, _) = self.root.alloc.append(data);
         let (entry, _) = unsafe { self.prep_append(val_ptr) };
         (entry, unsafe {val_ptr.as_mut().unwrap()})
     }
 
     pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
-    -> AppendSlot<Packet<V>> {
+    -> AppendSlot<Packet> {
         use std::cmp::Ordering::*;
         match key.cmp(&self.root.next_entry) {
             Equal => self.partial_append(storage_size),
@@ -351,7 +346,7 @@ where V: Storeable {
         (val_ptr.as_mut_ptr(), loc)
     }
 
-    pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet<V>> {
+    pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet> {
         let (val_ptr, loc): (*mut u8, ByteLoc) = {
             let (val_ptr, loc) = self.root.alloc.prep_append(size);
             (val_ptr.as_mut_ptr(), loc)
@@ -367,7 +362,7 @@ where V: Storeable {
         key: TrieIndex,
         //TODO what type?
         storage: *mut [u8],
-    ) -> AppendSlot<Packet<V>> {
+    ) -> AppendSlot<Packet> {
         let trie_entry = self.prep_append_at(key, ptr::null());
         let size = (*storage).len();
         let storage = (*storage).as_mut_ptr();
@@ -400,7 +395,7 @@ where V: Storeable {
     }
 
     pub unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (TrieIndex, &mut *const u8) {
-        let root: &mut RootTable<_> =&mut *self.root;
+        let root: &mut RootTable =&mut *self.root;
         let next_entry = root.next_entry;
         //if we're out of address space there's nothing we can do...
         debug_assert!(next_entry != 0xFFFFFFFFFFFFFFFF);
@@ -449,7 +444,7 @@ where V: Storeable {
     }
 
     fn get_append_slot(&mut self, k: TrieIndex, storage_start: ByteLoc, size: usize)
-    -> AppendSlot<Packet<V>> {
+    -> AppendSlot<Packet> {
         unsafe {
             let trie_entry: *mut *const u8 = self.get_entry_at(k).unwrap();
             //TODO these should be interleaved...
@@ -499,7 +494,7 @@ where V: Storeable {
     }
 
     #[cfg(FALSE)]
-    pub unsafe fn partial_insert(&mut self, k: u64, size: usize) -> AppendSlot<Packet<V>> {
+    pub unsafe fn partial_insert(&mut self, k: u64, size: usize) -> AppendSlot<Packet> {
         let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
         //assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
         let l1 = &mut self.root.array[root_index];
@@ -555,16 +550,16 @@ where V: Storeable {
     }
 }
 
-impl<V> Trie<V> {
+impl Trie {
     pub fn len(&self) -> u64 {
         self.root.next_entry
     }
 }
 
-impl<V> Trie<Packet<V>>
-where V: Storeable {
+impl Trie
+ {
 
-    pub fn get(&self, k: u64) -> Option<&Packet<V>> {
+    pub fn get(&self, k: u64) -> Option<Packet> {
         unsafe {
             // let root = self.array;
             // let l1_ptr = index!(root, k, 1);
@@ -583,15 +578,15 @@ where V: Storeable {
                 Some(v) => {
                     //let size = <V as UnStoreable>::size_from_bytes(v);
                     //Some(<V as Storeable>::bytes_to_ref(v, size))
-                    Some(Packet::wrap_byte(v))
+                    Some(Packet::wrap(v))
                 }
             }
         }
     }
 
-    #[allow(dead_code)]
+    /*#[allow(dead_code)]
     #[inline(always)]
-    pub fn entry<'s>(&'s mut self, k: u64) -> Entry<'s, V> {
+    pub fn entry<'s>(&'s mut self, k: u64) -> Entry<'s> {
         //FIXME specialize for the case when k in next
         if k == self.root.next_entry {
             return Entry::Vacant(VacantEntry(k, Vacancy::Next(self)));
@@ -617,22 +612,22 @@ where V: Storeable {
             let val = Packet::wrap_mut(&mut *val_ptr);
             Entry::Occupied(OccupiedEntry(val))
         }
-    }
+    }*/
+}
+/*
+pub enum Entry<'a> {
+    Occupied(OccupiedEntry<'a>),
+    Vacant(VacantEntry<'a>),
 }
 
-pub enum Entry<'a, V: 'a> {
-    Occupied(OccupiedEntry<'a, V>),
-    Vacant(VacantEntry<'a, V>),
-}
+pub struct OccupiedEntry<'a>(Packet<'a>);
+pub struct VacantEntry<'a>(u64, Vacancy<'a>);
 
-pub struct OccupiedEntry<'a, V: 'a>(&'a mut Packet<V>);
-pub struct VacantEntry<'a, V: 'a>(u64, Vacancy<'a, V>);
-
-impl<'a, V: 'a> Entry<'a, V>
-where V: Storeable {
+impl<'a> Entry<'a>
+ {
 
     #[allow(dead_code)]
-    pub fn or_insert(self, default: Packet<V>) -> &'a mut Packet<V> {
+    pub fn or_insert(self, default: Packet) -> Packet {
         use self::Entry::*;
         match self {
             Occupied(e) => e.into_mut(),
@@ -640,8 +635,8 @@ where V: Storeable {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn or_insert_with<F: FnOnce() -> Packet<V>>(self, default: F) -> &'a mut Packet<V> {
+    /*#[allow(dead_code)]
+    pub fn or_insert_with<F: FnOnce() -> Packet>(self, default: F) -> &'a mut Packet {
         use self::Entry::*;
         match self {
             Occupied(e) => e.into_mut(),
@@ -651,47 +646,47 @@ where V: Storeable {
     }
 
     #[allow(dead_code)]
-    pub fn insert_with<F: FnOnce() -> Packet<V>>(self, default: F) -> &'a mut Packet<V> {
+    pub fn insert_with<F: FnOnce() -> Packet>(self, default: F) -> &'a mut Packet {
         use self::Entry::*;
         match self {
             Occupied(e) => e.insert_with(default),
             //FIXME
             Vacant(e) => e.insert_with(default, alloc_seg2()),
         }
-    }
+    }*/
 }
 
-impl<'a, V: 'a> OccupiedEntry<'a, V>
-where V: Storeable {
+impl<'a> OccupiedEntry<'a>
+ {
     #[allow(dead_code)]
-    pub fn get(&self) -> &Packet<V> {
+    pub fn get(&self) -> &Packet {
         &*self.0
     }
 
     #[allow(dead_code)]
-    pub fn get_mut(&mut self) -> &mut Packet<V> {
+    pub fn get_mut(&mut self) -> &mut Packet {
         &mut *self.0
     }
 
     #[allow(dead_code)]
-    pub fn into_mut(self) -> &'a mut Packet<V> {
+    pub fn into_mut(self) -> &'a mut Packet {
         self.0
     }
 
     #[allow(dead_code)]
-    pub fn insert(&mut self, v: Packet<V>) -> Packet<V> {
+    pub fn insert(&mut self, v: Packet) -> Packet {
         mem::replace(self.0, v)
     }
 
-    #[allow(dead_code)]
-    pub fn insert_with<F: FnOnce() -> Packet<V>>(self, default: F) -> &'a mut Packet<V> {
+    /*#[allow(dead_code)]
+    pub fn insert_with<F: for<'a> FnOnce() -> Packet>(self, default: F) -> &'a mut Packet {
         *self.0 = default();
         self.into_mut()
-    }
+    }*/
 }
 
-enum Vacancy<'a, V: 'a> {
-    Next(&'a mut Trie<Packet<V>>),
+enum Vacancy<'a> {
+    Next(&'a mut Trie),
     L1(&'a mut L1Edge),
     L2(&'a mut L2Edge),
     L3(&'a mut L3Edge),
@@ -789,11 +784,11 @@ macro_rules! fill_entry {
     };
 }
 
-impl<'a, V: 'a> VacantEntry<'a, V>
-where V: Storeable {
+impl<'a> VacantEntry<'a>
+ {
     #[inline(always)]
-    pub fn insert_with<F: FnOnce() -> Packet<V>>(self, v: F, seg: *mut u8)
-    -> &'a mut Packet<V> {
+    pub fn insert_with<F: FnOnce() -> Packet>(self, v: F, seg: *mut u8)
+    -> &'a mut Packet {
         use self::Vacancy::*;
         assert!(seg != ptr::null_mut());
         let VacantEntry(k, entry) = self;
@@ -817,10 +812,10 @@ where V: Storeable {
     }
 
     #[allow(dead_code)]
-    pub fn insert(self, v: Packet<V>) -> &'a mut Packet<V> {
+    pub fn insert(self, v: Packet) -> &'a mut Packet {
         self.insert_with(|| v, alloc_seg2())
     }
-}
+}*/
 
 //TODO abstract over alloc place
 unsafe fn alloc_seg<V>() -> Box<[V; ARRAY_SIZE]> {
@@ -828,6 +823,7 @@ unsafe fn alloc_seg<V>() -> Box<[V; ARRAY_SIZE]> {
     Box::new(mem::zeroed())
 }
 
+#[allow(dead_code)]
 fn alloc_seg2() -> *mut u8 {
     let b: Box<[u8; LEVEL_BYTES]> = Box::new([0; LEVEL_BYTES]);
     let b = Box::into_raw(b);
@@ -839,13 +835,13 @@ pub mod test {
 
     use super::*;
 
-    use packets::EntryContents::Data;
+    use packets::SingletonBuilder as Data;
 
     use packets::{Entry as Packet, OrderIndex};
 
     #[test]
     pub fn empty() {
-        let t: Trie<Packet<()>> = Trie::new();
+        let t = Trie::new();
         assert!(t.get(0).is_none());
         assert!(t.get(10).is_none());
         assert!(t.get(1).is_none());
@@ -855,50 +851,54 @@ pub mod test {
 
     #[test]
     pub fn append() {
-        let mut p = Data(&0, &[OrderIndex(5.into(), 6.into())]).clone_entry();
+        let mut p = Data(&0u8, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            unsafe { Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p) }
-            assert_eq!(m.append(&p), i as u64);
+            unsafe { Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())])
+                .fill_entry(&mut p) }
+            assert_eq!(p.contents().into_singleton_builder(),
+                Data(&i, &[OrderIndex(5.into(), (i as u32).into())]));
+            assert_eq!(m.append(p.entry()), i as u64);
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
 
             for j in 0..i + 1 {
                 let r = m.get(j as u64);
-                assert_eq!(r.map(|e| e.contents()),
-                    Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
+                assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
+                    Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
             }
 
             for j in i + 1..255 {
                 let r = m.get(j as u64);
-                assert_eq!(r, None);
+                assert_eq!(r.map(Packet::contents), None);
             }
         }
     }
 
     #[test]
     pub fn insert() {
-        let mut p = Data(&0, &[OrderIndex(7.into(), 11.into())]).clone_entry();
+        let mut p = Data(&0u32, &[OrderIndex(7.into(), 11.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            unsafe { Data(&i, &[OrderIndex(7.into(), (i as u32).into())]).fill_entry(&mut p) }
+            unsafe { Data(&(i as u32), &[OrderIndex(7.into(), (i as u32).into())])
+                .fill_entry(&mut p) }
             unsafe {
                 let size = p.entry_size();
                 let slot = m.partial_append_at(i as u64, i as u64 * size as u64, size);
-                slot.finish_append(&p);
+                slot.finish_append(p.entry());
             }
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
 
             for j in 0..i + 1 {
                 let r = m.get(j as u64);
-                assert_eq!(r.map(|e| e.contents()),
-                    Some(Data(&j, &[OrderIndex(7.into(), (j as u32).into())])));
+                assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
+                    Some(Data(&(j as u32), &[OrderIndex(7.into(), (j as u32).into())])));
             }
 
             for j in i + 1..255 {
                 let r = m.get(j as u64);
-                assert_eq!(r, None);
+                assert_eq!(r.map(Packet::contents), None);
             }
         }
     }
@@ -924,40 +924,40 @@ pub mod test {
             let mut t = Trie::new();
             assert!(t.get(0).is_none());
             assert_eq!(t.len(), 0);
-            let slot0 = t.partial_append(p.entry_size());
+            let slot0 = t.partial_append(p.entry_size()).extend_lifetime();
             assert!(t.get(0).is_none());
             assert_eq!(t.len(), 1);
-            let slot1 = t.partial_append(p.entry_size());
+            let slot1 = t.partial_append(p.entry_size()).extend_lifetime();
             assert!(t.get(0).is_none());
             assert!(t.get(1).is_none());
             assert_eq!(t.len(), 2);
-            let slot2 = t.partial_append(p.entry_size());
+            let slot2 = t.partial_append(p.entry_size()).extend_lifetime();
             assert!(t.get(0).is_none());
             assert!(t.get(1).is_none());
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            slot1.finish_append(&p);
+            slot1.finish_append(p.entry());
             assert!(t.get(0).is_none());
-            assert_eq!(t.get(1).map(|e| e.contents()),
+            assert_eq!(t.get(1).map(|e| e.contents().into_singleton_builder()),
                 Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&1, &[OrderIndex(5.into(), (7 as u32).into())]).fill_entry(&mut p);
-            slot0.finish_append(&p);
-            assert_eq!(t.get(0).map(|e| e.contents()),
-                Some(Data(&1, &[OrderIndex(5.into(), (7 as u32).into())])));
-            assert_eq!(t.get(1).map(|e| e.contents()),
+            Data(&1i64, &[OrderIndex(5.into(), (7 as u32).into())]).fill_entry(&mut p);
+            slot0.finish_append(p.entry());
+            assert_eq!(t.get(0).map(|e| e.contents().into_singleton_builder()),
+                Some(Data(&1i64, &[OrderIndex(5.into(), (7 as u32).into())])));
+            assert_eq!(t.get(1).map(|e| e.contents().into_singleton_builder()),
                 Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&-7, &[OrderIndex(5.into(), (92 as u32).into())]).fill_entry(&mut p);
-            slot2.finish_append(&p);
-            assert_eq!(t.get(0).map(|e| e.contents()),
-                Some(Data(&1, &[OrderIndex(5.into(), (7 as u32).into())])));
-            assert_eq!(t.get(1).map(|e| e.contents()),
+            Data(&-7i64, &[OrderIndex(5.into(), (92 as u32).into())]).fill_entry(&mut p);
+            slot2.finish_append(p.entry());
+            assert_eq!(t.get(0).map(|e| e.contents().into_singleton_builder()),
+                Some(Data(&1i64, &[OrderIndex(5.into(), (7 as u32).into())])));
+            assert_eq!(t.get(1).map(|e| e.contents().into_singleton_builder()),
                 Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
-            assert_eq!(t.get(2).map(|e| e.contents()),
-                Some(Data(&-7, &[OrderIndex(5.into(), (92 as u32).into())])));
+            assert_eq!(t.get(2).map(|e| e.contents().into_singleton_builder()),
+                Some(Data(&-7i64, &[OrderIndex(5.into(), (92 as u32).into())])));
             assert_eq!(t.len(), 3);
         }
     }
@@ -970,38 +970,38 @@ pub mod test {
         for i in 0..0x18000u64 {
             assert_eq!(m.len(), i);
             unsafe { Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p) }
-            assert_eq!(m.append(&p), i);
+            assert_eq!(m.append(p.entry()), i);
             //println!("{:#?}", m);
             //println!("{:#?}", i);
             if i > 0 {
-                assert_eq!(m.get(i - 1).map(|e| e.contents()),
+                assert_eq!(m.get(i - 1).map(|e| e.contents().into_singleton_builder()),
                     Some(Data(&(i - 1), &[OrderIndex(5.into(), ((i-1) as u32).into())])));
             }
             if i >= 3 {
-                assert_eq!(m.get(i - 3).map(|e| e.contents()),
+                assert_eq!(m.get(i - 3).map(|e| e.contents().into_singleton_builder()),
                     Some(Data(&(i - 3), &[OrderIndex(5.into(), ((i-3) as u32).into())])));
             }
             if i >= 1000 {
-                assert_eq!(m.get(i - 1000).map(|e| e.contents()),
+                assert_eq!(m.get(i - 1000).map(|e| e.contents().into_singleton_builder()),
                     Some(Data(&(i - 1000), &[OrderIndex(5.into(), ((i-1000) as u32).into())])));
             }
-            assert_eq!(m.get(i).map(|e| e.contents()),
+            assert_eq!(m.get(i).map(|e| e.contents().into_singleton_builder()),
                 Some(Data(&i, &[OrderIndex(5.into(), (i as u32).into())])));
-            assert_eq!(m.get(i + 1), None);
+            assert!(m.get(i + 1).is_none());
             assert_eq!(m.len(), i + 1);
         }
 
         assert_eq!(m.len(), 0x18000u64);
 
         for j in 0..0x18000u64 {
-            assert_eq!(m.get(j).map(|e| e.contents()),
+            assert_eq!(m.get(j).map(|e| e.contents().into_singleton_builder()),
                 Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
         }
 
         assert_eq!(m.len(), 0x18000u64);
 
         for j in 0x18000..0x28000u64 {
-            assert_eq!(m.get(j), None);
+            assert!(m.get(j).is_none());
         }
     }
 
