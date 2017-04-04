@@ -1,5 +1,5 @@
 //use storeables::Storeable;
-use packets::{Entry, MutEntry, EntryContents, EntryContentsMut, EntryKind};
+use packets::{self, Entry, MutEntry, EntryContents, EntryContentsMut};
 use packets::Packet::WrapErr;
 use hash::HashMap;
 
@@ -12,6 +12,21 @@ pub struct Buffer {
 }
 
 impl Buffer {
+
+    #[cfg(any(debug_assertions, feature="debug_no_drop"))]
+    pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
+        let cap = inner.len();
+        unsafe { inner.set_len(cap) };
+        Buffer { inner: inner, no_drop: false }
+    }
+
+    #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
+    pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
+        let cap = inner.len();
+        unsafe { inner.set_len(cap) };
+        Buffer { inner: inner, }
+    }
+
     #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn new() -> Self {
         Buffer { inner: vec![0u8; 8192], no_drop: false }
@@ -47,7 +62,6 @@ impl Buffer {
         //      while Buffer has an invariant that len == cacpacity
         //      it might be better to pass a lambda into this function
         //      so we can reset the len at the end
-        let len = self.inner.len();
         unsafe { self.inner.set_len(0) }
         contents.fill_vec(&mut self.inner);
         if self.inner.len() < self.inner.capacity() {
@@ -118,14 +132,15 @@ impl Buffer {
     pub fn to_sentinel(&mut self) {
         //FIXME
         //assert_eq!(EntryKind::from_bits(self.inner[0]), EntryKind::Multiput);
-        self.inner[0] = unsafe { ::std::mem::transmute(EntryKind::Sentinel) }
+        packets::slice_to_sentinel(&mut self.inner[..]);
+        //self.inner[0] = unsafe { ::std::mem::transmute(EntryKind::Sentinel) }
     }
 
-    pub fn to_read(&mut self) {
+    //pub fn to_read(&mut self) {
         //FIXME
         //assert_eq!(EntryKind::from_bits(self.inner[0]), EntryKind::Multiput);
-        self.inner[0] = unsafe { ::std::mem::transmute(EntryKind::Read) }
-    }
+     //   self.inner[0] = unsafe { ::std::mem::transmute(EntryKind::Read) }
+    //}
 
     pub fn get_lock_nums(&self) -> HashMap<usize, u64> {
         unimplemented!()
@@ -144,6 +159,13 @@ impl Buffer {
 
     pub fn buffer_len(&self) -> usize {
         self.inner.len()
+    }
+
+    pub fn into_vec(mut self) -> Vec<u8> {
+        let inner = unsafe { ::std::ptr::read(&mut self.inner) };
+        ::std::mem::forget(self);
+        inner
+
     }
 }
 

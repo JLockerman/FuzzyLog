@@ -280,7 +280,7 @@ impl PerColor {
         assert_eq!(bytes_as_entry(&val).locs().into_iter()
             .find(|&&OrderIndex(o, _)| o == self.chain).unwrap().1, self.last_snapshot + 1);
         assert!(self.blocked_on_new_snapshot.as_ref().map(|b|
-            bytes_as_entry(b).id == bytes_as_entry(&val).id).unwrap_or(true),
+            bytes_as_entry(b).id() == bytes_as_entry(&val).id()).unwrap_or(true),
             "multiple next entries {:?} != {:?} @ {:?} snap: {:?}",
             {
                 let e = self.blocked_on_new_snapshot.as_ref().map(|b| bytes_as_entry(b));
@@ -332,6 +332,7 @@ impl PerColor {
     }
 
     pub fn fetching_range(&mut self, (low, high): (entry, entry), is_being_read: &IsRead) {
+        //FIXME is_being_read?
         debug_assert!(low <= high);
         self.read_status.set_range_as_sent(low, high);
     }

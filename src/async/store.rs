@@ -493,18 +493,19 @@ where PerServer<S>: Connected,
             Err(TryRecvError::Disconnected) => return false,
         };
         self.print_data.from_client(1);
-        let new_msg_kind = Entry::<()>::wrap_bytes(&msg).kind.layout();
+        let new_msg_kind = bytes_as_entry(&msg).layout();
         match new_msg_kind {
             EntryLayout::Read => {
-                let loc = Entry::<()>::wrap_bytes(&msg).locs()[0];
+                let loc = bytes_as_entry(&msg).locs()[0];
                 trace!("CLIENT got read {:?}", loc);
+                trace!("CLIENT vec len {}, entry len {}", msg.len(), bytes_as_entry(&msg).len());
                 let loc = loc.0;
                 let s = self.read_server_for_chain(loc);
                 //TODO if writeable write?
                 self.add_single_server_send(s, msg)
             }
             EntryLayout::Data => {
-                let loc = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
+                let loc = bytes_as_entry(&msg).locs()[0].0;
                 let s = self.write_server_for_chain(loc);
                 trace!("CLIENT got write {:?}, server {:?}:{:?}",
                     loc, s, self.num_chain_servers);
@@ -514,14 +515,14 @@ where PerServer<S>: Connected,
             EntryLayout::Multiput => {
                 trace!("CLIENT got multi write");
                 if self.is_single_node_append(&msg) {
-                    let chain = Entry::<()>::wrap_bytes(&msg).locs()[0].0;
+                    let chain = bytes_as_entry(&msg).locs()[0].0;
                     let s = self.write_server_for_chain(chain);
                     self.add_single_server_send(s, msg)
                 } else if self.new_multi {
                     let mut msg = msg;
                     {
-                        let e = Entry::<()>::wrap_bytes_mut(&mut msg);
-                        e.kind.insert(EntryKind::TakeLock | EntryKind::NewMultiPut);
+                        let mut e = bytes_as_entry_mut(&mut msg);
+                        e.flag_mut().insert(EntryFlag::TakeLock | EntryFlag::NewMultiPut);
                         e.locs_mut().into_iter()
                             .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
                     }
@@ -529,7 +530,7 @@ where PerServer<S>: Connected,
                     true
                 } else {
                     let mut msg = msg;
-                    Entry::<()>::wrap_bytes_mut(&mut msg).locs_mut().into_iter()
+                    bytes_as_entry_mut(&mut msg).locs_mut().into_iter()
                         .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
                     self.add_get_lock_nums(msg)
                 }
@@ -540,7 +541,7 @@ where PerServer<S>: Connected,
     } // End fn handle_new_requests_from_client
 
     fn add_single_server_send(&mut self, server: usize, msg: Vec<u8>) -> bool {
-        assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
+        assert_eq!(bytes_as_entry(&msg).len(), msg.len());
         //let per_server = self.server_for_token_mut(Token(server));
         let per_server = &mut self.servers[server];
         debug_assert_eq!(per_server.token, Token(server));
@@ -565,9 +566,9 @@ where PerServer<S>: Connected,
     }
 
     fn add_skeens1(&mut self, msg: Vec<u8>) {
-        debug_assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
+        debug_assert_eq!(bytes_as_entry(&msg).len(), msg.len());
         let timestamps = Rc::new(RefCell::new(
-            (0..Entry::<()>::wrap_bytes(&msg).locs().len())
+            (0..bytes_as_entry(&msg).locs().len())
                 .map(|_| 0u64).collect::<Vec<_>>().into_boxed_slice()
         ));
         let servers = self.get_servers_for_multi(&msg);
@@ -600,18 +601,14 @@ where PerServer<S>: Connected,
             Some(mut buf) => {
                 let buf = buf.get_mut();
                 let server = self.get_servers_for_multi(&buf);
+                slice_to_sentinel(buf);
                 let size = {
-                    let e = Entry::<()>::wrap_bytes_mut(buf);
-                    e.kind.remove(EntryKind::Multiput);
-                    e.kind.insert(EntryKind::Sentinel);
-                    e.kind.insert(EntryKind::Unlock | EntryKind::NewMultiPut);
-                    e.data_bytes = 0;
-                    e.dependency_bytes = 0;
-                    unsafe { e.as_multi_entry_mut().flex.lock = max_ts };
-                    debug_assert_eq!(e.lock_num(), max_ts);
-                    e.entry_size()
+                    let mut e = bytes_as_entry_mut(buf);
+                    e.flag_mut().insert(EntryFlag::Unlock | EntryFlag::NewMultiPut);
+                    *e.lock_mut() = max_ts;
+                    e.as_ref().len()
                 };
-                //unsafe { buf.set_len(size) };
+                unsafe { buf.set_len(size) };
                 server
             }
         };
@@ -671,17 +668,20 @@ where PerServer<S>: Connected,
         if let Some(packet) = finished_recv {
             self.print_data.finished_recvs(1);
             //stay_awake = true;
-            let kind = packet.entry().kind;
+            let (kind, flag) = {
+                let c = packet.contents();
+                (c.kind(), *c.flag())
+            };
             trace!("CLIENT got a {:?} from {:?}", kind, token);
-            if kind.contains(EntryKind::ReadSuccess) {
-                if !kind.contains(EntryKind::Unlock) || kind.contains(EntryKind::NewMultiPut) {
+            if flag.contains(EntryFlag::ReadSuccess) {
+                if !flag.contains(EntryFlag::Unlock) || flag.contains(EntryFlag::NewMultiPut) {
                     let num_chain_servers = self.num_chain_servers;
                     self.handle_completion(token, num_chain_servers, &packet)
                 }
             }
             //TODO distinguish between locks and empties
             else if kind.layout() == EntryLayout::Read
-                && !kind.contains(EntryKind::TakeLock) {
+                && !flag.contains(EntryFlag::TakeLock) {
                 //A read that found an usused entry still contains useful data
                 self.handle_completed_read(token, &packet);
             }
@@ -743,9 +743,9 @@ where PerServer<S>: Connected,
     //TODO I should probably return the buffer on recv_packet, and pass it into here
     fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize,
         packet: &Buffer) -> bool {
-        let (id, kind) = {
-            let e = packet.entry();
-            (e.id, e.kind)
+        let (id, kind, flag) = {
+            let e = packet.contents();
+            (*e.id(), e.kind(), *e.flag())
         };
         let unreplicated = self.is_unreplicated;
         trace!("CLIENT handle completed write?");
@@ -763,10 +763,10 @@ where PerServer<S>: Connected,
                     assert!(!self.new_multi);
                     assert_eq!(token, self.lock_token());
                     {
-                        let e = Entry::<()>::wrap_bytes_mut(&mut msg);
-                        e.kind.insert(EntryKind::TakeLock);
+                        let mut e = bytes_as_entry_mut(&mut msg);
+                        e.flag_mut().insert(EntryFlag::TakeLock);
                         let msg_locs = e.locs_mut();
-                        let lock_locs = &packet.entry().locs()[..msg_locs.len()];
+                        let lock_locs = &packet.contents().locs()[..msg_locs.len()];
                         for i in 0..msg_locs.len() {
                             debug_assert_eq!(msg_locs[i].0, lock_locs[i].0);
                             msg_locs[i] = lock_locs[i];
@@ -789,7 +789,7 @@ where PerServer<S>: Connected,
                     trace!("CLIENT finished multi section");
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
-                        let filled = fill_locs(&mut b, packet.entry(),
+                        let filled = fill_locs(&mut b, packet.contents(),
                             token, self.num_chain_servers, unreplicated);
                         let mut r = remaining_servers.borrow_mut();
                         if r.remove(&token.0) {
@@ -799,14 +799,14 @@ where PerServer<S>: Connected,
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
-                            let locs = Entry::<()>::wrap_bytes(&b).locs().to_vec();
+                            let locs = bytes_as_entry(&b).locs().to_vec();
                             Some(locs)
                         } else { None }
                     };
                     match ready_to_unlock {
                         Some(locs) => {
                             {
-                                Entry::<()>::wrap_bytes_mut(&mut buf.borrow_mut())
+                                bytes_as_entry_mut(&mut buf.borrow_mut())
                                     .locs_mut()
                                     .copy_from_slice(&locks)
                             }
@@ -825,7 +825,7 @@ where PerServer<S>: Connected,
                 }
 
                 WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel) => {
-                    if !kind.contains(EntryKind::Skeens1Queued) {
+                    if !flag.contains(EntryFlag::Skeens1Queued) {
                         error!("CLIENT bad skeens1 ack @ {:?}", token);
                         return false
                     }
@@ -843,8 +843,8 @@ where PerServer<S>: Connected,
 
                         let mut ts = timestamps.borrow_mut();
                         //alt just do ts[i] = max(oi.1, ts[i])
-                        let e = packet.entry();
-                        debug_assert_eq!(id, e.id);
+                        let e = packet.contents();
+                        debug_assert_eq!(id, *e.id());
                         for (i, oi) in e.locs().iter().enumerate() {
                             if oi.0 != order::from(0)
                                 && read_server_for_chain(oi.0, self.num_chain_servers, unreplicated) == token.0 {
@@ -887,8 +887,9 @@ where PerServer<S>: Connected,
                         let mut b = buf.borrow_mut();
                         let mut finished_writes = true;
                         {
-                            let locs = Entry::<()>::wrap_bytes_mut(&mut *b).locs_mut();
-                            let fill_from = packet.entry().locs();
+                            let mut me = bytes_as_entry_mut(&mut *b);
+                            let locs = me.locs_mut();
+                            let fill_from = packet.contents().locs();
                             //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
                             for (i, &loc) in fill_from.into_iter().enumerate() {
                                 if locs[i].0 != order::from(0) {
@@ -904,7 +905,7 @@ where PerServer<S>: Connected,
                         if finished_writes {
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
-                            let locs = Entry::<()>::wrap_bytes(&b).locs().to_vec();
+                            let locs = bytes_as_entry(&b).locs().to_vec();
                             Some(locs)
                         } else { None }
                     };
@@ -931,17 +932,18 @@ where PerServer<S>: Connected,
                 WriteState::SingleServer(mut buf) => {
                     //assert!(token != self.lock_token());
                     trace!("CLIENT finished single server");
-                    fill_locs(&mut buf, packet.entry(), token, self.num_chain_servers, unreplicated);
-                    let locs = packet.entry().locs().to_vec();
+                    fill_locs(&mut buf, packet.contents(), token, self.num_chain_servers, unreplicated);
+                    let locs = packet.contents().locs().to_vec();
                     self.client.on_finished_write(id, locs);
                     return true
                 }
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
             };
 
-            fn fill_locs(buf: &mut [u8], e: &Entry,
+            fn fill_locs(buf: &mut [u8], e: EntryContents,
                 server: Token, num_chain_servers: usize, unreplicated: bool) -> usize {
-                let locs = Entry::<()>::wrap_bytes_mut(buf).locs_mut();
+                let mut me = bytes_as_entry_mut(buf);
+                let locs = me.locs_mut();
                 let mut filled = 0;
                 let fill_from = e.locs();
                 //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
@@ -971,9 +973,9 @@ where PerServer<S>: Connected,
         self.servers[token.0].print_data.finished_read(1);
         //FIXME remove
         let mut was_needed = false;
-        let is_sentinel = packet.entry().kind.layout() == EntryLayout::Sentinel;
+        let is_sentinel = packet.contents().layout() == EntryLayout::Sentinel;
         let mut is_sentinel_loc = false;
-        for &oi in packet.entry().locs() {
+        for &oi in packet.contents().locs() {
             if oi == OrderIndex(0.into(), 0.into()) {
                 is_sentinel_loc = true;
                 continue
@@ -1019,19 +1021,22 @@ where PerServer<S>: Connected,
         self.servers[token.0].print_data.redo(1);
         let write_state = match kind.layout() {
             EntryLayout::Data | EntryLayout::Multiput | EntryLayout::Sentinel => {
-                let id = packet.entry().id;
-                self.sent_writes.remove(&id)
+                let id = packet.contents().id();
+                self.sent_writes.remove(id)
             }
             EntryLayout::Read => {
-                let read_loc = packet.entry().locs()[0];
+                let read_loc = packet.contents().locs()[0];
                 if self.sent_reads.contains_key(&read_loc) {
                     let mut b = self.waiting_buffers.pop_front()
                         .unwrap_or_else(|| Vec::with_capacity(50));
-                    {
-                        let e = EntryContents::Data(&(), &[]).fill_vec(&mut b);
-                        e.kind = EntryKind::Read;
-                        e.locs_mut()[0] = read_loc;
-                    }
+                    EntryContents::Read{
+                        id: &Uuid::nil(),
+                        flags: &EntryFlag::Nothing,
+                        data_bytes: &0,
+                        dependency_bytes: &0,
+                        loc: &read_loc,
+                        horizon: &OrderIndex(0.into(), 0.into()),
+                    }.fill_vec(&mut b);
                     //FIXME better read packet handling
                     Some(WriteState::SingleServer(b))
                 } else { None }
@@ -1060,21 +1065,18 @@ where PerServer<S>: Connected,
             Some(mut buf) => {
                 let buf = buf.get_mut();
                 let server = self.get_servers_for_multi(&buf);
+                slice_to_sentinel(buf);
                 let size = {
-                    let e = Entry::<()>::wrap_bytes_mut(buf);
-                    e.kind.remove(EntryKind::Multiput);
-                    e.kind.insert(EntryKind::Sentinel);
-                    e.kind.insert(EntryKind::Unlock);
-                    e.data_bytes = 0;
-                    e.dependency_bytes = 0;
-                    e.entry_size()
+                    let mut e = bytes_as_entry_mut(buf);
+                    e.flag_mut().insert(EntryFlag::Unlock);
+                    e.as_ref().len()
                 };
                 unsafe { buf.set_len(size) };
                 server
             }
         };
-        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).kind.layout(), EntryLayout::Sentinel);
-        assert_eq!(Entry::<()>::wrap_bytes(&buf.borrow()).entry_size(), buf.borrow().len());
+        assert_eq!(bytes_as_entry(&buf.borrow()).layout(), EntryLayout::Sentinel);
+        assert_eq!(bytes_as_entry(&buf.borrow()).len(), buf.borrow().len());
         for server in servers {
             trace!("CLIENT add unlock for {:?}", server);
             let per_server = &mut self.servers[server];
@@ -1087,8 +1089,8 @@ where PerServer<S>: Connected,
     }
 
     fn add_multis(&mut self, msg: Vec<u8>, num_servers: usize) {
-        debug_assert_eq!(Entry::<()>::wrap_bytes(&msg).entry_size(), msg.len());
-        let locks = Rc::new(Entry::<()>::wrap_bytes(&msg).locs().to_vec().into_boxed_slice());
+        debug_assert_eq!(bytes_as_entry(&msg).len(), msg.len());
+        let locks = Rc::new(bytes_as_entry(&msg).locs().to_vec().into_boxed_slice());
         let servers = self.get_servers_for_multi(&msg);
         let mut remaining_servers: HashSet<usize> = Default::default();
         remaining_servers.reserve(servers.len());
@@ -1116,7 +1118,7 @@ where PerServer<S>: Connected,
     fn is_single_node_append(&self, msg: &[u8]) -> bool {
         let mut single = true;
         let mut server_token = None;
-        let locked_chains = Entry::<()>::wrap_bytes(&msg).locs()
+        let locked_chains = bytes_as_entry(&msg).locs()
             .iter().cloned().filter(|&oi| oi != OrderIndex(0.into(), 0.into()));
         for c in locked_chains {
             if let Some(server_token) = server_token {
@@ -1131,10 +1133,10 @@ where PerServer<S>: Connected,
 
     fn get_servers_for_multi(&self, msg: &[u8]) -> Vec<usize> {
         debug_assert!(
-            Entry::<()>::wrap_bytes(msg).kind.layout() == EntryLayout::Multiput
-            || Entry::<()>::wrap_bytes(msg).kind.layout() == EntryLayout::Sentinel
+            bytes_as_entry(msg).layout() == EntryLayout::Multiput
+            || bytes_as_entry(msg).layout() == EntryLayout::Sentinel
         );
-        Entry::<()>::wrap_bytes(msg).locs()
+        bytes_as_entry(msg).locs()
             .iter()
             .filter(|&&oi| oi != OrderIndex(0.into(), 0.into()))
             .fold((0..self.num_chain_servers) //FIXME ?
@@ -1391,29 +1393,29 @@ impl Connected for PerServer<TcpStream> {
             {
                 let mut ts = msg.borrow_mut();
                 let send_end = {
-                    let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
                     {
-                        is_data = e.locs().into_iter()
+                        let mut e = bytes_as_entry_mut(&mut *ts);
+                        is_data = e.as_ref().locs().into_iter()
                             .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
                             .any(|oi| is_write_server_for(oi.0, self.token, num_servers));
-                        let kind = &mut e.kind;
-                        debug_assert!(kind.layout() == EntryLayout::Multiput
-                            || kind.layout() == EntryLayout::Sentinel);
-                        debug_assert!(kind.contains(EntryKind::TakeLock));
-                        if is_data {
-                            kind.remove(EntryKind::Lock);
-                            debug_assert_eq!(kind.layout(), EntryLayout::Multiput);
+                        debug_assert!(e.as_ref().layout() == EntryLayout::Multiput
+                            || e.as_ref().layout() == EntryLayout::Sentinel);
+                        {
+                            let flag = e.flag_mut();
+                            debug_assert!(flag.contains(EntryFlag::TakeLock));
+                            flag.insert(EntryFlag::TakeLock);
                         }
-                        else {
-                            kind.insert(EntryKind::Lock);
-                            debug_assert_eq!(kind.layout(), EntryLayout::Sentinel);
+                        if !is_data {
+                            debug_assert!(e.as_ref().locs()
+                                .contains(&OrderIndex(0.into(), 0.into())));
                         }
-                        kind.insert(EntryKind::TakeLock);
                     }
-                    if !is_data {
-                        debug_assert!(e.locs().contains(&OrderIndex(0.into(), 0.into())));
+                    if is_data {
+                        slice_to_multi(&mut ts[..]);
+                    } else {
+                        slice_to_sentinel(&mut ts[..]);
                     }
-                    e.entry_size()
+                    bytes_as_entry_mut(&mut *ts).as_ref().len()
                 };
                 //Since sentinels have a different size than multis, we need to truncate
                 //for those sends
@@ -1426,7 +1428,7 @@ impl Connected for PerServer<TcpStream> {
         } else {
             let is_sentinel = {
                 let ts = msg.borrow();
-                !Entry::<()>::wrap_bytes(&*ts)
+                !bytes_as_entry(&*ts)
                     .locs().into_iter()
                     .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
                     .any(|oi| is_write_server_for(oi.0, self.token, num_servers))
@@ -1450,10 +1452,7 @@ impl Connected for PerServer<TcpStream> {
             self.print_data.packets_sending(1);
             {
                 let ts = msg.borrow();
-                let send_end = {
-                    let e = Entry::<()>::wrap_bytes(&*ts);
-                    e.entry_size()
-                };
+                let send_end = bytes_as_entry(&*ts).len();
                 let sent = self.being_written.try_fill(&ts[..send_end], self.receiver);
                 debug_assert!(sent);
             }
@@ -1481,29 +1480,29 @@ impl Connected for PerServer<TcpStream> {
             {
                 let mut ts = msg.borrow_mut();
                 let send_end = {
-                    let e = Entry::<()>::wrap_bytes_mut(&mut *ts);
                     {
-                        is_data = e.locs().into_iter()
+                        let mut e = bytes_as_entry_mut(&mut *ts);
+                        is_data = e.as_ref().locs().into_iter()
                             .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
                             .any(|oi| is_write_server_for(oi.0, self.token, num_servers));
-                        let kind = &mut e.kind;
-                        debug_assert!(kind.layout() == EntryLayout::Multiput
-                            || kind.layout() == EntryLayout::Sentinel);
-                        debug_assert!(kind.contains(EntryKind::TakeLock));
-                        if is_data {
-                            kind.remove(EntryKind::Lock);
-                            debug_assert_eq!(kind.layout(), EntryLayout::Multiput);
+                        debug_assert!(e.as_ref().layout() == EntryLayout::Multiput
+                            || e.as_ref().layout() == EntryLayout::Sentinel);
+                        {
+                            let f = e.flag_mut();
+                            debug_assert!(f.contains(EntryFlag::TakeLock));
+                            f.insert(EntryFlag::TakeLock);
                         }
-                        else {
-                            kind.insert(EntryKind::Lock);
-                            debug_assert_eq!(kind.layout(), EntryLayout::Sentinel);
+                        if !is_data {
+                            debug_assert!(e.as_ref().locs()
+                                .contains(&OrderIndex(0.into(), 0.into())));
                         }
-                        kind.insert(EntryKind::TakeLock);
                     }
-                    if !is_data {
-                        debug_assert!(e.locs().contains(&OrderIndex(0.into(), 0.into())));
+                    if is_data {
+                        slice_to_multi(&mut ts[..]);
+                    } else {
+                        slice_to_sentinel(&mut ts[..]);
                     }
-                    e.entry_size()
+                    bytes_as_entry_mut(&mut *ts).as_ref().len()
                 };
                 //Since sentinels have a different size than multis, we need to truncate
                 //for those sends
@@ -1514,7 +1513,7 @@ impl Connected for PerServer<TcpStream> {
         } else {
             let is_sentinel = {
                 let ts = msg.borrow();
-                !Entry::<()>::wrap_bytes(&*ts)
+                !bytes_as_entry(&*ts)
                     .locs().into_iter()
                     .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
                     .any(|oi| is_write_server_for(oi.0, self.token, num_servers))
@@ -1837,6 +1836,8 @@ impl DoubleBuffer {
     }
 
     fn try_fill(&mut self, bytes: &[u8], addr: Ipv4SocketAddr) -> bool {
+        trace!("FFFFF add {} + {} bytes to send", bytes.len(), addr.bytes().len());
+        debug_assert_eq!(bytes.len(), bytes_as_entry(bytes).len());
         if self.is_filling_first() {
             if buffer_can_hold_bytes(&self.first, bytes.len() + addr.bytes().len())
             || self.first.is_empty() {
@@ -1877,33 +1878,15 @@ impl WriteState {
             &SingleServer(ref buf) | &ToLockServer(ref buf) => f(&**buf),
             &MultiServer(ref buf, _, _, is_sentinel) => {
                 let mut b = buf.borrow_mut();
-                {
-                    let e = Entry::<()>::wrap_bytes_mut(&mut *b);
-                    if is_sentinel {
-                        e.kind.remove(EntryKind::Multiput);
-                        e.kind.insert(EntryKind::Sentinel);
-                    }
-                    else {
-                        e.kind.remove(EntryKind::Sentinel);
-                        e.kind.insert(EntryKind::Multiput);
-                    }
-                }
+                if is_sentinel { slice_to_sentinel(&mut b[..]) }
+                else { slice_to_multi(&mut b[..]) }
                 f(&*b)
             },
 
             &Skeens1(ref buf, _, _, is_sentinel) => {
                 let mut b = buf.borrow_mut();
-                {
-                    let e = Entry::<()>::wrap_bytes_mut(&mut *b);
-                    if is_sentinel {
-                        e.kind.remove(EntryKind::Multiput);
-                        e.kind.insert(EntryKind::Sentinel);
-                    }
-                    else {
-                        e.kind.remove(EntryKind::Sentinel);
-                        e.kind.insert(EntryKind::Multiput);
-                    }
-                }
+                if is_sentinel { slice_to_sentinel(&mut b[..]) }
+                else { slice_to_multi(&mut b[..]) }
                 f(&*b)
             },
 
@@ -1942,7 +1925,7 @@ impl WriteState {
     fn id(&self) -> Uuid {
         let mut id = unsafe { mem::uninitialized() };
         self.with_packet(|p| {
-            id = Entry::<()>::wrap_bytes(p).id
+            id = bytes_as_entry(p).id().clone()
         });
         id
     }
@@ -1950,7 +1933,7 @@ impl WriteState {
     fn layout(&self) -> EntryLayout {
         let mut layout = unsafe { mem::uninitialized() };
         self.with_packet(|p| {
-            layout = Entry::<()>::wrap_bytes(p).kind.layout();
+            layout = bytes_as_entry(p).layout();
         });
         layout
     }
@@ -1958,9 +1941,7 @@ impl WriteState {
     fn read_loc(&self) -> OrderIndex {
         let mut loc = unsafe { mem::uninitialized() };
         self.with_packet(|p| {
-            let e = Entry::<()>::wrap_bytes(p);
-            assert!(e.kind.layout() != EntryLayout::Lock);
-            loc = e.locs()[0]
+            loc = bytes_as_entry(p).locs()[0]
         });
         loc
     }

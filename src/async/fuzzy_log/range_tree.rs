@@ -5,7 +5,7 @@ use std::cmp::Ordering::*;
 
 use std::u32;
 
-use std::collections::btree_map::{OccupiedEntry, Iter};
+use std::collections::btree_map::Iter;
 use std::collections::btree_map::Entry::Occupied;
 
 use packets::entry;
@@ -198,6 +198,7 @@ impl RangeTree {
             .map(|(r, _)| r.first())
     }
 
+    #[allow(dead_code)]
     pub fn last_outstanding(&self) -> Option<entry> {
         self.iter().rev()
             .filter(|&(_, &k)| k == Kind::SentToServer)
@@ -259,8 +260,8 @@ impl RangeTree {
         let (_, _, valid, num_outstanding, num_buffered) = self.iter()
             .fold((0.into(), None, true, 0, 0),
             |(prev, prev_kind, prev_valid, mut num_outstanding, mut num_buffered), (r, k)| {
-            if let Some(kind) = prev_kind {
-                let valid = prev_valid && r.first() == prev + 1 && Some(k) != prev_kind;
+            if let Some(prev_kind) = prev_kind {
+                let valid = prev_valid && r.first() == prev + 1 && k != prev_kind;
                 match k {
                     &Kind::SentToServer => num_outstanding += r.len(),
                     &Kind::GottenFromServer => num_buffered += r.len(),

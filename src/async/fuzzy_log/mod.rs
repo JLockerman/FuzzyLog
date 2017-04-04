@@ -186,7 +186,7 @@ impl ThreadLog {
             PerformAppend(msg) => {
                 self.print_data.append(1);
                 {
-                    let layout = bytes_as_entry(&msg).kind.layout();
+                    let layout = bytes_as_entry(&msg).layout();
                     assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
                 }
                 self.to_store.send(msg).expect("store hung up");
@@ -267,13 +267,16 @@ impl ThreadLog {
 
     fn handle_completed_read(&mut self, read_loc: OrderIndex, msg: Vec<u8>) {
         //TODO right now this assumes order...
-        let kind = bytes_as_entry(&msg).kind;
+        let (kind, flag) = {
+            let e = bytes_as_entry(&msg);
+            (e.kind(), *e.flag())
+        };
         trace!("FUZZY handle read @ {:?}", read_loc);
 
         match kind.layout() {
             EntryLayout::Read => {
                 trace!("FUZZY read has no data");
-                debug_assert!(!kind.contains(EntryKind::ReadSuccess));
+                debug_assert!(!flag.contains(EntryFlag::ReadSuccess));
                 debug_assert!(bytes_as_entry(&msg).locs()[0] == read_loc);
                 if read_loc.1 < u32::MAX.into() {
                     trace!("FUZZY overread at {:?}", read_loc);
@@ -290,8 +293,8 @@ impl ThreadLog {
                     let unblocked = self.per_chains.get_mut(&read_loc.0).and_then(|s| {
                         let e = bytes_as_entry(&msg);
                         assert_eq!(e.locs()[0].1, u32::MAX.into());
-                        debug_assert!(!e.kind.contains(EntryKind::ReadSuccess));
-                        let new_horizon = e.dependencies()[0].1;
+                        debug_assert!(!e.flag().contains(EntryFlag::ReadSuccess));
+                        let new_horizon = e.horizon().1;
                         trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
                         s.give_new_snapshot(new_horizon)
                     });
@@ -303,7 +306,7 @@ impl ThreadLog {
             }
             EntryLayout::Data => {
                 trace!("FUZZY read is single");
-                debug_assert!(kind.contains(EntryKind::ReadSuccess));
+                debug_assert!(flag.contains(EntryFlag::ReadSuccess));
                 //assert!(read_loc.1 >= pc.first_buffered);
                 //TODO check that read is needed?
                 //TODO no-alloc?
@@ -318,7 +321,7 @@ impl ThreadLog {
                     }
                 }
             }
-            EntryLayout::Multiput if kind.contains(EntryKind::NoRemote) => {
+            EntryLayout::Multiput if flag.contains(EntryFlag::NoRemote) => {
                 trace!("FUZZY read is atom");
                 let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
                     s.got_read(read_loc.1)).unwrap_or(false);
@@ -332,7 +335,7 @@ impl ThreadLog {
             }
             layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
                 trace!("FUZZY read is multi");
-                debug_assert!(kind.contains(EntryKind::ReadSuccess));
+                debug_assert!(flag.contains(EntryFlag::ReadSuccess));
                 let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
                     s.got_read(read_loc.1)).unwrap_or(false);
                     //s.decrement_outstanding_reads());
@@ -584,7 +587,7 @@ impl ThreadLog {
     -> MultiSearch {
         let id = {
             let entr = bytes_as_entry(&msg);
-            let id = entr.id;
+            let id = entr.id().clone();
             let locs = entr.locs();
             trace!("FUZZY multi part read {:?} @ {:?}", id, locs);
             id
@@ -669,7 +672,8 @@ impl ThreadLog {
                 }
             }
             {
-                let my_locs = bytes_as_entry_mut(&mut multi.val).locs_mut();
+                let mut e = bytes_as_entry_mut(&mut multi.val);
+                let my_locs = e.locs_mut();
                 {
                     let locs = my_locs.iter_mut().zip(bytes_as_entry(&msg).locs().iter());
                     for (my_loc, new_loc) in locs {
@@ -930,13 +934,14 @@ impl ThreadLog {
 
     fn make_read_packet(&mut self, chain: order, index: entry) -> Vec<u8> {
         let mut buffer = self.cache.alloc();
-        {
-            let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
-            e.kind = EntryKind::Read;
-            e.locs_mut()[0] = OrderIndex(chain, index);
-            debug_assert_eq!(e.data_bytes, 0);
-            debug_assert_eq!(e.dependency_bytes, 0);
-        }
+        EntryContents::Read{
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(chain, index),
+            horizon: &OrderIndex(0.into(), 0.into()),
+        }.fill_vec(&mut buffer);
         buffer
     }
 

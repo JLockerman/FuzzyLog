@@ -49,7 +49,6 @@ pub mod skeens_store;
 pub mod servers;*/
 pub mod servers2;
 //pub mod color_api;
-#[cfg(FIXME)]
 pub mod async;
 mod hash;
 pub mod socket_addr;

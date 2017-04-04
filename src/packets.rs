@@ -148,13 +148,13 @@ pub mod EntryFlag {
 define_packet!{
     enum Packet {
         tag: EntryKind::Kind,
-        Read: EntryKind::Read => {
-            id: Uuid,
-            flags: EntryFlag::Flag,
-            data_bytes: u16,
-            dependency_bytes: u16,
-            loc: OrderIndex,
-            horizon: OrderIndex
+        Read: EntryKind::Read => { // 1
+            id: Uuid, // 17
+            flags: EntryFlag::Flag, // 19
+            data_bytes: u16, // 21
+            dependency_bytes: u16, // 23
+            loc: OrderIndex, // 39
+            horizon: OrderIndex,
         },
         Single: EntryKind::Data => {
             id: Uuid,
@@ -208,6 +208,10 @@ impl<'a> Packet::Ref<'a> {
         }
     }
 
+    pub fn layout(self) -> EntryLayout {
+        self.kind().layout()
+    }
+
     pub fn id(self) -> &'a Uuid {
         use self::Packet::Ref::*;
         match self {
@@ -220,6 +224,14 @@ impl<'a> Packet::Ref<'a> {
         match self {
             Read{loc, ..} | Single{loc, ..} => unsafe { slice::from_raw_parts(loc, 1) },
             Multi{locs, ..} | Senti{locs, ..} => locs,
+        }
+    }
+
+    pub fn data(self) -> &'a [u8] {
+        use self::Packet::Ref::*;
+        match self {
+            Multi{data, ..} | Single{data, ..} => data,
+            Read{..} | Senti{..} => unreachable!(),
         }
     }
 
@@ -247,9 +259,25 @@ impl<'a> Packet::Ref<'a> {
         match self {
             Read{..} | Senti{..} => unreachable!(),
             Multi{deps, data, ..} | Single{deps, data, ..} => {
-                let data = unsafe { V::unstore(&*data.as_ptr()) };
+                let data = unsafe { V::unstore(data) };
                 SingletonBuilder(data, deps)
             },
+        }
+    }
+
+    pub fn dependencies(self) -> &'a [OrderIndex] {
+        use self::Packet::Ref::*;
+        match self {
+            Single{deps, ..} | Multi{deps, ..} | Senti{deps, ..} => deps,
+            Read{..} => unreachable!(),
+        }
+    }
+
+    pub fn horizon(self) -> OrderIndex {
+        use self::Packet::Ref::*;
+        match self {
+            Single{..} | Multi{..} | Senti{..} => unreachable!(),
+            Read{horizon, ..} => *horizon,
         }
     }
 }
@@ -284,6 +312,14 @@ impl<'a> Packet::Mut<'a> {
                 slice::from_raw_parts_mut(&mut **loc, 1)
             },
             &mut Multi{ref mut locs, ..} | &mut Senti{ref mut locs, ..} => &mut *locs,
+        }
+    }
+
+    pub fn lock_mut(&mut self) -> &mut u64 {
+        use self::Packet::Mut::*;
+        match self {
+            &mut Multi{ref mut lock, ..} | &mut Senti{ref mut lock, ..} => &mut *lock,
+            &mut Read{..} | &mut Single{..} => unreachable!(),
         }
     }
 }
@@ -388,27 +424,6 @@ impl<'a> MutEntry<'a> {
     //}
 }
 
-
-pub fn bytes_as_entry(bytes: &[u8]) -> EntryContents {
-    unsafe { Packet::Ref::try_ref(bytes).unwrap().0 }
-}
-
-pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> EntryContentsMut {
-    unsafe { Packet::Mut::try_mut(bytes).unwrap().0 }
-}
-
-pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
-    /*match Entry::<[u8]>::wrap_bytes(bytes).contents() {
-        EntryContents::Data(data, ..) | EntryContents::Multiput{data, ..} => data,
-        EntryContents::Sentinel(..) => &[],
-    }*/
-    use self::Packet::Ref::*;
-    match bytes_as_entry(bytes) {
-        Read{..} | Senti{..} => unreachable!(),
-        Single{data, ..} | Multi{data, ..} => data,
-    }
-}
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct SingletonBuilder<'a, V:'a + ?Sized>(pub &'a V, pub &'a [OrderIndex]);
 
@@ -482,6 +497,44 @@ impl<'a, V:'a> SingletonBuilder<'a, [V]> {
             }
         );
     }
+}
+
+pub fn data_to_slice<V: ?Sized + Storeable>(data: &V) -> &[u8] {
+    unsafe { <V as Storeable>::ref_to_slice(data) }
+}
+
+pub fn slice_to_data<V: ?Sized + UnStoreable + Storeable>(data: &[u8]) -> &V {
+    unsafe { <V as UnStoreable>::unstore(data) }
+}
+
+pub fn bytes_as_entry(bytes: &[u8]) -> EntryContents {
+    unsafe { Packet::Ref::try_ref(bytes).unwrap().0 }
+}
+
+pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> EntryContentsMut {
+    unsafe { Packet::Mut::try_mut(bytes).unwrap().0 }
+}
+
+pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
+    /*match Entry::<[u8]>::wrap_bytes(bytes).contents() {
+        EntryContents::Data(data, ..) | EntryContents::Multiput{data, ..} => data,
+        EntryContents::Sentinel(..) => &[],
+    }*/
+    use self::Packet::Ref::*;
+    match bytes_as_entry(bytes) {
+        Read{..} | Senti{..} => unreachable!(),
+        Single{data, ..} | Multi{data, ..} => data,
+    }
+}
+
+pub fn slice_to_sentinel(bytes: &mut [u8]) {
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::Sentinel) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
+}
+
+pub fn slice_to_multi(bytes: &mut [u8]) {
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::Multiput) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
 }
 
 ///////////////////////////////////////

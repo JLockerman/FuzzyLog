@@ -599,6 +599,7 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 mod tests {
     extern crate env_logger;
 
@@ -612,7 +613,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    use packets::{OrderIndex, EntryFlag};
+    use packets::{OrderIndex, EntryFlag, EntryContents, Uuid};
     use packets::SingletonBuilder as Data;
 
     /*pub fn run(
@@ -640,9 +641,7 @@ mod tests {
         let _ = stream.set_nodelay(true);
         let mut buffer = Buffer::empty();
         Data(&12i32, &[]).fill_entry(&mut buffer);
-        {
-            buffer.contents_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
-        }
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
@@ -672,12 +671,15 @@ mod tests {
         assert!(buffer.contents().flag().contains(EntryFlag::ReadSuccess));
         assert_eq!(buffer.contents().locs()[0], OrderIndex(2.into(), 1.into()));
         assert_eq!(buffer.contents().into_singleton_builder(), Data(&92u64, &[]));
-        Data(&(), &[]).fill_entry(&mut buffer);
-        buffer.ensure_len();
-        {
-            buffer.to_read();
-            buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
-        }
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(0.into(), 0.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+        });
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
@@ -698,9 +700,7 @@ mod tests {
         let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
         let mut buffer = Buffer::empty();
         Data(&12i32, &[]).fill_entry(&mut buffer);
-        {
-            buffer.contents_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
-        }
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
         trace!("sending write");
         write_stream.write_all(buffer.entry_slice()).unwrap();
         write_stream.write_all(read_addr.bytes()).unwrap();
@@ -724,9 +724,7 @@ mod tests {
         let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
         let mut buffer = Buffer::empty();
         Data(&92u64, &[]).fill_entry(&mut buffer);;
-        {
-            buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 0.into());
-        }
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 0.into());
         write_stream.write_all(buffer.entry_slice()).unwrap();
         write_stream.write_all(read_addr.bytes()).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
@@ -734,12 +732,16 @@ mod tests {
         assert!(buffer.entry().flag().contains(EntryFlag::ReadSuccess));
         assert_eq!(buffer.contents().locs()[0], OrderIndex(2.into(), 1.into()));
         assert_eq!(buffer.contents().into_singleton_builder(), Data(&92u64, &[]));
-        Data(&(), &[]).fill_entry(&mut buffer);
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(0.into(), 0.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+        });
         buffer.ensure_len();
-        {
-            buffer.to_read();
-            buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
-        }
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
         read_stream.write_all(buffer.entry_slice()).unwrap();
         read_stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
@@ -758,44 +760,48 @@ mod tests {
         let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
         let mut buffer = Buffer::empty();
         Data(&(), &[OrderIndex(0.into(), 0.into())]).fill_entry(&mut buffer);
-        Data(&(), &[]).fill_entry(&mut buffer);
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(0.into(), 0.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+        });
         buffer.ensure_len();
-        {
-            buffer.to_read();
-            buffer.contents_mut().locs_mut()[0] = OrderIndex(0.into(), 1.into());
-        }
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(0.into(), 1.into());
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
         recv_packet(&mut buffer, &mut stream);
         assert!(!buffer.entry().flag().contains(EntryFlag::ReadSuccess));
-        assert_eq!(buffer.contents().into_singleton_builder::<()>().dependencies(),
-            &[OrderIndex(0.into(), 0.into())]);
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(0.into(), 1.into()));
+        assert_eq!(buffer.contents().horizon(), OrderIndex(0.into(), 0.into()));
     }
 
     //FIXME add empty read tests
 
-fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream) {
-    use packets::Packet::WrapErr;
-    let mut read = 0;
-    loop {
-        let to_read = buffer.finished_at(read);
-        let size = match to_read {
-            Err(WrapErr::NotEnoughBytes(needs)) => needs,
-            Err(err) => panic!("{:?}", err),
-            Ok(size) if read < size => size,
-            Ok(..) => return,
-        };
-        let r = stream.read(&mut buffer[read..size]);
-        match r {
-            Ok(i) => read += i,
-            Err(e) => panic!("recv error {:?}", e),
+    fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream) {
+        use packets::Packet::WrapErr;
+        let mut read = 0;
+        loop {
+            let to_read = buffer.finished_at(read);
+            let size = match to_read {
+                Err(WrapErr::NotEnoughBytes(needs)) => needs,
+                Err(err) => panic!("{:?}", err),
+                Ok(size) if read < size => size,
+                Ok(..) => return,
+            };
+            let r = stream.read(&mut buffer[read..size]);
+            match r {
+                Ok(i) => read += i,
+                Err(e) => panic!("recv error {:?}", e),
+            }
         }
     }
-}
 
     fn start_servers<'a, 'b>(addr_strs: &'a [&'b str], server_ready: &'static AtomicUsize) {
-        use std::{thread, iter};
+        use std::thread;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         use mio;

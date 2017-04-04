@@ -581,25 +581,26 @@ fn recv_packet(
 )  -> RecvRes {
     use packets::Packet::WrapErr;
     loop {
-        trace!("WORKER recved {} bytes.", read);
+        trace!("WORKER recved {} bytes extra {}.", read, extra);
         let to_read = buffer.finished_at(read);
         let size = match to_read {
-            Err(WrapErr::NotEnoughBytes(needs)) => needs,
+            Err(WrapErr::NotEnoughBytes(needs)) =>
+                needs + mem::size_of::<Ipv4SocketAddr>() + extra,
             Err(err) => panic!("{:?}", err),
             Ok(size) if read < size + mem::size_of::<Ipv4SocketAddr>() + extra =>
                 size + mem::size_of::<Ipv4SocketAddr>() + extra,
             Ok(..) => {
-                /*debug_assert_eq!(
+                debug_assert_eq!(
                     read, buffer.entry_size() + mem::size_of::<Ipv4SocketAddr>() + extra,//TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 },
-                    "entry_size {}", buffer.entry().entry_size()
-                );*/
+                    "entry_size {}", buffer.entry_size()
+                );
                 let src_addr = Ipv4SocketAddr::from_slice(&buffer[read-6-extra..read-extra]);
                 trace!("WORKER finished recv {} bytes for {}.", read, src_addr);
                 //TODO ( if is_read { Some((receive_addr)) } else { None } )
                 return RecvRes::Done(src_addr)
             },
         //TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 };
-        } + mem::size_of::<Ipv4SocketAddr>() + extra;
+        };
         let r = stream.read(&mut buffer[read..size]);
         match r {
             Ok(0) => {

@@ -12,13 +12,16 @@ use async::fuzzy_log::{Message, ThreadLog};
 use async::fuzzy_log::FromClient::*;
 use packets::{
     entry,
-    Entry,
     EntryContents,
     OrderIndex,
     Uuid,
     Storeable,
+    UnStoreable,
     order,
-    bytes_as_entry_mut
+    bytes_as_entry,
+    data_to_slice,
+    slice_to_data,
+    EntryFlag,
 };
 
 pub struct LogHandle<V: ?Sized> {
@@ -342,7 +345,8 @@ where V: Storeable {
     }
 
     //TODO return two/three slices?
-    pub fn get_next(&mut self) -> Option<(&V, &[OrderIndex])> {
+    pub fn get_next(&mut self) -> Option<(&V, &[OrderIndex])>
+    where V: UnStoreable {
         if self.num_snapshots == 0 {
             trace!("HANDLE read with no snap.");
             return None
@@ -368,7 +372,10 @@ where V: Storeable {
         }
 
         trace!("HANDLE got val.");
-        let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
+        let (val, locs) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs())
+        };
         for &OrderIndex(o, i) in locs {
             let e = self.last_seen_entries.entry(o).or_insert(0.into());
             if *e < i {
@@ -570,7 +577,7 @@ where V: Storeable {
         if self.num_async_writes > 0 {
             let last_seen_entries = &mut self.last_seen_entries;
             self.num_async_writes -= self.finished_writes.try_iter().map(
-            |(id, locs)| {
+            |(_id, locs)| {
                 for &OrderIndex(o, i) in &locs {
                     let e = last_seen_entries.entry(o).or_insert(0.into());
                     if *e < i {
@@ -604,14 +611,15 @@ where V: Storeable {
 
     pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
         //TODO no-alloc?
-        let mut buffer = EntryContents::Data(data, &deps).clone_bytes();
         let id = Uuid::new_v4();
-        {
-            //TODO I should make a better entry builder
-            let e = bytes_as_entry_mut(&mut buffer);
-            e.id = id;
-            e.locs_mut()[0] = OrderIndex(chain, 0.into());
-        }
+        let mut buffer = Vec::new();
+        EntryContents::Single {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            loc: &OrderIndex(chain, 0.into()),
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
@@ -632,12 +640,15 @@ where V: Storeable {
         locs.sort();
         locs.dedup();
         let id = Uuid::new_v4();
-        let buffer = EntryContents::Multiput {
-            data: data,
-            uuid: &id,
-            columns: &locs,
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &locs,
             deps: deps,
-        }.clone_bytes();
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
@@ -653,21 +664,21 @@ where V: Storeable {
 
     pub fn async_no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
     -> Uuid {
-        use packets::EntryFlag::NoRemote;
-        use packets::bytes_as_entry_mut;
         //TODO no-alloc?
         assert!(chains.len() > 1);
         let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
         locs.sort();
         locs.dedup();
         let id = Uuid::new_v4();
-        let mut buffer = EntryContents::Multiput {
-            data: data,
-            uuid: &id,
-            columns: &locs,
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::NoRemote,
+            lock: &0,
+            locs: &locs,
             deps: deps,
-        }.clone_bytes();
-        bytes_as_entry_mut(&mut buffer).kind_mut().insert(NoRemote);
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
@@ -711,12 +722,15 @@ where V: Storeable {
         debug_assert!(mchains[(chains.len() + 1)..]
             .iter().all(|&OrderIndex(o, _)| depends_on.contains(&o)));
         let id = Uuid::new_v4();
-        let buffer = EntryContents::Multiput {
-            data: data,
-            uuid: &id,
-            columns: &mchains,
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &mchains,
             deps: deps,
-        }.clone_bytes();
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id

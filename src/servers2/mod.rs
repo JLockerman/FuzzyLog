@@ -1047,12 +1047,13 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 //    || last_valid_loc < old_loc.1,
                 //    "{:?} >= {:?}", last_valid_loc, old_loc);
                 buffer.fill_from_entry_contents(
-                    EntryContents::Single{
+                    EntryContents::Read{
                         id: &old_id,
                         flags: &EntryFlag::Nothing,
                         loc: &old_loc,
-                        deps: &[OrderIndex(chain, last_valid_loc)],
-                        data: &[],
+                        data_bytes: &0,
+                        dependency_bytes: &0,
+                        horizon: &OrderIndex(chain, last_valid_loc),
                     });
                 //FIXME where do I sent loc to old loc?
             }
@@ -1105,16 +1106,14 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 return (Some(buffer), ret, t, 0, false)
             }
             else {
-                unimplemented!();
-                /*let e = buffer.contents();
+                let mut e = buffer.contents();
                 let len = e.sentinel_entry_size();
                 trace!("place senti_storage @ {:?}, len {}", senti_storage, len);
-                let b = e.bytes();
+                let b = &buffer[..];
                 ptr::copy_nonoverlapping(b.as_ptr(), senti_storage, len);
                 {
-                    let e = Entry::<()>::wrap_mut(&mut *senti_storage);
-                    e.kind.remove(EntryKind::Multiput);
-                    e.kind.insert(EntryKind::Sentinel);
+                    let senti_storage = slice::from_raw_parts_mut(senti_storage, len);
+                    slice_to_sentinel(&mut *senti_storage);
                 }
                 for place in remaining_senti_places {
                     let _: *mut *const u8 = place;
@@ -1122,7 +1121,6 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                     //TODO mem barrier ordering
                     (*trie_entry).store(senti_storage, Ordering::Release);
                 }
-                */
             }
             //TODO is re right for sentinel only writes?
             (Some(buffer), ret, t, 0, false)
