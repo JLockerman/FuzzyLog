@@ -55,7 +55,6 @@ pub mod socket_addr;
 //TODO only for testing, should be private
 pub mod buffer;
 
-#[cfg(FIXME)]
 pub mod c_binidings {
 
     // use prelude::*;
