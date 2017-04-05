@@ -72,11 +72,9 @@ pub mod EntryKind {
             const Invalid = 0x0,
             const Data = 0x1,
             const Multiput = 0x2,
+            const Read = 0x3,
             const Lock = 0x4,
-            //TODO sentinel should be multi + no-remote + no-data
-            const Sentinel = Lock.bits | Multiput.bits,
-            const Read = Data.bits | Multiput.bits,
-            const Layout = Data.bits | Multiput.bits | Sentinel.bits,
+            const Sentinel = 0x6,
         }
     }
 
@@ -110,7 +108,7 @@ pub mod EntryKind {
 
     impl Kind {
         pub fn layout(&self) -> EntryLayout {
-            match *self & Layout {
+            match *self {
                 Data => EntryLayout::Data,
                 Multiput => EntryLayout::Multiput,
                 Lock => EntryLayout::Lock,
