@@ -177,6 +177,7 @@ impl ThreadLog {
                 true
             }
             MultiSnapshotAndPrefetch(chains) => {
+                self.print_data.snap(1);
                 for chain in chains {
                     self.fetch_snapshot(chain);
                     self.prefetch(chain);
