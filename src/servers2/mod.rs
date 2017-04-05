@@ -1054,7 +1054,7 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize) -> Serv
             trace!("WORKER {} finish delayed single", worker_num);
             let len = {
                 let storage = storage as *mut u8;
-                let mut e = MutEntry::wrap(&mut *storage).into_contents();
+                let mut e = MutEntry::wrap_bytes(&mut *storage).into_contents();
                 e.locs_mut()[0].1 = entry::from(index as u32);
                 e.as_ref().len()
             };

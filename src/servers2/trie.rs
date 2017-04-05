@@ -1,6 +1,6 @@
 
 use std::marker::PhantomData;
-use std::{mem, ptr};
+use std::{mem, ptr, slice};
 
 //use storeables::Storeable;
 //FIXME
@@ -268,7 +268,7 @@ impl<'a> AppendSlot<Packet<'a>> {
             mem::transmute::<*mut *const u8, *mut AtomicPtr<u8>>(trie_entry);
         //TODO mem barrier ordering
         (*trie_entry).store(data_ptr, Ordering::Release);
-        Packet::wrap(&*data_ptr)
+        Packet::wrap_slice(slice::from_raw_parts(data_ptr, storage_size))
     }
 
     pub unsafe fn finish_append_with<F>(self, data: Packet, before_insert: F) -> Packet
@@ -279,13 +279,14 @@ impl<'a> AppendSlot<Packet<'a>> {
         let bytes = data.bytes();
         assert!(bytes.len() >= data_size);
         ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, data_size);
-        before_insert(MutPacket::wrap(&mut *data_ptr));
-        assert_eq!(Packet::wrap(&*data_ptr).bytes().len(), data_size);
+        before_insert(MutPacket::wrap_slice(slice::from_raw_parts_mut(data_ptr, data_size)));
         //*trie_entry = data_ptr;
         let trie_entry: *mut AtomicPtr<u8> = mem::transmute(trie_entry);
         //TODO mem barrier ordering
         (*trie_entry).store(data_ptr, Ordering::Release);
-        Packet::wrap(&*data_ptr)
+        let p = Packet::wrap_slice(slice::from_raw_parts(data_ptr, data_size));
+        assert_eq!(p.bytes().len(), data_size);
+        p
     }
 
     pub fn loc(&self) -> ByteLoc {
@@ -578,7 +579,7 @@ impl Trie
                 Some(v) => {
                     //let size = <V as UnStoreable>::size_from_bytes(v);
                     //Some(<V as Storeable>::bytes_to_ref(v, size))
-                    Some(Packet::wrap(v))
+                    Some(Packet::wrap_bytes(v))
                 }
             }
         }

@@ -75,6 +75,12 @@ pub mod EntryKind {
             const Read = 0x3,
             const Lock = 0x4,
             const Sentinel = 0x6,
+
+            const SingleToReplica = Data.bits | ToReplica.bits,
+            const MultiputToReplica = Multiput.bits | ToReplica.bits,
+            const SentinelToReplica = Sentinel.bits | ToReplica.bits,
+
+            const ToReplica = 0x80,
         }
     }
 
@@ -109,10 +115,10 @@ pub mod EntryKind {
     impl Kind {
         pub fn layout(&self) -> EntryLayout {
             match *self {
-                Data => EntryLayout::Data,
-                Multiput => EntryLayout::Multiput,
+                Data | SingleToReplica => EntryLayout::Data,
+                Multiput | MultiputToReplica => EntryLayout::Multiput,
+                Sentinel | SentinelToReplica => EntryLayout::Sentinel,
                 Lock => EntryLayout::Lock,
-                Sentinel => EntryLayout::Sentinel,
                 Read => EntryLayout::Read,
                 Invalid => panic!("Empty Layout"),
                 _ => unreachable!("no layout {:x}", self.bits()),
@@ -184,6 +190,41 @@ define_packet!{
             locs: [OrderIndex | cols],
             deps: [OrderIndex | num_deps],
         },
+
+        SingleToReplica: EntryKind::SingleToReplica => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            loc: OrderIndex,
+            deps: [OrderIndex | num_deps],
+            data: [u8 | data_bytes],
+            storage_loc: u64,
+        },
+
+        MultiToReplica: EntryKind::MultiputToReplica => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+            deps: [OrderIndex | num_deps],
+            data: [u8 | data_bytes],
+            storage_loc: u64,
+        },
+        SentiToReplica: EntryKind::SentinelToReplica => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+            deps: [OrderIndex | num_deps],
+            storage_loc: u64,
+        },
     }
 }
 
@@ -191,7 +232,10 @@ impl<'a> Packet::Ref<'a> {
     pub fn flag(self) -> &'a Flag {
         use self::Packet::Ref::*;
         match self {
-            Read{flags, ..} | Single{flags, ..} | Multi{flags, ..} | Senti{flags, ..} =>
+            Read{flags, ..}
+            | Single{flags, ..} | SingleToReplica{flags, ..}
+            | Multi{flags, ..} | MultiToReplica{flags, ..}
+            | Senti{flags, ..} | SentiToReplica{flags, ..} =>
                 flags,
         }
     }
@@ -203,6 +247,9 @@ impl<'a> Packet::Ref<'a> {
             Single{..} => EntryKind::Data,
             Multi{..} => EntryKind::Multiput,
             Senti{..} => EntryKind::Sentinel,
+            SingleToReplica{..} => EntryKind::SingleToReplica,
+            MultiToReplica{..} => EntryKind::MultiputToReplica,
+            SentiToReplica{..} => EntryKind::SentinelToReplica,
         }
     }
 
@@ -213,41 +260,64 @@ impl<'a> Packet::Ref<'a> {
     pub fn id(self) -> &'a Uuid {
         use self::Packet::Ref::*;
         match self {
-            Read{id, ..} | Single{id, ..} | Multi{id, ..} | Senti{id, ..} => id,
+            Read{id, ..} | Single{id, ..} | Multi{id, ..} | Senti{id, ..}
+            | SingleToReplica{id, ..}
+            | MultiToReplica{id, ..} | SentiToReplica{id, ..} => id,
         }
     }
 
     pub fn locs(self) -> &'a [OrderIndex] {
         use self::Packet::Ref::*;
         match self {
-            Read{loc, ..} | Single{loc, ..} => unsafe { slice::from_raw_parts(loc, 1) },
-            Multi{locs, ..} | Senti{locs, ..} => locs,
+            Read{loc, ..} | Single{loc, ..} | SingleToReplica{loc, ..} => unsafe {
+                slice::from_raw_parts(loc, 1)
+            },
+            Multi{locs, ..} | Senti{locs, ..}
+            | MultiToReplica{locs, ..} | SentiToReplica{locs, ..} => locs,
         }
     }
 
     pub fn data(self) -> &'a [u8] {
         use self::Packet::Ref::*;
         match self {
-            Multi{data, ..} | Single{data, ..} => data,
-            Read{..} | Senti{..} => unreachable!(),
+            Multi{data, ..} | Single{data, ..}
+            | MultiToReplica{data, ..} | SingleToReplica{data, ..} => data,
+
+            Read{..} | Senti{..} | SentiToReplica{..} => unreachable!(),
         }
     }
 
     pub fn sentinel_entry_size(self) -> usize {
         use self::Packet::Ref::*;
-        let len = self.len();
         match self {
-            Multi{data, ..} => len - data.len(),
-            Senti{..} => len,
-            Read{..} | Single{..} => unreachable!(),
+            MultiToReplica{ id, flags, lock, locs, deps, ..} =>
+                Senti{
+                    id:id, flags:flags, data_bytes:&0, lock:lock, locs:locs, deps:deps
+                }.len(),
+
+            SentiToReplica{ id, flags, data_bytes, lock, locs, deps, ..} =>
+                Senti{
+                    id:id, flags:flags, data_bytes:data_bytes, lock:lock, locs:locs, deps:deps,
+                }.len(),
+
+            Multi{ id, flags, lock, locs, deps, ..} =>
+                Senti{
+                    id:id, flags:flags, data_bytes:&0, lock:lock, locs:locs, deps:deps
+                }.len(),
+
+            s @ Senti{..} => s.len(),
+
+            Read{..} | Single{..} | SingleToReplica{..} => unreachable!(),
         }
     }
 
     pub fn lock_num(self) -> u64 {
         use self::Packet::Ref::*;
         match self {
-            Multi{lock, ..} | Senti{lock, ..} => *lock,
-            Read{..} | Single{..} => unreachable!(),
+            Multi{lock, ..} | Senti{lock, ..}
+            | MultiToReplica{lock, ..} | SentiToReplica{lock, ..} => *lock,
+
+            Read{..} | Single{..} | SingleToReplica{..} => unreachable!(),
         }
     }
 
@@ -255,8 +325,11 @@ impl<'a> Packet::Ref<'a> {
     where V: UnStoreable {
         use self::Packet::Ref::*;
         match self {
-            Read{..} | Senti{..} => unreachable!(),
-            Multi{deps, data, ..} | Single{deps, data, ..} => {
+            Read{..} | Senti{..} | SentiToReplica{..} => unreachable!(),
+            SingleToReplica{deps, data, ..}
+            | MultiToReplica{deps, data, ..}
+            | Multi{deps, data, ..}
+            | Single{deps, data, ..} => {
                 let data = unsafe { V::unstore(data) };
                 SingletonBuilder(data, deps)
             },
@@ -266,7 +339,9 @@ impl<'a> Packet::Ref<'a> {
     pub fn dependencies(self) -> &'a [OrderIndex] {
         use self::Packet::Ref::*;
         match self {
-            Single{deps, ..} | Multi{deps, ..} | Senti{deps, ..} => deps,
+            Single{deps, ..} | Multi{deps, ..} | Senti{deps, ..}
+            | SingleToReplica{deps, ..} | MultiToReplica{deps, ..} | SentiToReplica{deps, ..} =>
+                deps,
             Read{..} => unreachable!(),
         }
     }
@@ -274,8 +349,32 @@ impl<'a> Packet::Ref<'a> {
     pub fn horizon(self) -> OrderIndex {
         use self::Packet::Ref::*;
         match self {
-            Single{..} | Multi{..} | Senti{..} => unreachable!(),
+            Single{..} | Multi{..} | Senti{..}
+            | SingleToReplica{..} | MultiToReplica{..} | SentiToReplica{..} =>
+                unreachable!(),
             Read{horizon, ..} => *horizon,
+        }
+    }
+
+    pub fn non_replicated_len(self) -> usize {
+        use self::Packet::Ref::*;
+        match self {
+            c @ Read {..} | c @ Single {..} | c @ Multi{..} | c @Senti{..} =>
+                c.len(),
+
+        SingleToReplica{ id, flags, loc, deps, data, ..} =>
+            Single{id: id, flags: flags, loc: loc, deps: deps, data: data}.len(),
+
+        MultiToReplica{ id, flags, lock, locs, deps, data, ..} =>
+            Multi{
+                id:id, flags:flags, lock:lock, locs:locs, deps:deps, data:data,
+            }.len(),
+
+        SentiToReplica{ id, flags, data_bytes, lock, locs, deps, ..} =>
+            Senti{
+                id:id, flags:flags, data_bytes:data_bytes, lock:lock, locs:locs, deps:deps,
+            }.len(),
+
         }
     }
 }
@@ -287,7 +386,10 @@ impl<'a> Packet::Mut<'a> {
             &mut Read{ref mut flags, ..}
             | &mut Single{ref mut flags, ..}
             | &mut Multi{ref mut flags, ..}
-            | &mut Senti{ref mut flags, ..} =>
+            | &mut Senti{ref mut flags, ..}
+            | &mut SingleToReplica{ref mut flags, ..}
+            | &mut MultiToReplica{ref mut flags, ..}
+            | &mut SentiToReplica{ref mut flags, ..} =>
                 &mut **flags,
         }
     }
@@ -298,7 +400,10 @@ impl<'a> Packet::Mut<'a> {
             &mut Read{ref mut flags, ..}
             | &mut Single{ref mut flags, ..}
             | &mut Multi{ref mut flags, ..}
-            | &mut Senti{ref mut flags, ..} =>
+            | &mut Senti{ref mut flags, ..}
+            | &mut SingleToReplica{ref mut flags, ..}
+            | &mut MultiToReplica{ref mut flags, ..}
+            | &mut SentiToReplica{ref mut flags, ..} =>
                 &mut **flags,
         }
     }
@@ -306,10 +411,16 @@ impl<'a> Packet::Mut<'a> {
     pub fn locs_mut(&mut self) -> &mut [OrderIndex] {
         use self::Packet::Mut::*;
         match self {
-            &mut Read{ref mut loc, ..} | &mut Single{ref mut loc, ..} => unsafe {
+            &mut Read{ref mut loc, ..}
+            | &mut Single{ref mut loc, ..}
+            | &mut SingleToReplica{ref mut loc, ..}  => unsafe {
                 slice::from_raw_parts_mut(&mut **loc, 1)
             },
-            &mut Multi{ref mut locs, ..} | &mut Senti{ref mut locs, ..} => &mut *locs,
+
+            &mut Multi{ref mut locs, ..}
+            | &mut Senti{ref mut locs, ..}
+            | &mut MultiToReplica{ref mut locs, ..}
+            | &mut SentiToReplica{ref mut locs, ..} => &mut *locs,
         }
     }
 
@@ -317,43 +428,52 @@ impl<'a> Packet::Mut<'a> {
         use self::Packet::Mut::*;
         match self {
             &mut Multi{ref mut lock, ..} | &mut Senti{ref mut lock, ..} => &mut *lock,
-            &mut Read{..} | &mut Single{..} => unreachable!(),
+            &mut MultiToReplica{ref mut lock, ..} | &mut SentiToReplica{ref mut lock, ..} =>
+                &mut *lock,
+            &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..} => unreachable!(),
         }
     }
 }
 
+//FIXME make slice
 #[derive(Copy, Clone)]
 pub struct Entry<'a> {
-    inner: &'a u8,
+    inner: &'a [u8],
 }
 
+//FIXME make slice
 pub struct MutEntry<'a> {
-    inner: &'a mut u8,
+    inner: &'a mut [u8],
 }
 
 impl<'a> Entry<'a> {
-    pub unsafe fn wrap(byte: &'a u8) -> Self {
-        Entry { inner: byte }
-    }
 
-    pub fn bytes(self) -> &'a [u8] {
-        //FIXME
+    pub unsafe fn wrap_bytes(byte: *const u8) -> Self {
         let mut size = Packet::min_len();
         loop {
-            let slice = unsafe { slice::from_raw_parts(self.inner, size) };
-            match unsafe { Packet::Ref::try_ref(slice) } {
+            let slice = slice::from_raw_parts(byte, size);
+            match Packet::Ref::try_ref(slice) {
                 Err(Packet::WrapErr::NotEnoughBytes(n)) => size = n,
                 Err(e) => panic!("{:?}", e),
                 Ok((c, _)) => {
                     debug_assert_eq!(slice.len(), c.len());
-                    return slice
+                    return Entry { inner: slice }
                 }
             }
         }
+
+    }
+
+    pub fn wrap_slice(slice: &'a [u8]) -> Self {
+        Entry { inner: slice }
+    }
+
+    pub fn bytes(self) -> &'a [u8] {
+        self.inner
     }
 
     pub fn contents(self) -> EntryContents<'a> {
-        unsafe { EntryContents::try_ref(self.bytes()).unwrap().0 }
+        unsafe { EntryContents::try_ref(self.inner).unwrap().0 }
     }
 
     pub fn flag(self) -> &'a EntryFlag::Flag {
@@ -373,36 +493,39 @@ impl<'a> fmt::Debug for Entry<'a> {
 
 #[allow(dead_code)]
 impl<'a> MutEntry<'a> {
-    pub unsafe fn wrap(byte: &'a mut u8) -> Self {
-        MutEntry { inner: byte }
-    }
 
-    pub fn bytes(&mut self) -> &mut [u8] {
-        //FIXME
+    pub unsafe fn wrap_bytes(byte: *mut u8) -> Self {
         let mut size = Packet::min_len();
         loop {
-            let slice = unsafe { slice::from_raw_parts_mut(self.inner, size) };
-            match unsafe { Packet::Mut::try_mut(slice) } {
+            let slice = slice::from_raw_parts_mut(byte, size);
+            match Packet::Mut::try_mut(slice) {
                 Err(Packet::WrapErr::NotEnoughBytes(n)) => size = n,
                 Err(e) => panic!("{:?}", e),
                 Ok((c, _)) => {
                     debug_assert_eq!(slice.len(), c.as_ref().len());
-                    return slice
+                    return MutEntry { inner: slice }
                 }
             }
         }
     }
-    pub fn bytes_a(&'a mut self) -> &'a mut [u8] {
-        //FIXME
-        let mut size = Packet::min_len();
-        loop {
-            let slice = unsafe { slice::from_raw_parts_mut(self.inner, size) };
-            match unsafe { Packet::Mut::try_mut(slice) } {
-                Err(Packet::WrapErr::NotEnoughBytes(n)) => size += n,
-                Err(e) => panic!("{:?}", e),
-                Ok(..) => return slice,
-            }
+
+    pub fn wrap_slice(slice: &'a mut [u8]) -> Self {
+        MutEntry { inner: slice }
+    }
+
+    pub fn to_non_replicated(&mut self) {
+        unsafe {
+            let mut kind: EntryKind::Kind = mem::transmute::<u8, _>(self.inner[0]);
+            let () = kind.remove(EntryKind::ToReplica);
+            self.inner[0] = mem::transmute::<EntryKind::Kind, u8>(kind);
         }
+    }
+
+    pub fn bytes(&mut self) -> &mut [u8] {
+        &mut *self.inner
+    }
+    pub fn bytes_a(&'a mut self) -> &'a mut [u8] {
+        &mut *self.inner
     }
 
     pub fn contents(&mut self) -> EntryContentsMut {
@@ -414,12 +537,8 @@ impl<'a> MutEntry<'a> {
     }
 
     pub fn contents_a(&'a mut self) -> EntryContentsMut<'a> {
-        unsafe { EntryContentsMut::try_mut(self.bytes_a()).unwrap().0 }
+        unsafe { EntryContentsMut::try_mut(self.inner).unwrap().0 }
     }
-
-    //pub fn flag(&'a mut self) -> &'a mut EntryFlag::Flag {
-    //    self.contents_a().flag_mut_a()
-    //}
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -520,8 +639,10 @@ pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
     }*/
     use self::Packet::Ref::*;
     match bytes_as_entry(bytes) {
-        Read{..} | Senti{..} => unreachable!(),
-        Single{data, ..} | Multi{data, ..} => data,
+        Read{..} | Senti{..} | SentiToReplica{..} => unreachable!(),
+
+        Single{data, ..} | Multi{data, ..}
+        | SingleToReplica{data, ..} | MultiToReplica{data, ..}=> data,
     }
 }
 

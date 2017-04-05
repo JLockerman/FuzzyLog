@@ -102,13 +102,14 @@ impl Buffer {
 
     pub fn entry(&self) -> Entry {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        unsafe {Entry::wrap(&self.inner[0])}
+        Entry::wrap_slice(&self.entry_slice())
     }
 
     pub fn entry_mut(&mut self) -> MutEntry {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         debug_assert!(self.packet_fits(), "packet size {}, buffer len {}", self.entry_size(), self.inner.len());
-        unsafe {MutEntry::wrap(&mut self.inner[0])}
+        let size = self.entry_size();
+        MutEntry::wrap_slice(&mut self[..size])
     }
 
     pub fn contents(&self) -> EntryContents {
