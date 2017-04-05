@@ -63,7 +63,7 @@ pub mod c_binidings {
     // use multitcp_store::TcpStore;
     use async::fuzzy_log::log_handle::LogHandle;
 
-    use std::collections::HashMap;
+    //use std::collections::HashMap;
     use std::{mem, ptr, slice};
 
     use std::ffi::CStr;
@@ -167,7 +167,7 @@ pub mod c_binidings {
         assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
         //assert_eq!(num_ips, 1, "Multiple servers are not yet supported via the C API");
         assert!(chain_server_ips != ptr::null());
-        assert!(unsafe {*chain_server_ips != ptr::null()});
+        assert!(*chain_server_ips != ptr::null());
         assert!(num_chain_ips >= 1);
         assert!(color != ptr::null());
         assert!(colors_valid(color));
@@ -178,7 +178,7 @@ pub mod c_binidings {
                 CStr::from_ptr(s).to_str().expect("invalid IP string")
                     .parse().expect("invalid IP addr")
             ).collect::<Vec<SocketAddr>>();
-        let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
+        let colors = slice::from_raw_parts((*color).mycolors, (*color).numcolors);
         Box::new(LogHandle::new_tcp_log(server_addrs.into_iter(),
             colors.into_iter().cloned().map(order::from)))
     }
@@ -466,7 +466,7 @@ pub mod c_binidings {
         num_locs: *mut usize,
     ) -> Vals {
         assert!(data_read != ptr::null_mut());
-        let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         let val = dag.get_next();
         let (data, locs) = val.unwrap_or((&[], &[]));
 
@@ -567,26 +567,26 @@ pub mod c_binidings {
     type Log = ();
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_new(server_addr: *const c_char, relevent_chains: *const u32,
-        num_relevent_chains: u16, callback: extern fn(*const u8, u16) -> u8) -> Box<Log> {
+    pub extern "C" fn fuzzy_log_new(_server_addr: *const c_char, _relevent_chains: *const u32,
+        _num_relevent_chains: u16, _callback: extern fn(*const u8, u16) -> u8) -> Box<Log> {
         unimplemented!()
     }
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_append(log: &mut Log,
-        chain: u32, val: *const u8, len: u16, deps: *const OrderIndex, num_deps: u16) -> OrderIndex {
+    pub extern "C" fn fuzzy_log_append(_log: &mut Log,
+        _chain: u32, _val: *const u8, _len: u16, _deps: *const OrderIndex, _num_deps: u16) -> OrderIndex {
         unimplemented!()
     }
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_multiappend(log: &mut Log,
-        chains: *mut OrderIndex, num_chains: u16,
-        val: *const u8, len: u16, deps: *const OrderIndex, num_deps: u16) {
+    pub extern "C" fn fuzzy_log_multiappend(_log: &mut Log,
+        _chains: *mut OrderIndex, _num_chains: u16,
+        _val: *const u8, _len: u16, _deps: *const OrderIndex, _num_deps: u16) {
         unimplemented!()
     }
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_play_forward(log: &mut Log, chain: u32) -> OrderIndex {
+    pub extern "C" fn fuzzy_log_play_forward(_log: &mut Log, _chain: u32) -> OrderIndex {
         unimplemented!()
     }
 
