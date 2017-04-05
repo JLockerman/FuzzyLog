@@ -1281,7 +1281,7 @@ impl Connected for PerServer<TcpStream> {
                     self.bytes_read += i
                 },
                 Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock => return Ok(None),
+                    ErrorKind::WouldBlock | ErrorKind::NotConnected => return Ok(None),
                     _ => return Err(e),
                 }
             }
