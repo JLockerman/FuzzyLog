@@ -334,6 +334,9 @@ impl PerColor {
     pub fn fetching_range(&mut self, (low, high): (entry, entry), is_being_read: &IsRead) {
         //FIXME is_being_read?
         debug_assert!(low <= high);
+        if self.is_being_read.is_none() {
+            self.is_being_read = Some(ReadState::new(is_being_read))
+        }
         self.read_status.set_range_as_sent(low, high);
     }
 
