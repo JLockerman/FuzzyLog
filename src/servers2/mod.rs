@@ -981,19 +981,56 @@ impl<T: Copy> Chain<T> {
     }
 }
 
-fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
--> (Option<Buffer>, &'static [u8], T, u64, bool) {
+pub type StorageLoc = u64;
+//pub type SkeensTimestamp = u64;
+pub type SkeensReplicationOrder = u64;
+
+pub enum ServerResponse<T: Send + Sync>{
+    None(BufferSlice, T),
+    Echo(BufferSlice, T),
+    Read(BufferSlice, T, &'static [u8]),
+    EmptyRead(BufferSlice, T),
+    FinishedAppend(BufferSlice, T, &'static [u8], StorageLoc),
+    FinishedSingletonSkeens1(BufferSlice, T, StorageLoc), //TODO SkeensReplicationOrder),
+    FinishedSingletonSkeens2(&'static [u8], T),
+    FinishedSkeens1(BufferSlice, T), //TODO &[SkeensReplicationOrder]
+    FinishedSkeens2(&'static [u8], T),
+
+    FinishOldMultiappend(BufferSlice, T, &'static [u8]),
+}
+
+/*
+impl<T: Send + Sync> ServerResponse<T> {
+    pub fn t(&self) -> &T {
+        match self {
+            &ServerResponse::None(_, ref t),
+            | &ServerResponse::Echo(_, ref t)
+            | &ServerResponse::Read(_, ref t, _)
+            | &ServerResponse::EmptyRead(_, ref t)
+            | &ServerResponse::FinishedAppend(_, ref t, _, _)
+            | &ServerResponse::FinishedSingletonSkeens1(_, ref t, _)
+            | &ServerResponse::FinishedSingletonSkeens2(_, ref t)
+            | &ServerResponse::FinishedSkeens1(_, ref t)
+            | &ServerResponse::FinishedSkeens2(_, ref t) => t,
+        }
+    }
+}*/
+
+fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize) -> ServerResponse<T> {
+//-> (Option<Buffer>, &'static [u8], T, u64, bool) {
     match msg {
         Reply(buffer, t) => {
             trace!("WORKER {} finish reply", worker_num);
-            (Some(buffer), &[], t, 0, false)
+            ServerResponse::Echo(buffer, t)
+            //(Some(buffer), &[], t, 0, false)
         },
 
         Write(buffer, slot, t) => unsafe {
             trace!("WORKER {} finish write", worker_num);
             let loc = slot.loc();
             let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
-            (Some(buffer), ret, t, loc, false)
+            ServerResponse::FinishedAppend(buffer, t, ret, loc)
+            //(Some(buffer), ret, t, loc, false)
         },
 
         SingleSkeens { mut buffer, storage, storage_loc, t, } => unsafe {
@@ -1006,7 +1043,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 ptr::copy_nonoverlapping(buffer[..len].as_ptr(), storage, len);
                 buffer.contents_mut().flag_mut().insert(EntryFlag::Skeens1Queued);
             }
-            (Some(buffer), &[], t, storage_loc, true)
+            ServerResponse::FinishedSingletonSkeens1(buffer, t, storage_loc)
+            //(Some(buffer), &[], t, storage_loc, true)
         },
 
         // Safety, since both the original append and the delayed portion
@@ -1023,7 +1061,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
             (*trie_entry).store(storage as *mut u8, Ordering::Release);
             let ret = slice::from_raw_parts(storage, len);
-            (None, ret, t, 0, false)
+            ServerResponse::FinishedSingletonSkeens2(ret, t)
+            //(None, ret, t, 0, false)
         },
 
         Read(read, mut buffer, t) => {
@@ -1032,7 +1071,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             //FIXME needless copy
             buffer.ensure_capacity(bytes.len());
             buffer[..bytes.len()].copy_from_slice(bytes);
-            (Some(buffer), bytes, t, 0, false)
+            ServerResponse::Read(buffer, t, bytes)
+            //(Some(buffer), bytes, t, 0, false)
         },
 
         EmptyRead(last_valid_loc, mut buffer, t) => {
@@ -1059,7 +1099,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             }
             buffer.ensure_len();
             trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
-            (Some(buffer), &[], t, 0, false)
+            ServerResponse::EmptyRead(buffer, t)
+            //(Some(buffer), &[], t, 0, false)
         },
 
         MultiReplica {
@@ -1103,10 +1144,10 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
             let ret = slice::from_raw_parts(multi_storage, len);
             //TODO is re right for sentinel only writes?
             if remaining_senti_places.len() == 0 {
-                return (Some(buffer), ret, t, 0, false)
+                return ServerResponse::FinishOldMultiappend(buffer, t, ret) //(Some(buffer), ret, t, 0, false)
             }
             else {
-                let mut e = buffer.contents();
+                let e = buffer.contents();
                 let len = e.sentinel_entry_size();
                 trace!("place senti_storage @ {:?}, len {}", senti_storage, len);
                 let b = &buffer[..];
@@ -1123,7 +1164,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 }
             }
             //TODO is re right for sentinel only writes?
-            (Some(buffer), ret, t, 0, false)
+            ServerResponse::FinishOldMultiappend(buffer, t, ret)
+            //(Some(buffer), ret, t, 0, false)
         },
 
         Skeens1{mut buffer, storage, t} => unsafe {
@@ -1149,7 +1191,8 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 }
             }
             buffer.contents_mut().flag_mut().insert(EntryFlag::Skeens1Queued);
-            (Some(buffer), &[], t, 0, false)
+            ServerResponse::FinishedSkeens1(buffer, t)
+            //(Some(buffer), &[], t, 0, false)
         },
         SkeensFinished{loc, trie_slot, storage, t,} => unsafe {
             trace!("WORKER {} finish skeens2 @ {:?}", worker_num, loc);
@@ -1180,11 +1223,13 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize)
                 };
                 (*trie_entry).store(to_store, Ordering::Release);
             }
-            (None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0, false)
+            ServerResponse::FinishedSkeens2(if st1.len() > 0 { &**st1 } else { &**st0 }, t)
+            //(None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0, false)
         },
         ReturnBuffer(buffer, t) => {
             trace!("WORKER {} return buffer", worker_num);
-            (Some(buffer), &[], t, 0, true)
+            ServerResponse::None(buffer, t)
+            //(Some(buffer), &[], t, 0, true)
         },
     }
 }
