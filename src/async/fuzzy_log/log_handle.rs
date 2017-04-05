@@ -331,6 +331,7 @@ where V: Storeable {
     pub fn snapshot_colors(&mut self, colors: &[order]) {
         trace!("HANDLE send snap {:?}.", colors);
         let colors = colors.to_vec();
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
         self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
     }
 
