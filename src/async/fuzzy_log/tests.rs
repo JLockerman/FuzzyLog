@@ -637,6 +637,40 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), None);
         }
 
+        #[test]
+        #[inline(never)]
+        pub fn test_snapshot_colors() {
+            let _ = env_logger::init();
+            trace!("TEST snapshot_colors column");
+
+            let mut lh = $new_thread_log::<i32>(vec![75.into(), 76.into(), 77.into()]);
+            let cols = vec![vec![12, 19, 30006, 122, 9],
+                vec![45, 111111, -64, 102, -10101],
+                vec![-1, -2, -9, 16, -108]];
+            for (j, col) in cols.iter().enumerate() {
+                for i in col.iter() {
+                    let _ = lh.append(((j + 75) as u32).into(), i, &[]);
+                }
+            }
+            lh.snapshot_colors(&[75.into(), 76.into(), 77.into()]);
+            let mut is = [0u32, 0, 0, 0];
+            let total_len = cols.iter().fold(0, |len, col| len + col.len());
+            for _ in 0..total_len {
+                let next = lh.get_next();
+                assert!(next.is_some());
+                let (&n, ois) = next.unwrap();
+                assert_eq!(ois.len(), 1);
+                let OrderIndex(o, i) = ois[0];
+                let off: u32 = (o - 75).into();
+                is[off as usize] = is[off as usize] + 1;
+                let i: u32 = i.into();
+                assert_eq!(is[off as usize], i);
+                let c = is[off as usize] - 1;
+                assert_eq!(n, cols[off as usize][c as usize]);
+            }
+            assert_eq!(lh.get_next(), None);
+        }
+
         //TODO test append after prefetch but before read
     );
     () => {
