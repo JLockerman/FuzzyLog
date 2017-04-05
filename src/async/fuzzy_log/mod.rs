@@ -158,8 +158,8 @@ impl ThreadLog {
         match msg {
             SnapshotAndPrefetch(chain) => {
                 self.print_data.snap(1);
-                trace!("FUZZY snapshot");
                 self.num_snapshots = self.num_snapshots.saturating_add(1);
+                trace!("FUZZY snapshot {:?}: {:?}", chain, self.num_snapshots);
                 //FIXME
                 if chain != 0.into() {
                     self.fetch_snapshot(chain);
@@ -177,6 +177,9 @@ impl ThreadLog {
                 true
             }
             MultiSnapshotAndPrefetch(chains) => {
+                self.print_data.snap(1);
+                self.num_snapshots = self.num_snapshots.saturating_add(1);
+                trace!("FUZZY snapshot {:?}: {:?}", chains, self.num_snapshots);
                 for chain in chains {
                     self.fetch_snapshot(chain);
                     self.prefetch(chain);
