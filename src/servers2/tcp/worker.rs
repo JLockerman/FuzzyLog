@@ -7,11 +7,12 @@ use std::time::Duration;
 use servers2::{
     self, spsc, ToReplicate, ToWorker,
     DistributeToWorkers, Troption, SkeensMultiStorage, ServerResponse,
+    ToSend
 };
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
-use packets::{EntryLayout, OrderIndex, EntryFlag, bytes_as_entry};
+use packets::{EntryLayout, OrderIndex, EntryFlag, EntryContents, bytes_as_entry};
 
 use mio;
 use mio::tcp::*;
@@ -28,13 +29,20 @@ use super::per_socket::{PerSocket, RecvPacket};
 //FIXME we should use something more accurate than &static [u8],
 pub enum WorkerToDist {
     Downstream(WorkerNum, Ipv4SocketAddr, &'static [u8], u64),
+    DownstreamB(WorkerNum, Ipv4SocketAddr, Box<[u8]>, u64),
+    DownstreamC(WorkerNum, Ipv4SocketAddr, Box<[u8]>),
     ToClient(Ipv4SocketAddr, &'static [u8]),
+    ToClientB(Ipv4SocketAddr, Box<[u8]>),
 }
 
 pub enum DistToWorker {
     NewClient(mio::Token, TcpStream),
     //ToClient(ToWorker<(usize, mio::Token, Ipv4SocketAddr)>),
     ToClient(mio::Token, &'static [u8], Ipv4SocketAddr, u64),
+    ToClientB(mio::Token, Box<[u8]>, Ipv4SocketAddr, u64),
+    ToClientC(mio::Token, Box<[u8]>, Ipv4SocketAddr),
+    //ToReplicate(mio::Token, Box<[u8]>, Ipv4SocketAddr, u64),
+    //ToClientC(mio::Token, Box<EntryContents<'static>>, Ipv4SocketAddr, u64),
 }
 
 pub enum ToLog<T> {
@@ -333,6 +341,43 @@ impl Worker {
                         //TODO replace with wake function
                         self.inner.awake_io.push_back(tok);
                     },
+
+                    Some(DistToWorker::ToClientB(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
+                        self.inner.print_data.from_dist_D(1);
+                        trace!("WORKER {} recv downstream from dist for {}.",
+                            self.inner.worker_num, src_addr);
+                        {
+                            let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
+                            //client.add_downstream_send(buffer);
+                            //client.add_downstream_send(src_addr.bytes());
+                            let mut storage_log_bytes: [u8; 8] = [0; 8];
+                            LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                            //client.add_downstream_send(&storage_log_bytes)
+                            client.add_downstream_send3(
+                                &buffer, src_addr.bytes(), &storage_log_bytes);
+                        }
+                        //TODO replace with wake function
+                        self.inner.awake_io.push_back(DOWNSTREAM);
+                    }
+                    Some(DistToWorker::ToClientB(tok, buffer, src_addr, storage_loc)) => {
+                        self.inner.print_data.from_dist_T(1);
+                        debug_assert_eq!(
+                            Ipv4SocketAddr::from_socket_addr(
+                                    self.clients[&tok].stream().peer_addr().unwrap()
+                            ),
+                            src_addr
+                        );
+                        debug_assert_eq!(storage_loc, 0);
+                        trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
+                        assert!(tok >= FIRST_CLIENT_TOKEN);
+                        self.clients.get_mut(&tok).unwrap().add_downstream_send(&buffer);
+                        //TODO replace with wake function
+                        self.inner.awake_io.push_back(tok);
+                    },
+
+                    Some(DistToWorker::ToClientC(..)) => {
+                        unimplemented!()
+                    }
                 }
                 continue 'event
             }
@@ -351,7 +396,43 @@ impl Worker {
         while let Some(log_work) = self.inner.from_log.try_recv() {
             //self.inner.waiting_for_log -= 1;
             self.inner.print_data.from_log(1);
-            let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
+            let (_wk, recv_token, src_addr) = log_work.get_associated_data();
+            debug_assert_eq!(_wk, self.inner.worker_num);
+            let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr);
+            let continue_replication = next_hop
+                .map(|(_, send_token)| send_token == DOWNSTREAM).unwrap_or(false);
+            let (buffer, send_token) = servers2::handle_to_worker2(log_work, self.inner.worker_num, continue_replication,
+                |to_send, _| {
+                    match next_hop {
+                        None => {
+                            trace!("WORKER {:?} re dist", self.inner.worker_num);
+                            self.redist_to_client(src_addr, to_send);
+                            None
+                        },
+                        Some((worker_num, DOWNSTREAM)) => {
+                            if worker_num != self.inner.worker_num {
+                                self.redist_downstream(worker_num, src_addr, to_send);
+                                return None
+                            }
+
+                            self.send_downsteam(recv_token, src_addr, to_send);
+                            Some(DOWNSTREAM)
+                        },
+
+                        Some((worker_num, send_token)) => {
+                            if worker_num != self.inner.worker_num {
+                                self.redist_to_client(src_addr, to_send);
+                                return None
+                            }
+
+                            self.send_to_client(send_token, src_addr, to_send);
+                            Some(send_token)
+                        }
+                    }
+                }
+            );
+
+            /*let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
             //let (buffer, bytes, (wk, token, src_addr), storage_loc, just_ret) = work_res;
             trace!("WORKER {} recv from log.", self.inner.worker_num);
             let (recv_token, send_tok, buffer) = match work_res {
@@ -519,15 +600,96 @@ impl Worker {
                     self.clients.get_mut(&recv_token).unwrap().add_downstream_send(written);
                     (recv_token, None, None)
                 },
-            };
+            };*/
             self.inner.awake_io.push_back(recv_token);
-            if let Some((send_token, true)) = send_tok.map(|t| (t, t != recv_token)) {
+            if let Some((send_token, true)) = send_token.map(|t| (t, t != recv_token)) {
                 self.inner.awake_io.push_back(send_token);
             }
             buffer.map(|b| self.clients.get_mut(&recv_token).unwrap().return_buffer(b));
             continue
         }
     }// end handle_from_log
+
+    fn send_downsteam(
+        &mut self, recv_token: mio::Token, src_addr: Ipv4SocketAddr, to_send: ToSend
+    ) {
+        match to_send {
+            ToSend::Nothing => return,
+            ToSend::OldReplication(to_replicate, storage_loc) => {
+                let mut storage_log_bytes: [u8; 8] = [0; 8];
+                LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                self.clients.get_mut(&DOWNSTREAM).unwrap()
+                    .add_downstream_send3(to_replicate, src_addr.bytes(), &storage_log_bytes)
+            },
+            ToSend::Contents(to_send) =>
+                self.clients.get_mut(&DOWNSTREAM).unwrap()
+                    .add_downstream_contents2(to_send, src_addr.bytes()),
+            ToSend::Slice(to_send) =>
+                self.clients.get_mut(&recv_token).unwrap()
+                    .add_downstream_send(to_send),
+            ToSend::Read(_to_send) => unreachable!(),
+        }
+    }
+
+    fn send_to_client(&mut self, send_token: mio::Token, _src_addr: Ipv4SocketAddr, to_send: ToSend) {
+        match to_send {
+            ToSend::Nothing => return,
+            ToSend::OldReplication(..) => unreachable!(),
+            ToSend::Contents(to_send) =>
+                self.clients.get_mut(&send_token).unwrap().add_downstream_contents(to_send),
+            ToSend::Slice(to_send) =>
+                self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
+            ToSend::Read(to_send) =>
+                self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
+        }
+    }
+
+    fn redist_downstream(&mut self, worker: WorkerNum, src_addr: Ipv4SocketAddr, to_send: ToSend) {
+        match to_send {
+            ToSend::Nothing => return,
+            ToSend::Read(..) => unreachable!(),
+            ToSend::Slice(..) => unreachable!(), //?
+
+            ToSend::OldReplication(to_replicate, storage_loc) =>
+                self.inner.to_dist.send(
+                    WorkerToDist::Downstream(worker, src_addr, to_replicate, storage_loc)
+                ).ok().unwrap(),
+
+            ToSend::Contents(to_replicate) => {
+                let mut vec = Vec::with_capacity(to_replicate.len());
+                to_replicate.fill_vec(&mut vec);
+                let to_replicate = vec.into_boxed_slice();
+                self.inner.to_dist.send(
+                    WorkerToDist::DownstreamC(worker, src_addr, to_replicate)
+                ).ok().unwrap()
+            },
+        }
+    }
+
+    fn redist_to_client(&mut self, src_addr: Ipv4SocketAddr, to_send: ToSend) {
+        match to_send {
+            ToSend::Nothing => return,
+            ToSend::OldReplication(..) => unreachable!(),
+
+            ToSend::Read(to_send) =>
+                self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, to_send))
+                    .ok().unwrap(),
+
+            ToSend::Slice(to_send) =>
+                self.inner.to_dist.send(
+                    WorkerToDist::ToClientB(src_addr, to_send.to_vec().into_boxed_slice())
+                ).ok().unwrap(),
+
+            ToSend::Contents(to_send) => {
+                let mut vec = Vec::with_capacity(to_send.len());
+                to_send.fill_vec(&mut vec);
+                let to_send = vec.into_boxed_slice();
+                self.inner.to_dist.send(
+                    WorkerToDist::ToClientB(src_addr, to_send)
+                ).ok().unwrap()
+            },
+        }
+    }
 }
 
 impl WorkerInner {

@@ -428,12 +428,37 @@ pub fn run_with_replication(
                                 (worker, DOWNSTREAM, buffer, addr, storage_loc)
                             },
 
+                            WorkerToDist::DownstreamB(worker, addr, buffer, storage_loc) => {
+                                trace!("DIST {} downstream worker for {} is {}.",
+                                    this_server_num, addr, worker);
+                                dist_to_workers[worker].send(
+                                    DistToWorker::ToClientB(
+                                        DOWNSTREAM, buffer, addr, storage_loc)
+                                );
+                                continue
+                            },
+
+                            WorkerToDist::DownstreamC(..) => {
+                                unimplemented!()
+                            },
+
                             WorkerToDist::ToClient(addr, buffer) => {
                                 trace!("DIST {} looking for worker for {}.",
                                     this_server_num, addr);
                                 //FIXME this is racey, if we don't know who gets the message it fails
                                 let (worker, token) = worker_for_client[&addr].clone();
                                 (worker, token, buffer, addr, 0)
+                            }
+
+                            WorkerToDist::ToClientB(addr, buffer) => {
+                                trace!("DIST {} looking for worker for {}.",
+                                    this_server_num, addr);
+                                //FIXME this is racey, if we don't know who gets the message it fails
+                                let (worker, token) = worker_for_client[&addr].clone();
+                                dist_to_workers[worker].send(
+                                    DistToWorker::ToClientB(token, buffer, addr, 0)
+                                );
+                                continue
                             }
                         };
                         dist_to_workers[worker].send(

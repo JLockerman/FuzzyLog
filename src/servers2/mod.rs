@@ -985,6 +985,7 @@ pub type StorageLoc = u64;
 //pub type SkeensTimestamp = u64;
 pub type SkeensReplicationOrder = u64;
 
+
 pub enum ServerResponse<T: Send + Sync>{
     None(BufferSlice, T),
     Echo(BufferSlice, T),
@@ -999,6 +1000,21 @@ pub enum ServerResponse<T: Send + Sync>{
     FinishOldMultiappend(BufferSlice, T, &'static [u8]),
 }
 
+/*
+pub enum ServerResponse<T: Send + Sync>{
+    None(BufferSlice, T),
+    Echo(BufferSlice, T),
+    Read(BufferSlice, T, &'static [u8]),
+    EmptyRead(BufferSlice, T),
+    FinishedAppend(BufferSlice, T, EntryContents<'static>),
+    FinishedSingletonSkeens1(BufferSlice, T, EntryContents<'static>),
+    FinishedSingletonSkeens2(&'static [u8], T),
+    FinishedSkeens1(BufferSlice, T, EntryContents<'static>),
+    FinishedSkeens2(&'static [u8], T),
+
+    FinishOldMultiappend(BufferSlice, T, &'static [u8]),
+}
+*/
 /*
 impl<T: Send + Sync> ServerResponse<T> {
     pub fn t(&self) -> &T {
@@ -1233,6 +1249,282 @@ fn handle_to_worker<T: Send + Sync>(msg: ToWorker<T>, worker_num: usize) -> Serv
         },
     }
 }
+
+pub enum ToSend<'a> {
+    Nothing,
+    Contents(EntryContents<'a>),
+    Slice(&'a [u8]),
+    Read(&'static [u8]),
+    OldReplication(&'static [u8], StorageLoc),
+}
+
+fn handle_to_worker2<T: Send + Sync, U, SendFn>(
+    msg: ToWorker<T>, worker_num: usize, continue_replication: bool, send: SendFn
+) -> (Option<BufferSlice>, U)
+where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
+    match msg {
+
+        ReturnBuffer(buffer, t) => {
+            trace!("WORKER {} return buffer", worker_num);
+            let u = send(ToSend::Nothing, t);
+            (Some(buffer), u)
+            //ServerResponse::None(buffer, t)
+            //(Some(buffer), &[], t, 0, true)
+        },
+
+        Reply(buffer, t) => {
+            trace!("WORKER {} finish reply", worker_num);
+            let u = send(ToSend::Slice(buffer.entry_slice()), t);
+            (Some(buffer), u)
+            //ServerResponse::Echo(buffer, t)
+            //(Some(buffer), &[], t, 0, false)
+        },
+
+        Read(read, buffer, t) => {
+            trace!("WORKER {} finish read", worker_num);
+            //let bytes = read.bytes();
+            //FIXME needless copy
+            //buffer.ensure_capacity(bytes.len());
+            //buffer[..bytes.len()].copy_from_slice(bytes);
+            let u = send(ToSend::Read(read.bytes()), t);
+            (Some(buffer), u)
+            //ServerResponse::Read(buffer, t, bytes)
+            //(Some(buffer), bytes, t, 0, false)
+        },
+
+        EmptyRead(last_valid_loc, buffer, t) => {
+            let (old_id, old_loc) = {
+                let e = buffer.contents();
+                (e.id().clone(), e.locs()[0])
+            };
+            let chain: order = old_loc.0;
+            trace!("WORKER {} finish empty read {:?}", worker_num, old_loc);
+            let u = send(ToSend::Contents(EntryContents::Read{
+                        id: &old_id,
+                        flags: &EntryFlag::Nothing,
+                        loc: &old_loc,
+                        data_bytes: &0,
+                        dependency_bytes: &0,
+                        horizon: &OrderIndex(chain, last_valid_loc),
+                    }), t);
+            (Some(buffer), u)
+            //ServerResponse::EmptyRead(buffer, t)
+            //(Some(buffer), &[], t, 0, false)
+        },
+
+        Write(buffer, slot, t) => unsafe {
+            trace!("WORKER {} finish write", worker_num);
+            let loc = slot.loc();
+            let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
+            let u = if continue_replication {
+                send(ToSend::OldReplication(ret, loc), t)
+            } else {
+                send(ToSend::Slice(ret), t)
+            };
+            (Some(buffer), u)
+            //ServerResponse::FinishedAppend(buffer, t, ret, loc)
+            //(Some(buffer), ret, t, loc, false)
+        },
+
+        SingleSkeens { mut buffer, storage, storage_loc, t, } => unsafe {
+            {
+                let len = {
+                    let mut e = buffer.contents_mut();
+                    e.flag_mut().insert(EntryFlag::ReadSuccess);
+                    e.as_ref().len()
+                };
+                ptr::copy_nonoverlapping(buffer[..len].as_ptr(), storage, len);
+                buffer.contents_mut().flag_mut().insert(EntryFlag::Skeens1Queued);
+            }
+            let u = if continue_replication {
+                unimplemented!()
+            } else {
+                send(ToSend::Nothing, t)
+            };
+            (Some(buffer), u)
+            //ServerResponse::FinishedSingletonSkeens1(buffer, t, storage_loc)
+            //(Some(buffer), &[], t, storage_loc, true)
+        },
+
+        // Safety, since both the original append and the delayed portion
+        // get finished by the same worker this does not race
+        // the storage_loc is sent with the first round
+        DelayedSingle { index, trie_slot, storage, t, } => unsafe {
+            trace!("WORKER {} finish delayed single", worker_num);
+            let len = {
+                let storage = storage as *mut u8;
+                let mut e = MutEntry::wrap_bytes(&mut *storage).into_contents();
+                e.locs_mut()[0].1 = entry::from(index as u32);
+                e.as_ref().len()
+            };
+            let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
+            (*trie_entry).store(storage as *mut u8, Ordering::Release);
+            let ret = slice::from_raw_parts(storage, len);
+            let u = if continue_replication {
+                unimplemented!()
+            } else {
+                send(ToSend::Slice(ret), t)
+            };
+            (None, u)
+            //ServerResponse::FinishedSingletonSkeens2(ret, t)
+            //(None, ret, t, 0, false)
+        },
+
+        MultiReplica {
+            buffer, multi_storage, senti_storage, t, num_places,
+        } => unsafe {
+            let (remaining_senti_places, len) = {
+                let e = buffer.contents();
+                let len = e.len();
+                let b = &buffer[..len];
+                trace!("place multi_storage @ {:?}, len {}", multi_storage, b.len());
+                ptr::copy_nonoverlapping(b.as_ptr(), multi_storage, b.len());
+                let places: &[*mut *const u8] = slice::from_raw_parts(
+                   senti_storage as *const _, num_places
+                );
+                trace!("multi places {:?}, locs {:?}", places, e.locs());
+                debug_assert!(places.len() <= e.locs().len());
+                //alt let mut sentinel_start = places.len();
+                let mut sentinel_start = None;
+                for i in 0..num_places {
+
+                    if e.locs()[i] == OrderIndex(0.into(), 0.into()) {
+                        //alt sentinel_start = i;
+                        sentinel_start = Some(i);
+                        break
+                    }
+
+                    let trie_entry: *mut AtomicPtr<u8> = mem::transmute(places[i]);
+                    //TODO mem barrier ordering
+                    (*trie_entry).store(multi_storage, Ordering::Release);
+                }
+                let remaining_places = if let Some(i) = sentinel_start {
+                    &places[i..]
+                }
+                else {
+                    &[]
+                };
+                // we finished with the first portion,
+                // if there is a second, we'll need auxiliary memory
+                (remaining_places.to_vec(), len)
+            };
+            let ret = slice::from_raw_parts(multi_storage, len);
+            //TODO is re right for sentinel only writes?
+            if remaining_senti_places.len() == 0 {
+                let u = if continue_replication {
+                    send(ToSend::OldReplication(ret, 0), t)
+                } else {
+                    send(ToSend::Slice(ret), t)
+                };
+                return (Some(buffer), u)
+                //return ServerResponse::FinishOldMultiappend(buffer, t, ret) //(Some(buffer), ret, t, 0, false)
+            }
+            else {
+                let e = buffer.contents();
+                let len = e.sentinel_entry_size();
+                trace!("place senti_storage @ {:?}, len {}", senti_storage, len);
+                let b = &buffer[..];
+                ptr::copy_nonoverlapping(b.as_ptr(), senti_storage, len);
+                {
+                    let senti_storage = slice::from_raw_parts_mut(senti_storage, len);
+                    slice_to_sentinel(&mut *senti_storage);
+                }
+                for place in remaining_senti_places {
+                    let _: *mut *const u8 = place;
+                    let trie_entry: *mut AtomicPtr<u8> = mem::transmute(place);
+                    //TODO mem barrier ordering
+                    (*trie_entry).store(senti_storage, Ordering::Release);
+                }
+            }
+            //TODO is re right for sentinel only writes?
+            let u = if continue_replication {
+                send(ToSend::OldReplication(ret, 0), t)
+            } else {
+                send(ToSend::Slice(ret), t)
+            };
+            (Some(buffer), u)
+            //ServerResponse::FinishOldMultiappend(buffer, t, ret)
+            //(Some(buffer), ret, t, 0, false)
+        },
+
+        Skeens1{mut buffer, storage, t} => unsafe {
+            let &mut (ref mut ts, ref mut st0, ref mut st1) = &mut (*storage.get());
+            trace!("WORKER {} finish skeens1 {:?}", worker_num, ts);
+            let len = {
+                let mut e = buffer.contents_mut();
+                e.flag_mut().insert(EntryFlag::ReadSuccess);
+                e.as_ref().len()
+            };
+            //let num_ts = ts.len();
+            st0.copy_from_slice(&buffer[..len]);
+            buffer.to_sentinel();
+            if st1.len() > 0 {
+                let len = buffer.contents().len();
+                st1.copy_from_slice(&buffer[..len]);
+            }
+            {
+                let mut c = buffer.contents_mut();
+                let locs = c.locs_mut();
+                for i in 0..locs.len() {
+                    locs[i].1 = entry::from(ts[i] as u32)
+                }
+            }
+            buffer.contents_mut().flag_mut().insert(EntryFlag::Skeens1Queued);
+            let u = if continue_replication {
+                unimplemented!()
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+            //ServerResponse::FinishedSkeens1(buffer, t)
+            //(Some(buffer), &[], t, 0, false)
+        },
+        SkeensFinished{loc, trie_slot, storage, t,} => unsafe {
+            trace!("WORKER {} finish skeens2 @ {:?}", worker_num, loc);
+            let chain = loc.0;
+            let &mut (ref mut _ts, ref mut st0, ref mut st1) = &mut (*storage.get());
+            let is_sentinel = {
+                let mut st0 = bytes_as_entry_mut(st0);
+                let st0_l = st0.locs_mut();
+                let i = st0_l.iter().position(|oi| oi.0 == chain).unwrap();
+                //FIXME atomic?
+                st0_l[i].1 = loc.1;
+                if st1.len() > 0 {
+                    bytes_as_entry_mut(st1).locs_mut()[i].1 = loc.1;
+                    let s_i = st0_l.iter()
+                        .position(|oi| oi == &OrderIndex(0.into(), 0.into()));
+                    i > s_i.unwrap()
+                }
+                else {
+                    false
+                }
+            };
+            let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
+            {
+                let to_store: *mut u8 = if is_sentinel {
+                    st1.as_mut_ptr()
+                } else {
+                    st0.as_mut_ptr()
+                };
+                (*trie_entry).store(to_store, Ordering::Release);
+            }
+            let u = if continue_replication {
+                unimplemented!()
+            } else {
+                send(ToSend::Slice(if st1.len() > 0 { &**st1 } else { &**st0 }), t)
+            };
+            (None, u)
+            //ServerResponse::FinishedSkeens2(if st1.len() > 0 { &**st1 } else { &**st0 }, t)
+            //(None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0, false)
+        },
+    }
+}
+
+/*fn handle_to_worker_for_replication<T: Send + Sync, U, ToSend>(
+    msg: ToWorker<T>, worker_num: usize, send: ToSend
+) -> (Option<BufferSlice>, U)
+where ToSend: for<'a> FnOnce(Troption<EntryContents<'static>, EntryContents<'a>>, T) -> U {
+*/
 
 unsafe fn extend_lifetime<'a, 'b, V: ?Sized>(v: &'a V) -> &'b V {
     ::std::mem::transmute(v)

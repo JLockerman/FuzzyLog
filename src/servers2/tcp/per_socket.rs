@@ -11,6 +11,8 @@ use mio::tcp::*;
 
 use buffer::Buffer;
 
+use packets::EntryContents;
+
 use super::*;
 
 /*
@@ -366,6 +368,98 @@ impl PerSocket {
         }
     }
 
+    pub fn add_downstream_contents(&mut self, to_write: EntryContents) {
+        use self::PerSocket::*;
+        trace!("SOCKET add downstream send");
+        self.stay_awake();
+        match self {
+            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
+                ref mut needs_to_stay_awake, ..}
+            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+                ref mut needs_to_stay_awake, ..} => {
+                *needs_to_stay_awake = true;
+                let write_len = to_write.len();
+                trace!("SOCKET send down contents {}B", write_len);
+                print_data.sends_added(1);
+                print_data.bytes_to_send(write_len as u64);
+                if being_written.can_hold_bytes(write_len) {
+                    let _added = being_written.try_fill_from_contents(to_write);
+                    debug_assert!(_added)
+                } else {
+                    let mut pend = Vec::with_capacity(write_len);
+                    to_write.fill_vec(&mut pend);
+                    pending.push_back(pend);
+                }
+            }
+            _ => unreachable!()
+        }
+    }
+
+    pub fn add_downstream_contents2(
+        &mut self, to_write: EntryContents, addr: &[u8]
+    ) {
+        use self::PerSocket::*;
+        trace!("SOCKET add downstream send");
+        self.stay_awake();
+        match self {
+            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
+                ref mut needs_to_stay_awake, ..}
+            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+                ref mut needs_to_stay_awake, ..} => {
+                *needs_to_stay_awake = true;
+                let write_len = to_write.len() + addr.len();
+                trace!("SOCKET send down contents {}B", write_len);
+                print_data.sends_added(1);
+                print_data.bytes_to_send(write_len as u64);
+                if being_written.can_hold_bytes(write_len) {
+                    let _added = being_written.try_fill_from_contents(to_write);
+                    let _added = being_written.try_fill(addr) && _added;
+                    debug_assert!(_added)
+                } else {
+                    let mut pend = Vec::with_capacity(write_len);
+                    to_write.fill_vec(&mut pend);
+                    pend.extend_from_slice(addr);
+                    pending.push_back(pend);
+                }
+            }
+            _ => unreachable!()
+        }
+    }
+
+    pub fn add_downstream_contents3(
+        &mut self, to_write: EntryContents, storage_loc: &[u8], addr: &[u8]
+    ) {
+        use self::PerSocket::*;
+        trace!("SOCKET add downstream send");
+        self.stay_awake();
+        match self {
+            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
+                ref mut needs_to_stay_awake, ..}
+            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+                ref mut needs_to_stay_awake, ..} => {
+                *needs_to_stay_awake = true;
+                let write_len = to_write.len() + storage_loc.len() + addr.len();
+                trace!("SOCKET send down contents {}B", write_len);
+                print_data.sends_added(1);
+                print_data.bytes_to_send(write_len as u64);
+                if being_written.can_hold_bytes(write_len) {
+                    let _added = being_written.try_fill_from_contents(to_write);
+                    let _added = being_written.try_fill(storage_loc) && _added;
+                    let _added = being_written.try_fill(addr) && _added;
+                    debug_assert!(_added)
+                } else {
+                    let mut pend = Vec::with_capacity(write_len);
+                    to_write.fill_vec(&mut pend);
+                    pend.extend_from_slice(storage_loc);
+                    pend.extend_from_slice(addr);
+                    pending.push_back(pend);
+                }
+            }
+            _ => unreachable!()
+        }
+    }
+
+
     pub fn return_buffer(&mut self, buffer: Buffer) {
         use self::PerSocket::*;
         self.stay_awake();
@@ -594,7 +688,8 @@ fn recv_packet(
                     read, buffer.entry_size() + mem::size_of::<Ipv4SocketAddr>() + extra,//TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 },
                     "entry_size {}", buffer.entry_size()
                 );
-                let src_addr = Ipv4SocketAddr::from_slice(&buffer[read-6-extra..read-extra]);
+                let src_addr = Ipv4SocketAddr::from_slice(
+                    &buffer[read-mem::size_of::<Ipv4SocketAddr>()-extra..read-extra]);
                 trace!("WORKER finished recv {} bytes for {}.", read, src_addr);
                 //TODO ( if is_read { Some((receive_addr)) } else { None } )
                 return RecvRes::Done(src_addr)
@@ -682,6 +777,34 @@ impl DoubleBuffer {
 
         return false
     }
+
+    fn try_fill_from_contents(&mut self, contents: EntryContents) -> bool {
+        let contents_len = contents.len();
+        if self.is_filling_first() {
+            if buffer_can_hold_bytes(&self.first, contents_len)
+            || self.first.is_empty() {
+                let _old_len = self.first.len();
+                contents.fill_vec(&mut self.first);
+                debug_assert!(
+                    self.first.len() > _old_len,
+                    "{:?} > {:?}, {:?}",
+                    _old_len, self.first.len(), contents_len
+                );
+                return true
+            }
+        }
+
+        if buffer_can_hold_bytes(&self.second, contents_len)
+        || self.second.capacity() < MAX_WRITE_BUFFER_SIZE {
+            let _old_len = self.second.len();
+            contents.fill_vec(&mut self.second);
+            debug_assert!(self.second.len() > _old_len);
+            return true
+        }
+
+        return false
+    }
+
 
     fn is_filling_first(&self) -> bool {
         self.second.len() == 0

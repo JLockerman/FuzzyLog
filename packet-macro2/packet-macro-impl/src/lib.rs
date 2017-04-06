@@ -458,6 +458,7 @@ fn struct_fill_vec(fields: &[Field]) -> quote::Tokens {
     quote!{
         #[allow(unused_assignments)]
         pub fn fill_vec(&self, mut __packet_macro_bytes: &mut Vec<u8>) {
+            __packet_macro_bytes.reserve_exact(self.len());
             let &Ref { #fields } = self;
             #counters
             #fill_vec_with
@@ -483,6 +484,7 @@ fn enum_fill_vec(tag_ident: &Ident, tag_ty: &Ty, variants: &[Variant]) -> quote:
     quote!{
         #[allow(unused_assignments)]
         pub fn fill_vec(&self, mut __packet_macro_bytes: &mut Vec<u8>) {
+            __packet_macro_bytes.reserve_exact(self.len());
             match self {
                 #(#bodies),*
             }
