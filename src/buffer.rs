@@ -130,11 +130,17 @@ impl Buffer {
         unsafe { EntryContents::try_ref(&self.inner[..]).is_ok() }
     }
 
-    pub fn to_sentinel(&mut self) {
+    pub fn to_sentinel(&mut self) -> bool {
         //FIXME
         //assert_eq!(EntryKind::from_bits(self.inner[0]), EntryKind::Multiput);
-        packets::slice_to_sentinel(&mut self.inner[..]);
+        packets::slice_to_sentinel(&mut self.inner[..])
         //self.inner[0] = unsafe { ::std::mem::transmute(EntryKind::Sentinel) }
+    }
+
+    pub fn from_sentinel(&mut self, was_multi: bool) {
+        if was_multi {
+            packets::slice_to_multi(&mut self.inner[..])
+        }
     }
 
     //pub fn to_read(&mut self) {

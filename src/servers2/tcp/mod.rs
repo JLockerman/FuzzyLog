@@ -438,10 +438,6 @@ pub fn run_with_replication(
                                 continue
                             },
 
-                            WorkerToDist::DownstreamC(..) => {
-                                unimplemented!()
-                            },
-
                             WorkerToDist::ToClient(addr, buffer) => {
                                 trace!("DIST {} looking for worker for {}.",
                                     this_server_num, addr);

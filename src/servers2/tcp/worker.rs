@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use servers2::{
     self, spsc, ToReplicate, ToWorker,
-    DistributeToWorkers, Troption, SkeensMultiStorage, ServerResponse,
+    DistributeToWorkers, Troption, SkeensMultiStorage,
     ToSend
 };
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
-use packets::{EntryLayout, OrderIndex, EntryFlag, EntryContents, bytes_as_entry};
+use packets::{EntryLayout, OrderIndex, EntryFlag};
 
 use mio;
 use mio::tcp::*;
@@ -30,7 +30,6 @@ use super::per_socket::{PerSocket, RecvPacket};
 pub enum WorkerToDist {
     Downstream(WorkerNum, Ipv4SocketAddr, &'static [u8], u64),
     DownstreamB(WorkerNum, Ipv4SocketAddr, Box<[u8]>, u64),
-    DownstreamC(WorkerNum, Ipv4SocketAddr, Box<[u8]>),
     ToClient(Ipv4SocketAddr, &'static [u8]),
     ToClientB(Ipv4SocketAddr, Box<[u8]>),
 }
@@ -621,12 +620,26 @@ impl Worker {
                 self.clients.get_mut(&DOWNSTREAM).unwrap()
                     .add_downstream_send3(to_replicate, src_addr.bytes(), &storage_log_bytes)
             },
-            ToSend::Contents(to_send) =>
+
+            ToSend::Contents(to_send) => {
+                let storage_log_bytes: [u8; 8] = [0; 8];
                 self.clients.get_mut(&DOWNSTREAM).unwrap()
-                    .add_downstream_contents2(to_send, src_addr.bytes()),
-            ToSend::Slice(to_send) =>
+                    .add_downstream_contents3(to_send, src_addr.bytes(), &storage_log_bytes)
+            },
+
+            ToSend::OldContents(to_send, storage_loc) => {
+                let mut storage_log_bytes: [u8; 8] = [0; 8];
+                LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                self.clients.get_mut(&DOWNSTREAM).unwrap().
+                    add_downstream_contents3(to_send, src_addr.bytes(), &storage_log_bytes)
+            }
+
+            ToSend::Slice(to_send) => {
+                let storage_loc_bytes: [u8; 8] = [0; 8];
                 self.clients.get_mut(&recv_token).unwrap()
-                    .add_downstream_send(to_send),
+                    .add_downstream_send3(to_send, src_addr.bytes(), &storage_loc_bytes)
+            }
+
             ToSend::Read(_to_send) => unreachable!(),
         }
     }
@@ -635,7 +648,7 @@ impl Worker {
         match to_send {
             ToSend::Nothing => return,
             ToSend::OldReplication(..) => unreachable!(),
-            ToSend::Contents(to_send) =>
+            ToSend::Contents(to_send) | ToSend::OldContents(to_send, _) =>
                 self.clients.get_mut(&send_token).unwrap().add_downstream_contents(to_send),
             ToSend::Slice(to_send) =>
                 self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
@@ -648,7 +661,13 @@ impl Worker {
         match to_send {
             ToSend::Nothing => return,
             ToSend::Read(..) => unreachable!(),
-            ToSend::Slice(..) => unreachable!(), //?
+
+            ToSend::Slice(to_send) =>
+                self.inner.to_dist.send(
+                    WorkerToDist::DownstreamB(
+                        worker, src_addr, to_send.to_vec().into_boxed_slice(), 0
+                    )
+                ).ok().unwrap(),
 
             ToSend::OldReplication(to_replicate, storage_loc) =>
                 self.inner.to_dist.send(
@@ -660,7 +679,16 @@ impl Worker {
                 to_replicate.fill_vec(&mut vec);
                 let to_replicate = vec.into_boxed_slice();
                 self.inner.to_dist.send(
-                    WorkerToDist::DownstreamC(worker, src_addr, to_replicate)
+                    WorkerToDist::DownstreamB(worker, src_addr, to_replicate, 0)
+                ).ok().unwrap()
+            },
+
+            ToSend::OldContents(to_replicate, storage_loc) => {
+                let mut vec = Vec::with_capacity(to_replicate.len());
+                to_replicate.fill_vec(&mut vec);
+                let to_replicate = vec.into_boxed_slice();
+                self.inner.to_dist.send(
+                    WorkerToDist::DownstreamB(worker, src_addr, to_replicate, storage_loc)
                 ).ok().unwrap()
             },
         }
@@ -680,7 +708,7 @@ impl Worker {
                     WorkerToDist::ToClientB(src_addr, to_send.to_vec().into_boxed_slice())
                 ).ok().unwrap(),
 
-            ToSend::Contents(to_send) => {
+            ToSend::Contents(to_send) | ToSend::OldContents(to_send, _) => {
                 let mut vec = Vec::with_capacity(to_send.len());
                 to_send.fill_vec(&mut vec);
                 let to_send = vec.into_boxed_slice();

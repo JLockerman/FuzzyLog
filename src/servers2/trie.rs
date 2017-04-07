@@ -347,6 +347,11 @@ impl Trie
         (val_ptr.as_mut_ptr(), loc)
     }
 
+    pub unsafe fn reserve_space_at(&mut self, storage_start: ByteLoc, size: usize) -> *mut u8 {
+        let val_ptr = self.root.alloc.alloc_at(storage_start, size);
+        val_ptr
+    }
+
     pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet> {
         let (val_ptr, loc): (*mut u8, ByteLoc) = {
             let (val_ptr, loc) = self.root.alloc.prep_append(size);

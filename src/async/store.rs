@@ -1878,14 +1878,14 @@ impl WriteState {
             &SingleServer(ref buf) | &ToLockServer(ref buf) => f(&**buf),
             &MultiServer(ref buf, _, _, is_sentinel) => {
                 let mut b = buf.borrow_mut();
-                if is_sentinel { slice_to_sentinel(&mut b[..]) }
+                if is_sentinel { slice_to_sentinel(&mut b[..]); }
                 else { slice_to_multi(&mut b[..]) }
                 f(&*b)
             },
 
             &Skeens1(ref buf, _, _, is_sentinel) => {
                 let mut b = buf.borrow_mut();
-                if is_sentinel { slice_to_sentinel(&mut b[..]) }
+                if is_sentinel { slice_to_sentinel(&mut b[..]); }
                 else { slice_to_multi(&mut b[..]) }
                 f(&*b)
             },
