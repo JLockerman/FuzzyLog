@@ -208,6 +208,70 @@ where C: AsyncStoreClient {
         }, to_store))
     }
 
+    pub fn replicated_new_tcp<I>(
+        chain_servers: I, client: C,
+        event_loop: &mut mio::Poll
+    ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    where I: IntoIterator<Item=(SocketAddr, SocketAddr)> {
+        //TODO assert no duplicates
+        trace!("Starting Store server addrs:");
+
+        let (write_servers, read_servers): (Vec<_>, Vec<_>) =
+            chain_servers.into_iter().inspect(|addrs| trace!("{:?}", addrs)).unzip();
+
+        let mut servers = try!(write_servers
+            .into_iter()
+            .map(PerServer::tcp)
+            .collect::<Result<Vec<_>, _>>());
+        let read_servers = try!(read_servers
+                .into_iter()
+                .map(PerServer::tcp)
+                .collect::<Result<Vec<_>, _>>());
+        let num_chain_servers = servers.len();
+        assert_eq!(num_chain_servers, read_servers.len());
+        assert!(num_chain_servers > 0);
+        servers.extend(read_servers.into_iter());
+
+        trace!("Client {:?} servers", num_chain_servers);
+        for (i, server) in servers.iter_mut().enumerate() {
+            server.token = Token(i);
+            event_loop.register(server.connection(), server.token,
+                mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
+                mio::PollOpt::edge())
+                .expect("could not reregister client socket")
+        }
+        for i in 0..num_chain_servers {
+            let receiver = servers[i+num_chain_servers].receiver;
+            servers[i].receiver = receiver;
+        }
+        trace!("Client servers {:?}",
+            servers.iter().map(|s| s.connection().local_addr()).collect::<Vec<_>>()
+        );
+        let awake_io = servers.iter().map(|s| s.token.0).collect();
+        let from_client_token = Token(servers.len());
+        let (to_store, from_client) = mio::channel::channel();
+        event_loop.register(&from_client,
+            from_client_token,
+            mio::Ready::readable() | mio::Ready::error(),
+            mio::PollOpt::level()
+        ).expect("could not reregister client channel");
+        Ok((AsyncTcpStore {
+            sent_writes: Default::default(),
+            sent_reads: Default::default(),
+            waiting_buffers: Default::default(),
+            servers: servers,
+            num_chain_servers: num_chain_servers,
+            lock_token: Token(::std::usize::MAX),
+            client: client,
+            awake_io: awake_io,
+            from_client: from_client,
+            is_unreplicated: false,
+            new_multi: true,
+
+            print_data: Default::default(),
+        }, to_store))
+    }
+
     pub fn replicated_tcp<I>(
         lock_server: Option<SocketAddr>,
         chain_servers: I,

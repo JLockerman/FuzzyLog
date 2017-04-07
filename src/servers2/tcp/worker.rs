@@ -703,6 +703,7 @@ impl Worker {
                 self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, to_send))
                     .ok().unwrap(),
 
+            //TODO add ToSend::StaticSlice
             ToSend::Slice(to_send) =>
                 self.inner.to_dist.send(
                     WorkerToDist::ToClientB(src_addr, to_send.to_vec().into_boxed_slice())

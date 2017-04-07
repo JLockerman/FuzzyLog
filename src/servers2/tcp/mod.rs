@@ -431,10 +431,16 @@ pub fn run_with_replication(
                             WorkerToDist::DownstreamB(worker, addr, buffer, storage_loc) => {
                                 trace!("DIST {} downstream worker for {} is {}.",
                                     this_server_num, addr, worker);
-                                dist_to_workers[worker].send(
-                                    DistToWorker::ToClientB(
-                                        DOWNSTREAM, buffer, addr, storage_loc)
-                                );
+                                let sent = dist_to_workers.get_mut(worker)
+                                    .map(|s| {
+                                        s.send(DistToWorker::ToClientB(
+                                            DOWNSTREAM, buffer, addr, storage_loc));
+                                        true
+                                }).unwrap_or(false);
+                                if !sent {
+                                    panic!("No downstream for {:?} in {:?}",
+                                        worker, dist_to_workers.len())
+                                }
                                 continue
                             },
 
@@ -450,7 +456,14 @@ pub fn run_with_replication(
                                 trace!("DIST {} looking for worker for {}.",
                                     this_server_num, addr);
                                 //FIXME this is racey, if we don't know who gets the message it fails
-                                let (worker, token) = worker_for_client[&addr].clone();
+                                let (worker, token) = worker_for_client.get(&addr)
+                                    .cloned().unwrap_or_else(||
+                                        panic!(
+                                            "No worker found for {:?} in {:?}",
+                                            addr, worker_for_client,
+                                        )
+                                );
+
                                 dist_to_workers[worker].send(
                                     DistToWorker::ToClientB(token, buffer, addr, 0)
                                 );

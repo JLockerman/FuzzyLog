@@ -138,7 +138,10 @@ where V: Storeable {
         let (to_log, from_outside) = mpsc::channel();
         let to_store = store_builder(to_log.clone());
         let (ready_reads_s, ready_reads_r) = mpsc::channel();
-        let interesting_chains: Vec<_> = interesting_chains.into_iter().collect();
+        let interesting_chains: Vec<_> = interesting_chains
+            .into_iter()
+            .inspect(|c| assert!(c != &0.into(), "Don't register interest in color 0."))
+            .collect();
         let (finished_writes_s, finished_writes_r) = mpsc::channel();
         ::std::thread::spawn(move || {
             ThreadLog::new(
@@ -211,6 +214,47 @@ where V: Storeable {
             thread::spawn(move || {
                 let mut event_loop = mio::Poll::new().unwrap();
                 let (store, to_store) = ::async::store::AsyncTcpStore::new_tcp(
+                    chain_servers.into_iter(),
+                    client,
+                    &mut event_loop
+                ).expect("could not start store.");
+                *tsm.lock().unwrap() = Some(to_store);
+                store.run(event_loop);
+            });
+            let to_store;
+            loop {
+                let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                if let Some(s) = ts {
+                    to_store = s;
+                    break
+                }
+            }
+            to_store
+        };
+
+        LogHandle::with_store(interesting_chains, make_store)
+    }
+
+    pub fn new_tcp_log_with_replication<S, C>(
+        chain_servers: S,
+        interesting_chains: C,
+    ) -> Self
+    where
+        S: IntoIterator<Item=(SocketAddr, SocketAddr)>,
+        C: IntoIterator<Item=order>,
+    {
+        use std::thread;
+        use std::sync::{Arc, Mutex};
+
+        let chain_servers: Vec<_> = chain_servers.into_iter().collect();
+        trace!("LogHandle for servers {:?}", chain_servers);
+
+        let make_store = |client| {
+            let to_store_m = Arc::new(Mutex::new(None));
+            let tsm = to_store_m.clone();
+            thread::spawn(move || {
+                let mut event_loop = mio::Poll::new().unwrap();
+                let (store, to_store) = ::async::store::AsyncTcpStore::replicated_new_tcp(
                     chain_servers.into_iter(),
                     client,
                     &mut event_loop

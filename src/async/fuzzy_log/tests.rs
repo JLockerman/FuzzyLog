@@ -678,6 +678,8 @@ macro_rules! async_tests {
         // async_tests!(udp);
         async_tests!(stcp);
         async_tests!(rtcp);
+
+        async_tests!(rstcp);
     };
     (tcp) => (
         mod tcp {
@@ -837,6 +839,103 @@ macro_rules! async_tests {
                 }
 
                 while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() {}
+            }
+        }
+    };
+    (rstcp) => {
+        mod rstcp {
+            use std::sync::{Arc, Mutex};
+            use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+            use std::{thread, iter};
+            use async::store::AsyncTcpStore;
+            use std::sync::mpsc;
+            use std::mem;
+            use std::net::{SocketAddr, Ipv4Addr, IpAddr};
+
+            use mio;
+
+            async_tests!(test new_thread_log);
+
+            const SERVER1_ADDRS: &'static [&'static str] = &["0.0.0.0:13590", "0.0.0.0:13591"];
+            const SERVER2_ADDRS: &'static [&'static str] = &["0.0.0.0:13690", "0.0.0.0:13691"];
+
+            fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                let addrs = iter::once((SERVER1_ADDRS[0], SERVER1_ADDRS[1]))
+                    .chain(iter::once((SERVER2_ADDRS[0], SERVER2_ADDRS[1])))
+                    .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+                LogHandle::new_tcp_log_with_replication(
+                    addrs,
+                    interesting_chains.into_iter(),
+                )
+            }
+
+
+            fn start_tcp_servers()
+            {
+                static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+                static SERVER_STARTING: AtomicUsize = ATOMIC_USIZE_INIT;
+
+                if SERVER_STARTING.swap(2, Ordering::SeqCst) == 0 {
+
+                    let local_host = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+                    for (i, &addr_str) in SERVER1_ADDRS.into_iter().enumerate() {
+                        let prev_server: Option<SocketAddr> =
+                            if i > 0 { Some(SERVER1_ADDRS[i-1]) } else { None }
+                            .map(|s| s.parse().unwrap());
+                        let prev_server = prev_server.map(|mut s| {s.set_ip(local_host); s});
+
+                        let next_server: Option<SocketAddr> = SERVER1_ADDRS.get(i+1)
+                            .map(|s| s.parse().unwrap());
+                        let next_server = next_server.map(|mut s| {s.set_ip(local_host); s});
+                        let next_server = next_server.map(|s| s.ip());
+
+                        let addr = addr_str.parse().expect("invalid inet address");
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        let acceptor = acceptor.unwrap();
+                        thread::spawn(move || {
+                            trace!("starting replica server {:?}", (0, i));
+                            ::servers2::tcp::run_with_replication(
+                                acceptor, 0, 2,
+                                prev_server,
+                                next_server,
+                                1, //TODO switch to 2
+                                &SERVERS_READY
+                            )
+                        });
+                    }
+
+                    for (i, &addr_str) in SERVER2_ADDRS.into_iter().enumerate() {
+
+                        let prev_server: Option<SocketAddr> =
+                            if i > 0 { Some(SERVER2_ADDRS[i-1]) } else { None }
+                            .map(|s| s.parse().unwrap());
+                        let prev_server = prev_server.map(|mut s| {s.set_ip(local_host); s});
+
+                        let next_server: Option<SocketAddr> = SERVER2_ADDRS.get(i+1)
+                            .map(|s| s.parse().unwrap());
+                        let next_server = next_server.map(|mut s| {s.set_ip(local_host); s});
+                        let next_server = next_server.map(|s| s.ip());
+
+                        let addr = addr_str.parse().expect("invalid inet address");
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        let acceptor = acceptor.unwrap();
+                        thread::spawn(move || {
+                            trace!("starting replica server {:?}", (1, i));
+                            ::servers2::tcp::run_with_replication(
+                                acceptor, 1, 2,
+                                prev_server,
+                                next_server,
+                                1, //TODO switch to 2
+                                &SERVERS_READY
+                            )
+                        });
+                    }
+                }
+
+                while SERVERS_READY.load(Ordering::Acquire) < SERVER1_ADDRS.len() + SERVER2_ADDRS.len() {}
             }
         }
     };
