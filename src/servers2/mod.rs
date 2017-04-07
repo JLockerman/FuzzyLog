@@ -107,6 +107,7 @@ pub enum ToWorker<T: Send + Sync> {
         loc: OrderIndex,
         trie_slot: *mut *const u8,
         storage: SkeensMultiStorage,
+        timestamp: u64,
         t: T,
     },
 
@@ -137,6 +138,7 @@ pub enum ToWorker<T: Send + Sync> {
     Skeens2MultiReplica {
         loc: OrderIndex,
         trie_slot: *mut *const u8,
+        timestamp: u64,
         storage: SkeensMultiStorage,
         t: T,
     },
@@ -559,7 +561,7 @@ where ToWorkers: DistributeToWorkers<T> {
             let print_data = &mut self.print_data;
             chain.finish_multi(id, max_timestamp,
                 |finished| match finished {
-                    FinishSkeens::Multi(index, trie_slot, storage, t) => {
+                    FinishSkeens::Multi(index, trie_slot, storage, timestamp, t) => {
                         trace!("server finish sk multi");
                         print_data.msgs_sent(1);
                         to_workers.send_to_worker(
@@ -567,6 +569,7 @@ where ToWorkers: DistributeToWorkers<T> {
                                 loc: OrderIndex(chain_num, (index as u32).into()),
                                 trie_slot: trie_slot,
                                 storage: storage,
+                                timestamp: timestamp,
                                 t: t
                             }
                         )
@@ -912,7 +915,6 @@ where ToWorkers: DistributeToWorkers<T> {
 
             ToReplicate::Skeens2(buffer) => {
                 use self::ReplicatedSkeens::*;
-
                 trace!("SERVER {:?} replicate skeens max", self.this_server_num);
                 let id = *buffer.contents().id();
                 let max_timestamp = buffer.contents().lock_num();
@@ -928,7 +930,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     let index = u32::from(i) as u64;
                     let trie = &mut c.trie;
                     c.skeens.replicate_round2(&id, max_timestamp, index, |rep| match rep {
-                        Multi{index, storage, t} => {
+                        Multi{index, storage, max_timestamp, t} => {
                             trace!("SERVER finish sk multi rep ({:?}, {:?})", o, index);
                             let slot = unsafe { trie.prep_append_at(index, ptr::null()) };
                             print_data.msgs_sent(1);
@@ -937,6 +939,7 @@ where ToWorkers: DistributeToWorkers<T> {
                                     loc: OrderIndex(o, (index as u32).into()),
                                     trie_slot: slot,
                                     storage: storage,
+                                    timestamp: max_timestamp,
                                     t: t
                                 }
                             )
@@ -1076,7 +1079,7 @@ where ToWorkers: DistributeToWorkers<T> {
 
 enum FinishSkeens<T> {
     Single(u64, *mut *const u8, *const u8, T),
-    Multi(u64, *mut *const u8, SkeensMultiStorage, T),
+    Multi(u64, *mut *const u8, SkeensMultiStorage, u64, T),
 }
 
 impl<T: Copy> Chain<T> {
@@ -1134,7 +1137,7 @@ impl<T: Copy> Chain<T> {
                             trace!("flush multi {:?}: {:?}", id, timestamp);
                             //println!("m id {:?} ts {:?}", id, timestamp);
                             let (loc, ptr) = trie.prep_append(ptr::null());
-                            on_finish(Multi(loc, ptr, storage, t));
+                            on_finish(Multi(loc, ptr, storage, timestamp, t));
                         },
                     }
                 })
@@ -1654,28 +1657,28 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let len = buffer.contents().len();
                 st1.copy_from_slice(&buffer[..len]);
             }
-            buffer.contents_mut().flag_mut().insert(EntryFlag::Skeens1Queued);
+            {
+                let mut c = buffer.contents_mut();
+                c.flag_mut().insert(EntryFlag::Skeens1Queued);
+                let locs = c.locs_mut();
+                for i in 0..locs.len() {
+                    locs[i].1 = entry::from(ts[i] as u32)
+                }
+            }
             let u = if continue_replication {
                 buffer.from_sentinel(was_multi);
                 send(ToSend::Contents(
-                    bytes_as_entry(st0).multi_skeens_to_replication(indicies))
+                    buffer.contents().multi_skeens_to_replication(indicies))
                 , t)
             } else {
-                {
-                    let mut c = buffer.contents_mut();
-                    let locs = c.locs_mut();
-                    for i in 0..locs.len() {
-                        locs[i].1 = entry::from(ts[i] as u32)
-                    }
-                }
                 send(ToSend::Slice(buffer.entry_slice()), t)
             };
             (Some(buffer), u)
             //ServerResponse::FinishedSkeens1(buffer, t)
             //(Some(buffer), &[], t, 0, false)
         },
-        SkeensFinished{loc, trie_slot, storage, t,}
-        | Skeens2MultiReplica{loc, trie_slot, storage, t} => unsafe {
+        SkeensFinished{loc, trie_slot, storage, timestamp, t,}
+        | Skeens2MultiReplica{loc, trie_slot, storage, timestamp, t} => unsafe {
             trace!("WORKER {} finish skeens2 @ {:?}", worker_num, loc);
             let chain = loc.0;
             let &mut (ref mut _ts, ref mut _indicies, ref mut st0, ref mut st1) =
@@ -1709,7 +1712,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let e = bytes_as_entry(st0);
                 send(ToSend::Contents(EntryContents::Skeens2ToReplica{
                     id: e.id(),
-                    lock: &e.lock_num(),
+                    lock: &timestamp,
                     loc: &loc,
                 }), t)
             } else {
@@ -1723,25 +1726,28 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         Skeens1Replica{mut buffer, storage, t} => unsafe {
             let &mut (ref mut ts, ref mut indicies, ref mut st0, ref mut st1) =
                 &mut (*storage.get());
-            trace!("WORKER {} finish skeens1 rep {:?}", worker_num, ts);
             let len = buffer.contents().non_replicated_len();
             st0.copy_from_slice(&buffer[..len]);
             {
+                slice_to_multi(st0);
                 let mut e = bytes_as_entry_mut(st0);
                 e.locs_mut().iter_mut().enumerate().fold((),
                     |(), (j, &mut OrderIndex(_, ref mut i))| {
                         ts[j] = u32::from(*i) as u64;
                         *i = entry::from(0);
                 });
-                indicies.iter_mut().zip(e.as_ref().queue_nums().iter()).fold((),
-                    |(), (q, num)| *q = *num);
                 e.flag_mut().remove(EntryFlag::Skeens1Queued);
             }
+            indicies.iter_mut().zip(buffer.contents().queue_nums().iter()).fold((),
+                    |(), (q, num)| *q = *num);
+            trace!("WORKER {} finish skeens1 rep {:?}", worker_num, ts);
             //TODO just copy from sentinel Ref
             let was_multi = buffer.to_sentinel();
             if st1.len() > 0 {
+                trace!("WORKER {} finish skeens1 rep sentinel", worker_num);
                 let len = buffer.contents().len();
                 st1.copy_from_slice(&buffer[..len]);
+                slice_to_sentinel(st1);
                 let mut e = bytes_as_entry_mut(st0);
                 e.locs_mut().iter_mut().fold((),
                     |(), &mut OrderIndex(_, ref mut i)| *i = entry::from(0));

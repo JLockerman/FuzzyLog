@@ -408,7 +408,7 @@ impl PerSocket {
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len() + addr.len();
-                trace!("SOCKET send down contents {}B", write_len);
+                trace!("SOCKET send down contents2 {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
@@ -439,7 +439,7 @@ impl PerSocket {
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len() + storage_loc.len() + addr.len();
-                trace!("SOCKET send down contents {}B", write_len);
+                trace!("SOCKET send down contents3 {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {

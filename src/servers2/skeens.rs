@@ -383,7 +383,7 @@ impl<T: Copy> SkeensState<T> {
 }
 
 pub enum ReplicatedSkeens<T> {
-    Multi{index: TrieIndex, storage: SkeensMultiStorage, t: T},
+    Multi{index: TrieIndex, storage: SkeensMultiStorage, max_timestamp: Time, t: T},
     Single{index: TrieIndex, storage: *const u8, t: T},
 }
 
@@ -525,8 +525,10 @@ impl<T: Copy> WaitingForMax<T> {
             ReplicatedSingle{index, storage, t, id, ..} =>
                 (id, ReplicatedSkeens::Single{index: index, storage: storage, t: t}),
 
-            ReplicatedMulti{index, storage, t, id, ..} => {
-                (id, ReplicatedSkeens::Multi{index: index, storage: storage, t: t})
+            ReplicatedMulti{index, storage, t, id, max_timestamp, ..} => {
+                (id, ReplicatedSkeens::Multi{
+                    index: index, storage: storage, t: t, max_timestamp: max_timestamp,
+                })
             },
 
             _ => unreachable!(),

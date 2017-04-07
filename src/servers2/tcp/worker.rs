@@ -893,17 +893,18 @@ impl WorkerInner {
         token: mio::Token,
         src_addr: Ipv4SocketAddr,
     ) {
+        use packets::EntryKind;
         trace!("WORKER {} send replica to log", self.worker_num);
-        let kind = buffer.contents().kind().layout();
+        let kind = buffer.contents().kind();
         let to_send = match kind {
-            EntryLayout::Data => {
+            EntryKind::Data => {
                 ToReplicate::Data(buffer, storage_addr)
             },
-            EntryLayout::Lock => {
+            EntryKind::Lock => {
                 ToReplicate::UnLock(buffer)
             },
             //TODO
-            EntryLayout::Multiput | EntryLayout::Sentinel => {
+            EntryKind::Multiput | EntryKind::Sentinel => {
                 let (size, senti_size) = {
                     let e = buffer.contents();
                     (e.len(), e.sentinel_entry_size())
@@ -917,6 +918,38 @@ impl WorkerInner {
                 };
                 ToReplicate::Multi(buffer, multi_storage, senti_storage)
             },
+            EntryKind::SingleToReplica => {
+                ToReplicate::SingleSkeens1(buffer, storage_addr)
+            }
+            EntryKind::MultiputToReplica => {
+                let (size, senti_size, num_locs, has_senti) = {
+                    let e = buffer.contents();
+                    let locs = e.locs();
+                    let num_locs = locs.len();
+                    //FIXME
+                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
+                    (e.non_replicated_len(), e.sentinel_entry_size(), num_locs, has_senti)
+                };
+                let senti_size = if has_senti { Some(senti_size) } else { None };
+                let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                ToReplicate::Skeens1(buffer, storage)
+            }
+            EntryKind::SentinelToReplica => {
+                let (size, senti_size, num_locs, has_senti) = {
+                    let e = buffer.contents();
+                    let locs = e.locs();
+                    let num_locs = locs.len();
+                    //FIXME
+                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
+                    (e.non_replicated_len(), e.sentinel_entry_size(), num_locs, has_senti)
+                };
+                let senti_size = if has_senti { Some(senti_size) } else { None };
+                let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                ToReplicate::Skeens1(buffer, storage)
+            }
+            EntryKind::Skeens2ToReplica => {
+                ToReplicate::Skeens2(buffer)
+            }
             _ => unreachable!(),
         };
         self.print_data.rep_to_log(1);
