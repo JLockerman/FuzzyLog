@@ -184,6 +184,43 @@ pub mod c_binidings {
             colors.into_iter().cloned().map(order::from)))
     }
 
+    #[no_mangle]
+    pub unsafe extern "C" fn new_dag_handle_with_replication(
+        num_chain_ips: usize,
+        chain_server_head_ips: *const *const c_char,
+        chain_server_tail_ips: *const *const c_char,
+        color: *const colors
+    ) -> Box<DAG> {
+        assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
+
+        assert!(chain_server_head_ips != ptr::null());
+        assert!(chain_server_tail_ips != ptr::null());
+        assert!(*chain_server_head_ips != ptr::null());
+        assert!(*chain_server_tail_ips != ptr::null());
+        assert!(num_chain_ips >= 1);
+
+        assert!(color != ptr::null());
+        assert!(colors_valid(color));
+
+        let _ = ::env_logger::init();
+        trace!("Lib num chain servers {:?}", num_chain_ips);
+        let server_heads = slice::from_raw_parts(chain_server_head_ips, num_chain_ips)
+            .into_iter().map(|&s|
+                CStr::from_ptr(s).to_str().expect("invalid IP string")
+                    .parse().expect("invalid IP addr")
+            );
+        let server_tails = slice::from_raw_parts(chain_server_tail_ips, num_chain_ips)
+            .into_iter().map(|&s|
+                CStr::from_ptr(s).to_str().expect("invalid IP string")
+                    .parse().expect("invalid IP addr")
+            );
+        let colors = slice::from_raw_parts((*color).mycolors, (*color).numcolors);
+        Box::new(LogHandle::new_tcp_log_with_replication(
+            server_heads.zip(server_tails),
+            colors.into_iter().cloned().map(order::from)
+        ))
+    }
+
     //NOTE currently can only use 31bits of return value
     #[no_mangle]
     pub extern "C" fn do_append(dag: *mut DAG, data: *const u8, data_size: usize,

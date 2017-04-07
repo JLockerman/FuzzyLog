@@ -91,6 +91,39 @@ DAGHandle *new_dag_handle_with_skeens(
 	struct colors *interesting_colors
 );
 
+
+//! Creates a new DAGHandle for a replicated server group
+//! which uses the skeens based multiappend protocol.
+//!
+//!
+//! @param num_chain_servers
+//!     The number of chain servers in the server group.
+//!
+//! @param chain_server_head_ips
+//!     The IP address of the head of every replication-chain in the server group.
+//!     NOTE Currently the ordering of the IP addresses must be the same as the
+//!          ordering of the servers.
+//!     NOTE the ordering of the replication-chains must be the same in both this
+//!          and chain_server_tail_ips
+//!
+//! @param chain_server_tail_ips
+//!     The IP address of the tail of every replication-chain in the server group.
+//!     NOTE Currently the ordering of the IP addresses must be the same as the
+//!          ordering of the servers.
+//!     NOTE the ordering of the replication-chains must be the same in both this
+//!          and chain_server_tail_ips
+//!
+//!
+//! @param interesting_colors
+//!     The colors this DAGHandle is interested in reading.
+//!
+DAGHandle *new_dag_handle_with_replication(
+        size_t num_chain_servers,
+        const char * const* chain_server_head_ips,
+        const char * const* chain_server_tail_ips,
+        struct colors *interesting_colors
+);
+
 write_id do_append(DAGHandle *handle, char *data, size_t data_size,
 	struct colors* inhabits, struct colors* depends_on, uint8_t async);
 
