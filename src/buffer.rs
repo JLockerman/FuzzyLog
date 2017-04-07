@@ -174,6 +174,10 @@ impl Buffer {
         inner
 
     }
+
+    pub fn clear_data(&mut self) {
+        self[..].iter_mut().fold((), |_, i| *i = 0);
+    }
 }
 
 #[cfg(any(debug_assertions, feature="debug_no_drop"))]
