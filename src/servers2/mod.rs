@@ -894,9 +894,11 @@ where ToWorkers: DistributeToWorkers<T> {
             },
 
             ToReplicate::Skeens1(buffer, storage) => {
-                trace!("SERVER {:?} replicate skeens multiput", self.this_server_num);
+                trace!("SERVER {:?} replicate skeens multiput {:?}",
+                    self.this_server_num, buffer.contents());
                 let id = *buffer.contents().id();
-                for (&OrderIndex(o, i), &node_num) in buffer.contents().locs_and_node_nums() {
+                'sk_rep: for (&OrderIndex(o, i), &node_num) in buffer.contents().locs_and_node_nums() {
+                    if o == order::from(0) || !self.stores_chain(o) { continue 'sk_rep }
                     let c = self.ensure_chain(o);
                     c.skeens.replicate_multi_append_round1(
                         u32::from(i) as u64, node_num, id, storage.clone(), t
@@ -917,7 +919,8 @@ where ToWorkers: DistributeToWorkers<T> {
                 trace!("SERVER {:?} replicate skeens2 max", self.this_server_num);
                 let id = *buffer.contents().id();
                 let max_timestamp = buffer.contents().lock_num();
-                for &OrderIndex(o, i) in buffer.contents().locs() {
+                'sk2_rep: for &OrderIndex(o, i) in buffer.contents().locs() {
+                    if o == order::from(0) || !self.stores_chain(o) { continue 'sk2_rep }
                     //let c = self.ensure_chain(chain);
                     let c = self.log.entry(o).or_insert_with(|| unsafe {
                         let mut t = Trie::new();
@@ -1737,7 +1740,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             let len = buffer.contents().non_replicated_len();
             st0.copy_from_slice(&buffer[..len]);
             {
-                slice_to_multi(st0);
+                MutEntry::wrap_slice(st0).to_non_replicated();
                 let mut e = bytes_as_entry_mut(st0);
                 e.locs_mut().iter_mut().enumerate().fold((),
                     |(), (j, &mut OrderIndex(_, ref mut i))| {

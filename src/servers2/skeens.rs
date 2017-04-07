@@ -339,7 +339,10 @@ impl<T: Copy> SkeensState<T> {
                     id: id,
                 };
                 let old = self.phase1_queue.insert(node_num, m);
-                assert!(old.is_none());
+                assert!(old.is_none(),
+                    "replace skeens? {:?} {:?}",
+                    self.phase1_queue.get(node_num), old
+                );
                 true
             },
         }
