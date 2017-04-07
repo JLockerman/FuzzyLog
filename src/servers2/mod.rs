@@ -822,7 +822,7 @@ where ToWorkers: DistributeToWorkers<T> {
     fn ensure_chain(&mut self, chain: order) -> &mut Chain<T> {
         self.log.entry(chain).or_insert_with(|| unsafe {
             let mut t = Trie::new();
-            t.prep_append(ptr::null());
+            let _ = t.partial_append(1);
             Chain{ trie: t, skeens: SkeensState::new() }
         })
     }
@@ -870,7 +870,6 @@ where ToWorkers: DistributeToWorkers<T> {
 
             ToReplicate::SingleSkeens1(buffer, storage_loc) => unsafe {
                 trace!("SERVER {:?} replicate skeens single", self.this_server_num);
-
                 let (id, (OrderIndex(c, ts), node_num), size) = {
                     let e = buffer.contents();
                     (*e.id(), e.locs_and_node_nums().map(|(&o, &n)| (o, n)).next().unwrap(),
@@ -915,14 +914,14 @@ where ToWorkers: DistributeToWorkers<T> {
 
             ToReplicate::Skeens2(buffer) => {
                 use self::ReplicatedSkeens::*;
-                trace!("SERVER {:?} replicate skeens max", self.this_server_num);
+                trace!("SERVER {:?} replicate skeens2 max", self.this_server_num);
                 let id = *buffer.contents().id();
                 let max_timestamp = buffer.contents().lock_num();
                 for &OrderIndex(o, i) in buffer.contents().locs() {
                     //let c = self.ensure_chain(chain);
                     let c = self.log.entry(o).or_insert_with(|| unsafe {
                         let mut t = Trie::new();
-                        t.prep_append(ptr::null());
+                        let _ = t.partial_append(1);
                         Chain{ trie: t, skeens: SkeensState::new() }
                     });
                     let to_workers = &mut self.to_workers;
@@ -1095,7 +1094,10 @@ impl<T: Copy> Chain<T> {
         let (slot, storage_loc) = unsafe { self.trie.reserve_space(size) };
         let ts_and_queue_index = self.skeens.add_single_append(id, slot as *const _, t);
         match ts_and_queue_index {
-            SkeensAppendRes::NewAppend(ts, queue_num) => (slot, storage_loc, ts, queue_num),
+            SkeensAppendRes::NewAppend(ts, queue_num) => {
+                trace!("singleton skeens @ {:?}", (ts, queue_num));
+                (slot, storage_loc, ts, queue_num)
+            },
             _ => unimplemented!(),
         }
 
@@ -1514,12 +1516,15 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         Skeens1SingleReplica { buffer, storage, storage_loc, t, } => unsafe {
+            trace!("WORKER {} finish skeens single replication", worker_num);
             let len = buffer.contents().non_replicated_len();
             ptr::copy_nonoverlapping(buffer[..len].as_ptr(), storage, len);
             let mut e = MutEntry::wrap_slice(slice::from_raw_parts_mut(storage, len));
             e.to_non_replicated();
             e.contents().flag_mut().remove(EntryFlag::Skeens1Queued);
+            e.contents().flag_mut().insert(EntryFlag::ReadSuccess);
             let u = if continue_replication {
+                trace!("WORKER {} skeens no-ack", worker_num);
                 //send(ToSend::OldReplication(buffer.entry_slice(), storage_loc), t)
                 send(ToSend::OldContents(buffer.contents(), storage_loc), t)
             } else {
@@ -1533,7 +1538,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         // the storage_loc is sent with the first round
         DelayedSingle { index, trie_slot, storage, t, }
         | Skeens2SingleReplica { index, trie_slot, storage, t, } => unsafe {
-            trace!("WORKER {} finish delayed single", worker_num);
+            //trace!("WORKER {} finish delayed single @ {:?}", worker_num);
             let color;
             let len = {
                 let storage = storage as *mut u8;
@@ -1543,11 +1548,13 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     color = locs[0].0;
                     locs[0].1 = entry::from(index as u32);
                 }
+                debug_assert!(e.flag_mut().contains(EntryFlag::ReadSuccess));
                 e.as_ref().len()
             };
+            trace!("WORKER {} finish delayed single @ {:?}",
+                worker_num, OrderIndex(color, entry::from(index as u32)));
             let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
             (*trie_entry).store(storage as *mut u8, Ordering::Release);
-            let ret = slice::from_raw_parts(storage, len);
             let u = if continue_replication {
                 let e = Entry::wrap_bytes(&*storage).contents();
                 send(ToSend::Contents(EntryContents::Skeens2ToReplica{
@@ -1556,6 +1563,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     loc: &OrderIndex(color, entry::from(index as u32)),
                 }), t)
             } else {
+                let ret = slice::from_raw_parts(storage, len);
                 send(ToSend::Slice(ret), t)
             };
             (None, u)

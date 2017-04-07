@@ -768,7 +768,59 @@ mod test {
 
     use super::*;
 
-    use std::marker::PhantomData;
+    use byteorder::{ByteOrder, LittleEndian};
+
+    //use std::marker::PhantomData;
+
+    #[test]
+    fn packet_sanity_check() {
+        let id = Uuid::new_v4();
+        let flag = EntryFlag::ReadSuccess;
+        let data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 99, 10];
+        let deps = [OrderIndex(1.into(), 1.into()), OrderIndex(2.into(), 1.into()), OrderIndex(3.into(), 3.into())];
+        let locs = [OrderIndex(5.into(), 55.into()), OrderIndex(37.into(), 8.into()),
+            OrderIndex(1000000000.into(), 0xffffffff.into())];
+        let lock = 0xdeadbeef;
+        let mut bytes = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &flag,
+            //data_bytes: u32,
+            //num_deps: u16,
+            //cols: u16,
+            lock: &lock,
+            locs: &locs,
+            deps: &deps,
+            data: &data,
+        }.fill_vec(&mut bytes);
+        let mut data_bytes = [0u8; 4];
+        LittleEndian::write_u32(&mut data_bytes, data.len() as u32);
+        let mut num_deps = [0u8; 2];
+        LittleEndian::write_u16(&mut num_deps, deps.len() as u16);
+        let mut cols = [0u8; 2];
+        LittleEndian::write_u16(&mut cols, locs.len() as u16);
+        let mut lock_bytes = [0u8; 8];
+        LittleEndian::write_u64(&mut lock_bytes, lock);
+
+        let locs_as_bytes = unsafe { slice::from_raw_parts(
+            &locs as *const _ as *const u8, locs.len() * mem::size_of::<OrderIndex>()) };
+        let deps_as_bytes = unsafe { slice::from_raw_parts(
+            &deps as *const _ as *const u8, deps.len() * mem::size_of::<OrderIndex>()) };
+
+        let mut cannonical = Vec::new();
+        cannonical.extend_from_slice(id.as_bytes());
+        unsafe { cannonical.push(mem::transmute(flag)) };
+        cannonical.extend_from_slice(&data_bytes);
+        cannonical.extend_from_slice(&num_deps);
+        cannonical.extend_from_slice(&cols);
+        cannonical.extend_from_slice(&lock_bytes);
+        cannonical.extend_from_slice(&locs_as_bytes);
+        cannonical.extend_from_slice(&deps_as_bytes);
+        cannonical.extend_from_slice(&data);
+
+
+        assert_eq!(&bytes[1..], &cannonical[..]);
+    }
 
 
     /*#[test]

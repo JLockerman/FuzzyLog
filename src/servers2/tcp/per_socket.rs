@@ -427,7 +427,7 @@ impl PerSocket {
     }
 
     pub fn add_downstream_contents3(
-        &mut self, to_write: EntryContents, storage_loc: &[u8], addr: &[u8]
+        &mut self, to_write: EntryContents, to_write1: &[u8], to_write2: &[u8]
     ) {
         use self::PerSocket::*;
         trace!("SOCKET add downstream send");
@@ -438,20 +438,20 @@ impl PerSocket {
             | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
-                let write_len = to_write.len() + storage_loc.len() + addr.len();
+                let write_len = to_write.len() + to_write1.len() + to_write2.len();
                 trace!("SOCKET send down contents3 {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
                     let _added = being_written.try_fill_from_contents(to_write);
-                    let _added = being_written.try_fill(storage_loc) && _added;
-                    let _added = being_written.try_fill(addr) && _added;
+                    let _added = being_written.try_fill(to_write1) && _added;
+                    let _added = being_written.try_fill(to_write2) && _added;
                     debug_assert!(_added)
                 } else {
                     let mut pend = Vec::with_capacity(write_len);
                     to_write.fill_vec(&mut pend);
-                    pend.extend_from_slice(storage_loc);
-                    pend.extend_from_slice(addr);
+                    pend.extend_from_slice(to_write1);
+                    pend.extend_from_slice(to_write2);
                     pending.push_back(pend);
                 }
             }
@@ -681,15 +681,17 @@ fn recv_packet(
             Err(WrapErr::NotEnoughBytes(needs)) =>
                 needs + mem::size_of::<Ipv4SocketAddr>() + extra,
             Err(err) => panic!("{:?}", err),
-            Ok(size) if read < size + mem::size_of::<Ipv4SocketAddr>() + extra =>
-                size + mem::size_of::<Ipv4SocketAddr>() + extra,
+            Ok(size) if read < size + extra + mem::size_of::<Ipv4SocketAddr>() =>
+                size + extra + mem::size_of::<Ipv4SocketAddr>(),
             Ok(..) => {
                 debug_assert_eq!(
                     read, buffer.entry_size() + mem::size_of::<Ipv4SocketAddr>() + extra,//TODO if is_write { mem::size_of::<Ipv4SocketAddr>() } else { 0 },
                     "entry_size {}", buffer.entry_size()
                 );
+                //let src_addr = Ipv4SocketAddr::from_slice(
+                //    &buffer[read-mem::size_of::<Ipv4SocketAddr>()-extra..read-extra]);
                 let src_addr = Ipv4SocketAddr::from_slice(
-                    &buffer[read-mem::size_of::<Ipv4SocketAddr>()-extra..read-extra]);
+                   &buffer[read-mem::size_of::<Ipv4SocketAddr>()..read]);
                 trace!("WORKER finished recv {} bytes for {}.", read, src_addr);
                 //TODO ( if is_read { Some((receive_addr)) } else { None } )
                 return RecvRes::Done(src_addr)

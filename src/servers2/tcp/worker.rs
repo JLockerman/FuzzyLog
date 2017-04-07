@@ -320,7 +320,7 @@ impl Worker {
                             LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
                             //client.add_downstream_send(&storage_log_bytes)
                             client.add_downstream_send3(
-                                buffer, src_addr.bytes(), &storage_log_bytes);
+                                buffer, &storage_log_bytes, src_addr.bytes());
                         }
                         //TODO replace with wake function
                         self.inner.awake_io.push_back(DOWNSTREAM);
@@ -353,7 +353,7 @@ impl Worker {
                             LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
                             //client.add_downstream_send(&storage_log_bytes)
                             client.add_downstream_send3(
-                                &buffer, src_addr.bytes(), &storage_log_bytes);
+                                &buffer, &storage_log_bytes, src_addr.bytes());
                         }
                         //TODO replace with wake function
                         self.inner.awake_io.push_back(DOWNSTREAM);
@@ -618,26 +618,26 @@ impl Worker {
                 let mut storage_log_bytes: [u8; 8] = [0; 8];
                 LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
                 self.clients.get_mut(&DOWNSTREAM).unwrap()
-                    .add_downstream_send3(to_replicate, src_addr.bytes(), &storage_log_bytes)
+                    .add_downstream_send3(to_replicate, &storage_log_bytes, src_addr.bytes())
             },
 
             ToSend::Contents(to_send) => {
                 let storage_log_bytes: [u8; 8] = [0; 8];
                 self.clients.get_mut(&DOWNSTREAM).unwrap()
-                    .add_downstream_contents3(to_send, src_addr.bytes(), &storage_log_bytes)
+                    .add_downstream_contents3(to_send, &storage_log_bytes, src_addr.bytes())
             },
 
             ToSend::OldContents(to_send, storage_loc) => {
                 let mut storage_log_bytes: [u8; 8] = [0; 8];
                 LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
                 self.clients.get_mut(&DOWNSTREAM).unwrap().
-                    add_downstream_contents3(to_send, src_addr.bytes(), &storage_log_bytes)
+                    add_downstream_contents3(to_send, &storage_log_bytes, src_addr.bytes())
             }
 
             ToSend::Slice(to_send) => {
                 let storage_loc_bytes: [u8; 8] = [0; 8];
                 self.clients.get_mut(&recv_token).unwrap()
-                    .add_downstream_send3(to_send, src_addr.bytes(), &storage_loc_bytes)
+                    .add_downstream_send3(to_send, &storage_loc_bytes, src_addr.bytes())
             }
 
             ToSend::Read(_to_send) => unreachable!(),
@@ -898,13 +898,16 @@ impl WorkerInner {
         let kind = buffer.contents().kind();
         let to_send = match kind {
             EntryKind::Data => {
+                trace!("WORKER {} replicate Data", self.worker_num);
                 ToReplicate::Data(buffer, storage_addr)
             },
             EntryKind::Lock => {
+                trace!("WORKER {} replicate Unlock", self.worker_num);
                 ToReplicate::UnLock(buffer)
             },
             //TODO
             EntryKind::Multiput | EntryKind::Sentinel => {
+                trace!("WORKER {} replicate Multi/Senti", self.worker_num);
                 let (size, senti_size) = {
                     let e = buffer.contents();
                     (e.len(), e.sentinel_entry_size())
@@ -919,9 +922,11 @@ impl WorkerInner {
                 ToReplicate::Multi(buffer, multi_storage, senti_storage)
             },
             EntryKind::SingleToReplica => {
+                trace!("WORKER {} replicate single skeens 1", self.worker_num);
                 ToReplicate::SingleSkeens1(buffer, storage_addr)
             }
             EntryKind::MultiputToReplica => {
+                trace!("WORKER {} replicate multi skeens 1", self.worker_num);
                 let (size, senti_size, num_locs, has_senti) = {
                     let e = buffer.contents();
                     let locs = e.locs();
@@ -935,6 +940,7 @@ impl WorkerInner {
                 ToReplicate::Skeens1(buffer, storage)
             }
             EntryKind::SentinelToReplica => {
+                trace!("WORKER {} replicate senti skeens 1", self.worker_num);
                 let (size, senti_size, num_locs, has_senti) = {
                     let e = buffer.contents();
                     let locs = e.locs();
@@ -948,6 +954,7 @@ impl WorkerInner {
                 ToReplicate::Skeens1(buffer, storage)
             }
             EntryKind::Skeens2ToReplica => {
+                trace!("WORKER {} replicate skeens 2", self.worker_num);
                 ToReplicate::Skeens2(buffer)
             }
             _ => unreachable!(),
