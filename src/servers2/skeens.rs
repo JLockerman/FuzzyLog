@@ -562,7 +562,7 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
                     .field("id", id)
                     .field("timestamp", timestamp)
                     .field("node_num", node_num)
-                    .field("storage", &(&**storage as *const _))
+                    .field("storage", &unsafe{ storage.get() })
                     .finish()
             },
             &WaitingForMax::Multi{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
@@ -571,7 +571,7 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
                     .field("id", id)
                     .field("timestamp", timestamp)
                     .field("node_num", node_num)
-                    .field("storage", &(&**storage as *const _))
+                    .field("storage", &unsafe{ storage.get() })
                     .finish()
             },
             &WaitingForMax::SimpleSingle{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
@@ -601,7 +601,7 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
                     .field("id", id)
                     .field("max_timestamp", max_timestamp)
                     .field("index", index)
-                    .field("storage", &(&**storage as *const _))
+                    .field("storage", &unsafe{ storage.get() })
                     .finish()
             },
             &WaitingForMax::ReplicatedSingle{
@@ -685,7 +685,7 @@ impl<T> ::std::fmt::Debug for GotMax<T> {
                 let _ = t;
                 fmt.debug_struct("GotMax::Multi")
                     .field("timestamp", timestamp)
-                    .field("storage", &(&**storage as *const _))
+                    .field("storage", &unsafe{ storage.get() })
                     .field("id", id)
                     .finish()
             },
@@ -797,7 +797,7 @@ impl<T> PartialEq for GotMax<T> {
             (&Multi{timestamp: my_ts, id: ref my_id, storage: ref my_s, ..},
                 &Multi{timestamp: other_ts, id: ref other_id, storage: ref other_s, ..})
             => my_ts == other_ts && my_id == other_id
-                && &**my_s as *const _ == &**other_s as *const _,
+                && my_s.ptr() as *const _ == other_s.ptr(),
 
             (&SimpleSingle{timestamp: my_ts, storage: my_s, ..},
                 &SimpleSingle{timestamp: other_ts, storage: other_s, ..})

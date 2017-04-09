@@ -173,35 +173,52 @@ unsafe impl Send for SkeensMultiStorage {}
 
 impl SkeensMultiStorage {
     fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
-        unsafe {
-            let mut timestamps = Vec::with_capacity(num_locs);
-            let mut queue_indicies = Vec::with_capacity(num_locs);
+            let mut timestamps = vec![0; num_locs];
+            let mut queue_indicies = vec![0; num_locs];
             let mut data = Vec::with_capacity(entry_size);
-            queue_indicies.set_len(num_locs);
-            timestamps.set_len(num_locs);
-            data.set_len(entry_size);
+            unsafe { data.set_len(entry_size) };
             let timestamps = timestamps.into_boxed_slice();
             let queue_indicies = queue_indicies.into_boxed_slice();
-            let data = &mut *Box::into_raw(data.into_boxed_slice());
+            let data = unsafe { &mut *Box::into_raw(data.into_boxed_slice()) };
             let senti = sentinel_size.map(|s| {
                 let mut senti = Vec::with_capacity(s);
-                senti.set_len(s);
-                &mut *Box::into_raw(senti.into_boxed_slice())
+                unsafe { senti.set_len(s) };
+                unsafe { &mut *Box::into_raw(senti.into_boxed_slice()) }
             }).unwrap_or(&mut []);
             debug_assert_eq!(timestamps.len(), num_locs);
             debug_assert_eq!(timestamps.len(), queue_indicies.len());
             SkeensMultiStorage(Arc::new(UnsafeCell::new((timestamps, queue_indicies, data, senti))))
-        }
+    }
+
+    fn try_unwrap(s: Self) -> Result<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>, Self> {
+        Arc::try_unwrap(s.0).map_err(SkeensMultiStorage)
+    }
+
+    unsafe fn get(&self) -> (&Box<[Time]>, &Box<[QueueIndex]>, &'static [u8], &'static [u8]) {
+        let &(ref ts, ref indicies, ref st0, ref st1) = &*self.0.get();
+        (ts, indicies, *st0, *st1)
+    }
+
+    unsafe fn get_mut(&self)
+    -> (&mut Box<[Time]>, &mut Box<[QueueIndex]>, &mut [u8], &mut [u8]) {
+        let &mut (ref mut ts, ref mut indicies, ref mut st0, ref mut st1) = &mut *self.0.get();
+        (ts, indicies, &mut **st0, &mut **st1)
+    }
+
+    fn ptr(&self)
+    -> *const UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>
+    {
+        &*(self.0)
     }
 }
 
-impl ::std::ops::Deref for SkeensMultiStorage {
+/*impl ::std::ops::Deref for SkeensMultiStorage {
     type Target = UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
     }
-}
+}*/
 
 #[derive(Debug)]
 pub enum WhichMulti {
@@ -508,8 +525,8 @@ where ToWorkers: DistributeToWorkers<T> {
         trace!("SERVER {:?} new-style multiput Round 1 {:?}", self.this_server_num, kind);
         let val = buffer.contents();
         let locs = val.locs();
-        let timestamps = &mut unsafe { &mut (&mut *storage.get()).0 }[..locs.len()];
-        let queue_indicies = &mut unsafe { &mut (&mut *storage.get()).1 }[..locs.len()];
+        let timestamps = &mut unsafe { storage.get_mut().0 }[..locs.len()];
+        let queue_indicies = &mut unsafe { storage.get_mut().1 }[..locs.len()];
         let id = val.id().clone();
         for i in 0..locs.len() {
             let chain = locs[i].0;
@@ -1652,8 +1669,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         Skeens1{mut buffer, storage, t} => unsafe {
-            let &mut (ref mut ts, ref mut indicies, ref mut st0, ref mut st1) =
-                &mut (*storage.get());
+            let (ts, indicies, st0, st1) = storage.get_mut();
             trace!("WORKER {} finish skeens1 {:?}", worker_num, ts);
             let len = {
                 let mut e = buffer.contents_mut();
@@ -1688,55 +1704,67 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             //ServerResponse::FinishedSkeens1(buffer, t)
             //(Some(buffer), &[], t, 0, false)
         },
+
         SkeensFinished{loc, trie_slot, storage, timestamp, t,}
         | Skeens2MultiReplica{loc, trie_slot, storage, timestamp, t} => unsafe {
             trace!("WORKER {} finish skeens2 @ {:?}", worker_num, loc);
             let chain = loc.0;
-            let &mut (ref mut _ts, ref mut _indicies, ref mut st0, ref mut st1) =
-                &mut (*storage.get());
-            let is_sentinel = {
-                let mut st0 = bytes_as_entry_mut(st0);
-                let st0_l = st0.locs_mut();
-                let i = st0_l.iter().position(|oi| oi.0 == chain).unwrap();
-                //FIXME atomic?
-                st0_l[i].1 = loc.1;
-                if st1.len() > 0 {
-                    bytes_as_entry_mut(st1).locs_mut()[i].1 = loc.1;
-                    let s_i = st0_l.iter()
-                        .position(|oi| oi == &OrderIndex(0.into(), 0.into()));
-                    i > s_i.unwrap()
-                }
-                else {
-                    false
-                }
-            };
-            let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
+            let id;
             {
-                let to_store: *mut u8 = if is_sentinel {
-                    st1.as_mut_ptr()
-                } else {
-                    st0.as_mut_ptr()
+                let (_ts, _indicies, st0, st1) = storage.get_mut();
+                let is_sentinel = {
+                    let mut st0 = bytes_as_entry_mut(st0);
+                    id = *st0.as_ref().id();
+                    let st0_l = st0.locs_mut();
+                    let i = st0_l.iter().position(|oi| oi.0 == chain).unwrap();
+                    //FIXME atomic?
+                    st0_l[i].1 = loc.1;
+                    if st1.len() > 0 {
+                        bytes_as_entry_mut(st1).locs_mut()[i].1 = loc.1;
+                        let s_i = st0_l.iter()
+                            .position(|oi| oi == &OrderIndex(0.into(), 0.into()));
+                        i > s_i.unwrap()
+                    }
+                    else {
+                        false
+                    }
                 };
-                (*trie_entry).store(to_store, Ordering::Release);
+                let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
+                {
+                    let to_store: *mut u8 = if is_sentinel {
+                        st1.as_mut_ptr()
+                    } else {
+                        st0.as_mut_ptr()
+                    };
+                    (*trie_entry).store(to_store, Ordering::Release);
+                }
             }
-            let u = if continue_replication {
-                let e = bytes_as_entry(st0);
-                send(ToSend::Contents(EntryContents::Skeens2ToReplica{
-                    id: e.id(),
+
+            let to_send = if continue_replication {
+                ToSend::Contents(EntryContents::Skeens2ToReplica{
+                    id: &id,
                     lock: &timestamp,
                     loc: &loc,
-                }), t)
+                })
             } else {
-                send(ToSend::Slice(if st1.len() > 0 { &**st1 } else { &**st0 }), t)
+                match SkeensMultiStorage::try_unwrap(storage) {
+                    Ok(storage) => {
+                        let &(_, _, ref st0, ref st1) = &*storage.get();
+                        ToSend::Slice(if st1.len() > 0 { *st1 } else { *st0 })
+                    }
+                    Err(..) => ToSend::Nothing
+                }
             };
+
+            let u = send(to_send, t);
             (None, u)
+
             //ServerResponse::FinishedSkeens2(if st1.len() > 0 { &**st1 } else { &**st0 }, t)
             //(None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0, false)
         },
 
-        Skeens1Replica{mut buffer, storage, t} => unsafe {
-            let &mut (ref mut ts, ref mut indicies, ref mut st0, ref mut st1) =
-                &mut (*storage.get());
+        Skeens1Replica{mut buffer, mut storage, t} => unsafe {
+            let (ts, indicies, st0, st1) = storage.get_mut();
             let len = buffer.contents().non_replicated_len();
             st0.copy_from_slice(&buffer[..len]);
             {
