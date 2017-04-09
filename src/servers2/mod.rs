@@ -97,6 +97,8 @@ pub enum ToWorker<T: Send + Sync> {
         num_places: usize,
     },
 
+    MultiFastPath(BufferSlice, SkeensMultiStorage, T),
+
     Skeens1 {
         buffer: BufferSlice,
         storage: SkeensMultiStorage,
@@ -110,6 +112,8 @@ pub enum ToWorker<T: Send + Sync> {
         timestamp: u64,
         t: T,
     },
+
+    SingleServerSkeens1(SkeensMultiStorage, T),
 
     //FIXME this is getting too big...
     //This is not racey b/c both this and DelayedSingle single get sent to the same thread
@@ -173,8 +177,8 @@ unsafe impl Send for SkeensMultiStorage {}
 
 impl SkeensMultiStorage {
     fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
-            let mut timestamps = vec![0; num_locs];
-            let mut queue_indicies = vec![0; num_locs];
+            let timestamps = vec![0; num_locs];
+            let queue_indicies = vec![0; num_locs];
             let mut data = Vec::with_capacity(entry_size);
             unsafe { data.set_len(entry_size) };
             let timestamps = timestamps.into_boxed_slice();
@@ -209,6 +213,24 @@ impl SkeensMultiStorage {
     -> *const UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>
     {
         &*(self.0)
+    }
+
+    fn fill_from(&mut self, buffer: &mut Buffer) {
+        let (_ts, _indicies, st0, st1) = unsafe { self.get_mut() };
+        let len = {
+            let mut e = buffer.contents_mut();
+            e.flag_mut().insert(EntryFlag::ReadSuccess);
+            e.as_ref().len()
+        };
+        //let num_ts = ts.len();
+        st0.copy_from_slice(&buffer[..len]);
+        //TODO just copy from sentinel Ref
+        let was_multi = buffer.to_sentinel();
+        if st1.len() > 0 {
+            let len = buffer.contents().len();
+            st1.copy_from_slice(&buffer[..len]);
+        }
+        buffer.from_sentinel(was_multi);
     }
 }
 
@@ -249,7 +271,9 @@ where T: Send + Sync {
             | &mut Skeens2SingleReplica {ref mut t,..}
             | &mut Skeens1SingleReplica {ref mut t,..}=> f(t),
 
-            &mut ReturnBuffer(_, ref mut t) => f(t),
+            &mut SingleServerSkeens1(_, ref mut t) => f(t),
+
+            &mut ReturnBuffer(_, ref mut t) | &mut MultiFastPath(_, _, ref mut t) => f(t),
         }
     }
 }
@@ -259,11 +283,13 @@ where T: Copy + Send + Sync {
     fn get_associated_data(&self) -> T {
         match self {
             &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
+            &MultiFastPath(_, _, t) => t,
             &MultiReplica{t, ..} => t,
             &Skeens1{t, ..} | &SkeensFinished{t, ..} => t,
             &SingleSkeens {t, ..} | &DelayedSingle {t, .. } => t,
             &Skeens1SingleReplica {t, ..} => t,
             &ReturnBuffer(_, t) => t,
+            &SingleServerSkeens1(_, t) => t,
 
             &Skeens1Replica {t, ..}
             | &Skeens2MultiReplica {t,..}
@@ -482,12 +508,123 @@ where ToWorkers: DistributeToWorkers<T> {
         t: T
     ) {
         //FXIME fastpath for single server appends
-        if kind.contains(EntryFlag::NewMultiPut) {
+        if !kind.contains(EntryFlag::TakeLock) {
+            self.handle_single_server_append(kind, buffer, storage, t)
+        } else if kind.contains(EntryFlag::NewMultiPut) {
             self.handle_new_multiappend(kind, buffer, storage, t)
         }
         else {
             self.handle_old_multiappend(kind, buffer, storage, t)
         }
+    }
+
+    //////////////////////
+
+    fn handle_single_server_append(
+        &mut self,
+        kind: EntryFlag::Flag,
+        buffer: BufferSlice,
+        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
+        t: T
+    ) {
+        let storage = storage.unwrap_left();
+
+        let (mut needs_lock, mut needs_skeens) = (false, false);
+        {
+            for &OrderIndex(c, _) in buffer.contents().locs() {
+                if c == order::from(0) || !self.stores_chain(c) {
+                    continue
+                }
+
+                let chain =  self.ensure_chain(c);
+                needs_skeens |= chain.needs_skeens_single();
+                needs_lock |= chain.trie.is_locked();
+            }
+        }
+        debug_assert!(!(needs_lock && needs_skeens));
+        if !needs_lock && !needs_skeens {
+            self.single_server_single_append_fast_path(kind, buffer, storage, t)
+        } else if needs_skeens {
+            self.single_server_local_skeens(kind, buffer, storage, t)
+        } else if needs_lock {
+            self.multi_append_lock_failed(kind, buffer, storage, t)
+        }
+    }
+
+    fn single_server_single_append_fast_path(
+        &mut self,
+        _kind: EntryFlag::Flag,
+        mut buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T
+    ) {
+        unsafe {
+            let (pointers, _indicies, _st0, _st1) = storage.get_mut();
+            let mut contents = buffer.contents_mut();
+            let locs = contents.locs_mut();
+            let pointers = &mut pointers[..locs.len()];
+            for (j, &mut OrderIndex(ref o, ref mut i)) in locs.into_iter().enumerate() {
+                if *o == order::from(0) || !self.stores_chain(*o) {
+                    *i = entry::from(0);
+                    pointers[j] = 0;
+                    continue
+                }
+
+                let (index, ptr) =
+                    self.ensure_chain(*o).trie.prep_append(ptr::null());
+                *i = (index as u32).into();
+                pointers[j] = ptr as *mut *const u8 as usize as u64;
+            }
+        }
+
+        self.print_data.msgs_sent(1);
+        self.to_workers.send_to_worker(MultiFastPath(buffer, storage, t))
+    }
+
+    fn single_server_local_skeens(
+        &mut self,
+        kind: EntryFlag::Flag,
+        mut buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T
+    ) {
+        self.new_multiappend_round1(kind, &mut buffer, &storage, t);
+
+        let max_timestamp = unsafe { storage.get().0.iter().cloned().max() };
+
+        self.print_data.msgs_sent(1);
+        self.to_workers.send_to_worker(SingleServerSkeens1(storage, t));
+
+        *buffer.contents_mut().lock_mut() = max_timestamp.unwrap();
+        self.new_multiappend_round2(kind, &mut buffer);
+
+        self.print_data.msgs_sent(1);
+        self.to_workers.send_to_worker(ReturnBuffer(buffer, t));
+    }
+
+    fn multi_append_lock_failed(
+        &mut self,
+        _kind: EntryFlag::Flag,
+        mut buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T
+    ) {
+        {
+            for &mut OrderIndex(ref o, ref mut i) in buffer.contents_mut().locs_mut() {
+                if *o == order::from(0) || !self.stores_chain(*o) {
+                    continue
+                }
+
+                if self.ensure_chain(*o).trie.is_locked() {
+                    *i = entry::from(::std::u64::MAX as u32)
+                }
+            }
+        }
+
+        mem::drop(storage);
+
+        self.print_data.msgs_sent(1);
+        self.to_workers.send_to_worker(Reply(buffer, t));
     }
 
     //////////////////////
@@ -1418,6 +1555,79 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             //(Some(buffer), ret, t, 0, false)
         },
 
+        MultiFastPath(mut buffer, storage, t) => unsafe {
+            trace!("WORKER {} finish fastpath", worker_num);
+            {
+                let (ptrs, _indicies, st0, st1) = storage.get_mut();
+                let len = {
+                    let mut e = buffer.contents_mut();
+                    e.flag_mut().insert(EntryFlag::ReadSuccess);
+                    e.as_ref().len()
+                };
+                st0.copy_from_slice(&buffer[..len]);
+                let was_multi = buffer.to_sentinel();
+                if st1.len() > 0 {
+                    let len = buffer.contents().len();
+                    st1.copy_from_slice(&buffer[..len]);
+                }
+                {
+                    buffer.from_sentinel(was_multi);
+                    let mut is_sentinel = false;
+                    let locs = buffer.contents().locs();
+                    for (&oi, &trie_slot) in locs.iter().zip(ptrs.iter()) {
+                        if oi == OrderIndex(0.into(), 0.into()) {
+                            is_sentinel = true;
+                            continue
+                        }
+                        if trie_slot == 0 { continue }
+
+                        let trie_slot: u64 = trie_slot;
+                        let trie_entry: *mut AtomicPtr<u8> = trie_slot as usize as *mut _;
+                        let to_store: *mut u8 = if is_sentinel {
+                            st1.as_mut_ptr()
+                        } else {
+                            st0.as_mut_ptr()
+                        };
+                        (*trie_entry).store(to_store, Ordering::Release);
+                    }
+                }
+            }
+            let (_ptrs, _indicies, st0, _st1) = storage.get();
+            let u = if continue_replication {
+                send(ToSend::OldReplication(st0, 0), t)
+            } else {
+                send(ToSend::Slice(st0), t)
+            };
+            (Some(buffer), u)
+        },
+
+        SingleServerSkeens1(storage, t) => unsafe {
+            let (ts, indicies, st0, _st1) = storage.get_mut();
+            trace!("WORKER {} finish s skeens1 {:?}", worker_num, ts);
+            let mut c = bytes_as_entry_mut(st0);
+            c.flag_mut().insert(EntryFlag::ReadSuccess);
+            let u;
+            if continue_replication {
+                {
+                    c.flag_mut().insert(EntryFlag::Skeens1Queued);
+                    let locs = c.locs_mut();
+                    for i in 0..locs.len() {
+                        locs[i].1 = entry::from(ts[i] as u32)
+                    }
+                }
+                u = send(ToSend::Contents(c.as_ref().multi_skeens_to_replication(indicies)), t);
+                {
+                    c.flag_mut().remove(EntryFlag::Skeens1Queued);
+                    c.locs_mut().iter_mut().fold((),
+                        |(), &mut OrderIndex(_, ref mut i)| *i = entry::from(0)
+                    );
+                }
+            } else {
+                u = send(ToSend::Nothing, t)
+            };
+            (None, u)
+        },
+
         Skeens1{mut buffer, storage, t} => unsafe {
             let (ts, indicies, st0, st1) = storage.get_mut();
             trace!("WORKER {} finish skeens1 {:?}", worker_num, ts);
@@ -1513,11 +1723,11 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             //(None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0, false)
         },
 
-        Skeens1Replica{mut buffer, mut storage, t} => unsafe {
+        Skeens1Replica{mut buffer, storage, t} => unsafe {
             let (ts, indicies, st0, st1) = storage.get_mut();
             let len = buffer.contents().non_replicated_len();
             st0.copy_from_slice(&buffer[..len]);
-            {
+            let is_multi_server = {
                 MutEntry::wrap_slice(st0).to_non_replicated();
                 let mut e = bytes_as_entry_mut(st0);
                 e.locs_mut().iter_mut().enumerate().fold((),
@@ -1526,7 +1736,8 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         *i = entry::from(0);
                 });
                 e.flag_mut().remove(EntryFlag::Skeens1Queued);
-            }
+                e.flag_mut().contains(EntryFlag::TakeLock)
+            };
             indicies.iter_mut().zip(buffer.contents().queue_nums().iter()).fold((),
                     |(), (q, num)| *q = *num);
             trace!("WORKER {} finish skeens1 rep {:?}", worker_num, ts);
@@ -1545,8 +1756,10 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             let u = if continue_replication {
                 buffer.from_sentinel(was_multi);
                 send(ToSend::Slice(buffer.entry_slice()) , t)
-            } else {
+            } else if is_multi_server {
                 send(ToSend::Slice(buffer.entry_slice()), t)
+            } else {
+                send(ToSend::Nothing, t)
             };
             (Some(buffer), u)
         },

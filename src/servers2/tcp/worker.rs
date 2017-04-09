@@ -844,7 +844,7 @@ impl WorkerInner {
 
     fn send_to_log(
         &mut self,
-        buffer: Buffer,
+        mut buffer: Buffer,
         worker_num: usize,
         token: mio::Token,
         src_addr: Ipv4SocketAddr,
@@ -865,9 +865,12 @@ impl WorkerInner {
                     let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
                     (e.len(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
-                if f.contains(EntryFlag::NewMultiPut) {
+                if f.contains(EntryFlag::NewMultiPut) || !f.contains(EntryFlag::TakeLock) {
                     let senti_size = if has_senti { Some(senti_size) } else { None };
-                    let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                    let mut storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                    if !f.contains(EntryFlag::TakeLock) {
+                        storage.fill_from(&mut buffer)
+                    }
                     Troption::Left(storage)
                 } else {
                     let mut m = Vec::with_capacity(size);
