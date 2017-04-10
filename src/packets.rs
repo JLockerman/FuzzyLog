@@ -471,6 +471,12 @@ impl<'a> Packet::Ref<'a> {
             o => panic!("tried to get queue_nums from {:?}.", o),
         }
     }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        let mut v = Vec::new();
+        self.fill_vec(&mut v);
+        v
+    }
 }
 
 impl<'a> Packet::Mut<'a> {

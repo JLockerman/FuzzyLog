@@ -30,6 +30,7 @@ impl Kind {
         match (self, other) {
             (Kind::None, _) => true,
             (Kind::SentToServer, _) => true,
+            (Kind::GottenFromServer, Kind::None) => true,
             (Kind::GottenFromServer, Kind::ReturnedToClient) => true,
             (_, _) => false,
         }
@@ -445,5 +446,21 @@ impl PartialEq for Range {
 
 #[cfg(test)]
 mod test {
+    use super::*;
 
+    #[test]
+    fn overread() {
+        let inner = [
+            (Range::new(0.into(), 54.into()), Kind::ReturnedToClient),
+            (Range::new(55.into(), 55.into()), Kind::GottenFromServer),
+            (Range::new(56.into(), 134.into()), Kind::SentToServer),
+            (Range::new(135.into(), 4294967295.into()), Kind::None)
+            ].iter().cloned().collect();
+        let mut tree = RangeTree {
+            inner: inner, num_outstanding: 79, num_buffered: 1
+        };
+        tree.set_point_as_none(55.into());
+        println!("{:?}", tree);
+        assert!(false);
+    }
 }
