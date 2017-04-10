@@ -901,7 +901,7 @@ macro_rules! async_tests {
                                 acceptor, 0, 2,
                                 prev_server,
                                 next_server,
-                                1, //TODO switch to 2
+                                3,
                                 &SERVERS_READY
                             )
                         });
@@ -928,7 +928,7 @@ macro_rules! async_tests {
                                 acceptor, 1, 2,
                                 prev_server,
                                 next_server,
-                                1, //TODO switch to 2
+                                3,
                                 &SERVERS_READY
                             )
                         });
