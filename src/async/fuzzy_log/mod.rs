@@ -340,7 +340,7 @@ impl ThreadLog {
                 trace!("FUZZY read is multi");
                 debug_assert!(flag.contains(EntryFlag::ReadSuccess));
                 let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.got_read(read_loc.1)).unwrap_or(false);
+                    s.got_read(read_loc.1)).unwrap_or(false); //FIXME only call got_read on success otherwise call overread
                     //s.decrement_outstanding_reads());
                 if needed {
                     let is_sentinel = layout == EntryLayout::Sentinel;

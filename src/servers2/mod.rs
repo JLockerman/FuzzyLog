@@ -1329,6 +1329,7 @@ pub enum ToSend<'a> {
     Contents(EntryContents<'a>),
     OldContents(EntryContents<'a>, StorageLoc),
     Slice(&'a [u8]),
+    StaticSlice(&'static [u8]),
     Read(&'static [u8]),
     OldReplication(&'static [u8], StorageLoc),
 }
@@ -1394,7 +1395,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             let u = if continue_replication {
                 send(ToSend::OldReplication(ret, loc), t)
             } else {
-                send(ToSend::Slice(ret), t)
+                send(ToSend::StaticSlice(ret), t)
             };
             (Some(buffer), u)
             //ServerResponse::FinishedAppend(buffer, t, ret, loc)
@@ -1471,7 +1472,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 }), t)
             } else {
                 let ret = slice::from_raw_parts(storage, len);
-                send(ToSend::Slice(ret), t)
+                send(ToSend::StaticSlice(ret), t)
             };
             (None, u)
             //ServerResponse::FinishedSingletonSkeens2(ret, t)
@@ -1522,7 +1523,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let u = if continue_replication {
                     send(ToSend::OldReplication(ret, 0), t)
                 } else {
-                    send(ToSend::Slice(ret), t)
+                    send(ToSend::StaticSlice(ret), t)
                 };
                 return (Some(buffer), u)
                 //return ServerResponse::FinishOldMultiappend(buffer, t, ret) //(Some(buffer), ret, t, 0, false)
@@ -1548,7 +1549,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             let u = if continue_replication {
                 send(ToSend::OldReplication(ret, 0), t)
             } else {
-                send(ToSend::Slice(ret), t)
+                send(ToSend::StaticSlice(ret), t)
             };
             (Some(buffer), u)
             //ServerResponse::FinishOldMultiappend(buffer, t, ret)
@@ -1596,7 +1597,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             let u = if continue_replication {
                 send(ToSend::OldReplication(st0, 0), t)
             } else {
-                send(ToSend::Slice(st0), t)
+                send(ToSend::StaticSlice(st0), t)
             };
             (Some(buffer), u)
         },
@@ -1710,7 +1711,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 match SkeensMultiStorage::try_unwrap(storage) {
                     Ok(storage) => {
                         let &(_, _, ref st0, ref st1) = &*storage.get();
-                        ToSend::Slice(if st1.len() > 0 { *st1 } else { *st0 })
+                        ToSend::StaticSlice(if st1.len() > 0 { *st1 } else { *st0 })
                     }
                     Err(..) => ToSend::Nothing
                 }

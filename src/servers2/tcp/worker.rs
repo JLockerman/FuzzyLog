@@ -640,6 +640,12 @@ impl Worker {
                     .add_downstream_send3(to_send, &storage_loc_bytes, src_addr.bytes())
             }
 
+            ToSend::StaticSlice(to_send) => {
+                let storage_loc_bytes: [u8; 8] = [0; 8];
+                self.clients.get_mut(&recv_token).unwrap()
+                    .add_downstream_send3(to_send, &storage_loc_bytes, src_addr.bytes())
+            }
+
             ToSend::Read(_to_send) => unreachable!(),
         }
     }
@@ -648,10 +654,16 @@ impl Worker {
         match to_send {
             ToSend::Nothing => return,
             ToSend::OldReplication(..) => unreachable!(),
+
             ToSend::Contents(to_send) | ToSend::OldContents(to_send, _) =>
                 self.clients.get_mut(&send_token).unwrap().add_downstream_contents(to_send),
+
             ToSend::Slice(to_send) =>
                 self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
+
+            ToSend::StaticSlice(to_send) =>
+                self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
+
             ToSend::Read(to_send) =>
                 self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
         }
@@ -666,6 +678,13 @@ impl Worker {
                 self.inner.to_dist.send(
                     WorkerToDist::DownstreamB(
                         worker, src_addr, to_send.to_vec().into_boxed_slice(), 0
+                    )
+                ).ok().unwrap(),
+
+            ToSend::StaticSlice(to_send) =>
+                self.inner.to_dist.send(
+                    WorkerToDist::Downstream(
+                        worker, src_addr, to_send, 0
                     )
                 ).ok().unwrap(),
 
@@ -703,10 +722,14 @@ impl Worker {
                 self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, to_send))
                     .ok().unwrap(),
 
-            //TODO add ToSend::StaticSlice
             ToSend::Slice(to_send) =>
                 self.inner.to_dist.send(
                     WorkerToDist::ToClientB(src_addr, to_send.to_vec().into_boxed_slice())
+                ).ok().unwrap(),
+
+            ToSend::StaticSlice(to_send) =>
+                self.inner.to_dist.send(
+                    WorkerToDist::ToClient(src_addr, to_send)
                 ).ok().unwrap(),
 
             ToSend::Contents(to_send) | ToSend::OldContents(to_send, _) => {
