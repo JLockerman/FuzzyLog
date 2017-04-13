@@ -7,7 +7,7 @@ authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
 env_logger = "0.3"
 log = "0.3.2"
 num_cpus = "1"
-mio = "*"
+mio = "0.6.6"
 fuzzy_log = {path = "../.."}
 
 [profile.release]
