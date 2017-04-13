@@ -13,7 +13,6 @@ use vec_deque_map::VecDequeMap;
 
 use super::SkeensMultiStorage;
 
-#[derive(Debug)]
 pub struct SkeensState<T: Copy> {
     next_timestamp: u64,
     phase1_queue: VecDequeMap<WaitingForMax<T>>,
@@ -22,6 +21,17 @@ pub struct SkeensState<T: Copy> {
     //waiting_for_max_timestamp: LinkedHashMap<Uuid, WaitingForMax<T>>,
     //in_progress: HashMap<Uuid, AppendStatus>, //subsumes waiting_for_max_timestamp and phase2_ids
     //phase2_ids: HashMap<Uuid, u64>,
+}
+
+impl<T: Copy> ::std::fmt::Debug for SkeensState<T> {
+    fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
+        fmt.debug_struct("SkeensState")
+            .field("next_timestamp", &self.next_timestamp)
+            .field("phase1_queue", &self.phase1_queue)
+            .field("got_max_timestamp", &self.got_max_timestamp)
+            .field("append_status", &self.append_status)
+            .finish()
+    }
 }
 
 pub type QueueIndex = u64;
@@ -354,14 +364,14 @@ impl<T: Copy> SkeensState<T> {
             Some(&AppendStatus::Phase1(offset)) | Some(&AppendStatus::Singleton(offset)) =>
                 offset,
             _ => {
-                trace!("SKEENS early round 2");
+                trace!("SKEENS early round 2 {:?}", self);
                 return
             },
         };
         self.phase1_queue.get_mut(offset).map(|w|
             w.replicate_max_timetamp(max_timestamp, index));
         if offset != self.phase1_queue.start_index() {
-            trace!("SKEENS not ready to flush replica");
+            trace!("SKEENS not ready to flush replica {:?}", self);
             return
         }
         while self.phase1_queue.front().map(|w| w.has_replication()).unwrap_or(false) {
