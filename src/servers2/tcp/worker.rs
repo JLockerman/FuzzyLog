@@ -124,13 +124,13 @@ impl Worker {
             &from_dist,
             FROM_DIST,
             mio::Ready::readable(),
-            mio::PollOpt::level()
+            mio::PollOpt::edge()
         ).expect("cannot pol from dist on worker");
         poll.register(
             &from_log,
             FROM_LOG,
             mio::Ready::readable(),
-            mio::PollOpt::level()
+            mio::PollOpt::edge()
         ).expect("cannot pol from log on worker");
         let mut awake_io: VecDeque<_> = Default::default();
         let mut clients: HashMap<_, _> = Default::default();
