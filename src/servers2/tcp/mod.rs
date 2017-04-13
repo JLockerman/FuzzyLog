@@ -372,7 +372,7 @@ pub fn run_with_replication(
             }
             worker
         } else {
-            worker_for_ip(addr.ip(), num_workers as u64)
+            worker_for_ip(addr, num_workers as u64)
         };
         dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
         worker_for_client.insert(
@@ -407,7 +407,7 @@ pub fn run_with_replication(
                                 }
                                 worker
                             } else {
-                                worker_for_ip(addr.ip(), num_workers as u64)
+                                worker_for_ip(addr, num_workers as u64)
                             };
                             trace!("SERVER accepting client @ {:?} => {:?}",
                                 addr, (worker, tok));
@@ -1546,7 +1546,7 @@ fn get_next_token(token: &mut mio::Token) -> mio::Token {
     *token
 }
 
-fn worker_for_ip(ip: IpAddr, num_workers: u64) -> usize {
+fn worker_for_ip(ip: SocketAddr, num_workers: u64) -> usize {
     use std::hash::{Hash, Hasher};
     let mut hasher: FxHasher = Default::default();
     ip.hash(&mut hasher);
