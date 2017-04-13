@@ -35,6 +35,7 @@ pub enum PerSocket {
         bytes_read: usize,
         stream: TcpStream,
         needs_to_stay_awake: bool,
+        is_staying_awake: bool,
 
         print_data: PerSocketData,
     },
@@ -44,6 +45,7 @@ pub enum PerSocket {
         stream: TcpStream,
         pending: VecDeque<Vec<u8>>,
         needs_to_stay_awake: bool,
+        is_staying_awake: bool,
 
         print_data: PerSocketData,
     },
@@ -56,6 +58,7 @@ pub enum PerSocket {
         bytes_written: usize,
         pending: VecDeque<Vec<u8>>,
         needs_to_stay_awake: bool,
+        is_staying_awake: bool,
 
         print_data: PerSocketData,
     }
@@ -142,6 +145,8 @@ impl PerSocket {
             bytes_written: 0,
             pending: Default::default(),
             needs_to_stay_awake: false,
+            is_staying_awake: true,
+
             print_data: Default::default(),
         }
     }
@@ -152,6 +157,7 @@ impl PerSocket {
             bytes_read: 0,
             stream: stream,
             needs_to_stay_awake: false,
+            is_staying_awake: true,
             print_data: Default::default(),
         }
     }
@@ -163,6 +169,7 @@ impl PerSocket {
             pending: Default::default(),
             stream: stream,
             needs_to_stay_awake: false,
+            is_staying_awake: true,
             print_data: Default::default(),
         }
     }
@@ -182,7 +189,7 @@ impl PerSocket {
         trace!("SOCKET try recv");
         match self {
             &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream,
-                ref mut needs_to_stay_awake, ref mut print_data} => {
+                ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
                     trace!("SOCKET recv actual");
                     //TODO audit
@@ -262,7 +269,7 @@ impl PerSocket {
     pub fn send_burst(&mut self) -> Result<ShouldContinue, ()> {
         use self::PerSocket::*;
         match self {
-            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data}
+            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..}
             | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 trace!("SOCKET send actual.");
                 if being_written.is_empty() {
@@ -507,13 +514,35 @@ impl PerSocket {
         }
     }
 
+    pub fn should_be_awake(&self) -> bool {
+        use self::PerSocket::*;
+        match self {
+            &Downstream {needs_to_stay_awake, is_staying_awake, ..}
+            | &Client {needs_to_stay_awake, is_staying_awake, ..}
+            | &Upstream {needs_to_stay_awake, is_staying_awake, ..} => {
+                needs_to_stay_awake || is_staying_awake
+            }
+        }
+    }
+
     pub fn needs_to_stay_awake(&self) -> bool {
         use self::PerSocket::*;
         match self {
-            &Downstream {needs_to_stay_awake, ..}
-            | &Client {needs_to_stay_awake, ..}
-            | &Upstream {needs_to_stay_awake, ..} => {
-                needs_to_stay_awake
+            &Downstream {needs_to_stay_awake, is_staying_awake, ..}
+            | &Client {needs_to_stay_awake, is_staying_awake, ..}
+            | &Upstream {needs_to_stay_awake, is_staying_awake, ..} => {
+                needs_to_stay_awake && !is_staying_awake
+            }
+        }
+    }
+
+    pub fn is_staying_awake(&mut self) {
+        use self::PerSocket::*;
+        match self {
+            &mut Downstream {ref mut is_staying_awake, ..}
+            | &mut Client {ref mut is_staying_awake, ..}
+            | &mut Upstream {ref mut is_staying_awake, ..} => {
+                *is_staying_awake = true;
             }
         }
     }
@@ -521,10 +550,11 @@ impl PerSocket {
     pub fn wake(&mut self) {
         use self::PerSocket::*;
         match self {
-            &mut Downstream {ref mut needs_to_stay_awake, ..}
-            | &mut Client {ref mut needs_to_stay_awake, ..}
-            | &mut Upstream {ref mut needs_to_stay_awake, ..} => {
+            &mut Downstream {ref mut needs_to_stay_awake, ref mut is_staying_awake, ..}
+            | &mut Client {ref mut needs_to_stay_awake, ref mut is_staying_awake, ..}
+            | &mut Upstream {ref mut needs_to_stay_awake, ref mut is_staying_awake, ..} => {
                 *needs_to_stay_awake = false;
+                *is_staying_awake = false;
             }
         }
     }

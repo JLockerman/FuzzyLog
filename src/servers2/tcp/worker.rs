@@ -272,9 +272,11 @@ impl Worker {
             }
             #[cfg(debug_assertions)]
             for (tok, c) in self.clients.iter() {
-                debug_assert!(!(c.needs_to_stay_awake() && !c.is_backpressured()),
-                    "Token {:?} sleep @ stay_awake: {}, backpressure: {}",
-                    tok, c.needs_to_stay_awake(), c.is_backpressured());
+                debug_assert!(!(c.should_be_awake() && !c.is_backpressured()),
+                    "Token {:?} sleep @ stay_awake: {}, backpressure: {}
+                    {:?}",
+                    tok, c.needs_to_stay_awake(), c.is_backpressured(),
+                    c);
             }
         }
     }// end fn run
@@ -339,7 +341,10 @@ impl Worker {
                             buffer, &storage_log_bytes, src_addr.bytes());
                     }
                     //TODO replace with wake function
-                    self.inner.awake_io.push_back(DOWNSTREAM);
+                    if self.clients[&DOWNSTREAM].needs_to_stay_awake() {
+                        self.inner.awake_io.push_back(DOWNSTREAM);
+                        self.clients.get_mut(&DOWNSTREAM).map(|p| p.is_staying_awake());
+                    }
                 }
                 Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
                     self.inner.print_data.from_dist_T(1);
@@ -354,7 +359,10 @@ impl Worker {
                     assert!(tok >= FIRST_CLIENT_TOKEN);
                     self.clients.get_mut(&tok).unwrap().add_downstream_send(buffer);
                     //TODO replace with wake function
-                    self.inner.awake_io.push_back(tok);
+                    if self.clients[&tok].needs_to_stay_awake() {
+                        self.inner.awake_io.push_back(tok);
+                        self.clients.get_mut(&tok).map(|p| p.is_staying_awake());
+                    }
                 },
 
                 Some(DistToWorker::ToClientB(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
@@ -372,7 +380,10 @@ impl Worker {
                             &buffer, &storage_log_bytes, src_addr.bytes());
                     }
                     //TODO replace with wake function
-                    self.inner.awake_io.push_back(DOWNSTREAM);
+                    if self.clients[&DOWNSTREAM].needs_to_stay_awake() {
+                        self.inner.awake_io.push_back(DOWNSTREAM);
+                        self.clients.get_mut(&DOWNSTREAM).map(|p| p.is_staying_awake());
+                    }
                 }
 
                 Some(DistToWorker::ToClientB(tok, buffer, src_addr, storage_loc)) => {
@@ -388,7 +399,10 @@ impl Worker {
                     assert!(tok >= FIRST_CLIENT_TOKEN);
                     self.clients.get_mut(&tok).unwrap().add_downstream_send(&buffer);
                     //TODO replace with wake function
-                    self.inner.awake_io.push_back(tok);
+                    if self.clients[&tok].needs_to_stay_awake() {
+                        self.inner.awake_io.push_back(tok);
+                        self.clients.get_mut(&tok).map(|p| p.is_staying_awake());
+                    }
                 },
 
                 Some(DistToWorker::ToClientC(..)) => {
@@ -440,11 +454,16 @@ impl Worker {
                 }
             );
 
-            self.inner.awake_io.push_back(recv_token);
-            if let Some((send_token, true)) = send_token.map(|t| (t, t != recv_token)) {
-                self.inner.awake_io.push_back(send_token);
-            }
             buffer.map(|b| self.clients.get_mut(&recv_token).unwrap().return_buffer(b));
+            if self.clients[&recv_token].needs_to_stay_awake() {
+                self.inner.awake_io.push_back(recv_token);
+                self.clients.get_mut(&recv_token).map(|p| p.is_staying_awake());
+            }
+            if let Some((send_token, true)) = send_token.map(
+                |t| (t, self.clients[&t].needs_to_stay_awake())) {
+                self.inner.awake_io.push_back(send_token);
+                self.clients.get_mut(&send_token).map(|p| p.is_staying_awake());
+            }
             continue
 
             /*let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
@@ -781,7 +800,8 @@ impl WorkerInner {
         }
 
         if socket_state.needs_to_stay_awake() {
-            self.awake_io.push_back(token)
+            self.awake_io.push_back(token);
+            socket_state.is_staying_awake();
         }
     }
 
