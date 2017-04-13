@@ -388,7 +388,6 @@ pub fn run_with_replication(
                     match acceptor.accept() {
                         Err(e) => trace!("error {}", e),
                         Ok((socket, addr)) => {
-                            trace!("SERVER accepting client @ {:?}", addr);
                             let _ = socket.set_keepalive_ms(Some(1000));
                             let _ = socket.set_nodelay(true);
                             //TODO oveflow
@@ -410,6 +409,8 @@ pub fn run_with_replication(
                             } else {
                                 worker_for_ip(addr.ip(), num_workers as u64)
                             };
+                            trace!("SERVER accepting client @ {:?} => {:?}",
+                                addr, (worker, tok));
                             dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
                             worker_for_client.insert(
                                 Ipv4SocketAddr::from_socket_addr(addr), (worker, tok));
@@ -471,7 +472,8 @@ pub fn run_with_replication(
                             }
                         };
                         dist_to_workers[worker].send(
-                            DistToWorker::ToClient(token, buffer, addr, storage_loc))
+                            DistToWorker::ToClient(token, buffer, addr, storage_loc));
+                        continue
 
                     }
                     /*while let Ok((buffer, socket, tok)) = dist_from_workers.try_recv() {
@@ -1540,9 +1542,7 @@ mod tests {
 }
 
 fn get_next_token(token: &mut mio::Token) -> mio::Token {
-    let next = token.0.wrapping_add(1);
-    if next == 0 { *token = mio::Token(2) }
-    else { *token = mio::Token(next) };
+    *token = mio::Token(token.0.checked_add(1).unwrap());
     *token
 }
 

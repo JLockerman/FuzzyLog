@@ -35,11 +35,13 @@ def mirror(cmd=''):
 #      so you need to input the server addrs twice once comma separated for -H
 #      once '^' separated for chain_hosts
 @parallel
-def run_chain(chain_hosts, port="13289", trace="", workers="", debug="", stats=""):
+def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stats=""):
     with settings(hide('warnings'), warn_only=True):
-        run("pkill tcp_server")
+        run("pkill delos_tcp_serve")
+        run("pkill delos_tcp_server")
     host_index = index_of_host()
-    cmd = "cd servers/tcp_server && "
+    #cmd = "cd servers/tcp_server && "
+    cmd = ""
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
     cmd += "RUST_BACKTRACE=1 cargo run "
@@ -49,23 +51,29 @@ def run_chain(chain_hosts, port="13289", trace="", workers="", debug="", stats="
         cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
     cmd += "-- " + port
 
-    chain_hosts = chain_hosts.split("^")
+    if chain_hosts == "":
+        chain_hosts = env.all_hosts
+    else:
+        chain_hosts = chain_hosts.split("^")
     if host_index > 0:
         #prev_host = network.normalize(env.all_hosts[host_index-1])[1]
         prev_host = chain_hosts[host_index-1]
         cmd += " -up " + prev_host + ":" + port
+        #cmd = "RUST_LOG=fuzzy_log " + cmd
     if host_index + 1 < len(env.all_hosts):
         #next_host = network.normalize(env.all_hosts[host_index+1])[1]
         next_host = chain_hosts[host_index+1]
         cmd += " -dwn " + next_host
     if workers != "":
         cmd += " -w " + workers
+    cmd = "cd servers/tcp_server && " + cmd
     mirror(cmd)
 
 @parallel
 def kill_server():
     with settings(hide('warnings'), warn_only=True):
-        run("pkill tcp_server")
+        run("pkill delos_tcp_serve")
+        run("pkill delos_tcp_server")
 
 # servers should be of the form <server addr>(^<server addr>)*
 # (yes '^' is being used as the separator)
@@ -79,7 +87,7 @@ def run_clients(num_clients, servers, jobsize="1000", num_writes="100000", trace
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
     if debug == "":
-        cmd += "cargo run --release "
+        cmd += "RUST_BACKTRACE=1 cargo run --release "
     else:
         cmd += "cargo run "
     if trace != "":

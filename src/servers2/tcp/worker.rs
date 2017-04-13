@@ -291,6 +291,7 @@ impl Worker {
                 match self.inner.from_dist.try_recv() {
                     None => {},
                     Some(DistToWorker::NewClient(tok, stream)) => {
+                        debug_assert!(tok.0 >= FIRST_CLIENT_TOKEN.0);
                         self.inner.print_data.from_dist_N(1);
                         self.inner.poll.register(
                             &stream,
@@ -430,6 +431,13 @@ impl Worker {
                     }
                 }
             );
+
+            self.inner.awake_io.push_back(recv_token);
+            if let Some((send_token, true)) = send_token.map(|t| (t, t != recv_token)) {
+                self.inner.awake_io.push_back(send_token);
+            }
+            buffer.map(|b| self.clients.get_mut(&recv_token).unwrap().return_buffer(b));
+            continue
 
             /*let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
             //let (buffer, bytes, (wk, token, src_addr), storage_loc, just_ret) = work_res;
@@ -600,12 +608,6 @@ impl Worker {
                     (recv_token, None, None)
                 },
             };*/
-            self.inner.awake_io.push_back(recv_token);
-            if let Some((send_token, true)) = send_token.map(|t| (t, t != recv_token)) {
-                self.inner.awake_io.push_back(send_token);
-            }
-            buffer.map(|b| self.clients.get_mut(&recv_token).unwrap().return_buffer(b));
-            continue
         }
     }// end handle_from_log
 
