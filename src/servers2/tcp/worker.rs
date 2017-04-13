@@ -214,6 +214,7 @@ impl Worker {
                 for (&t, _) in self.clients.iter() {
                     self.inner.awake_io.push_back(t)
                 }
+                self.handle_from_dist();
                 self.handle_from_log();
                 if !self.inner.awake_io.is_empty() {
                     if timeout_idx + 1 < TIMEOUTS.len() {
@@ -288,97 +289,7 @@ impl Worker {
             }
 
             if token == FROM_DIST {
-                match self.inner.from_dist.try_recv() {
-                    None => {},
-                    Some(DistToWorker::NewClient(tok, stream)) => {
-                        debug_assert!(tok.0 >= FIRST_CLIENT_TOKEN.0);
-                        self.inner.print_data.from_dist_N(1);
-                        self.inner.poll.register(
-                            &stream,
-                            tok,
-                            mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
-                            mio::PollOpt::edge()
-                        ).unwrap();
-                        //self.clients.insert(tok, PerSocket::new(buffer, stream));
-                        //TODO assert unique?
-                        trace!("WORKER {} recv from dist.", self.inner.worker_num);
-                        let client_addr = Ipv4SocketAddr::from_socket_addr(stream.peer_addr().unwrap());
-                        self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
-                        let _state =
-                            self.clients.entry(tok).or_insert(PerSocket::client(stream));
-                        //self.inner.recv_packet(tok, _state);
-                        self.inner.awake_io.push_back(tok);
-                    },
-                    Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
-                        self.inner.print_data.from_dist_D(1);
-                        trace!("WORKER {} recv downstream from dist for {}.",
-                            self.inner.worker_num, src_addr);
-                        {
-                            let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
-                            //client.add_downstream_send(buffer);
-                            //client.add_downstream_send(src_addr.bytes());
-                            let mut storage_log_bytes: [u8; 8] = [0; 8];
-                            LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                            //client.add_downstream_send(&storage_log_bytes)
-                            client.add_downstream_send3(
-                                buffer, &storage_log_bytes, src_addr.bytes());
-                        }
-                        //TODO replace with wake function
-                        self.inner.awake_io.push_back(DOWNSTREAM);
-                    }
-                    Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
-                        self.inner.print_data.from_dist_T(1);
-                        debug_assert_eq!(
-                            Ipv4SocketAddr::from_socket_addr(
-                                    self.clients[&tok].stream().peer_addr().unwrap()
-                            ),
-                            src_addr
-                        );
-                        debug_assert_eq!(storage_loc, 0);
-                        trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
-                        assert!(tok >= FIRST_CLIENT_TOKEN);
-                        self.clients.get_mut(&tok).unwrap().add_downstream_send(buffer);
-                        //TODO replace with wake function
-                        self.inner.awake_io.push_back(tok);
-                    },
-
-                    Some(DistToWorker::ToClientB(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
-                        self.inner.print_data.from_dist_D(1);
-                        trace!("WORKER {} recv downstream from dist for {}.",
-                            self.inner.worker_num, src_addr);
-                        {
-                            let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
-                            //client.add_downstream_send(buffer);
-                            //client.add_downstream_send(src_addr.bytes());
-                            let mut storage_log_bytes: [u8; 8] = [0; 8];
-                            LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                            //client.add_downstream_send(&storage_log_bytes)
-                            client.add_downstream_send3(
-                                &buffer, &storage_log_bytes, src_addr.bytes());
-                        }
-                        //TODO replace with wake function
-                        self.inner.awake_io.push_back(DOWNSTREAM);
-                    }
-                    Some(DistToWorker::ToClientB(tok, buffer, src_addr, storage_loc)) => {
-                        self.inner.print_data.from_dist_T(1);
-                        debug_assert_eq!(
-                            Ipv4SocketAddr::from_socket_addr(
-                                    self.clients[&tok].stream().peer_addr().unwrap()
-                            ),
-                            src_addr
-                        );
-                        debug_assert_eq!(storage_loc, 0);
-                        trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
-                        assert!(tok >= FIRST_CLIENT_TOKEN);
-                        self.clients.get_mut(&tok).unwrap().add_downstream_send(&buffer);
-                        //TODO replace with wake function
-                        self.inner.awake_io.push_back(tok);
-                    },
-
-                    Some(DistToWorker::ToClientC(..)) => {
-                        unimplemented!()
-                    }
-                }
+                self.handle_from_dist();
                 continue 'event
             }
 
@@ -389,6 +300,103 @@ impl Worker {
             }
         }
     }// end handle_new_events
+
+    fn handle_from_dist(&mut self) {
+        loop {
+            match self.inner.from_dist.try_recv() {
+                None => return,
+                Some(DistToWorker::NewClient(tok, stream)) => {
+                    debug_assert!(tok.0 >= FIRST_CLIENT_TOKEN.0);
+                    self.inner.print_data.from_dist_N(1);
+                    self.inner.poll.register(
+                        &stream,
+                        tok,
+                        mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
+                        mio::PollOpt::edge()
+                    ).unwrap();
+                    //self.clients.insert(tok, PerSocket::new(buffer, stream));
+                    //TODO assert unique?
+                    trace!("WORKER {} recv from dist.", self.inner.worker_num);
+                    let client_addr = Ipv4SocketAddr::from_socket_addr(stream.peer_addr().unwrap());
+                    self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
+                    let _state =
+                        self.clients.entry(tok).or_insert(PerSocket::client(stream));
+                    //self.inner.recv_packet(tok, _state);
+                    self.inner.awake_io.push_back(tok);
+                },
+                Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
+                    self.inner.print_data.from_dist_D(1);
+                    trace!("WORKER {} recv downstream from dist for {}.",
+                        self.inner.worker_num, src_addr);
+                    {
+                        let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
+                        //client.add_downstream_send(buffer);
+                        //client.add_downstream_send(src_addr.bytes());
+                        let mut storage_log_bytes: [u8; 8] = [0; 8];
+                        LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                        //client.add_downstream_send(&storage_log_bytes)
+                        client.add_downstream_send3(
+                            buffer, &storage_log_bytes, src_addr.bytes());
+                    }
+                    //TODO replace with wake function
+                    self.inner.awake_io.push_back(DOWNSTREAM);
+                }
+                Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
+                    self.inner.print_data.from_dist_T(1);
+                    debug_assert_eq!(
+                        Ipv4SocketAddr::from_socket_addr(
+                                self.clients[&tok].stream().peer_addr().unwrap()
+                        ),
+                        src_addr
+                    );
+                    debug_assert_eq!(storage_loc, 0);
+                    trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
+                    assert!(tok >= FIRST_CLIENT_TOKEN);
+                    self.clients.get_mut(&tok).unwrap().add_downstream_send(buffer);
+                    //TODO replace with wake function
+                    self.inner.awake_io.push_back(tok);
+                },
+
+                Some(DistToWorker::ToClientB(DOWNSTREAM, buffer, src_addr, storage_loc)) => {
+                    self.inner.print_data.from_dist_D(1);
+                    trace!("WORKER {} recv downstream from dist for {}.",
+                        self.inner.worker_num, src_addr);
+                    {
+                        let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
+                        //client.add_downstream_send(buffer);
+                        //client.add_downstream_send(src_addr.bytes());
+                        let mut storage_log_bytes: [u8; 8] = [0; 8];
+                        LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                        //client.add_downstream_send(&storage_log_bytes)
+                        client.add_downstream_send3(
+                            &buffer, &storage_log_bytes, src_addr.bytes());
+                    }
+                    //TODO replace with wake function
+                    self.inner.awake_io.push_back(DOWNSTREAM);
+                }
+
+                Some(DistToWorker::ToClientB(tok, buffer, src_addr, storage_loc)) => {
+                    self.inner.print_data.from_dist_T(1);
+                    debug_assert_eq!(
+                        Ipv4SocketAddr::from_socket_addr(
+                                self.clients[&tok].stream().peer_addr().unwrap()
+                        ),
+                        src_addr
+                    );
+                    debug_assert_eq!(storage_loc, 0);
+                    trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
+                    assert!(tok >= FIRST_CLIENT_TOKEN);
+                    self.clients.get_mut(&tok).unwrap().add_downstream_send(&buffer);
+                    //TODO replace with wake function
+                    self.inner.awake_io.push_back(tok);
+                },
+
+                Some(DistToWorker::ToClientC(..)) => {
+                    unimplemented!()
+                }
+            }
+        }
+    }
 
     //#[inline(always)]
     fn handle_from_log(&mut self) {
