@@ -353,11 +353,17 @@ impl<T: Copy> SkeensState<T> {
         let offset = match self.append_status.get(&id) {
             Some(&AppendStatus::Phase1(offset)) | Some(&AppendStatus::Singleton(offset)) =>
                 offset,
-            _ => return,
+            _ => {
+                trace!("SKEENS early round 2");
+                return
+            },
         };
         self.phase1_queue.get_mut(offset).map(|w|
             w.replicate_max_timetamp(max_timestamp, index));
-        if offset != self.phase1_queue.start_index() { return }
+        if offset != self.phase1_queue.start_index() {
+            trace!("SKEENS not ready to flush replica");
+            return
+        }
         while self.phase1_queue.front().map(|w| w.has_replication()).unwrap_or(false) {
             let replica = self.phase1_queue.pop_front().unwrap();
             let (id, replica) = replica.to_replica();

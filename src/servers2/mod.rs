@@ -1103,7 +1103,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         Single{index, storage, t} => unsafe {
                             //trace!("SERVER finish sk single rep");
                             //let size = buffer.entry_size();
-                            trace!("SERVER replicating entry ({:?}, {:?})", o, index);
+                            trace!("SERVER replicating single sk2 ({:?}, {:?})", o, index);
                             let slot = trie.prep_append_at(index, ptr::null());
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
@@ -1117,6 +1117,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         }
                     });
                 }
+                trace!("SRVER {:?} skeens2 over", self.this_server_num);
                 self.to_workers.send_to_worker(ReturnBuffer(buffer, t))
             }
 
