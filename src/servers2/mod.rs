@@ -1655,10 +1655,12 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             }
             let u = if continue_replication {
                 buffer.from_sentinel(was_multi);
+                trace!("WORKER {} skeens1 to rep @ {:?}", worker_num, ts);
                 send(ToSend::Contents(
                     buffer.contents().multi_skeens_to_replication(indicies))
                 , t)
             } else {
+                trace!("WORKER {} skeens1 to client @ {:?}", worker_num, ts);
                 send(ToSend::Slice(buffer.entry_slice()), t)
             };
             (Some(buffer), u)
@@ -1702,6 +1704,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             }
 
             let to_send = if continue_replication {
+                trace!("WORKER {} continue skeens2 replication @ {:?}", worker_num, loc);
                 ToSend::Contents(EntryContents::Skeens2ToReplica{
                     id: &id,
                     lock: &timestamp,
@@ -1710,10 +1713,14 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             } else {
                 match SkeensMultiStorage::try_unwrap(storage) {
                     Ok(storage) => {
+                        trace!("WORKER {} skeens2 to client @ {:?}", worker_num, loc);
                         let &(_, _, ref st0, ref st1) = &*storage.get();
                         ToSend::StaticSlice(if st1.len() > 0 { *st1 } else { *st0 })
                     }
-                    Err(..) => ToSend::Nothing
+                    Err(..) => {
+                        trace!("WORKER {} incomplete skeens2 @ {:?}", worker_num, loc);
+                        ToSend::Nothing
+                    }
                 }
             };
 

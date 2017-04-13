@@ -142,7 +142,7 @@ where C: AsyncStoreClient {
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
-            mio::PollOpt::level()
+            mio::PollOpt::edge()
         ).expect("could not reregister client channel");
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
@@ -189,7 +189,7 @@ where C: AsyncStoreClient {
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
-            mio::PollOpt::level()
+            mio::PollOpt::edge()
         ).expect("could not reregister client channel");
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
@@ -253,7 +253,7 @@ where C: AsyncStoreClient {
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
-            mio::PollOpt::level()
+            mio::PollOpt::edge()
         ).expect("could not reregister client channel");
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
@@ -319,7 +319,7 @@ where C: AsyncStoreClient {
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
-            mio::PollOpt::level()
+            mio::PollOpt::edge()
         ).expect("could not reregister client channel");
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
@@ -369,7 +369,7 @@ where C: AsyncStoreClient {
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
-            mio::PollOpt::level()
+            mio::PollOpt::edge()
         ).expect("could not reregister client channel");
         Ok((AsyncTcpStore {
             sent_writes: Default::default(),
