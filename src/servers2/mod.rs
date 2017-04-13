@@ -1763,7 +1763,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 e.flag_mut().remove(EntryFlag::Skeens1Queued);
             }
             let u = if continue_replication {
-                buffer.from_sentinel(was_multi);
+                buffer.skeens1_rep_from_sentinel(was_multi);
                 send(ToSend::Slice(buffer.entry_slice()) , t)
             } else if is_multi_server {
                 send(ToSend::Slice(buffer.entry_slice()), t)
