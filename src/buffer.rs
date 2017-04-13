@@ -143,6 +143,14 @@ impl Buffer {
         }
     }
 
+    pub fn skeens1_rep_from_sentinel(&mut self, was_multi: bool) {
+        if was_multi {
+            packets::slice_to_skeens1_multirep(&mut self.inner[..])
+        } else {
+            packets::slice_to_skeens1_sentirep(&mut self.inner[..])
+        }
+    }
+
     //pub fn to_read(&mut self) {
         //FIXME
         //assert_eq!(EntryKind::from_bits(self.inner[0]), EntryKind::Multiput);

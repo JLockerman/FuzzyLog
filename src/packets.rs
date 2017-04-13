@@ -764,6 +764,16 @@ pub fn slice_to_multi(bytes: &mut [u8]) {
     unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
 }
 
+pub fn slice_to_skeens1_multirep(bytes: &mut [u8]) {
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::MultiputToReplica) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
+}
+
+pub fn slice_to_skeens1_sentirep(bytes: &mut [u8]) {
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::SentinelToReplica) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
+}
+
 ///////////////////////////////////////
 ///////////////////////////////////////
 ///////////////////////////////////////
