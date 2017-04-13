@@ -1,60 +1,60 @@
 //use storeables::Storeable;
-use packets::{self, Entry, MutEntry, EntryContents, EntryContentsMut};
+use packets::EntryContents;
 use packets::Packet::WrapErr;
-use hash::HashMap;
 
 #[must_use]
 #[derive(Debug, Clone)]
 pub struct Buffer {
     inner: Vec<u8>,
+    start: usize,
     #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     no_drop: bool,
 }
 
 impl Buffer {
-
+/*
     #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
         let cap = inner.len();
         unsafe { inner.set_len(cap) };
-        Buffer { inner: inner, no_drop: false }
+        Buffer { inner: inner, no_drop: false, start: 0, }
     }
 
     #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
         let cap = inner.len();
         unsafe { inner.set_len(cap) };
-        Buffer { inner: inner, }
-    }
+        Buffer { inner: inner, start: 0, }
+    }*/
 
     #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn new() -> Self {
-        Buffer { inner: vec![0u8; 8192], no_drop: false }
+        Buffer { inner: vec![0u8; 8192], no_drop: false, start: 0, }
     }
 
     #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn new() -> Self {
-        Buffer { inner: vec![0u8; 8192] }
+        Buffer { inner: vec![0u8; 8192], start: 0, }
     }
 
     #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn empty() -> Self {
-        Buffer { inner: Vec::new(), no_drop: false }
+        Buffer { inner: Vec::new(), no_drop: false, start: 0, }
     }
 
     #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn empty() -> Self {
-        Buffer { inner: Vec::new(), }
+        Buffer { inner: Vec::new(), start: 0, }
     }
-
+/*
     #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn no_drop() -> Self {
-        Buffer { inner: Vec::new(), no_drop: true }
+        Buffer { inner: Vec::new(), no_drop: true, start: 0, }
     }
 
     #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn no_drop() -> Self {
-        Buffer { inner: Vec::new() }
+        Buffer { inner: Vec::new(), start: 0, }
     }
 
     pub fn fill_from_entry_contents(&mut self, contents: EntryContents) -> MutEntry {
@@ -71,17 +71,6 @@ impl Buffer {
         self.entry_mut()
     }
 
-    pub fn ensure_capacity(&mut self, capacity: usize) {
-        if self.inner.capacity() < capacity {
-            let curr_cap = self.inner.capacity();
-            self.inner.reserve_exact(capacity - curr_cap);
-            unsafe { self.inner.set_len(capacity) }
-        }
-        else if self.inner.len() < capacity {
-            unsafe { self.inner.set_len(capacity) }
-        }
-    }
-
     pub fn ensure_len(&mut self) {
         unsafe {
             let capacity = self.inner.capacity();
@@ -93,14 +82,9 @@ impl Buffer {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         let size = self.entry_size();
         &self[..size]
-    }
+    }*/
 
-    pub fn entry_size(&self) -> usize {
-        debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        self.contents().len()
-    }
-
-    pub fn entry(&self) -> Entry {
+    /*pub fn entry(&self) -> Entry {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         Entry::wrap_slice(&self.entry_slice())
     }
@@ -110,30 +94,73 @@ impl Buffer {
         debug_assert!(self.packet_fits(), "packet size {}, buffer len {}", self.entry_size(), self.inner.len());
         let size = self.entry_size();
         MutEntry::wrap_slice(&mut self[..size])
+    }*/
+
+    pub fn try_contents_until(&self, len: usize) -> Result<(EntryContents, &[u8]), WrapErr> {
+        unsafe { EntryContents::try_ref(&self.inner[self.start..len]) }
+    }
+
+    pub fn try_contents(&self) -> Result<(EntryContents, &[u8]), WrapErr> {
+        self.try_contents_until(self.inner.len())
+    }
+
+    pub fn entry_slice(&self) -> &[u8] {
+        debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        let size = self.entry_size();
+        &self.inner[self.start..self.start+size]
     }
 
     pub fn contents(&self) -> EntryContents {
-        unsafe { EntryContents::try_ref(&self.inner[..]).unwrap().0 }
+        self.try_contents().unwrap().0
     }
 
+    pub fn entry_size(&self) -> usize {
+        debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        self.contents().len()
+    }
+
+    pub fn ensure_capacity(&mut self, capacity: usize) -> usize {
+        let effective_cap = self.inner.len() - self.start;
+        if effective_cap >= capacity {
+            return 0
+        }
+
+        let drained = self.start;
+        self.inner.drain(0..drained).fold((), |_, _| ());
+        self.start = 0;
+
+        if self.inner.capacity() < capacity {
+            let curr_cap = self.inner.capacity();
+            self.inner.reserve_exact(capacity - curr_cap);
+            unsafe { self.inner.set_len(capacity) }
+        } else {
+            let cap = self.inner.capacity();
+            unsafe { self.inner.set_len(cap) }
+        }
+        debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        drained
+    }
+
+    pub fn finished_entry(&mut self) {
+        self.start += self.entry_size()
+    }
+
+    /*
     pub fn contents_mut(&mut self) -> EntryContentsMut {
         unsafe { EntryContentsMut::try_mut(&mut self.inner[..]).unwrap().0 }
     }
+*/
 
     pub fn finished_at(&self, len: usize) -> Result<usize, WrapErr> {
-        unsafe { EntryContents::try_ref(&self.inner[..len]).map(|(c, _)| c.len()) }
-    }
-
-    pub fn finished_around(&self, start: usize, len: usize) -> Result<usize, WrapErr> {
-        unsafe { EntryContents::try_ref(&self.inner[start..len]).map(|(c, _)| c.len()) }
+        self.try_contents_until(len).map(|(c, _)| c.len())
     }
 
     pub fn packet_fits(&self) -> bool {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         //self.inner.len() >= Entry::<()>::wrap_bytes(&self[..]).entry_size()
-        unsafe { EntryContents::try_ref(&self.inner[..]).is_ok() }
+        self.try_contents_until(self.inner.len()).is_ok()
     }
-
+/*
     pub fn to_sentinel(&mut self) -> bool {
         //FIXME
         //assert_eq!(EntryKind::from_bits(self.inner[0]), EntryKind::Multiput);
@@ -181,7 +208,7 @@ impl Buffer {
 
     pub fn clear_data(&mut self) {
         self[..].iter_mut().fold((), |_, i| *i = 0);
-    }
+    }*/
 }
 
 #[cfg(any(debug_assertions, feature="debug_no_drop"))]
@@ -190,23 +217,6 @@ impl Drop for Buffer {
         if !::std::thread::panicking() && self.no_drop {
             panic!("Dropped NoDropBuffer.")
         }
-    }
-}
-
-
-//FIXME impl AsRef for Buffer...
-impl ::std::ops::Index<::std::ops::Range<usize>> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ::std::ops::Range<usize>) -> &Self::Output {
-        &self.inner[index]
-    }
-}
-
-impl ::std::ops::IndexMut<::std::ops::Range<usize>> for Buffer {
-    fn index_mut(&mut self, index: ::std::ops::Range<usize>) -> &mut Self::Output {
-        //TODO should this ensure capacity?
-        self.ensure_capacity(index.end);
-        &mut self.inner[index]
     }
 }
 
@@ -219,9 +229,38 @@ impl ::std::ops::Index<::std::ops::RangeFrom<usize>> for Buffer {
 
 impl ::std::ops::IndexMut<::std::ops::RangeFrom<usize>> for Buffer {
     fn index_mut(&mut self, index: ::std::ops::RangeFrom<usize>) -> &mut Self::Output {
-        //TODO should this ensure capacity?
-        self.ensure_capacity(index.start);
+        &mut self.inner[index]
+    }
+}
+
+impl ::std::ops::Index<::std::ops::RangeFull> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ::std::ops::RangeFull) -> &Self::Output {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        &self.inner[index]
+    }
+}
+
+impl ::std::ops::IndexMut<::std::ops::RangeFull> for Buffer {
+    fn index_mut(&mut self, index: ::std::ops::RangeFull) -> &mut Self::Output {
+        debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        &mut self.inner[index]
+    }
+}
+
+/*
+//FIXME impl AsRef for Buffer...
+impl ::std::ops::Index<::std::ops::Range<usize>> for Buffer {
+    type Output = [u8];
+    fn index(&self, index: ::std::ops::Range<usize>) -> &Self::Output {
+        &self.inner[index]
+    }
+}
+
+impl ::std::ops::IndexMut<::std::ops::Range<usize>> for Buffer {
+    fn index_mut(&mut self, index: ::std::ops::Range<usize>) -> &mut Self::Output {
+        //TODO should this ensure capacity?
+        self.ensure_capacity(index.end);
         &mut self.inner[index]
     }
 }
@@ -239,22 +278,6 @@ impl ::std::ops::IndexMut<::std::ops::RangeTo<usize>> for Buffer {
         //TODO should this ensure capacity?
         self.ensure_capacity(index.end);
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        &mut self.inner[index]
-    }
-}
-
-impl ::std::ops::Index<::std::ops::RangeFull> for Buffer {
-    type Output = [u8];
-    fn index(&self, index: ::std::ops::RangeFull) -> &Self::Output {
-        debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        &self.inner[index]
-    }
-}
-
-impl ::std::ops::IndexMut<::std::ops::RangeFull> for Buffer {
-    fn index_mut(&mut self, index: ::std::ops::RangeFull) -> &mut Self::Output {
-        debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        //TODO should this ensure capacity?
         &mut self.inner[index]
     }
 }
@@ -290,3 +313,4 @@ impl Drop for NoDropBuffer {
         }
     }
 }
+*/

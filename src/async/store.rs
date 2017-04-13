@@ -7,7 +7,7 @@ use std::time::Duration;
 use std::rc::Rc;
 
 use packets::*;
-use buffer::Buffer;
+use buffer2::Buffer;
 
 use hash::{HashMap, HashSet};
 use socket_addr::Ipv4SocketAddr;
@@ -729,14 +729,15 @@ where PerServer<S>: Connected,
         let token = Token(server);
         debug_assert_eq!(token, self.servers[server].token);
         let finished_recv = self.servers[server].recv_packet().expect("cannot recv");
-        if let Some(packet) = finished_recv {
+        if let Some(mut packet) = finished_recv {
             self.print_data.finished_recvs(1);
             //stay_awake = true;
             let (kind, flag) = {
                 let c = packet.contents();
                 (c.kind(), *c.flag())
             };
-            trace!("CLIENT got a {:?} from {:?}", kind, token);
+            trace!("CLIENT got a {:?} from {:?}: {:?}",
+                kind, token, packet.contents());
             if flag.contains(EntryFlag::ReadSuccess) {
                 if !flag.contains(EntryFlag::Unlock) || flag.contains(EntryFlag::NewMultiPut) {
                     let num_chain_servers = self.num_chain_servers;
@@ -753,6 +754,7 @@ where PerServer<S>: Connected,
             else {
                 self.handle_redo(Token(server), kind, &packet)
             }
+            packet.finished_entry();
             self.servers.get_mut(server).unwrap().read_buffer = packet;
         }
 
@@ -1321,6 +1323,44 @@ impl Connected for PerServer<TcpStream> {
                 Err(err) => panic!("{:?}", err),
                 Ok(..) => {
                     debug_assert!(self.read_buffer.packet_fits());
+                    debug_assert!(self.bytes_read >= self.read_buffer.entry_size());
+                    trace!("CLIENT finished recv");
+                    {
+                        self.print_data.packets_recvd(1);
+                        self.print_data.bytes_recvd(self.bytes_read as u64);
+                    }
+                    let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
+                    self.stay_awake = true;
+                    //let buff = mem::replace(&mut self.read_buffer, Buffer::new());
+                    return Ok(Some(buff))
+                },
+            };
+            let drained = self.read_buffer.ensure_capacity(size);
+            trace!("CLIENT drained {:?}", drained);
+            self.bytes_read -= drained;
+            let r = self.stream.read(&mut self.read_buffer[self.bytes_read..]);
+            match r {
+                Ok(i) if i == 0 => {
+                    //self.stay_awake = true;
+                    return Ok(None)
+                },
+                Ok(i) => {
+                    self.stay_awake = true;
+                    self.bytes_read += i
+                },
+                Err(e) => match e.kind() {
+                    ErrorKind::WouldBlock | ErrorKind::NotConnected => return Ok(None),
+                    _ => return Err(e),
+                }
+            }
+        }
+        /*loop {
+            let to_read = self.read_buffer.finished_at(self.bytes_read);
+            let size = match to_read {
+                Err(WrapErr::NotEnoughBytes(needs)) => needs,
+                Err(err) => panic!("{:?}", err),
+                Ok(..) => {
+                    debug_assert!(self.read_buffer.packet_fits());
                     debug_assert_eq!(self.bytes_read, self.read_buffer.entry_size());
                     trace!("CLIENT finished recv");
                     {
@@ -1349,7 +1389,7 @@ impl Connected for PerServer<TcpStream> {
                     _ => return Err(e),
                 }
             }
-        }
+        }*/
     }
 
     fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
@@ -1626,7 +1666,7 @@ impl Connected for PerServer<UdpConnection> {
         //TODO
         self.read_buffer.ensure_capacity(8192);
         //FIXME handle WouldBlock and number of bytes read
-        let read = self.stream.socket.recv_from(&mut self.read_buffer[0..8192])
+        let read = self.stream.socket.recv_from(&mut self.read_buffer[..])
             .expect("cannot read");
         if let Some((read, _)) = read {
             if read > 0 {

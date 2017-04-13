@@ -54,6 +54,7 @@ mod hash;
 pub mod socket_addr;
 //TODO only for testing, should be private
 pub mod buffer;
+pub mod buffer2;
 mod vec_deque_map;
 
 pub mod c_binidings {
