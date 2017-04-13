@@ -646,13 +646,13 @@ impl Worker {
 
             ToSend::Slice(to_send) => {
                 let storage_loc_bytes: [u8; 8] = [0; 8];
-                self.clients.get_mut(&recv_token).unwrap()
+                self.clients.get_mut(&DOWNSTREAM).unwrap()
                     .add_downstream_send3(to_send, &storage_loc_bytes, src_addr.bytes())
             }
 
             ToSend::StaticSlice(to_send) => {
                 let storage_loc_bytes: [u8; 8] = [0; 8];
-                self.clients.get_mut(&recv_token).unwrap()
+                self.clients.get_mut(&DOWNSTREAM).unwrap()
                     .add_downstream_send3(to_send, &storage_loc_bytes, src_addr.bytes())
             }
 
