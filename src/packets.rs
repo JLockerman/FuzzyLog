@@ -756,7 +756,7 @@ pub fn slice_to_sentinel(bytes: &mut [u8]) -> bool {
     let old_kind: EntryKind::Kind = unsafe { ::std::mem::transmute(bytes[0]) };
     bytes[0] = unsafe { ::std::mem::transmute(EntryKind::Sentinel) };
     unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
-    old_kind == EntryKind::Multiput
+    old_kind == EntryKind::Multiput || old_kind == EntryKind::MultiputToReplica
 }
 
 pub fn slice_to_multi(bytes: &mut [u8]) {
