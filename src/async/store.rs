@@ -669,6 +669,8 @@ where PerServer<S>: Connected,
                 let size = {
                     let mut e = bytes_as_entry_mut(buf);
                     e.flag_mut().insert(EntryFlag::Unlock | EntryFlag::NewMultiPut);
+                    e.locs_mut().iter_mut()
+                        .fold((), |_, &mut OrderIndex(_, ref mut i)| *i = entry::from(0));
                     *e.lock_mut() = max_ts;
                     e.as_ref().len()
                 };
@@ -928,7 +930,8 @@ where PerServer<S>: Connected,
                             //let locs = buf.locs().to_vec();
                             let max_ts = ts.iter().cloned().max().unwrap();
                             for t in ts.iter() { assert!(&max_ts >= t); }
-                            trace!("CLIENT finished skeens1 {:?} max {:?}", ts, max_ts);
+                            trace!("CLIENT finished skeens1 {:?}: {:?} max {:?}",
+                                e.id(), ts, max_ts);
                             Some(max_ts)
                         } else { None }
                     };
@@ -1556,6 +1559,7 @@ impl Connected for PerServer<TcpStream> {
             self.print_data.packets_sending(1);
             {
                 let ts = msg.borrow();
+                debug_assert_eq!(bytes_as_entry(&*ts).lock_num(), max_timestamp);
                 let send_end = bytes_as_entry(&*ts).len();
                 let sent = self.being_written.try_fill(&ts[..send_end], self.receiver);
                 debug_assert!(sent);
