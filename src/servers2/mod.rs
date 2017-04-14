@@ -280,6 +280,8 @@ where T: Send + Sync {
 
 impl<T> ToWorker<T>
 where T: Copy + Send + Sync {
+
+    #[inline(always)]
     fn get_associated_data(&self) -> T {
         match self {
             &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
@@ -375,7 +377,7 @@ where ToWorkers: DistributeToWorkers<T> {
         self.print_data.msgs_recvd(1);
         let (kind, flag) = {
             let c = buffer.contents();
-            (c.kind(), c.flag().clone())
+            (c.kind(), *c.flag())
         };
         match kind.layout() {
             EntryLayout::Multiput | EntryLayout::Sentinel => {
@@ -427,40 +429,20 @@ where ToWorkers: DistributeToWorkers<T> {
                     chain, self.this_server_num, self.total_servers);
 
                 let this_server_num = self.this_server_num;
-                let delay = {
+
+                let send = {
                     let log = self.ensure_chain(chain);
                     if log.needs_skeens_single() {
                         let s = log.handle_skeens_single(&mut buffer, t);
-                        Some(s)
-                    } else {
-                        None
-                    }
-                };
-                if let Some((slot, storage_loc, time, queue_num)) = delay {
-                    self.print_data.msgs_sent(1);
-                    let msg = SingleSkeens {
-                        buffer: buffer,
-                        storage: slot,
-                        storage_loc: storage_loc,
-                        time: time,
-                        queue_num: queue_num,
-                        t: t,
-                    };
-                    self.to_workers.send_to_worker(msg);
-                    return
-                }
-
-                let slot = {
-                    let log = self.ensure_trie(chain);
-                    if log.is_locked() {
+                        Troption::Right(s)
+                    } else if log.trie.is_locked() {
                         trace!("SERVER append during lock {:?} @ {:?}",
-                            log.lock_pair(), chain,
+                            log.trie.lock_pair(), chain,
                         );
-                        None
-                    }
-                    else {
+                        Troption::None
+                    } else {
                         //FIXME this shuld be done in the worker thread?
-                        let index = log.len();
+                        let index = log.trie.len();
                         let size = {
                             let mut val = buffer.contents_mut();
                             val.flag_mut().insert(EntryFlag::ReadSuccess);
@@ -471,20 +453,32 @@ where ToWorkers: DistributeToWorkers<T> {
                         };
                         trace!("SERVER {:?} Writing entry {:?}",
                             this_server_num, (chain, index));
-                        Some(unsafe { log.partial_append(size).extend_lifetime() })
+                        let slot = unsafe { log.trie.partial_append(size).extend_lifetime() };
+                        Troption::Left(slot)
                     }
                 };
-                match slot {
-                    Some(slot) => {
-                        self.print_data.msgs_sent(1);
-                        self.to_workers.send_to_worker(Write(buffer, slot, t))
-                    },
-                    None => {
+                match send {
+                    Troption::None => {
                         self.print_data.msgs_sent(1);
                         self.to_workers.send_to_worker(Reply(buffer, t))
                     },
+                    Troption::Left(slot) => {
+                        self.print_data.msgs_sent(1);
+                        self.to_workers.send_to_worker(Write(buffer, slot, t))
+                    }
+                    Troption::Right((slot, storage_loc, time, queue_num)) => {
+                        self.print_data.msgs_sent(1);
+                        let msg = SingleSkeens {
+                            buffer: buffer,
+                            storage: slot,
+                            storage_loc: storage_loc,
+                            time: time,
+                            queue_num: queue_num,
+                            t: t,
+                        };
+                        self.to_workers.send_to_worker(msg);
+                    }
                 }
-
             }
 
             /////////////////////////////////////////////////

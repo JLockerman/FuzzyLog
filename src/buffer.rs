@@ -71,6 +71,7 @@ impl Buffer {
         self.entry_mut()
     }
 
+    #[inline(always)]
     pub fn ensure_capacity(&mut self, capacity: usize) {
         if self.inner.capacity() < capacity {
             let curr_cap = self.inner.capacity();
@@ -91,7 +92,7 @@ impl Buffer {
 
     pub fn entry_slice(&self) -> &[u8] {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        let size = self.entry_size();
+        let size = unsafe { EntryContents::try_ref(&self.inner[..]).unwrap().0.len() };
         &self[..size]
     }
 
@@ -112,10 +113,12 @@ impl Buffer {
         MutEntry::wrap_slice(&mut self[..size])
     }
 
+    #[inline(always)]
     pub fn contents(&self) -> EntryContents {
         unsafe { EntryContents::try_ref(&self.inner[..]).unwrap().0 }
     }
 
+    #[inline(always)]
     pub fn contents_mut(&mut self) -> EntryContentsMut {
         unsafe { EntryContentsMut::try_mut(&mut self.inner[..]).unwrap().0 }
     }
@@ -206,12 +209,16 @@ impl Drop for Buffer {
 //FIXME impl AsRef for Buffer...
 impl ::std::ops::Index<::std::ops::Range<usize>> for Buffer {
     type Output = [u8];
+
+    #[inline(always)]
     fn index(&self, index: ::std::ops::Range<usize>) -> &Self::Output {
         &self.inner[index]
     }
 }
 
 impl ::std::ops::IndexMut<::std::ops::Range<usize>> for Buffer {
+
+    #[inline(always)]
     fn index_mut(&mut self, index: ::std::ops::Range<usize>) -> &mut Self::Output {
         //TODO should this ensure capacity?
         self.ensure_capacity(index.end);
@@ -221,12 +228,14 @@ impl ::std::ops::IndexMut<::std::ops::Range<usize>> for Buffer {
 
 impl ::std::ops::Index<::std::ops::RangeFrom<usize>> for Buffer {
     type Output = [u8];
+    #[inline(always)]
     fn index(&self, index: ::std::ops::RangeFrom<usize>) -> &Self::Output {
         &self.inner[index]
     }
 }
 
 impl ::std::ops::IndexMut<::std::ops::RangeFrom<usize>> for Buffer {
+    #[inline(always)]
     fn index_mut(&mut self, index: ::std::ops::RangeFrom<usize>) -> &mut Self::Output {
         //TODO should this ensure capacity?
         self.ensure_capacity(index.start);
@@ -237,6 +246,8 @@ impl ::std::ops::IndexMut<::std::ops::RangeFrom<usize>> for Buffer {
 
 impl ::std::ops::Index<::std::ops::RangeTo<usize>> for Buffer {
     type Output = [u8];
+
+    #[inline(always)]
     fn index(&self, index: ::std::ops::RangeTo<usize>) -> &Self::Output {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         &self.inner[index]
@@ -244,6 +255,8 @@ impl ::std::ops::Index<::std::ops::RangeTo<usize>> for Buffer {
 }
 
 impl ::std::ops::IndexMut<::std::ops::RangeTo<usize>> for Buffer {
+
+    #[inline(always)]
     fn index_mut(&mut self, index: ::std::ops::RangeTo<usize>) -> &mut Self::Output {
         //TODO should this ensure capacity?
         self.ensure_capacity(index.end);
@@ -254,6 +267,8 @@ impl ::std::ops::IndexMut<::std::ops::RangeTo<usize>> for Buffer {
 
 impl ::std::ops::Index<::std::ops::RangeFull> for Buffer {
     type Output = [u8];
+
+    #[inline(always)]
     fn index(&self, index: ::std::ops::RangeFull) -> &Self::Output {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         &self.inner[index]
@@ -261,6 +276,7 @@ impl ::std::ops::Index<::std::ops::RangeFull> for Buffer {
 }
 
 impl ::std::ops::IndexMut<::std::ops::RangeFull> for Buffer {
+    #[inline(always)]
     fn index_mut(&mut self, index: ::std::ops::RangeFull) -> &mut Self::Output {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         //TODO should this ensure capacity?

@@ -35,7 +35,7 @@ def mirror(cmd=''):
 #      so you need to input the server addrs twice once comma separated for -H
 #      once '^' separated for chain_hosts
 @parallel
-def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stats=""):
+def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stats="", nt=""):
     with settings(hide('warnings'), warn_only=True):
         run("pkill delos_tcp_serve")
         run("pkill delos_tcp_server")
@@ -49,6 +49,8 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
         cmd += "--release "
     if stats != "":
         cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
+    if nt != "":
+        cmd += "--features \"fuzzy_log/no_trace\" "
     cmd += "-- " + port
 
     if chain_hosts == "":
