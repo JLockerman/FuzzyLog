@@ -267,7 +267,7 @@ impl Worker {
                     break 'work
                 }
 
-                let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)));
+                let _ = self.inner.poll.poll(&mut events, Some(Duration::from_millis(0)));
                 self.handle_new_events(events.iter());
             }
             #[cfg(debug_assertions)]
