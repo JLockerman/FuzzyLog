@@ -35,7 +35,7 @@ pub enum WorkerToDist {
 }
 
 pub enum DistToWorker {
-    NewClient(mio::Token, TcpStream),
+    NewClient(mio::Token, TcpStream, Ipv4SocketAddr),
     //ToClient(ToWorker<(usize, mio::Token, Ipv4SocketAddr)>),
     ToClient(mio::Token, &'static [u8], Ipv4SocketAddr, u64),
     ToClientB(mio::Token, Box<[u8]>, Ipv4SocketAddr, u64),
@@ -307,7 +307,7 @@ impl Worker {
         loop {
             match self.inner.from_dist.try_recv() {
                 None => return,
-                Some(DistToWorker::NewClient(tok, stream)) => {
+                Some(DistToWorker::NewClient(tok, stream, client_addr)) => {
                     debug_assert!(tok.0 >= FIRST_CLIENT_TOKEN.0);
                     self.inner.print_data.from_dist_N(1);
                     self.inner.poll.register(
@@ -319,7 +319,6 @@ impl Worker {
                     //self.clients.insert(tok, PerSocket::new(buffer, stream));
                     //TODO assert unique?
                     trace!("WORKER {} recv from dist.", self.inner.worker_num);
-                    let client_addr = Ipv4SocketAddr::from_socket_addr(stream.peer_addr().unwrap());
                     self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
                     let _state =
                         self.clients.entry(tok).or_insert(PerSocket::client(stream));
@@ -348,12 +347,6 @@ impl Worker {
                 }
                 Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
                     self.inner.print_data.from_dist_T(1);
-                    debug_assert_eq!(
-                        Ipv4SocketAddr::from_socket_addr(
-                                self.clients[&tok].stream().peer_addr().unwrap()
-                        ),
-                        src_addr
-                    );
                     debug_assert_eq!(storage_loc, 0);
                     trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
                     assert!(tok >= FIRST_CLIENT_TOKEN);
@@ -388,12 +381,6 @@ impl Worker {
 
                 Some(DistToWorker::ToClientB(tok, buffer, src_addr, storage_loc)) => {
                     self.inner.print_data.from_dist_T(1);
-                    debug_assert_eq!(
-                        Ipv4SocketAddr::from_socket_addr(
-                                self.clients[&tok].stream().peer_addr().unwrap()
-                        ),
-                        src_addr
-                    );
                     debug_assert_eq!(storage_loc, 0);
                     trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
                     assert!(tok >= FIRST_CLIENT_TOKEN);

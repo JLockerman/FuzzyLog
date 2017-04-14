@@ -362,7 +362,11 @@ pub fn run_with_replication(
     //let mut buffer_cache = VecDeque::new();
     let mut next_worker = 0usize;
 
-    for (socket, addr) in other_sockets {
+    for (mut socket, addr) in other_sockets {
+        let mut id = [0u8; 16];
+        blocking_read(&mut socket, &mut id);
+        let id = Ipv4SocketAddr::from_bytes(id);
+        trace!("new client {}", id);
         let tok = get_next_token(&mut next_token);
         let worker = if is_unreplicated {
             let worker = next_worker;
@@ -372,11 +376,12 @@ pub fn run_with_replication(
             }
             worker
         } else {
-            worker_for_ip(addr, num_workers as u64)
+            let worker = worker_for_ip(id, num_workers as u64);
+            worker_for_client.insert(id, (worker, tok));
+            worker
         };
-        dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
-        worker_for_client.insert(
-            Ipv4SocketAddr::from_socket_addr(addr), (worker, tok));
+        dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
+
     }
 
     trace!("SERVER start server loop");
@@ -387,11 +392,14 @@ pub fn run_with_replication(
                 ACCEPT => {
                     match acceptor.accept() {
                         Err(e) => trace!("error {}", e),
-                        Ok((socket, addr)) => {
+                        Ok((mut socket, addr)) => {
                             let _ = socket.set_keepalive_ms(Some(1000));
                             let _ = socket.set_nodelay(true);
                             //TODO oveflow
                             let tok = get_next_token(&mut next_token);
+                            let mut id = [0u8; 16];
+                            blocking_read(&mut socket, &mut id);
+                            let id = Ipv4SocketAddr::from_bytes(id);
                             /*poll.register(
                                 &socket,
                                 tok,
@@ -407,13 +415,12 @@ pub fn run_with_replication(
                                 }
                                 worker
                             } else {
-                                worker_for_ip(addr, num_workers as u64)
+                                worker_for_ip(id, num_workers as u64)
                             };
+                            worker_for_client.insert(id, (worker, tok));
                             trace!("SERVER accepting client @ {:?} => {:?}",
-                                addr, (worker, tok));
-                            dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
-                            worker_for_client.insert(
-                                Ipv4SocketAddr::from_socket_addr(addr), (worker, tok));
+                                (addr, id), (worker, tok));
+                            dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
                             //FIXME tell other workers
                         }
                     }
@@ -635,6 +642,7 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     }
 }
 
+#[cfg(TODO)]
 #[cfg(test)]
 mod tests {
     extern crate env_logger;
@@ -1546,7 +1554,7 @@ fn get_next_token(token: &mut mio::Token) -> mio::Token {
     *token
 }
 
-fn worker_for_ip(ip: SocketAddr, num_workers: u64) -> usize {
+fn worker_for_ip(ip: Ipv4SocketAddr, num_workers: u64) -> usize {
     use std::hash::{Hash, Hasher};
     let mut hasher: FxHasher = Default::default();
     ip.hash(&mut hasher);
