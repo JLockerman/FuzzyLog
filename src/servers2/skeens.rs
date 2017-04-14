@@ -737,7 +737,7 @@ impl<T> Ord for GotMax<T> {
             (&Multi{timestamp: my_timestamp, id: ref my_id, ..},
                 &Multi{timestamp: other_timestamp, id: ref other_id, ..}) =>
                 match my_timestamp.cmp(&other_timestamp) {
-                    Equal => my_id.cmp(other_id),
+                    Equal => my_id.cmp(other_id).reverse(),
                     o => o.reverse(),
                 },
 
@@ -973,6 +973,21 @@ mod test {
     }
 
     #[test]
+    fn happens_before_ord() {
+        let g0 = GotMax::Multi{
+            timestamp: 2, storage: multi_storage(), t: (), id: Uuid::new_v4()
+        };
+        let id = Uuid::new_v4();
+        let w1 = WaitingForMax::Multi{
+            timestamp: 2, storage: multi_storage(), t: (), id: id, node_num: 0,
+        };
+        let g1 = GotMax::Multi{
+            timestamp: 2, storage: multi_storage(), t: (), id: id
+        };
+        assert_eq!(g0.happens_before(&w1), g0 > g1);
+    }
+
+    #[test]
     fn binary_heap() {
         let mut heap = BinaryHeap::with_capacity(4);
         heap.push(Multi{ timestamp: 2, storage: multi_storage(), t: (), id: Uuid::nil()});
@@ -1072,6 +1087,66 @@ mod test {
         assert_eq!(&*v,
             &[Multi{timestamp: 3, id: id1, t: (), storage: s1},
             Multi{timestamp: 122, id: id0, t: (), storage: s0}]);
+    }
+
+    #[test]
+    fn multi_eq() {
+        let id0 = Uuid::parse_str("936DA01F9ABD4d9d80C702AF85C822A8").unwrap();
+        let s0 = multi_storage();
+        let id1 = Uuid::nil();
+        let s1 = multi_storage();
+        let mut skeen = SkeensState::new();
+        //TODO add assert for fn res
+        skeen.add_multi_append(id0, s0.clone(), ());
+        assert_eq!(skeen.next_timestamp, 2);
+        skeen.add_multi_append(id1, s1.clone(), ());
+        assert_eq!(skeen.next_timestamp, 3);
+        let r = skeen.set_max_timestamp(id0, 100);
+        assert_eq!(r, SkeensSetMaxRes::Ok);
+        assert_eq!(skeen.next_timestamp, 101);
+        let mut v = Vec::with_capacity(2);
+        skeen.flush_got_max_timestamp(|g| {v.push(g)});
+        assert_eq!(&*v, &[]);
+        let r = skeen.set_max_timestamp(id1, 100);
+        assert_eq!(r, SkeensSetMaxRes::NeedsFlush);
+        assert_eq!(skeen.next_timestamp, 101);
+
+        let mut i = true;
+        skeen.flush_got_max_timestamp(|g| {v.push(g);});
+
+        assert_eq!(&*v,
+            &[Multi{timestamp: 100, id: id1, t: (), storage: s1},
+            Multi{timestamp: 100, id: id0, t: (), storage: s0}]);
+    }
+
+    #[test]
+    fn multi_eq2() {
+        let id0 = Uuid::parse_str("936DA01F9ABD4d9d80C702AF85C822A8").unwrap();
+        let s0 = multi_storage();
+        let id1 = Uuid::nil();
+        let s1 = multi_storage();
+        let mut skeen = SkeensState::new();
+        //TODO add assert for fn res
+        skeen.add_multi_append(id1, s1.clone(), ());
+        assert_eq!(skeen.next_timestamp, 2);
+        skeen.add_multi_append(id0, s0.clone(), ());
+        assert_eq!(skeen.next_timestamp, 3);
+        let r = skeen.set_max_timestamp(id0, 100);
+        assert_eq!(r, SkeensSetMaxRes::Ok);
+        assert_eq!(skeen.next_timestamp, 101);
+        let mut v = Vec::with_capacity(2);
+        skeen.flush_got_max_timestamp(|g| {v.push(g)});
+        assert_eq!(&*v, &[]);
+        let r = skeen.set_max_timestamp(id1, 100);
+        assert_eq!(r, SkeensSetMaxRes::NeedsFlush);
+        assert_eq!(skeen.next_timestamp, 101);
+
+        let mut i = true;
+        skeen.flush_got_max_timestamp(|g| {v.push(g);});
+
+        assert_eq!(&*v,
+            &[Multi{timestamp: 100, id: id1, t: (), storage: s1},
+            Multi{timestamp: 100, id: id0, t: (), storage: s0}]);
     }
 
     #[test]
