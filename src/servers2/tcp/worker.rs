@@ -267,7 +267,7 @@ impl Worker {
                     break 'work
                 }
 
-                let _ = self.inner.poll.poll(&mut events, Some(Duration::new(0, 1)));
+                let _ = self.inner.poll.poll(&mut events, Some(Duration::from_millis(0)));
                 self.handle_new_events(events.iter());
             }
             #[cfg(debug_assertions)]
@@ -1014,6 +1014,7 @@ impl WorkerInner {
 
 impl DistributeToWorkers<(usize, mio::Token, Ipv4SocketAddr)>
 for Vec<spsc::Sender<ToWorker<(usize, mio::Token, Ipv4SocketAddr)>>> {
+    #[inline(always)]
     fn send_to_worker(&mut self, msg: ToWorker<(usize, mio::Token, Ipv4SocketAddr)>) {
         let (which_queue, token, _) = msg.get_associated_data();
         trace!("SERVER   sending to worker {} {:?} ", which_queue, token);

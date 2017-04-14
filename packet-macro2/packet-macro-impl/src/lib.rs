@@ -175,6 +175,7 @@ fn struct_try_wrap(fields: &[Field]) -> quote::Tokens {
         try_wrap_body(fields, &"'tryref".into());
     quote!{
         #[allow(unused_assignments)]
+        #[inline(always)]
         pub unsafe fn try_ref(mut __packet_macro_bytes: &[u8]) -> Result<(Self, &[u8]), WrapErr> {
             let __packet_macro_read_len = 0usize;
             #vars
@@ -210,6 +211,7 @@ fn enum_try_wrap(tag_ident: &Ident, tag_ty: &Ty, variants: &[Variant]) -> quote:
     let try_wrap_tag = try_wrap_field(tag_ident, tag_ty, &"'tryref_tag".into());
     quote!{
         #[allow(unused_assignments)]
+        #[inline(always)]
         pub unsafe fn try_ref(mut __packet_macro_bytes: &[u8]) -> Result<(Self, &[u8]), WrapErr> {
             let __packet_macro_read_len = 0usize;
             let mut #tag_ident = None;
@@ -297,6 +299,7 @@ fn struct_try_mut(fields: &[Field]) -> quote::Tokens {
         try_mut_body(fields, &"'trymut".into());
     quote!{
         #[allow(unused_assignments)]
+        #[inline(always)]
         pub unsafe fn try_mut(__packet_macro_bytes: &mut [u8]) -> Result<(Self, &mut [u8]), WrapErr> {
             let __packet_macro_read_len = 0usize;
             #vars
@@ -333,6 +336,7 @@ fn enum_try_mut(tag_ident: &Ident, tag_ty: &Ty, variants: &[Variant]) -> quote::
     let try_mut_tag = try_mut_field(tag_ident, tag_ty, &"'trymut_tag".into());
     quote!{
         #[allow(unused_assignments)]
+        #[inline(always)]
         pub unsafe fn try_mut(mut __packet_macro_bytes: &mut [u8]) -> Result<(Self, &mut [u8]), WrapErr> {
             let __packet_macro_read_len = 0usize;
             let mut #tag_ident = None;

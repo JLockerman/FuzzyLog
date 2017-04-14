@@ -789,6 +789,35 @@ mod test {
     //use std::marker::PhantomData;
 
     #[test]
+    fn packet_size_check() {
+        let b = Packet::Ref::Single {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            loc: &OrderIndex(0.into(), 0.into()),
+            deps: &[],
+            data: &[],
+        }.len();
+        assert!(
+            Packet::min_len() >= b,
+            "{} >= {}",
+            Packet::min_len(), b,
+        );
+        /*let b = Packet::Ref::Multi {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &[],
+            deps: &[],
+            data: &[],
+        }.len();
+        assert!(
+            Packet::min_len() >= b,
+            "{} >= {}",
+            Packet::min_len(), b,
+        );*/
+    }
+
+    #[test]
     fn packet_sanity_check() {
         let id = Uuid::new_v4();
         let flag = EntryFlag::ReadSuccess;
