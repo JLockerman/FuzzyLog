@@ -97,7 +97,7 @@ impl Buffer {
 
     pub fn entry_size(&self) -> usize {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
-        self.contents().len()
+        unsafe { EntryContents::try_ref(&self.inner[..]).unwrap().0.len() }
     }
 
     pub fn entry(&self) -> Entry {
@@ -120,6 +120,7 @@ impl Buffer {
         unsafe { EntryContentsMut::try_mut(&mut self.inner[..]).unwrap().0 }
     }
 
+    #[inline(always)]
     pub fn finished_at(&self, len: usize) -> Result<usize, WrapErr> {
         unsafe { EntryContents::try_ref(&self.inner[..len]).map(|(c, _)| c.len()) }
     }
