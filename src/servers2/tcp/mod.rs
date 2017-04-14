@@ -131,7 +131,7 @@ const DOWNSTREAM: mio::Token = mio::Token(3);
 // can determine who is responsible for a client
 const FIRST_CLIENT_TOKEN: mio::Token = mio::Token(10);
 
-const NUMBER_READ_BUFFERS: usize = 5;
+const NUMBER_READ_BUFFERS: usize = 15;
 
 type WorkerNum = usize;
 
