@@ -737,7 +737,7 @@ impl<T> Ord for GotMax<T> {
             (&Multi{timestamp: my_timestamp, id: ref my_id, ..},
                 &Multi{timestamp: other_timestamp, id: ref other_id, ..}) =>
                 match my_timestamp.cmp(&other_timestamp) {
-                    Equal => my_id.cmp(other_id),
+                    Equal => my_id.cmp(other_id).reverse(),
                     o => o.reverse(),
                 },
 
@@ -973,6 +973,21 @@ mod test {
     }
 
     #[test]
+    fn happens_before_ord() {
+        let g0 = GotMax::Multi{
+            timestamp: 2, storage: multi_storage(), t: (), id: Uuid::new_v4()
+        };
+        let id = Uuid::new_v4();
+        let w1 = WaitingForMax::Multi{
+            timestamp: 2, storage: multi_storage(), t: (), id: id, node_num: 0,
+        };
+        let g1 = GotMax::Multi{
+            timestamp: 2, storage: multi_storage(), t: (), id: id
+        };
+        assert_eq!(g0.happens_before(&w1), g0 > g1);
+    }
+
+    #[test]
     fn binary_heap() {
         let mut heap = BinaryHeap::with_capacity(4);
         heap.push(Multi{ timestamp: 2, storage: multi_storage(), t: (), id: Uuid::nil()});
@@ -1100,8 +1115,8 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g);});
 
         assert_eq!(&*v,
-            &[Multi{timestamp: 100, id: id0, t: (), storage: s0},
-            Multi{timestamp: 100, id: id1, t: (), storage: s1}]);
+            &[Multi{timestamp: 100, id: id1, t: (), storage: s1},
+            Multi{timestamp: 100, id: id0, t: (), storage: s0}]);
     }
 
     #[test]
@@ -1130,8 +1145,8 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g);});
 
         assert_eq!(&*v,
-            &[Multi{timestamp: 100, id: id0, t: (), storage: s0},
-            Multi{timestamp: 100, id: id1, t: (), storage: s1}]);
+            &[Multi{timestamp: 100, id: id1, t: (), storage: s1},
+            Multi{timestamp: 100, id: id0, t: (), storage: s0}]);
     }
 
     #[test]
