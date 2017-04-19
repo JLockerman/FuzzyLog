@@ -515,6 +515,33 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn async_get_next2(
+        dag: *mut DAG,
+        data_read: *mut usize,
+        num_locs: *mut usize,
+    ) -> Vals {
+        use async::fuzzy_log::log_handle::TryGetNextErr;
+
+        assert!(data_read != ptr::null_mut());
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        let val = dag.try_get_next();
+        let (data, locs): (&[u8], &[OrderIndex]) = match val {
+            Ok((data, locs)) => (data, locs),
+            Err(TryGetNextErr::NothingReady) => (&[], &[]),
+            Err(TryGetNextErr::Done) => {
+                ptr::write(data_read, 0);
+                ptr::write(num_locs, 0);
+                return Vals { data: ptr::null(), locs: ptr::null() }
+            },
+        };
+
+        ptr::write(data_read, data.len());
+        ptr::write(num_locs, locs.len());
+
+        Vals { data: data.as_ptr(), locs: locs.as_ptr() }
+    }
+
+    #[no_mangle]
     pub extern "C" fn snapshot(dag: *mut DAG) {
         let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
         dag.take_snapshot();

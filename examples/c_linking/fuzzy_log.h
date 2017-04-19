@@ -335,7 +335,6 @@ write_id async_simple_causal_append(
 // greater than DELOS_MAX_DATA_SIZE
 void get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
 
-
 typedef struct get_next_val {
 	const uint8_t *data;
 	const fuzzy_log_location *locs;
@@ -360,6 +359,30 @@ typedef struct get_next_val {
 //!              they are maintained by the dag handle.
 //!
 get_next_val get_next2(DAGHandle *handle, size_t *data_size, size_t *locs_read);
+
+
+//! Tries to read a valid next node from the new nodes discovered with the latests
+//! snapshot.
+//! If there are no nodes ready data_read and locs_read will be set to 0
+//! If there are no such nodes remaining (i.e. all new nodes have been read)
+//! additionally the pointers in get_next_val will be NULL
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param[out] data_size
+//!     The size in bytes of the data that was read.
+//!
+//! @param[out] locs_read
+//!     The number of locations that the entry inhabited.
+//!
+//! @return
+//!     Pointers to the data and locations that were read,
+//!     or null if there are no nodes remaining in the snapshot
+//!     @warning do _not_ write to or free the data return by this function;
+//!              they are maintained by the dag handle.
+//!
+get_next_val async_get_next2(DAGHandle *handle, size_t *data_size, size_t *locs_read);
 
 //! Flush all appends that have already been completed.
 //!
