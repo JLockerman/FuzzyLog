@@ -30,6 +30,10 @@ impl Ipv4SocketAddr {
     pub fn bytes(&self) -> &[u8; 16] {
         &self.bytes
     }
+
+    pub fn to_uuid(&self) -> Uuid {
+        Uuid::from_bytes(&self.bytes).unwrap()
+    }
 }
 
 impl fmt::Debug for Ipv4SocketAddr {

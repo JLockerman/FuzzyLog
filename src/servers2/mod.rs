@@ -170,13 +170,20 @@ pub enum ToWorker<T: Send + Sync> {
 
 #[derive(Clone, Debug)]
 pub struct SkeensMultiStorage(
-    Arc<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>>
+    Arc<UnsafeCell<
+        (Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8], Uuid)
+    >>
 );
 
 unsafe impl Send for SkeensMultiStorage {}
 
 impl SkeensMultiStorage {
-    fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
+    fn new(
+        num_locs: usize,
+        entry_size: usize,
+        sentinel_size: Option<usize>,
+        writer_id: Uuid
+    ) -> Self {
             let timestamps = vec![0; num_locs];
             let queue_indicies = vec![0; num_locs];
             let mut data = Vec::with_capacity(entry_size);
@@ -191,26 +198,35 @@ impl SkeensMultiStorage {
             }).unwrap_or(&mut []);
             debug_assert_eq!(timestamps.len(), num_locs);
             debug_assert_eq!(timestamps.len(), queue_indicies.len());
-            SkeensMultiStorage(Arc::new(UnsafeCell::new((timestamps, queue_indicies, data, senti))))
+            SkeensMultiStorage(Arc::new(UnsafeCell::new(
+                (timestamps, queue_indicies, data, senti, writer_id)
+            )))
     }
 
-    fn try_unwrap(s: Self) -> Result<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>, Self> {
+    fn try_unwrap(s: Self) -> Result<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8], Uuid)>, Self> {
         Arc::try_unwrap(s.0).map_err(SkeensMultiStorage)
     }
 
     unsafe fn get(&self) -> (&Box<[Time]>, &Box<[QueueIndex]>, &'static [u8], &'static [u8]) {
-        let &(ref ts, ref indicies, ref st0, ref st1) = &*self.0.get();
+        let &(ref ts, ref indicies, ref st0, ref st1, ref _id) = &*self.0.get();
         (ts, indicies, *st0, *st1)
+    }
+
+    unsafe fn get_id(&self) -> &Uuid {
+        let &(ref _ts, ref _indicies, ref _st0, ref _st1, ref id) = &*self.0.get();
+        id
     }
 
     unsafe fn get_mut(&self)
     -> (&mut Box<[Time]>, &mut Box<[QueueIndex]>, &mut [u8], &mut [u8]) {
-        let &mut (ref mut ts, ref mut indicies, ref mut st0, ref mut st1) = &mut *self.0.get();
+        let &mut (ref mut ts, ref mut indicies, ref mut st0, ref mut st1, ref _id)
+            = &mut *self.0.get();
         (ts, indicies, &mut **st0, &mut **st1)
     }
 
     fn ptr(&self)
-    -> *const UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>
+    -> *const UnsafeCell<
+        (Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8], Uuid)>
     {
         &*(self.0)
     }
@@ -1709,7 +1725,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 match SkeensMultiStorage::try_unwrap(storage) {
                     Ok(storage) => {
                         trace!("WORKER {} skeens2 to client @ {:?}", worker_num, loc);
-                        let &(_, _, ref st0, ref st1) = &*storage.get();
+                        let &(_, _, ref st0, ref st1, _) = &*storage.get();
                         ToSend::StaticSlice(if st1.len() > 0 { *st1 } else { *st0 })
                     }
                     Err(..) => {

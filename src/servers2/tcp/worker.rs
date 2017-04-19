@@ -907,7 +907,9 @@ impl WorkerInner {
                 };
                 if f.contains(EntryFlag::NewMultiPut) || !f.contains(EntryFlag::TakeLock) {
                     let senti_size = if has_senti { Some(senti_size) } else { None };
-                    let mut storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                    let mut storage = SkeensMultiStorage::new(
+                        num_locs, size, senti_size, src_addr.to_uuid(),
+                    );
                     if !f.contains(EntryFlag::TakeLock) {
                         storage.fill_from(&mut buffer)
                     }
@@ -980,7 +982,9 @@ impl WorkerInner {
                     (e.non_replicated_len(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
                 let senti_size = if has_senti { Some(senti_size) } else { None };
-                let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                let storage = SkeensMultiStorage::new(
+                    num_locs, size, senti_size, src_addr.to_uuid()
+                );
                 ToReplicate::Skeens1(buffer, storage)
             }
             EntryKind::SentinelToReplica => {
@@ -994,7 +998,9 @@ impl WorkerInner {
                     (e.non_replicated_len(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
                 let senti_size = if has_senti { Some(senti_size) } else { None };
-                let storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                let storage = SkeensMultiStorage::new(
+                    num_locs, size, senti_size, src_addr.to_uuid()
+                );
                 ToReplicate::Skeens1(buffer, storage)
             }
             EntryKind::Skeens2ToReplica => {
