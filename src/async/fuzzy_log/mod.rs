@@ -25,7 +25,7 @@ mod range_tree;
 #[cfg(test)]
 mod tests;
 
-const MAX_PREFETCH: u32 = 40;
+const MAX_PREFETCH: u32 = 1;
 
 type ChainEntry = Rc<Vec<u8>>;
 
