@@ -23,6 +23,10 @@ impl Ipv4SocketAddr {
         Ipv4SocketAddr { bytes: bytes }
     }
 
+    pub fn from_uuid(id: &Uuid) -> Self {
+        Self::from_bytes(*id.as_bytes())
+    }
+
     pub fn nil() -> Self {
         Ipv4SocketAddr { bytes: [0; 16] }
     }
@@ -33,6 +37,12 @@ impl Ipv4SocketAddr {
 
     pub fn to_uuid(&self) -> Uuid {
         Uuid::from_bytes(&self.bytes).unwrap()
+    }
+}
+
+impl From<Uuid> for Ipv4SocketAddr {
+    fn from(id: Uuid) -> Self {
+        Self::from_uuid(&id)
     }
 }
 

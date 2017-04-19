@@ -16,6 +16,8 @@ use mio::tcp::*;
 
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
+use packets::EntryContents;
+
 mod worker;
 mod per_socket;
 
@@ -334,6 +336,7 @@ pub fn run_with_replication(
             match to_log {
                 ToLog::New(buffer, storage, st) => log.handle_op(buffer, storage, st),
                 ToLog::Replication(tr, st) => log.handle_replication(tr, st),
+                ToLog::Recovery(r, st) => log.handle_recovery(r, st),
             }
         }
         #[cfg(feature = "print_stats")]
@@ -343,6 +346,7 @@ pub fn run_with_replication(
             match msg {
                 Ok(ToLog::New(buffer, storage, st)) => log.handle_op(buffer, storage, st),
                 Ok(ToLog::Replication(tr, st)) => log.handle_replication(tr, st),
+                ToLog::Recovery(r, st) => log.handle_recovery(r, st),
                 Err(RecvTimeoutError::Timeout) => log.print_stats(),
                 Err(RecvTimeoutError::Disconnected) => panic!("log disconnected"),
             }
@@ -474,6 +478,49 @@ pub fn run_with_replication(
 
                                 dist_to_workers[worker].send(
                                     DistToWorker::ToClientB(token, buffer, addr, 0)
+                                );
+                                continue
+                            }
+
+                            WorkerToDist::FenceClient(buffer) => {
+                                let (client_to_fence, fencing_client) = match buffer.contents() {
+                                    EntryContents::FenceClient{
+                                        client_to_fence, fencing_client, ..
+                                    } => (*client_to_fence, *fencing_client),
+                                    _ => unreachable!(),
+                                };
+                                if let Some(&(worker, token)) = worker_for_client
+                                    .get(&client_to_fence.into()) {
+                                    dist_to_workers[worker].send(
+                                        DistToWorker::FenceOff(token, buffer)
+                                    );
+                                    continue
+                                };
+                                worker_for_client.get(&fencing_client.into())
+                                .map(|&(worker, token)|
+                                    dist_to_workers[worker].send(
+                                        DistToWorker::FinishedFence(token, buffer)
+                                    )
+                                );
+                                continue
+                            },
+
+                            WorkerToDist::ClientFenced(buffer) => {
+                                let fencing_client = match buffer.contents() {
+                                    EntryContents::FenceClient{fencing_client, ..} =>
+                                        *fencing_client,
+                                    _ => unreachable!(),
+                                };
+                                //TODO we should probably store the worker on the outbound hop
+                                //     to ensure it can get the buffer back if it's client
+                                //     gets fenced in the interim
+
+                                //TODO we should probably GC the worker_for_client entry here
+                                worker_for_client.get(&fencing_client.into())
+                                .map(|&(worker, token)|
+                                    dist_to_workers[worker].send(
+                                        DistToWorker::FinishedFence(token, buffer)
+                                    )
                                 );
                                 continue
                             }

@@ -13,11 +13,14 @@ use vec_deque_map::VecDequeMap;
 
 use super::SkeensMultiStorage;
 
+use packets::OrderIndex;
+
 pub struct SkeensState<T: Copy> {
     next_timestamp: u64,
     phase1_queue: VecDequeMap<WaitingForMax<T>>,
     got_max_timestamp: BinaryHeap<GotMax<T>>,
     append_status: HashMap<Uuid, AppendStatus>,
+    recovering: HashMap<Uuid, Box<(Uuid, Box<[OrderIndex]>)>>,
     //waiting_for_max_timestamp: LinkedHashMap<Uuid, WaitingForMax<T>>,
     //in_progress: HashMap<Uuid, AppendStatus>, //subsumes waiting_for_max_timestamp and phase2_ids
     //phase2_ids: HashMap<Uuid, u64>,
@@ -70,6 +73,7 @@ impl<T: Copy> SkeensState<T> {
             phase1_queue: Default::default(),
             got_max_timestamp: Default::default(),
             next_timestamp: 1,
+            recovering: Default::default(),
         }
     }
 
@@ -398,6 +402,31 @@ impl<T: Copy> SkeensState<T> {
     pub fn is_empty(&self) -> bool {
         self.phase1_queue.is_empty()
         && self.got_max_timestamp.is_empty()
+    }
+
+    pub fn tas_recoverer(
+        &mut self,
+        write_id: Uuid,
+        recoverer: Box<(Uuid, Box<[OrderIndex]>)>,
+        old_recoverer: Option<Uuid>,
+    ) -> Result<(), Option<Uuid>> {
+        use std::collections::hash_map;
+
+        match (self.recovering.entry(write_id), old_recoverer) {
+            (hash_map::Entry::Vacant(..), Some(..)) => Err(None),
+
+            (hash_map::Entry::Vacant(v), None) => {
+                v.insert(recoverer);
+                Ok(())
+            },
+
+            (hash_map::Entry::Occupied(ref mut o), Some(ref mut old)) if o.get().0 == *old => {
+                o.insert(recoverer);
+                Ok(())
+            },
+
+            (hash_map::Entry::Occupied(o), _) => Err(Some(o.get().0)),
+        }
     }
 }
 

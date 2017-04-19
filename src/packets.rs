@@ -238,12 +238,22 @@ define_packet!{
         },
 
         FenceClient: EntryKind::FenceClient => {
-            client_to_fence: Uuid,
             fencing_write: Uuid,
+            client_to_fence: Uuid,
+            fencing_client: Uuid,
         },
 
+        /*?
+        TakeOverRecovery: EntryKind::FenceClient => {
+            fencing_write: Uuid,
+            flags: EntryFlag,
+            old_recoverer: Uuid,
+            new_recoverer: Uuid,
+        }
+        */
+
         UpdateRecovery: EntryKind::UpdateRecovery => {
-            recoverer: Uuid,
+            old_recoverer: Uuid,
             write_id: Uuid,
             flags: EntryFlag::Flag,
             cols: u16,
@@ -514,6 +524,16 @@ impl<'a> Packet::Ref<'a> {
         self.fill_vec(&mut v);
         v
     }
+
+    pub fn write_id_and_old_recoverer(self) -> (&'a Uuid, &'a Uuid) {
+        use self::Packet::Ref::*;
+        match self {
+            UpdateRecovery{write_id, old_recoverer, ..} =>
+                (write_id, old_recoverer),
+
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl<'a> Packet::Mut<'a> {
@@ -582,6 +602,14 @@ impl<'a> Packet::Mut<'a> {
 
             &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..} | &mut FenceClient{..}
             => unreachable!(),
+        }
+    }
+
+    pub fn recoverer_is(&mut self, id: Uuid) {
+        use self::Packet::Mut::*;
+        match self {
+            &mut UpdateRecovery{ref mut old_recoverer, ..} => **old_recoverer = id,
+            _ => unreachable!(),
         }
     }
 }
