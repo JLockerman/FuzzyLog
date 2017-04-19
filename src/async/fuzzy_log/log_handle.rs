@@ -42,6 +42,12 @@ impl<V: ?Sized> Drop for LogHandle<V> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TryGetNextErr {
+    Done,
+    NothingReady
+}
+
 impl<V> LogHandle<[V]>
 where V: Storeable {
 
@@ -428,6 +434,51 @@ where V: Storeable {
             }
         }
         Some((val, locs))
+    }
+
+    pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), TryGetNextErr>
+    where V: UnStoreable {
+        if self.num_snapshots == 0 {
+            trace!("HANDLE read with no snap.");
+            return Err(TryGetNextErr::Done)
+        }
+
+        'recv: loop {
+            //TODO use recv_timeout in real version
+            let read = self.ready_reads.try_recv();
+            let read = match read {
+                Ok(v) => v,
+                Err(..) => return Err(TryGetNextErr::NothingReady),
+            };
+            let old = mem::replace(&mut self.curr_entry, read);
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
+            }
+            if self.curr_entry.len() != 0 {
+                break 'recv
+            }
+
+            trace!("HANDLE finished snap.");
+            assert!(self.num_snapshots > 0);
+            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+            if self.num_snapshots == 0 {
+                trace!("HANDLE finished all snaps.");
+                return Err(TryGetNextErr::Done)
+            }
+        }
+
+        trace!("HANDLE got val.");
+        let (val, locs) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs())
+        };
+        for &OrderIndex(o, i) in locs {
+            let e = self.last_seen_entries.entry(o).or_insert(0.into());
+            if *e < i {
+                *e = i
+            }
+        }
+        Ok((val, locs))
     }
 
     pub fn color_append(

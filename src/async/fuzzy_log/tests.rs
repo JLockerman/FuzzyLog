@@ -706,6 +706,35 @@ macro_rules! async_tests {
             h1.join();
         }
 
+        #[test]
+        #[inline(never)]
+        pub fn test_try_get_next() {
+            use async::fuzzy_log::log_handle::TryGetNextErr;
+
+            let _ = env_logger::init();
+            trace!("TEST try get next");
+            let mut lh = $new_thread_log::<u32>(vec![80.into()]);
+            let _ = lh.append(80.into(), &1, &[]);
+            let _ = lh.append(80.into(), &2, &[]);
+            let _ = lh.append(80.into(), &3, &[]);
+            let _ = lh.append(80.into(), &4, &[]);
+            lh.snapshot(80.into());
+            let mut num_gotten = 0;
+            loop {
+                let got = lh.try_get_next();
+                match got {
+                    Err(TryGetNextErr::NothingReady) => continue,
+                    Err(TryGetNextErr::Done) => break,
+                    Ok((v, l)) => {
+                        num_gotten += 1;
+                        assert_eq!(v, &num_gotten);
+                        assert_eq!(l, &[OrderIndex(80.into(), num_gotten.into())][..]);
+                    }
+                }
+            }
+            assert_eq!(num_gotten, 4);
+        }
+
         //TODO test append after prefetch but before read
     );
     () => {
