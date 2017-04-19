@@ -442,7 +442,6 @@ impl ThreadLog {
                 .has_returned(index);
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", locs, (chain, index));
-                try_ret = false;
                 //TODO no-alloc?
                 self.blockers.entry(OrderIndex(chain, index))
                     .or_insert_with(Vec::new)
@@ -470,7 +469,7 @@ impl ThreadLog {
         }
         if !needed { return false }
         if !try_ret {
-            self.enqueue_packet(loc, packet.clone());
+            self.enqueue_packet(loc, Rc::clone(packet));
         }
         trace!("FUZZY checking {:?} for blockers in {:?}", loc, deps);
         for &OrderIndex(chain, index) in deps {
@@ -479,11 +478,10 @@ impl ThreadLog {
                 .has_returned(index);
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", loc, (chain, index));
-                try_ret = false;
                 //TODO no-alloc?
                 self.blockers.entry(OrderIndex(chain, index))
                     .or_insert_with(Vec::new)
-                    .push(packet.clone());
+                    .push(Rc::clone(packet));
                 self.fetch_blocker_at(chain, index);
             } else {
                 trace!("FUZZY read @ {:?} need not wait for {:?}", loc, (chain, index));
@@ -575,9 +573,11 @@ impl ThreadLog {
                         }
                         self.return_entry(val);
                     }
-                    Err(still_blocked) =>
-                        trace!("FUZZY {:?} no longer by {:?} but still blocked",
-                            bytes_as_entry(&still_blocked).locs(), loc),
+                    Err(still_blocked) => {
+                        trace!("FUZZY {:?} no longer by {:?} but still blocked by {:?}",
+                            bytes_as_entry(&still_blocked).locs(), loc,
+                                Rc::strong_count(&still_blocked))
+                    }
                 }
             }
         }

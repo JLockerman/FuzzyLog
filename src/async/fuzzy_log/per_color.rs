@@ -12,6 +12,7 @@ use super::range_tree::RangeTree;
 //TODO we could add messages from the client on read, and keep a counter of messages sent
 //     this would allow us to ensure that every client gets an end-of-data message, as long
 //     ad there're no concurrent snapshots...
+#[derive(Debug)]
 pub struct PerColor {
     //TODO repr?
     //blocking: HashMap<entry, OrderIndex>,
@@ -197,13 +198,14 @@ impl PerColor {
     }
 
     pub fn has_returned(&self, index: entry) -> bool {
-        trace!{"QQQQQ last return for {:?}: {:?}", self.chain, self.read_status};
+        trace!{"QQQQQ last return for {:?}: {:?}, snapshot {:?}",
+        self.chain, self.read_status, self.last_snapshot};
         self.read_status.is_returned(index)
     }
 
     pub fn next_return_is(&self, index: entry) -> bool {
-        trace!("QQQQQ check {:?} next return for {:?}: {:?}",
-            index, self.chain, self.read_status);
+        trace!("QQQQQ check {:?} next return for {:?}: {:?}, snapshot: {:?}",
+            index, self.chain, self.read_status, self.last_snapshot);
         self.read_status.next_return_is(index)
     }
 

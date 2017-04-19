@@ -671,6 +671,41 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), None);
         }
 
+        #[test]
+        #[inline(never)]
+        pub fn test_simple_causal_c() {
+            use std::thread;
+
+            let _ = env_logger::init();
+            trace!("TEST test_simple_causal_c");
+
+            let h0 = thread::spawn(||{
+                let mut lh = $new_thread_log::<(u32, u32)>(vec![78.into(), 79.into()]);
+                for i in 0..100u32 {
+                    for j in 0..5u32 {
+                        lh.simple_causal_append(&(i, j), &mut [78.into()], &mut [79.into()]);
+                        lh.simple_causal_append(&(i, j), &mut [79.into()], &mut [78.into()]);
+                    }
+                    lh.wait_for_all_appends();
+                }
+            });
+
+            let h1 = thread::spawn(||{
+                let mut got = vec![];
+                let mut lh = $new_thread_log::<(u32, u32)>(vec![78.into(), 79.into()]);
+                while got.len() < 5 * 2 * 100 {
+                    lh.take_snapshot();
+                    while let Some((v, ois)) = lh.get_next() {
+                        got.push((v.clone(), ois.to_vec()));
+                    }
+                }
+                //println!("{:?}", got);
+            });
+
+            h0.join();
+            h1.join();
+        }
+
         //TODO test append after prefetch but before read
     );
     () => {

@@ -14,6 +14,8 @@ def setup():
     #install rust
     run('sudo DEBIAN_FRONTEND=noninteractive apt-get -y update')
     run('sudo DEBIAN_FRONTEND=noninteractive apt-get -y install gcc')
+    run('sudo DEBIAN_FRONTEND=noninteractive apt-get -y install g++')
+    run('sudo DEBIAN_FRONTEND=noninteractive apt-get -y install make')
     run('curl https://sh.rustup.rs -sSf | sh -s -- -y', pty=False)
     run('export PATH=$HOME/.cargo/bin:$PATH')
     #run('ulimit -n 2048')
@@ -22,6 +24,10 @@ def setup():
 def sync():
     #local("rsync --filter=':- .gitignore' -P -avz ./ " + env.host_string + ":~/" + dirname)
     rsync_project(remote_dir="~/", exclude=[".*",".*/"], extra_opts="--filter=':- .gitignore'")
+
+def export(dir):
+    run("echo DELOS_RUST_LOC=" + dir + " >> ~/.bashrc")
+
 
 @parallel
 def mirror(cmd=''):
