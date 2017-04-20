@@ -169,6 +169,9 @@ pub enum ToWorker<T: Send + Sync> {
 
     GotRecovery(BufferSlice, T),
     DidntGetRecovery(BufferSlice, Uuid, T),
+
+    ContinueRecovery(Buffer, T),
+    EndRecovery(Buffer, T),
 }
 
 #[derive(Clone, Debug)]
@@ -291,7 +294,9 @@ where T: Send + Sync {
             | &mut Skeens1SingleReplica {ref mut t,..}=> f(t),
 
             &mut GotRecovery(_, ref mut t)
-            | &mut DidntGetRecovery(_, _, ref mut t) => f(t),
+            | &mut DidntGetRecovery(_, _, ref mut t)
+            | &mut ContinueRecovery(_, ref mut t)
+            | &mut EndRecovery(_, ref mut t) => f(t),
 
             &mut SingleServerSkeens1(_, ref mut t) => f(t),
 
@@ -320,7 +325,9 @@ where T: Copy + Send + Sync {
             | &Skeens2SingleReplica {t,..} => t,
 
             &GotRecovery(_, t)
-            | &DidntGetRecovery(_, _, t) => t,
+            | &DidntGetRecovery(_, _, t)
+            | &ContinueRecovery(_, t)
+            | &EndRecovery(_, t) => t,
         }
     }
 }
@@ -343,6 +350,7 @@ pub enum ToReplicate {
 
 pub enum Recovery {
     TasRecoverer(BufferSlice, Box<(Uuid, Box<[OrderIndex]>)>),
+    CheckSkeens1(BufferSlice),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1274,6 +1282,22 @@ where ToWorkers: DistributeToWorkers<T> {
                     Err(id) => ToWorker::DidntGetRecovery(buffer, id.unwrap_or_else(Uuid::nil), t),
                 })
             },
+
+            Recovery::CheckSkeens1(buffer) => {
+                let (id, OrderIndex(chain, time)) = {
+                    let c = buffer.contents();
+                    (*c.id(), c.locs()[0])
+                };
+                let time = u32::from(time) as u64;
+                let still_there = self.log.get(&chain)
+                    .map(|c| c.skeens.check_skeens1(id, time))
+                    .unwrap_or(false);
+                self.to_workers.send_to_worker(if still_there {
+                    ToWorker::ContinueRecovery(buffer, t)
+                } else {
+                    ToWorker::EndRecovery(buffer, t)
+                });
+            },
         }
     }
 }
@@ -1835,6 +1859,28 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let mut e = buffer.contents_mut();
                 e.recoverer_is(id);
             }
+            let u = if continue_replication {
+                unimplemented!()
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+        },
+
+        ToWorker::ContinueRecovery(mut buffer, t) => {
+            {
+                let mut e = buffer.contents_mut();
+                e.flag_mut().insert(EntryFlag::ReadSuccess);
+            }
+            let u = if continue_replication {
+                unimplemented!()
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+        },
+
+        ToWorker::EndRecovery(buffer, t) => {
             let u = if continue_replication {
                 unimplemented!()
             } else {

@@ -757,6 +757,14 @@ impl WorkerInner {
             self.print_data.to_log(1);
             self.to_log.send(to_send).unwrap();
             return
+        } else if k == packets::EntryKind::CheckSkeens1 {
+            let to_send = ToLog::Recovery(
+                Recovery::CheckSkeens1(buffer),
+                (worker_num, token, src_addr),
+            );
+            self.print_data.to_log(1);
+            self.to_log.send(to_send).unwrap();
+            return
         } else if k == packets::EntryKind::FenceClient {
             self.to_dist.send(WorkerToDist::FenceClient(buffer)).ok().unwrap();
             return

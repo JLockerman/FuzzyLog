@@ -428,6 +428,18 @@ impl<T: Copy> SkeensState<T> {
             (hash_map::Entry::Occupied(o), _) => Err(Some(o.get().0)),
         }
     }
+
+    pub fn check_skeens1(&self, write_id: Uuid, timestamp: Time) -> bool {
+        let status = self.append_status.get(&write_id);
+        if let Some(status) = status {
+            if let &AppendStatus::Phase1(i) = status {
+                if let Timestamp::Phase1(t) = self.phase1_queue[i].multi_timestamp() {
+                    return t == timestamp
+                }
+            }
+        }
+        false
+    }
 }
 
 pub enum ReplicatedSkeens<T> {
