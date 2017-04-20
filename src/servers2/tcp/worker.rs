@@ -433,7 +433,11 @@ impl Worker {
             let continue_replication = next_hop
                 .map(|(_, send_token)| send_token == DOWNSTREAM).unwrap_or(false);
             let (buffer, send_token) = servers2::handle_to_worker2(log_work, self.inner.worker_num, continue_replication,
-                |to_send, _| {
+                |to_send, _, just_reply| {
+                    if just_reply {
+                        self.send_to_client(recv_token, src_addr, to_send);
+                        return None
+                    }
                     match next_hop {
                         None => {
                             trace!("WORKER {:?} re dist", self.inner.worker_num);
@@ -883,7 +887,14 @@ impl WorkerInner {
                 trace!("WORKER {} replicate skeens 2", self.worker_num);
                 ToReplicate::Skeens2(buffer)
             }
-            _ => unreachable!(),
+            EntryKind::UpdateRecovery => {
+                let recovery = Box::new((src_addr.to_uuid(), buffer.contents().locs()
+                    .to_vec().into_boxed_slice()));
+                ToReplicate::TasRecoverer(buffer, recovery)
+            }
+            c @ EntryKind::CheckSkeens1 | c @ EntryKind::FenceClient =>
+                panic!("should not replicate {:?}", c),
+            c => panic!("bad replication {:?}", c),
         };
         self.print_data.rep_to_log(1);
         self.print_data.to_log(1);

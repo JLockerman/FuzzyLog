@@ -1,0 +1,9 @@
+[package]
+name = "failure"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+env_logger = "0.3"
+fuzzy_log = {path = "../.."}
+mio = "0.6.6"

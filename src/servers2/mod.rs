@@ -346,6 +346,8 @@ pub enum ToReplicate {
     Skeens2(BufferSlice),
 
     UnLock(BufferSlice),
+
+    TasRecoverer(BufferSlice, Box<(Uuid, Box<[OrderIndex]>)>),
 }
 
 pub enum Recovery {
@@ -1260,13 +1262,27 @@ where ToWorkers: DistributeToWorkers<T> {
                 //}
                 //FIXME this needs to be perchain now
                 unimplemented!()
-            }
+            },
+
+            ToReplicate::TasRecoverer(buffer, recoverer) => {
+                let (&write_id, _) = buffer.contents().write_id_and_old_recoverer();
+                let index = buffer.contents().lock_num();
+                let chain = recoverer.1[0].0;
+                let res = self.ensure_chain(chain).skeens.replicate_recoverer(
+                    write_id, recoverer, index
+                );
+                self.print_data.msgs_sent(1);
+                self.to_workers.send_to_worker(match res {
+                    Ok(i) => ToWorker::GotRecovery(buffer, t),
+                    Err(id) => ToWorker::DidntGetRecovery(buffer, id.unwrap_or_else(Uuid::nil), t),
+                })
+            },
         }
     }
 
     pub fn handle_recovery(&mut self, recovery: Recovery, t: T) {
         match recovery {
-            Recovery::TasRecoverer(buffer, recoverer) => {
+            Recovery::TasRecoverer(mut buffer, recoverer) => {
                 let (&write_id, &old_recoverer) = buffer.contents().write_id_and_old_recoverer();
                 let old_recoverer = if old_recoverer == Uuid::nil() {
                     None
@@ -1278,7 +1294,10 @@ where ToWorkers: DistributeToWorkers<T> {
                     .tas_recoverer(write_id, recoverer, old_recoverer);
                 self.print_data.msgs_sent(1);
                 self.to_workers.send_to_worker(match res {
-                    Ok(()) => ToWorker::GotRecovery(buffer, t),
+                    Ok(i) => {
+                        *buffer.contents_mut().lock_mut() = i;
+                        ToWorker::GotRecovery(buffer, t)
+                    },
                     Err(id) => ToWorker::DidntGetRecovery(buffer, id.unwrap_or_else(Uuid::nil), t),
                 })
             },
@@ -1406,12 +1425,12 @@ pub enum ToSend<'a> {
 fn handle_to_worker2<T: Send + Sync, U, SendFn>(
     msg: ToWorker<T>, worker_num: usize, continue_replication: bool, send: SendFn
 ) -> (Option<BufferSlice>, U)
-where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
+where SendFn: for<'a> FnOnce(ToSend<'a>, T, bool) -> U {
     match msg {
 
         ReturnBuffer(buffer, t) => {
             trace!("WORKER {} return buffer", worker_num);
-            let u = send(ToSend::Nothing, t);
+            let u = send(ToSend::Nothing, t, false);
             (Some(buffer), u)
             //ServerResponse::None(buffer, t)
             //(Some(buffer), &[], t, 0, true)
@@ -1419,7 +1438,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
 
         Reply(buffer, t) => {
             trace!("WORKER {} finish reply", worker_num);
-            let u = send(ToSend::Slice(buffer.entry_slice()), t);
+            let u = send(ToSend::Slice(buffer.entry_slice()), t, true);
             (Some(buffer), u)
             //ServerResponse::Echo(buffer, t)
             //(Some(buffer), &[], t, 0, false)
@@ -1431,7 +1450,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             //FIXME needless copy
             //buffer.ensure_capacity(bytes.len());
             //buffer[..bytes.len()].copy_from_slice(bytes);
-            let u = send(ToSend::Read(read.bytes()), t);
+            let u = send(ToSend::Read(read.bytes()), t, false);
             (Some(buffer), u)
             //ServerResponse::Read(buffer, t, bytes)
             //(Some(buffer), bytes, t, 0, false)
@@ -1451,7 +1470,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         data_bytes: &0,
                         dependency_bytes: &0,
                         horizon: &OrderIndex(chain, last_valid_loc),
-                    }), t);
+                    }), t, false);
             (Some(buffer), u)
             //ServerResponse::EmptyRead(buffer, t)
             //(Some(buffer), &[], t, 0, false)
@@ -1462,9 +1481,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             let loc = slot.loc();
             let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
             let u = if continue_replication {
-                send(ToSend::OldReplication(ret, loc), t)
+                send(ToSend::OldReplication(ret, loc), t, false)
             } else {
-                send(ToSend::StaticSlice(ret), t)
+                send(ToSend::StaticSlice(ret), t, false)
             };
             (Some(buffer), u)
             //ServerResponse::FinishedAppend(buffer, t, ret, loc)
@@ -1483,9 +1502,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             }
             let u = if continue_replication {
                 let to_send = buffer.contents().single_skeens_to_replication(&time, &queue_num);
-                send(ToSend::OldContents(to_send, storage_loc), t)
+                send(ToSend::OldContents(to_send, storage_loc), t, false)
             } else {
-                send(ToSend::Nothing, t)
+                send(ToSend::Nothing, t, false)
             };
             (Some(buffer), u)
             //ServerResponse::FinishedSingletonSkeens1(buffer, t, storage_loc)
@@ -1503,9 +1522,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             let u = if continue_replication {
                 trace!("WORKER {} skeens no-ack", worker_num);
                 //send(ToSend::OldReplication(buffer.entry_slice(), storage_loc), t)
-                send(ToSend::OldContents(buffer.contents(), storage_loc), t)
+                send(ToSend::OldContents(buffer.contents(), storage_loc), t, false)
             } else {
-                send(ToSend::Nothing, t)
+                send(ToSend::Nothing, t, false)
             };
             (Some(buffer), u)
         },
@@ -1538,10 +1557,10 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     id: e.id(),
                     lock: &0,//TODO
                     loc: &OrderIndex(color, entry::from(index as u32)),
-                }), t)
+                }), t, false)
             } else {
                 let ret = slice::from_raw_parts(storage, len);
-                send(ToSend::StaticSlice(ret), t)
+                send(ToSend::StaticSlice(ret), t, false)
             };
             (None, u)
             //ServerResponse::FinishedSingletonSkeens2(ret, t)
@@ -1590,9 +1609,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             //TODO is re right for sentinel only writes?
             if remaining_senti_places.len() == 0 {
                 let u = if continue_replication {
-                    send(ToSend::OldReplication(ret, 0), t)
+                    send(ToSend::OldReplication(ret, 0), t, false)
                 } else {
-                    send(ToSend::StaticSlice(ret), t)
+                    send(ToSend::StaticSlice(ret), t, false)
                 };
                 return (Some(buffer), u)
                 //return ServerResponse::FinishOldMultiappend(buffer, t, ret) //(Some(buffer), ret, t, 0, false)
@@ -1616,9 +1635,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             }
             //TODO is re right for sentinel only writes?
             let u = if continue_replication {
-                send(ToSend::OldReplication(ret, 0), t)
+                send(ToSend::OldReplication(ret, 0), t, false)
             } else {
-                send(ToSend::StaticSlice(ret), t)
+                send(ToSend::StaticSlice(ret), t, false)
             };
             (Some(buffer), u)
             //ServerResponse::FinishOldMultiappend(buffer, t, ret)
@@ -1664,9 +1683,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             }
             let (_ptrs, _indicies, st0, _st1) = storage.get();
             let u = if continue_replication {
-                send(ToSend::OldReplication(st0, 0), t)
+                send(ToSend::OldReplication(st0, 0), t, false)
             } else {
-                send(ToSend::StaticSlice(st0), t)
+                send(ToSend::StaticSlice(st0), t, false)
             };
             (Some(buffer), u)
         },
@@ -1685,7 +1704,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         locs[i].1 = entry::from(ts[i] as u32)
                     }
                 }
-                u = send(ToSend::Contents(c.as_ref().multi_skeens_to_replication(indicies)), t);
+                u = send(ToSend::Contents(c.as_ref().multi_skeens_to_replication(indicies)), t, false);
                 {
                     c.flag_mut().remove(EntryFlag::Skeens1Queued);
                     c.locs_mut().iter_mut().fold((),
@@ -1693,7 +1712,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     );
                 }
             } else {
-                u = send(ToSend::Nothing, t)
+                u = send(ToSend::Nothing, t, false)
             };
             (None, u)
         },
@@ -1727,10 +1746,10 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 trace!("WORKER {} skeens1 to rep @ {:?}", worker_num, ts);
                 send(ToSend::Contents(
                     buffer.contents().multi_skeens_to_replication(indicies))
-                , t)
+                , t, false)
             } else {
                 trace!("WORKER {} skeens1 to client @ {:?}", worker_num, ts);
-                send(ToSend::Slice(buffer.entry_slice()), t)
+                send(ToSend::Slice(buffer.entry_slice()), t, false)
             };
             (Some(buffer), u)
             //ServerResponse::FinishedSkeens1(buffer, t)
@@ -1793,7 +1812,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 }
             };
 
-            let u = send(to_send, t);
+            let u = send(to_send, t, false);
             (None, u)
 
             //ServerResponse::FinishedSkeens2(if st1.len() > 0 { &**st1 } else { &**st0 }, t)
@@ -1832,11 +1851,11 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             }
             let u = if continue_replication {
                 buffer.skeens1_rep_from_sentinel(was_multi);
-                send(ToSend::Slice(buffer.entry_slice()) , t)
+                send(ToSend::Slice(buffer.entry_slice()) , t, false)
             } else if is_multi_server {
-                send(ToSend::Slice(buffer.entry_slice()), t)
+                send(ToSend::Slice(buffer.entry_slice()), t, false)
             } else {
-                send(ToSend::Nothing, t)
+                send(ToSend::Nothing, t, false)
             };
             (Some(buffer), u)
         },
@@ -1847,9 +1866,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 e.flag_mut().insert(EntryFlag::ReadSuccess);
             }
             let u = if continue_replication {
-                unimplemented!()
+                send(ToSend::Slice(buffer.entry_slice()), t, false)
             } else {
-                send(ToSend::Slice(buffer.entry_slice()), t)
+                send(ToSend::Slice(buffer.entry_slice()), t, false)
             };
             (Some(buffer), u)
         },
@@ -1857,12 +1876,13 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         DidntGetRecovery(mut buffer, id, t) => {
             {
                 let mut e = buffer.contents_mut();
+                e.flag_mut().remove(EntryFlag::ReadSuccess);
                 e.recoverer_is(id);
             }
             let u = if continue_replication {
-                unimplemented!()
+                send(ToSend::Slice(buffer.entry_slice()), t, true)
             } else {
-                send(ToSend::Slice(buffer.entry_slice()), t)
+                send(ToSend::Slice(buffer.entry_slice()), t, false)
             };
             (Some(buffer), u)
         },
@@ -1873,18 +1893,18 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 e.flag_mut().insert(EntryFlag::ReadSuccess);
             }
             let u = if continue_replication {
-                unimplemented!()
+                send(ToSend::Slice(buffer.entry_slice()), t, true)
             } else {
-                send(ToSend::Slice(buffer.entry_slice()), t)
+                send(ToSend::Slice(buffer.entry_slice()), t, false)
             };
             (Some(buffer), u)
         },
 
         ToWorker::EndRecovery(buffer, t) => {
             let u = if continue_replication {
-                unimplemented!()
+                send(ToSend::Slice(buffer.entry_slice()), t, true)
             } else {
-                send(ToSend::Slice(buffer.entry_slice()), t)
+                send(ToSend::Slice(buffer.entry_slice()), t, false)
             };
             (Some(buffer), u)
         },
