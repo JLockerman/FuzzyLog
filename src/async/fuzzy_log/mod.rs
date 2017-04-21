@@ -879,18 +879,25 @@ impl ThreadLog {
         let (locs, is_interesting) = {
             let mut should_block_on = None;
             {
-                let locs = bytes_as_entry(&val).locs();
+                let e = bytes_as_entry(&val);
+                let no_remote = e.flag().contains(EntryFlag::NoRemote);
+                let locs = e.locs();
                 trace!("FUZZY trying to return read from {:?}", locs);
                 for &OrderIndex(o, i) in locs.into_iter() {
                     if o == order::from(0) { continue }
-                    let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
-                    if pc.has_returned(i) {
-                        trace!("FUZZY double return {:?} in {:?}", (o, i), locs);
-                        return None
-                    }
-                    if !pc.is_within_snapshot(i) {
-                        trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
-                        should_block_on = Some((o, i));
+                    match (self.per_chains.get_mut(&o), no_remote) {
+                        (None, true) => {}
+                        (None, false) => panic!("trying to return boring chain {:?}", o),
+                        (Some(pc), _) => {
+                            if pc.has_returned(i) {
+                                trace!("FUZZY double return {:?} in {:?}", (o, i), locs);
+                                return None
+                            }
+                            if !pc.is_within_snapshot(i) {
+                                trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
+                                should_block_on = Some((o, i));
+                            }
+                        },
                     }
                 }
             }
