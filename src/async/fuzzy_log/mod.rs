@@ -287,10 +287,14 @@ impl ThreadLog {
                     //     we can probably do it by checking (chain, read_loc - 1)
                     //     to see if the read we're about to attempt is there, but
                     //     it might be better to switch to a buffer per-chain model
-                    self.per_chains.get_mut(&read_loc.0).map(|s| {
+                    let resend_prev = self.per_chains.get_mut(&read_loc.0).map(|s| {
                         s.overread_at(read_loc.1);
+                        !s.has_gotten(read_loc.1 - 1) && s.is_within_snapshot(read_loc.1 - 1)
                         //s.decrement_outstanding_reads();
                     });
+                    if let Some(true) = resend_prev {
+                        self.fetch_next(read_loc.0, (read_loc.1 - 1).into(), (read_loc.1 - 1).into());
+                    }
                 }
                 else {
                     let unblocked = self.per_chains.get_mut(&read_loc.0).and_then(|s| {
@@ -322,6 +326,8 @@ impl ThreadLog {
                     if try_ret {
                         self.try_returning_at(read_loc, packet);
                     }
+                } else {
+                    trace!("FUZZY unneeded read {:?} @ {:?}", read_loc, self.per_chains.get(&read_loc.0))
                 }
             }
             EntryLayout::Multiput if flag.contains(EntryFlag::NoRemote) => {
@@ -334,6 +340,8 @@ impl ThreadLog {
                     let packet = Rc::new(msg);
                     self.add_blockers_at(read_loc, &packet);
                     self.try_returning_at(read_loc, packet);
+                } else {
+                    trace!("FUZZY unneeded read {:?} @ {:?}", read_loc, self.per_chains.get(&read_loc.0))
                 }
             }
             layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
@@ -367,6 +375,8 @@ impl ThreadLog {
                         }
                         MultiSearch::Repeat => {}
                     }
+                } else {
+                    trace!("FUZZY unneeded read {:?} @ {:?}", read_loc, self.per_chains.get(&read_loc.0))
                 }
             }
 

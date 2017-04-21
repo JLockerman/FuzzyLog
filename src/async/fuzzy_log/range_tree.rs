@@ -131,8 +131,18 @@ impl RangeTree {
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
         let new_range = Range::new(low, high);
         let (old_range, old_kind) = remove_from_map(&mut self.inner, Range::point(low));
-        assert_eq!(old_kind, Kind::None);
+        //assert_eq!(old_kind, Kind::None);
+        assert!(
+            old_kind == Kind::None || old_kind == Kind::SentToServer,
+            "{:?} == (Kind::None || Kind::SentToServer)",
+            old_kind,
+        );
         assert!(old_range.spans(&new_range));
+
+        if old_kind == Kind::SentToServer {
+            self.inner.insert(old_range, old_kind);
+            return
+        }
 
         self.num_outstanding += new_range.len();
 
@@ -168,6 +178,13 @@ impl RangeTree {
     pub fn is_returned(&self, point: entry) -> bool {
         match self.inner.get(&Range::point(point)) {
             Some(&Kind::ReturnedToClient) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_gotten(&self, point: entry) -> bool {
+        match self.inner.get(&Range::point(point)) {
+            Some(&Kind::ReturnedToClient) | Some(&Kind::GottenFromServer) => true,
             _ => false,
         }
     }

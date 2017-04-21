@@ -203,6 +203,10 @@ impl PerColor {
         self.read_status.is_returned(index)
     }
 
+    pub fn has_gotten(&self, index: entry) -> bool {
+        self.read_status.is_gotten(index)
+    }
+
     pub fn next_return_is(&self, index: entry) -> bool {
         trace!("QQQQQ check {:?} next return for {:?}: {:?}, snapshot: {:?}",
             index, self.chain, self.read_status, self.last_snapshot);
