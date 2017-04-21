@@ -1008,8 +1008,10 @@ where ToWorkers: DistributeToWorkers<T> {
                 let slot = {
                     let log = self.ensure_trie(loc.0);
                     let size = buffer.entry_size();
-                    trace!("SERVER {:?} replicating entry {:?}",
-                        this_server_num, loc);
+                    trace!(
+                        "SERVER {:?} replicating entry {:?} @ {:?}",
+                        this_server_num, loc, storage_loc,
+                    );
                     unsafe {
                         log.partial_append_at(u32::from(loc.1) as u64,
                             storage_loc, size).extend_lifetime()
@@ -1394,8 +1396,12 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         Write(buffer, slot, t) => unsafe {
-            trace!("WORKER {} finish write {:?}", worker_num, buffer.contents());
+            trace!(
+                "WORKER {} finish write {:?} @ {:?}",
+                worker_num, buffer.contents(), slot
+            );
             let loc = slot.loc();
+
             let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
             let u = if continue_replication {
                 send(ToSend::OldReplication(ret, loc), t)

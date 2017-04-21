@@ -244,6 +244,7 @@ macro_rules! entry {
 //TODO wildly unsafe
 #[must_use]
 #[repr(C)]
+#[derive(Debug)]
 pub struct AppendSlot<V> {
     trie_entry: *mut *const u8,
     data_ptr: *mut u8,
