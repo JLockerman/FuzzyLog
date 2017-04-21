@@ -830,8 +830,19 @@ impl ThreadLog {
         let blocked_on = OrderIndex(loc.0, loc.1 - 1);
         trace!("FUZZY read @ {:?} blocked on prior {:?}", loc, blocked_on);
         //TODO no-alloc?
-        let blocked = self.blockers.entry(blocked_on).or_insert_with(Vec::new);
-        blocked.push(packet.clone());
+        {
+            let blocked = self.blockers.entry(blocked_on).or_insert_with(Vec::new);
+            blocked.push(packet.clone());
+        }
+
+
+        let resend_prev = {
+            let s = &self.per_chains[&loc.0];
+            !s.has_gotten(loc.1 - 1) && s.is_within_snapshot(loc.1 - 1)
+        };
+        if resend_prev {
+            self.fetch_next(loc.0, (loc.1 - 1).into(), (loc.1 - 1).into());
+        }
     }
 
     fn return_entry_at(&mut self, loc: OrderIndex, val: Vec<u8>) -> bool {
