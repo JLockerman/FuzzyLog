@@ -214,7 +214,7 @@ impl RootTable {
             let remaining = VAL_MASK - (start_byte & VAL_MASK);
             self.append(remaining as usize);
             debug_assert_eq!(self.stored_bytes, start_byte + remaining);
-            while self.stored_bytes & !VAL_MASK != end_loc & !VAL_MASK {
+            while self.stored_bytes & !VAL_MASK != (end_loc - 1) & !VAL_MASK {
                 trace!(
                     "BTRIE {:?} & {:x} ({:x}) != ({:?}) {:x} & {:x}",
                     self.stored_bytes, !VAL_MASK,
