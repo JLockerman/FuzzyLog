@@ -915,14 +915,21 @@ impl ThreadLog {
                 return None
             }
             let mut is_interesting = false;
-            let locs = bytes_as_entry(&val).locs();
+            let e = bytes_as_entry(&val);
+            let no_remote = e.flag().contains(EntryFlag::NoRemote);
+            let locs = e.locs();
             for &OrderIndex(o, i) in locs.into_iter() {
                 if o == order::from(0) { continue }
-                trace!("QQQQ setting returned {:?}", (o, i));
-                let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
-                debug_assert!(pc.is_within_snapshot(i));
-                pc.set_returned(i);
-                is_interesting |= pc.is_interesting;
+                match (self.per_chains.get_mut(&o), no_remote) {
+                    (None, true) => {}
+                    (None, false) => panic!("trying to return boring chain {:?}", o),
+                    (Some(pc), _) => {
+                        trace!("QQQQ setting returned {:?}", (o, i));
+                        debug_assert!(pc.is_within_snapshot(i));
+                        pc.set_returned(i);
+                        is_interesting |= pc.is_interesting;
+                    },
+                }
             }
             //TODO no-alloc
             //     a better solution might be to have this function push onto a temporary
