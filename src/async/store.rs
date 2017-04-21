@@ -723,7 +723,6 @@ where PerServer<S>: Connected,
     }
 
     fn handle_server_event(&mut self, server: usize) {
-        trace!("CLIENT handle server {:?} event", server);
         self.servers[server].got_new_message = false;
         //TODO pass in whether a read or write is ready?
         self.servers[server].stay_awake = false;
@@ -1339,7 +1338,6 @@ impl Connected for PerServer<TcpStream> {
                 },
             };
             let drained = self.read_buffer.ensure_capacity(size);
-            trace!("CLIENT drained {:?}", drained);
             self.bytes_read -= drained;
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..]);
             match r {
