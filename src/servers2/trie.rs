@@ -323,11 +323,18 @@ impl Trie
     pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
     -> AppendSlot<Packet> {
         use std::cmp::Ordering::*;
-        match key.cmp(&self.root.next_entry) {
-            Equal => self.partial_append(storage_size),
-            Less => self.get_append_slot(key, storage_start, storage_size),
+        let slot = match key.cmp(&self.root.next_entry) {
+            Equal => {
+                trace!("TRIE E {:?} = {:?}", key, self.root.next_entry);
+                self.partial_append(storage_size)
+            },
+            Less => {
+                trace!("TRIE L {:?} < {:?}", key, self.root.next_entry);
+                self.get_append_slot(key, storage_start, storage_size)
+            },
             Greater => {
                 //TODO
+                trace!("TRIE G {:?} > {:?}", key, self.root.next_entry);
                 let trie_entry: *mut *const u8;
                 loop {
                     let (index, tentry) = self.prep_append(ptr::null());
@@ -340,7 +347,10 @@ impl Trie
                 AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: storage_size, storage_loc: storage_start,
                     _pd: Default::default()}
             }
-        }
+        };
+        debug_assert_eq!(slot.storage_loc, storage_start);
+        debug_assert_eq!(slot.data_size, storage_size);
+        slot
     }
 
     pub unsafe fn reserve_space(&mut self, size: usize) -> (*mut u8, u64) {
