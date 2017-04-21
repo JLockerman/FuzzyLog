@@ -357,6 +357,7 @@ impl Trie
                     _pd: Default::default()}
             }
         };
+        trace!("TRIE D");
         debug_assert_eq!(slot.storage_loc, storage_start);
         debug_assert_eq!(slot.data_size, storage_size);
         slot

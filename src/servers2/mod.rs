@@ -387,8 +387,8 @@ where ToWorkers: DistributeToWorkers<T> {
             /////////////////////////////////////////////////
 
             EntryLayout::Read => {
-                trace!("SERVER {:?} Read", self.this_server_num);
                 let OrderIndex(chain, index) = buffer.contents().locs()[0];
+                trace!("SERVER {:?} Read {:?}", self.this_server_num, OrderIndex(chain, index));
                 //TODO validate lock
                 //     this will come after per-chain locks
                 match self.log.get(&chain) {

@@ -198,13 +198,30 @@ impl RootTable {
 
     fn reserve_until(&mut self, end_loc: u64) {
         let start_byte = self.stored_bytes;
-        if start_byte > end_loc { return }
+        //FIXME audit this
+        if start_byte >= end_loc { return }
+        assert!(self.stored_bytes < end_loc);
         //if they're not in the same segment
-        if start_byte & !VAL_MASK != end_loc & !VAL_MASK {
+        if (start_byte & !VAL_MASK) != ((end_loc - 1) & !VAL_MASK) {
+            trace!(
+                "0BTRIE {} & {:x} ({:x}) != ({:x}) {} & {:x}",
+                self.stored_bytes, !VAL_MASK,
+                (self.stored_bytes & !VAL_MASK),
+                (end_loc & !VAL_MASK),
+                end_loc, !VAL_MASK,
+
+            );
             let remaining = VAL_MASK - (start_byte & VAL_MASK);
             self.append(remaining as usize);
             debug_assert_eq!(self.stored_bytes, start_byte + remaining);
             while self.stored_bytes & !VAL_MASK != end_loc & !VAL_MASK {
+                trace!(
+                    "BTRIE {:?} & {:x} ({:x}) != ({:?}) {:x} & {:x}",
+                    self.stored_bytes, !VAL_MASK,
+                    (self.stored_bytes & !VAL_MASK),
+                    (end_loc & !VAL_MASK),
+                    end_loc, !VAL_MASK,
+                );
                 self.append(LEVEL_BYTES);
             }
         }
