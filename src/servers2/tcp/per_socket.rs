@@ -186,12 +186,10 @@ impl PerSocket {
     //TODO recv burst
     pub fn recv_packet(&mut self) -> RecvPacket {
         use self::PerSocket::*;
-        trace!("SOCKET try recv");
         match self {
             &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream,
                 ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
-                    trace!("SOCKET recv actual");
                     //TODO audit
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read, mem::size_of::<u64>(), needs_to_stay_awake, print_data);
                     match recv {
@@ -271,13 +269,11 @@ impl PerSocket {
         match self {
             &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..}
             | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..} => {
-                trace!("SOCKET send actual.");
                 if being_written.is_empty() {
                     //debug_assert!(pending.iter().all(|p| p.is_empty()));
                     assert!(pending.is_empty());
                     //TODO remove
                     //assert!(pending.iter().all(|p| p.is_empty()));
-                    trace!("SOCKET empty write.");
                     //FIXME: this removes the hang? while slowing the server...
                     //*needs_to_stay_awake = true;
                     return Ok(false)
@@ -293,7 +289,6 @@ impl PerSocket {
                         *needs_to_stay_awake = true;
                         print_data.bytes_sent(i as u64);
                         *bytes_written = *bytes_written + i;
-                        trace!("SOCKET sent {}B.", bytes_written);
                     },
                 }
 
@@ -705,7 +700,6 @@ fn recv_packet(
 )  -> RecvRes {
     use packets::Packet::WrapErr;
     loop {
-        trace!("WORKER recved {} bytes extra {}.", read, extra);
         let to_read = buffer.finished_at(read);
         let size = match to_read {
             Err(WrapErr::NotEnoughBytes(needs)) =>

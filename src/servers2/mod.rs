@@ -552,6 +552,7 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: SkeensMultiStorage,
         t: T
     ) {
+        trace!("SERVER {:?} fastpath {:?}", self.this_server_num, buffer.contents());
         unsafe {
             let (pointers, _indicies, _st0, _st1) = storage.get_mut();
             let mut contents = buffer.contents_mut();
@@ -571,6 +572,7 @@ where ToWorkers: DistributeToWorkers<T> {
             }
         }
 
+
         self.print_data.msgs_sent(1);
         self.to_workers.send_to_worker(MultiFastPath(buffer, storage, t))
     }
@@ -582,6 +584,7 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: SkeensMultiStorage,
         t: T
     ) {
+        trace!("SERVER {:?} local skeens {:?}", self.this_server_num, buffer.contents());
         self.new_multiappend_round1(kind, &mut buffer, &storage, t);
 
         let max_timestamp = unsafe { storage.get().0.iter().cloned().max() };
@@ -614,6 +617,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 }
             }
         }
+        trace!("SERVER {:?} lock failed {:?}", self.this_server_num, buffer.contents());
 
         mem::drop(storage);
 
@@ -1352,7 +1356,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         Read(read, buffer, t) => {
-            trace!("WORKER {} finish read", worker_num);
+            trace!("WORKER {} finish read {:?}", worker_num, read.contents());
             //let bytes = read.bytes();
             //FIXME needless copy
             //buffer.ensure_capacity(bytes.len());
@@ -1384,7 +1388,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         Write(buffer, slot, t) => unsafe {
-            trace!("WORKER {} finish write", worker_num);
+            trace!("WORKER {} finish write {:?}", worker_num, buffer.contents());
             let loc = slot.loc();
             let ret = extend_lifetime(slot.finish_append(buffer.entry()).bytes());
             let u = if continue_replication {
@@ -1398,6 +1402,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         SingleSkeens { mut buffer, storage, storage_loc, time, queue_num, t, } => unsafe {
+            trace!("WORKER {} finish single skeens {:?}", worker_num, buffer.contents());
             {
                 let len = {
                     let mut e = buffer.contents_mut();
@@ -1552,7 +1557,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         MultiFastPath(mut buffer, storage, t) => unsafe {
-            trace!("WORKER {} finish fastpath", worker_num);
+            trace!("WORKER {} finish fastpath {:?}", worker_num, buffer.contents());
             {
                 let (ptrs, _indicies, st0, st1) = storage.get_mut();
                 let len = {

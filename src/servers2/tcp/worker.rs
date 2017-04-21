@@ -789,12 +789,10 @@ impl WorkerInner {
         socket_state.wake();
 
         if send {
-            trace!("WORKER {} will try to send.", self.worker_num);
             //FIXME need to disinguish btwn to client and to upstream
             self.send_burst(token, socket_state)
         }
         if recv {
-            trace!("WORKER {} will try to recv.", self.worker_num);
             //FIXME need to disinguish btwn from client and from upstream
             self.recv_packet(token, socket_state)
         }
