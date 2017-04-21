@@ -326,7 +326,16 @@ impl Trie
         let slot = match key.cmp(&self.root.next_entry) {
             Equal => {
                 trace!("TRIE E {:?} = {:?}", key, self.root.next_entry);
-                self.partial_append(storage_size)
+                //self.partial_append(storage_size)
+                let (index, trie_entry): (_, *mut *const u8); {
+                    let (i, tentry) = self.prep_append(ptr::null());
+                    index = i;
+                    trie_entry = tentry;
+                }
+                debug_assert_eq!(index, key);
+                let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
+                AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: storage_size, storage_loc: storage_start,
+                    _pd: Default::default()}
             },
             Less => {
                 trace!("TRIE L {:?} < {:?}", key, self.root.next_entry);

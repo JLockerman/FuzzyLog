@@ -161,7 +161,11 @@ impl RootTable {
     pub unsafe fn append_at(&mut self, at: u64, size: usize) -> &mut [u8] {
         use std::cmp::Ordering::*;
         match at.cmp(&self.stored_bytes) {
-            Equal => self.append(size).0,
+            Equal => {
+                // self.append(size).0
+                self.reserve_until(at);
+                self.append(size).0
+            },
             Greater => {
                 self.reserve_until(at);
                 self.append(size).0
