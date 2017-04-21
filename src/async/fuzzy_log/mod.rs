@@ -332,6 +332,7 @@ impl ThreadLog {
                 if needed {
                     //FIXME ensure other pieces get fetched if reading those chains
                     let packet = Rc::new(msg);
+                    self.ensure_read(read_loc, &packet);
                     self.add_blockers_at(read_loc, &packet);
                     self.try_returning_at(read_loc, packet);
                 }
@@ -579,6 +580,18 @@ impl ThreadLog {
                                 Rc::strong_count(&still_blocked))
                     }
                 }
+            }
+        }
+    }
+
+    fn ensure_read(&mut self, read_loc: OrderIndex, packet: &ChainEntry) {
+        let e = bytes_as_entry(packet);
+        let id = e.id();
+        let first = self.per_chains.get_mut(&read_loc.0).map(|p| p.got_no_remote(id));
+        if let Some(true) = first {
+            for &OrderIndex(ref o, _) in e.locs() {
+                if o == &read_loc.0 { continue }
+                self.per_chains.get_mut(o).map(|p| p.add_no_remote(id));
             }
         }
     }

@@ -2,7 +2,7 @@
 use std::mem;
 use std::rc::Rc;
 
-use hash::HashMap;
+use hash::{HashMap, HashSet};
 use packets::{order, entry, OrderIndex, bytes_as_entry};
 
 use uuid::Uuid;
@@ -25,6 +25,7 @@ pub struct PerColor {
     blocked_on_new_snapshot: Option<Vec<u8>>,
     //TODO this is where is might be nice to have a more structured id format
     found_but_unused_multiappends: HashMap<Uuid, entry>,
+    required_no_remotes: HashSet<Uuid>,
     is_being_read: Option<ReadState>,
     pub is_interesting: bool,
 }
@@ -74,6 +75,7 @@ impl PerColor {
             blocked_on_new_snapshot: None,
             found_but_unused_multiappends: Default::default(),
             read_status: RangeTree::new(),
+            required_no_remotes: Default::default(),
             is_being_read: None,
             is_interesting: false,
         }
@@ -190,6 +192,14 @@ impl PerColor {
 
     pub fn has_read_state(&self) -> bool {
         self.is_being_read.is_some()
+    }
+
+    pub fn got_no_remote(&mut self, id: &Uuid) -> bool {
+        !self.required_no_remotes.remove(id)
+    }
+
+    pub fn add_no_remote(&mut self, id: &Uuid) {
+        self.required_no_remotes.insert(*id);
     }
 
     #[allow(dead_code)]
@@ -345,12 +355,14 @@ impl PerColor {
     pub fn has_more_multi_search_than_outstanding_reads(&self) -> bool {
         let outstanding_reads = self.read_status.num_outstanding();
         let chain = self.chain;
-        self.is_being_read.as_ref().map_or(false, |r| {
+        let num_required_no_remotes = self.required_no_remotes.len() as u32;
+        let need_due_to_no_remote = num_required_no_remotes > 0;
+        self.is_being_read.as_ref().map_or(need_due_to_no_remote, |r| {
             debug_assert!(!(r.num_multiappends_searching_for > (outstanding_reads + 1)
                 as u32));
             trace!("QQQQQ {:?} num multi > out? {:?} > {:?}?",
                 chain, r.num_multiappends_searching_for, outstanding_reads);
-            r.num_multiappends_searching_for > outstanding_reads as u32
+            r.num_multiappends_searching_for + num_required_no_remotes > outstanding_reads as u32
         })
     }
 
