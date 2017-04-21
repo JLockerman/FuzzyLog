@@ -198,6 +198,7 @@ impl RootTable {
 
     fn reserve_until(&mut self, end_loc: u64) {
         let start_byte = self.stored_bytes;
+        if start_byte > end_loc { return }
         //if they're not in the same segment
         if start_byte & !VAL_MASK != end_loc & !VAL_MASK {
             let remaining = VAL_MASK - (start_byte & VAL_MASK);
