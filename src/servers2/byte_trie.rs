@@ -103,7 +103,14 @@ macro_rules! get_mut {
             let index = index!($array, $k, $depth);
             match *$array {
                 None => return None,
-                Some(ref mut ptr) => &mut (**ptr)[index],
+                Some(ref mut ptr) => {
+                    debug_assert!(
+                        index < (**ptr).len(),
+                        "overflow @ {:?} from {:?}",
+                        $depth, $k,
+                    );
+                    &mut (**ptr)[index]
+                },
             }
         }
     };
@@ -161,14 +168,10 @@ impl RootTable {
     pub unsafe fn append_at(&mut self, at: u64, size: usize) -> &mut [u8] {
         use std::cmp::Ordering::*;
         match at.cmp(&self.stored_bytes) {
-            Equal => {
-                // self.append(size).0
-                self.reserve_until(at);
-                self.append(size).0
-            },
-            Greater => {
-                self.reserve_until(at);
-                self.append(size).0
+            Greater | Equal => {
+                self.reserve_until(at + size as u64);
+                //self.append(size).0
+                self.get_mut(at, size).unwrap()
             }
             Less =>{
                 self.get_mut(at, size).unwrap()
@@ -199,7 +202,7 @@ impl RootTable {
     }
 
     fn reserve_until(&mut self, end_loc: u64) {
-        let start_byte = self.stored_bytes;
+        /*let start_byte = self.stored_bytes;
         //FIXME audit this
         if start_byte >= end_loc { return }
         assert!(self.stored_bytes < end_loc);
@@ -230,7 +233,16 @@ impl RootTable {
         //start and end are now in the same segment
         let remaining = end_loc - self.stored_bytes;
         self.append(remaining as usize);
-        debug_assert_eq!(self.stored_bytes, end_loc);
+        debug_assert_eq!(self.stored_bytes, end_loc);*/
+        if self.stored_bytes > end_loc { return }
+        if self.stored_bytes as usize % LEVEL_BYTES as usize != 0 {
+            let slosh = self.stored_bytes as usize % LEVEL_BYTES as usize;
+            self.append(slosh);
+        }
+        while (self.stored_bytes as usize) <= (end_loc as usize) {
+            self.append(LEVEL_BYTES as usize);
+        }
+
     }
 
     pub fn append(&mut self, size: usize) -> (&mut [u8], u64) {
