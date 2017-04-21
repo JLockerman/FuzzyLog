@@ -95,6 +95,8 @@ fn main() {
         check_skeens1.extend_from_slice(&*client_id.as_bytes());
 
         let mut buffer = Buffer::new();
+        let mut buffer1 = Buffer::new();
+        let mut buffer2 = Buffer::new();
 
         blocking_write(&mut send_server0, &skeens).unwrap();
         recv_packet(&mut buffer, &recv_server0);
@@ -109,12 +111,18 @@ fn main() {
 
         bytes_as_entry_mut(&mut check_skeens1).locs_mut()[0] = reason;
 
-        blocking_write(&mut send_server0, &fence0_and_update).unwrap();
-        blocking_write(&mut send_server1, &fence1).unwrap();
+        blocking_writes(&mut [
+            (&mut send_server0, &fence0_and_update, false),
+            (&mut send_server1, &fence1, false)
+        ]);
 
         // println!("b");
 
-        recv_packet(&mut buffer, &send_server0);
+        recv_packets(&mut [
+            (&mut buffer, &send_server0, 0, false),
+            (&mut buffer1, &send_server1, 0, false),
+            (&mut buffer2, &recv_server0, 0, false),
+        ]);
         match buffer.contents() {
             EntryContents::FenceClient{fencing_write, client_to_fence, fencing_client,} => {
                 assert_eq!(fencing_write, &write_id);
@@ -125,9 +133,7 @@ fn main() {
         }
 
         // println!("c");
-
-        recv_packet(&mut buffer, &send_server1);
-        match buffer.contents() {
+        match buffer1.contents() {
             EntryContents::FenceClient{fencing_write, client_to_fence, fencing_client,} => {
                 assert_eq!(fencing_write, &write_id);
                 assert_eq!(client_to_fence, &client_id);
@@ -137,9 +143,7 @@ fn main() {
         }
 
         // println!("d");
-
-        recv_packet(&mut buffer, &recv_server0);
-        match buffer.contents() {
+        match buffer2.contents() {
             EntryContents::UpdateRecovery{flags, ..} =>
                 assert!(flags.contains(EntryFlag::ReadSuccess)),
             _ => unreachable!(),
@@ -172,12 +176,18 @@ fn main() {
             *e.lock_mut() = ::std::cmp::max(ts0 as u64, ts1 as u64);
             e.flag_mut().insert(EntryFlag::Unlock);
         }
-        blocking_write(&mut send_server0, &skeens).unwrap();
-        blocking_write(&mut send_server1, &skeens).unwrap();
+        blocking_writes(&mut [
+            (&mut send_server0, &skeens, false),
+            (&mut send_server1, &skeens, false)
+        ]);
 
-        recv_packet(&mut buffer, &recv_server0);
         // println!("h");
-        recv_packet(&mut buffer, &recv_server1);
+
+        recv_packets(&mut [
+            (&mut buffer, &recv_server0, 0, false),
+            (&mut buffer1, &recv_server1, 0, false),
+        ]);
+
 
         // println!("i");
 
@@ -220,6 +230,34 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     }
 }
 
+fn blocking_writes(
+    state: &mut [(&mut TcpStream, &[u8], bool)],
+) {
+    state.iter_mut().fold((), |_, s| { s.2 = false });
+    //like Write::write_all but doesn't die on WouldBlock
+    let mut done = 0;
+    while done < state.len() {
+        'poll: for &mut (ref mut w, ref mut buffer, ref mut finished) in state.iter_mut() {
+            'recv: while !buffer.is_empty() {
+                if *finished { continue 'poll }
+                match w.write(buffer) {
+                    Ok(i) => { let tmp = *buffer; *buffer = &tmp[i..]; }
+                    Err(e) => match e.kind() {
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                            thread::yield_now();
+                            continue 'poll
+                        },
+                        e => panic!("{:?}", e),
+                    }
+                }
+            }
+            *finished = true;
+            done += 1;
+            continue 'poll
+        }
+    }
+}
+
 fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream) {
     use fuzzy_log::packets::Packet::WrapErr;
     let mut read = 0;
@@ -241,6 +279,93 @@ fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream) {
                     continue
                 },
                 _ => panic!("recv error {:?}", e),
+            }
+        }
+    }
+}
+
+/*fn recv_2packet(
+    buffer0: &mut Buffer, buffer1: &mut Buffer,
+    mut stream0: &TcpStream, mut stream1: &TcpStream
+) {
+    use fuzzy_log::packets::Packet::WrapErr;
+    let mut read0 = 0;
+    let mut read1 = 0;
+    let mut recving0 = true;
+    let mut recving1 = true;
+    while recving0 || recving1 {
+        if recving0 {
+            let to_read = buffer0.finished_at(read0);
+            let size = match to_read {
+                Err(WrapErr::NotEnoughBytes(needs)) => needs,
+                Err(err) => panic!("{:?}", err),
+                Ok(size) if read < size => size,
+                Ok(..) => recving0 = false,
+            };
+            let r = stream0.read(&mut buffer0[read..size]);
+            match r {
+                Ok(i) => read0 += i,
+
+                Err(e) => match e.kind() {
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {},
+                    _ => panic!("recv error {:?}", e),
+                }
+            }
+        }
+        if recving1 {
+            let to_read = buffer.finished_at(read1);
+            let size = match to_read {
+                Err(WrapErr::NotEnoughBytes(needs)) => needs,
+                Err(err) => panic!("{:?}", err),
+                Ok(size) if read < size => size,
+                Ok(..) => recving1 = false,
+            };
+            let r = stream.read(&mut buffer1[read..size]);
+            match r {
+                Ok(i) => read += i,
+
+                Err(e) => match e.kind() {
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {},
+                    _ => panic!("recv error {:?}", e),
+                }
+            }
+        }
+    }
+}*/
+
+fn recv_packets(
+    state: &mut [(&mut Buffer, &TcpStream, usize, bool)],
+) {
+    use fuzzy_log::packets::Packet::WrapErr;
+    state.iter_mut().fold((), |_, s| { s.2 = 0; s.3 = false; });
+    let mut done = 0;
+    while done < state.len() {
+        'poll: for &mut (ref mut buffer, ref mut stream, ref mut read, ref mut finished) in
+            state.iter_mut() {
+            if *finished {
+                continue 'poll
+            }
+            let to_read = buffer.finished_at(*read);
+            let size = match to_read {
+                Err(WrapErr::NotEnoughBytes(needs)) => needs,
+                Err(err) => panic!("{:?}", err),
+                Ok(size) if *read < size => size,
+                Ok(..) => {
+                    done += 1;
+                    *finished = true;
+                    continue 'poll
+                },
+            };
+            let r = stream.read(&mut buffer[*read..size]);
+            match r {
+                Ok(i) => {
+                    *read = *read + i
+                },
+
+                Err(e) => match e.kind() {
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {},
+                    _ => panic!("recv error {:?}", e),
+                }
             }
         }
     }
