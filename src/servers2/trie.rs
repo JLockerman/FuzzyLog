@@ -475,7 +475,8 @@ impl Trie
         unsafe {
             let trie_entry: *mut *const u8 = self.get_entry_at(k).unwrap();
             //TODO these should be interleaved...
-            let data_ptr = self.root.alloc.get_mut(storage_start, size);
+            //let data_ptr = self.root.alloc.get_mut(storage_start, size);
+            let data_ptr = self.root.alloc.alloc_at(storage_start, size);
             AppendSlot { trie_entry: trie_entry, data_ptr: data_ptr, data_size: size,
                 storage_loc: storage_start, _pd: Default::default()}
         }
@@ -920,7 +921,9 @@ pub mod test {
             for j in 0..i + 1 {
                 let r = m.get(j as u64);
                 assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
-                    Some(Data(&(j as u32), &[OrderIndex(7.into(), (j as u32).into())])));
+                    Some(Data(&(j as u32), &[OrderIndex(7.into(), (j as u32).into())])),
+                    "failed at {:?} in {:?}", j, i,
+                );
             }
 
             for j in i + 1..255 {

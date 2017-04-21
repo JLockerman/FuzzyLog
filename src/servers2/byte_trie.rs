@@ -170,7 +170,9 @@ impl RootTable {
                 self.reserve_until(at);
                 self.append(size).0
             }
-            Less => self.get_mut(at, size).unwrap(),
+            Less =>{
+                self.get_mut(at, size).unwrap()
+            },
         }
     }
 
@@ -426,6 +428,28 @@ pub mod test {
             let r = trie.get_mut(0x18002 as u64, 8190);
             //TODO no longer valid now that we use unimplemented for the last level of the trie
             //assert_eq!(r, Some(&mut [0; 8190][..]), "@ {}", 0x18002);
+        }
+    }
+
+    #[test]
+    pub fn insert() {
+        let mut m = Trie::new();
+        for i in 0..255u8 {
+            let data = [i, i, i];
+            unsafe {
+                m.append_at(i as u64 * 3, data.len()).copy_from_slice(&data);
+            }
+            // println!("{:#?}", m);
+            // assert_eq!(m.get(&i).unwrap(), &i);
+
+            for j in 0..i + 1 {
+                unsafe {
+                    assert_eq!(m.get(j as u64 * 3, data.len()),
+                        Some(&[j, j, j][..]),
+                        "failed at {:?} in {:?}", j, i,
+                    );
+                }
+            }
         }
     }
 /*
