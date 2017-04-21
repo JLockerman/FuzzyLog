@@ -228,7 +228,6 @@ impl PerSocket {
             &mut Client {ref mut being_read, ref mut bytes_read, ref stream,
                 ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
-                    trace!("SOCKET recv actual");
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read, 0,  needs_to_stay_awake, print_data);
                     match recv {
                         //TODO send to log
