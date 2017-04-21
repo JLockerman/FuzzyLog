@@ -1357,6 +1357,12 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
 
         Read(read, buffer, t) => {
             trace!("WORKER {} finish read {:?}", worker_num, read.contents());
+            debug_assert!(
+                read.contents().locs().contains(&buffer.contents().locs()[0]),
+                "Bad read {:?} not in {:?}",
+                buffer.contents().locs()[0],
+                read.contents().locs(),
+            );
             //let bytes = read.bytes();
             //FIXME needless copy
             //buffer.ensure_capacity(bytes.len());
