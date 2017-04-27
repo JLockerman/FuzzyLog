@@ -195,9 +195,9 @@ macro_rules! insert {
         {
             let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE, "index: {}", index);
-            match *$array {
-                Some(ref mut ptr) => &mut (**ptr)[index],
-                ref mut slot => {
+            match $array {
+                &mut Some(ref mut ptr) => &mut (**ptr)[index],
+                slot => {
                     *slot = Some(alloc_seg());
                     &mut slot.as_mut().unwrap()[index]
                 }
@@ -322,25 +322,17 @@ impl Trie
     pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
     -> AppendSlot<Packet> {
         use std::cmp::Ordering::*;
-        match key.cmp(&self.root.next_entry) {
-            Equal => self.partial_append(storage_size),
-            Less => self.get_append_slot(key, storage_start, storage_size),
-            Greater => {
-                //TODO
-                let trie_entry: *mut *const u8;
-                loop {
-                    let (index, tentry) = self.prep_append(ptr::null());
-                    if index == key {
-                        trie_entry = tentry;
-                        break
-                    }
-                }
-                let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
-                AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: storage_size, storage_loc: storage_start,
-                    _pd: Default::default()}
-            }
+        let trie_entry = self.prep_append_at(key, ptr::null());
+        let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
+        AppendSlot {
+            trie_entry: trie_entry,
+            data_ptr: val_ptr,
+            data_size: storage_size,
+            storage_loc: storage_start,
+            _pd: Default::default()
         }
     }
+
 
     pub unsafe fn reserve_space(&mut self, size: usize) -> (*mut u8, u64) {
         let (val_ptr, loc) = self.root.alloc.prep_append(size);
@@ -381,23 +373,16 @@ impl Trie
     }
 
     pub unsafe fn prep_append_at(&mut self, key: TrieIndex, val_ptr: *const u8) -> *mut *const u8 {
-        use std::cmp::Ordering::*;
-        match key.cmp(&self.root.next_entry) {
-            Equal => self.prep_append(val_ptr).1,
-            Less => self.get_entry_at(key).unwrap(),
-            Greater => {
-                //TODO
-                let trie_entry: *mut *const u8;
-                loop {
-                    let (index, tentry) = self.prep_append(ptr::null());
-                    if index == key {
-                        trie_entry = tentry;
-                        break
-                    }
-                }
-                trie_entry
-            }
-        }
+        if key >= self.root.next_entry { self.root.next_entry = key + 1 }
+        let root_index = ((key >> ROOT_SHIFT) & MASK) as usize;
+        let l1 = &mut self.root.array[root_index];
+        let l2 = insert!(l1, key, 1);
+        let l3 = insert!(l2, key, 2);
+        let l4 = insert!(l3, key, 3);
+        let l5 = insert!(l4, key, 4);
+        let l6 = insert!(l5, key, 5);
+        let val_ptr: &mut *const u8 = insert!(l6, key, 6);
+        val_ptr
     }
 
     pub unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (TrieIndex, &mut *const u8) {
@@ -454,7 +439,7 @@ impl Trie
         unsafe {
             let trie_entry: *mut *const u8 = self.get_entry_at(k).unwrap();
             //TODO these should be interleaved...
-            let data_ptr = self.root.alloc.get_mut(storage_start, size);
+            let data_ptr = self.root.alloc.alloc_at(storage_start, size);
             AppendSlot { trie_entry: trie_entry, data_ptr: data_ptr, data_size: size,
                 storage_loc: storage_start, _pd: Default::default()}
         }
@@ -885,13 +870,21 @@ pub mod test {
     pub fn insert() {
         let mut p = Data(&0u32, &[OrderIndex(7.into(), 11.into())]).clone_entry();
         let mut m = Trie::new();
+            let mut storage_loc = 0;
         for i in 0..255u8 {
-            unsafe { Data(&(i as u32), &[OrderIndex(7.into(), (i as u32).into())])
-                .fill_entry(&mut p) }
             unsafe {
+                Data(&(i as u32), &[OrderIndex(7.into(), (i as u32).into())])
+                    .fill_entry(&mut p);
                 let size = p.entry_size();
-                let slot = m.partial_append_at(i as u64, i as u64 * size as u64, size);
+                assert_eq!(storage_loc / 8192, (storage_loc + size as u64) / 8192);
+                let slot = m.partial_append_at(i as u64, storage_loc, size);
                 slot.finish_append(p.entry());
+                storage_loc += size as u64;
+
+                if (storage_loc + size as u64) / 8192 != storage_loc / 8192 {
+                    storage_loc = round_up_to_next(storage_loc, 8192);
+                }
+
             }
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
@@ -907,6 +900,12 @@ pub mod test {
                 assert_eq!(r.map(Packet::contents), None);
             }
         }
+    }
+
+    #[inline]
+    fn round_up_to_next(unrounded: u64, target_alignment: u64) -> u64 {
+        assert!(target_alignment.is_power_of_two());
+        (unrounded + target_alignment - 1) & !(target_alignment - 1)
     }
 
     #[cfg(TODO)]

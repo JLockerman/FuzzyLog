@@ -113,12 +113,12 @@ macro_rules! insert {
     ($array:ident, $k:expr, $depth:expr) => {
         {
             let index = index!($array, $k, $depth);
-            match *$array {
-                Some(ref mut ptr) => &mut (**ptr)[index],
-                ref mut slot => {
+            match $array {
+                &mut Some(ref mut ptr) => &mut (**ptr)[index],
+                slot => {
                     *slot = Some(alloc_seg());
                     &mut slot.as_mut().unwrap()[index]
-                }
+                },
             }
         }
     };
@@ -159,15 +159,38 @@ impl Trie  {
 
 impl RootTable {
     pub unsafe fn append_at(&mut self, at: u64, size: usize) -> &mut [u8] {
-        use std::cmp::Ordering::*;
-        match at.cmp(&self.stored_bytes) {
-            Equal => self.append(size).0,
-            Greater => {
-                self.reserve_until(at);
-                self.append(size).0
-            }
-            Less => self.get_mut(at, size).unwrap(),
+        // use std::cmp::Ordering::*;
+        // match at.cmp(&self.stored_bytes) {
+        //     Equal => self.append(size).0,
+        //     Greater => {
+        //         self.reserve_until(at);
+        //         self.append(size).0
+        //     }
+        //     Less => self.get_mut(at, size).unwrap(),
+        // }
+        self.insert(at, size)
+    }
+
+    pub unsafe fn insert(&mut self, loc: u64, size: usize) -> &mut [u8] {
+        let root = &mut self.storage_root;
+        if loc + size as u64 > self.stored_bytes {
+            self.stored_bytes = loc + size as u64;
+            //FIXME update shortcut here or at switch to be head?
         }
+        let l1 = insert!(root, loc, 0);
+        let l2 = insert!(l1, loc, 1);
+        let l3 = insert!(l2, loc, 2);
+        let l4 = insert!(l3, loc, 3);
+        let lv = insert!(l4, loc, 4);
+        let val_start = index!(lv, loc, 5);
+        let vals = match lv {
+            &mut Some(ref mut vals) => vals,
+            slot => {
+                *slot = Some(alloc_val_level());
+                slot.as_mut().unwrap()
+            },
+        };
+        &mut vals[val_start..val_start+size]
     }
 
     pub unsafe fn get_mut(&mut self, loc: u64, size: usize) -> Option<&mut [u8]> {
@@ -406,6 +429,29 @@ pub mod test {
             //assert_eq!(r, Some(&mut [0; 8190][..]), "@ {}", 0x18002);
         }
     }
+
+    #[test]
+    pub fn insert() {
+        let mut m = Trie::new();
+        for i in 0..255u8 {
+            let data = [i, i, i];
+            unsafe {
+                m.append_at(i as u64 * 3, data.len()).copy_from_slice(&data);
+            }
+            // println!("{:#?}", m);
+            // assert_eq!(m.get(&i).unwrap(), &i);
+
+            for j in 0..i + 1 {
+                unsafe {
+                    assert_eq!(m.get(j as u64 * 3, data.len()),
+                        Some(&[j, j, j][..]),
+                        "failed at {:?} in {:?}", j, i,
+                    );
+                }
+            }
+        }
+    }
+
 /*
     #[test]
     pub fn insert() {
