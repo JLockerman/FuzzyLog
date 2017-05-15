@@ -30,6 +30,7 @@ extern crate uuid;
 extern crate libc;
 extern crate lazycell;
 extern crate env_logger;
+extern crate evmap;
 
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;

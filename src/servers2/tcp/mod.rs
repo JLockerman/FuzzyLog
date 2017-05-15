@@ -16,38 +16,48 @@ use mio::tcp::*;
 
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
+use evmap::{self, ReadHandle};
+
 mod worker;
 mod per_socket;
 
 /*
   GC with parrallel readers plan:
     each worker will have a globally visible field
-      currently_reading
+      epoch
     padded to a cache line to prevent false sharing
-    the GC core (which need not be the same as the index core)
-    has a globally visible field (per chain?)
-      greatest_collected
+    the GC core (which need not be the same as the index core) has a globally visible epoch
+    each chain has a minimum (and maximum?) valid location
     to read:
-      a worker first sets its currently_reading field to the loc it wants to read,
-      it then checks greatest_collected,
-      if greatest_collected >= currently_reading the entry is already gc'd and the worker returns the needed respose
+      a worker updates its epoch to the GC epoch,
+      if the entry is already gc'd (< min or > max) the worker returns the needed response
       otherwise it returns the found value
     to gc:
-      the gcer first sets greatest_collected to the point it wants to collect,
-      then waits until none of the worker are reading a value in the collection range
+      the gc'er increments the epoch,
+      the gc'er broadcasts update-epoch to all workers
+      then waits until all of the workers have seen the new epoch,
 
       we don't worry about gc during write (that seems like a silly scenario),
       so we can send the log's copy downstream and don't have to worry about returning buffers.
       during reads, the worker which receives the read req is the one which sends,
       so the above scheme will work
 
-    this does not deadlock b/c if the worker sets its then the gcer its the worker will abort
+    this does not deadlock b/c gc'er must wait for at most 1 read per worker
 
-    this should be efficient b/c in normal operation the workers are just writing to a local value
+    this should be efficient b/c in normal operation the workers are just
+      reading an immutable shared value
+      and writing to a local value
+      (addtnl we could only have the checks immediately after update-epoch is recv'd)
 
     for multi entry values store refcount before entry,
-    we want bit field which tells us where seq of entries end in allocator,
-    use to distinguish btwn single and multi entries...
+
+    (we want bit field which tells us where seq of entries end in allocator,
+    use to distinguish btwn single and multi entries?)
+
+    store bit in flags saying start-of-run
+    for now check each val to see if start-of-run if is free previous run (on other thread?),
+    if multi decrement refcount
+    want to use bit in pointer instead
 */
 
 /*
@@ -327,8 +337,11 @@ pub fn run_with_replication(
         // mio::PollOpt::level()
     // ).expect("cannot pol from log on dist");
 
+    let (log_reader, log_writer) = evmap::new();
     thread::spawn(move || {
-        let mut log = ServerLog::new(this_server_num, total_chain_servers, log_to_workers);
+        let mut log = ServerLog::new(
+            this_server_num, total_chain_servers, log_to_workers, log_writer
+        );
         #[cfg(not(feature = "print_stats"))]
         for to_log in recv_from_workers.iter() {
             match to_log {

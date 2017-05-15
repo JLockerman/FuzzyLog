@@ -25,6 +25,7 @@ mio = "0.6.6"
 nix = "*"
 net2 = "0.2"
 env_logger = "0.3"
+evmap = "0.6.4"
 
 [features]
 no_trace = ["log/max_level_info"]

@@ -23,9 +23,13 @@ use servers2::trie::{AppendSlot, ByteLoc, Trie};
 
 use hash::HashMap;
 
+use evmap::WriteHandle;
+
 use self::ToWorker::*;
 
 use packets::*;
+
+use self::trivial_eq_arc::TrivialEqArc;
 
 pub mod tcp;
 // pub mod udp;
@@ -38,12 +42,16 @@ mod skeens;
 pub mod trie;
 pub mod byte_trie;
 
+pub mod trivial_eq_arc;
+
 #[cfg(test)]
 mod tests;
 
+pub type ChainStore<T> = WriteHandle<order, TrivialEqArc<Chain<T>>>;
+
 struct ServerLog<T: Send + Sync + Copy, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
-    log: HashMap<order, Chain<T>>,
+    log: ChainStore<T>,
     //TODO per chain locks...
     total_servers: u32,
     this_server_num: u32,
@@ -61,10 +69,12 @@ counters! {
     }
 }
 
-struct Chain<T: Copy> {
+pub struct Chain<T: Copy> {
     trie: Trie,
     skeens: SkeensState<T>,
 }
+
+unsafe impl<T: Copy> Sync for Chain<T> {}
 
 pub trait DistributeToWorkers<T: Send + Sync> {
     fn send_to_worker(&mut self, msg: ToWorker<T>);
@@ -342,15 +352,19 @@ impl<L, R> Troption<L, R> {
 impl<T: Send + Sync + Copy, ToWorkers> ServerLog<T, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
 
-    fn new(this_server_num: u32, total_servers: u32, to_workers: ToWorkers)
-     -> Self {
+    fn new(
+        this_server_num: u32,
+        total_servers: u32,
+        to_workers: ToWorkers,
+        chains: ChainStore<T>,
+    ) -> Self {
         //TODO
         //assert!(this_server_num > 0);
         assert!(this_server_num <= total_servers,
             "this_server_num <= total_servers, {:?} <= {:?}",
             this_server_num, total_servers);
         ServerLog {
-            log: Default::default(),
+            log: chains,
             //_seen_ids: HashSet::new(),
             this_server_num: this_server_num,
             total_servers: total_servers,
@@ -391,7 +405,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 let OrderIndex(chain, index) = buffer.contents().locs()[0];
                 //TODO validate lock
                 //     this will come after per-chain locks
-                match self.log.get(&chain) {
+                match get_chain(&self.log, chain) {
                     None => {
                         trace!("SERVER {:?} Read Vacant chain {:?}",
                             self.this_server_num, chain);
@@ -698,7 +712,7 @@ where ToWorkers: DistributeToWorkers<T> {
             }
 
             //let chain = self.ensure_trie(chain);
-            let chain = self.log.get_mut(&chain_num)
+            let chain = get_chain_mut(&mut self.log, chain_num)
                 .expect("cannot have skeens-2 as the first op on a chain");
                 /*.or_insert_with(|| {
                 let mut t = Trie::new();
@@ -967,12 +981,11 @@ where ToWorkers: DistributeToWorkers<T> {
         chain % self.total_servers == self.this_server_num.into()
     }
 
+    //Safety: since this thread is the only one that mutates the map,
+    //        as long as this thread holds a mutable refrence it is effectively immutable
+    //FIXME: uniqueness is a lie
     fn ensure_chain(&mut self, chain: order) -> &mut Chain<T> {
-        self.log.entry(chain).or_insert_with(|| unsafe {
-            let mut t = Trie::new();
-            let _ = t.partial_append(1);
-            Chain{ trie: t, skeens: SkeensState::new() }
-        })
+        ensure_chain(&mut self.log, chain)
     }
 
     fn ensure_trie(&mut self, chain: order) -> &mut Trie {
@@ -1070,11 +1083,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 'sk2_rep: for &OrderIndex(o, i) in buffer.contents().locs() {
                     if o == order::from(0) || !self.stores_chain(o) { continue 'sk2_rep }
                     //let c = self.ensure_chain(chain);
-                    let c = self.log.entry(o).or_insert_with(|| unsafe {
-                        let mut t = Trie::new();
-                        let _ = t.partial_append(1);
-                        Chain{ trie: t, skeens: SkeensState::new() }
-                    });
+                    let c = ensure_chain(&mut self.log, o);
                     let to_workers = &mut self.to_workers;
                     let print_data = &mut self.print_data;
                     let index = u32::from(i) as u64;
@@ -1774,6 +1783,30 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
 ) -> (Option<BufferSlice>, U)
 where ToSend: for<'a> FnOnce(Troption<EntryContents<'static>, EntryContents<'a>>, T) -> U {
 */
+
+//SAFETY: log is single writer and Chain refs never escape this thread
+fn ensure_chain<T: Copy>(log: &mut ChainStore<T>, chain: order) -> &mut Chain<T> {
+    let c = log.get_and(&chain, |chains| unsafe { &mut *UnsafeCell::get(&chains[0]) });
+    if let Some(chain) = c {
+        return chain
+    }
+
+    let mut t = Trie::new();
+    //FIXME remove for GC
+    let _ = unsafe { t.partial_append(1) };
+    let contents = TrivialEqArc::new(Chain{ trie: t, skeens: SkeensState::new()});
+    log.insert(chain, contents);
+    log.refresh();
+    get_chain_mut(log, chain).unwrap()
+}
+
+fn get_chain_mut<T: Copy>(log: &mut ChainStore<T>, chain: order) -> Option<&mut Chain<T>> {
+    log.get_and(&chain, |chains| unsafe { &mut *UnsafeCell::get(&chains[0]) })
+}
+
+fn get_chain<T: Copy>(log: &ChainStore<T>, chain: order) -> Option<&Chain<T>> {
+    log.get_and(&chain, |chains| unsafe { &*UnsafeCell::get(&chains[0]) })
+}
 
 unsafe fn extend_lifetime<'a, 'b, V: ?Sized>(v: &'a V) -> &'b V {
     ::std::mem::transmute(v)
