@@ -9,6 +9,8 @@ use packets::Entry as Packet;
 
 use servers2::byte_trie::Trie as Alloc;
 
+use std::sync::atomic::{AtomicPtr, Ordering};
+
 //XXX UGH this is going to be wildly unsafe...
 
 
@@ -201,6 +203,19 @@ macro_rules! insert {
                     *slot = Some(alloc_seg());
                     &mut slot.as_mut().unwrap()[index]
                 }
+            }
+        }
+    };
+}
+
+macro_rules! atomic_index {
+    ($array:ident, $k:expr, $depth:expr) => {
+        {
+            let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            assert!(index < ARRAY_SIZE, "index: {}", index);
+            match $array {
+                None => return None,
+                Some(ptr) => to_atom(&ptr[index]).load(Ordering::Relaxed).as_ref(),
             }
         }
     };
@@ -575,6 +590,29 @@ impl Trie
         }
     }
 
+    pub fn atomic_get(&self, k: u64) -> Option<Packet> {
+        unsafe {
+            let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
+            let l1: Option<&_> =
+                to_atom(&self.root.array[root_index]).load(Ordering::Relaxed).as_ref();
+            let l2: Option<&_> = atomic_index!(l1, k, 1);
+            let l3 = atomic_index!(l2, k, 2);
+            let l4 = atomic_index!(l3, k, 3);
+            let l5 = atomic_index!(l4, k, 4);
+            let l6 = atomic_index!(l5, k, 5);
+            let val_ptr = atomic_index!(l6, k, 6);
+            //let val_ptr = val_ptr.as_ref();
+            match val_ptr {
+                None => None,
+                Some(v) => {
+                    //let size = <V as UnStoreable>::size_from_bytes(v);
+                    //Some(<V as Storeable>::bytes_to_ref(v, size))
+                    Some(Packet::wrap_bytes(v))
+                }
+            }
+        }
+    }
+
     /*#[allow(dead_code)]
     #[inline(always)]
     pub fn entry<'s>(&'s mut self, k: u64) -> Entry<'s> {
@@ -821,6 +859,30 @@ fn alloc_seg2() -> *mut u8 {
     unsafe { &mut (*b)[0] }
 }
 
+trait NullablePtr {
+  type Output;
+}
+
+impl<T> NullablePtr for Box<T> {
+  type Output = T;
+}
+impl<T> NullablePtr for Option<Box<T>> {
+  type Output = T;
+}
+impl<T> NullablePtr for *const T {
+  type Output = T;
+}
+impl<T> NullablePtr for *mut T {
+  type Output = T;
+}
+
+
+fn to_atom<'a, P, T>(t: &'a P) -> &'a AtomicPtr<T>
+where
+  P: NullablePtr<Output=T>, {
+    unsafe { mem::transmute(t) }
+}
+
 #[cfg(test)]
 pub mod test {
 
@@ -1025,11 +1087,13 @@ pub mod test {
                 for j in 0..i + 1 {
                     let r = m.get(j);
                     assert_eq!(r, Some(&j));
+                    assert_eq!(r, m.atomic_get(j));
                 }
 
                 for j in i + 1..1001 {
                     let r = m.get(j);
                     assert_eq!(r, None);
+                    assert_eq!(r, m.atomic_get(j));
                 }
             }
         }
@@ -1051,17 +1115,21 @@ pub mod test {
                     assert_eq!(m.get(i - 1000), Some(&(i - 1000)));
                 }
                 assert_eq!(m.get(i), Some(&i));
+                assert_eq!(m.get(i), m.atomic_get(i));
                 assert_eq!(m.get(i + 1), None);
+                assert_eq!(m.get(i + 1), m.atomic_get(i + 1));
             }
 
             for j in 0..0x18000u64 {
                 let r = m.get(j);
                 assert_eq!(r, Some(&j));
+                assert_eq!(r, m.atomic_get(j));
             }
 
             for j in 0x18000..0x28000u64 {
                 let r = m.get(j);
                 assert_eq!(r, None);
+                assert_eq!(r, m.atomic_get(j));
             }
         }
 
