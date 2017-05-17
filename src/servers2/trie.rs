@@ -849,7 +849,9 @@ impl<'a> VacantEntry<'a>
 //TODO abstract over alloc place
 unsafe fn alloc_seg<V>() -> Box<[V; ARRAY_SIZE]> {
     assert_eq!(mem::size_of::<[V; ARRAY_SIZE]>(), LEVEL_BYTES);
-    Box::new(mem::zeroed())
+    let mut b: Box<[V; ARRAY_SIZE]> = Box::new(mem::uninitialized());
+    ptr::write_bytes::<[V; ARRAY_SIZE]>(&mut *b, 0, 1);
+    b
 }
 
 #[allow(dead_code)]
