@@ -9,7 +9,7 @@ use packets::Entry as Packet;
 
 use servers2::byte_trie::Trie as Alloc;
 
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 //XXX UGH this is going to be wildly unsafe...
 
@@ -560,6 +560,10 @@ impl Trie {
     pub fn len(&self) -> u64 {
         self.root.next_entry
     }
+
+    pub fn atomic_len(&self) -> u64 {
+        to_atomic_usize(&self.root.next_entry).load(Ordering::Relaxed) as u64
+    }
 }
 
 impl Trie
@@ -882,6 +886,11 @@ impl<T> NullablePtr for *mut T {
 fn to_atom<'a, P, T>(t: &'a P) -> &'a AtomicPtr<T>
 where
   P: NullablePtr<Output=T>, {
+    unsafe { mem::transmute(t) }
+}
+
+fn to_atomic_usize<T>(t: &T) -> &AtomicUsize {
+    assert_eq!(mem::size_of::<T>(), mem::size_of::<AtomicUsize>());
     unsafe { mem::transmute(t) }
 }
 

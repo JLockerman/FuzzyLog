@@ -787,7 +787,7 @@ macro_rules! async_tests {
         async_tests!(rstcp);
     };
     (tcp) => (
-        mod tcp {
+        mod ptcp {
             async_tests!(test new_thread_log);
 
             #[allow(non_upper_case_globals)]

@@ -11,8 +11,6 @@ use servers2::skeens::{
 };
 use servers2::trie::{AppendSlot, ByteLoc, Trie};
 
-use evmap::WriteHandle;
-
 
 impl<T: Copy> Chain<T> {
     fn needs_skeens_single(&mut self) -> bool {

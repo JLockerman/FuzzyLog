@@ -23,7 +23,7 @@ use servers2::trie::{AppendSlot, ByteLoc, Trie};
 
 use hash::HashMap;
 
-use evmap::WriteHandle;
+use evmap::{WriteHandle, ReadHandle};
 
 use self::ToWorker::*;
 
@@ -47,12 +47,13 @@ pub mod byte_trie;
 pub mod trivial_eq_arc;
 
 mod ordering_thread;
-mod worker_thread;
+pub mod worker_thread;
 
 #[cfg(test)]
 mod tests;
 
 pub type ChainStore<T> = WriteHandle<order, TrivialEqArc<Chain<T>>>;
+pub type ChainReader<T> = ReadHandle<order, TrivialEqArc<Chain<T>>>;
 
 struct ServerLog<T: Send + Sync + Copy, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {

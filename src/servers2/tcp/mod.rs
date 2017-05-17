@@ -300,6 +300,7 @@ pub fn run_with_replication(
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
+    let (log_reader, log_writer) = evmap::new();
     for n in 0..num_workers {
         //let from_dist = recv_from_dist.clone();
         let to_dist   = workers_to_dist.clone();
@@ -309,12 +310,14 @@ pub fn run_with_replication(
         let (dist_to_worker, from_dist) = spsc::channel();
         let upstream = upstream.pop();
         let downstream = downstream.pop();
+        let log_reader = log_reader.clone();
         thread::spawn(move ||
             Worker::new(
                 from_dist,
                 to_dist,
                 from_log,
                 to_log,
+                log_reader,
                 upstream,
                 downstream,
                 num_downstream,
@@ -336,8 +339,6 @@ pub fn run_with_replication(
         // mio::Ready::readable(),
         // mio::PollOpt::level()
     // ).expect("cannot pol from log on dist");
-
-    let (log_reader, log_writer) = evmap::new();
     thread::spawn(move || {
         let mut log = ServerLog::new(
             this_server_num, total_chain_servers, log_to_workers, log_writer

@@ -450,3 +450,43 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
     }
 }
+
+pub fn handle_read<U, V: Send + Sync + Copy, SendFn>(
+    chains: &ChainReader<V>, buffer: &BufferSlice, worker_num: usize, mut send: SendFn
+) -> U
+where SendFn: for<'a> FnMut(Result<&'a [u8], EntryContents<'a>>) -> U {
+    let OrderIndex(chain, index) = buffer.contents().locs()[0];
+    let res = chains.get_and(&chain, |logs| {
+        let log = unsafe {&*UnsafeCell::get(&logs[0])};
+        match log.trie.atomic_get(u32::from(index) as u64) {
+            Some(packet) => {
+                trace!("WORKER {:?} read occupied entry {:?} {:?}",
+                    worker_num, (chain, index), packet.contents().id());
+                Ok(send(Ok(packet.bytes())))
+            }
+
+            None => Err(entry::from((log.trie.atomic_len() - 1) as u32)),
+        }
+    })
+    .unwrap_or_else(|| Err(entry::from(0)));
+    match res {
+        Ok(u) => u,
+        Err(last_valid_loc) => {
+            trace!("WORKER {} overread {:?}: {:?} > {:?}",
+                worker_num, chain, index, last_valid_loc);
+            let (old_id, old_loc) = {
+                let e = buffer.contents();
+                (e.id().clone(), e.locs()[0])
+            };
+            let chain: order = old_loc.0;
+            send(Err(EntryContents::Read{
+                id: &old_id,
+                flags: &EntryFlag::Nothing,
+                loc: &old_loc,
+                data_bytes: &0,
+                dependency_bytes: &0,
+                horizon: &OrderIndex(chain, last_valid_loc),
+            }))
+        }
+    }
+}

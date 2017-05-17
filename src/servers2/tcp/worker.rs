@@ -5,9 +5,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use servers2::{
-    self, spsc, ToReplicate, ToWorker,
+    self, spsc, worker_thread, ToReplicate, ToWorker,
     DistributeToWorkers, Troption, SkeensMultiStorage,
-    ToSend
+    ToSend, ChainReader,
 };
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
@@ -62,6 +62,7 @@ struct WorkerInner {
     to_dist: mio::channel::Sender<WorkerToDist>,
     from_log: spsc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
     to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+    log_reader: ChainReader<(WorkerNum, mio::Token, Ipv4SocketAddr)>,
     ip_to_worker: HashMap<Ipv4SocketAddr, (WorkerNum, mio::Token)>,
     worker_num: WorkerNum,
     downstream_workers: WorkerNum,
@@ -111,6 +112,7 @@ impl Worker {
         to_dist: mio::channel::Sender<WorkerToDist>,
         from_log: spsc::Receiver<ToWorker<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
         to_log: mpsc::Sender<ToLog<(WorkerNum, mio::Token, Ipv4SocketAddr)>>,
+        log_reader: ChainReader<(WorkerNum, mio::Token, Ipv4SocketAddr)>,
         upstream: Option<TcpStream>,
         downstream: Option<TcpStream>,
         downstream_workers: usize,
@@ -168,6 +170,7 @@ impl Worker {
                 to_dist: to_dist,
                 from_log: from_log,
                 to_log: to_log,
+                log_reader: log_reader,
                 ip_to_worker: Default::default(),
                 poll: poll,
                 worker_num: worker_num,
@@ -841,7 +844,7 @@ impl WorkerInner {
                 trace!("WORKER {} finished recv from client.", self.worker_num);
                 self.print_data.finished_recv_from_client(1);
                 let worker = self.worker_num;
-                self.send_to_log(packet, worker, token, src_addr);
+                self.send_to_log(packet, worker, token, src_addr, socket_state);
                 //self.awake_io.push_back(token)
             }
             RecvPacket::FromUpstream(packet, src_addr, storage_loc) => {
@@ -901,6 +904,7 @@ impl WorkerInner {
         worker_num: usize,
         token: mio::Token,
         src_addr: Ipv4SocketAddr,
+        socket_state: &mut PerSocket,
     ) {
         trace!("WORKER {} send to log", self.worker_num);
         let (k, f) = {
@@ -909,6 +913,17 @@ impl WorkerInner {
         };
         let kind = k.layout();
         let storage = match kind {
+            EntryLayout::Read => {
+                worker_thread::handle_read(&self.log_reader, &buffer, worker_num, |to_send| {
+                    match to_send {
+                        Ok(to_send) => socket_state.add_downstream_send(to_send),
+                        Err(to_send) => socket_state.add_downstream_contents(to_send),
+                    }
+                });
+                socket_state.return_buffer(buffer);
+                return
+            },
+
             EntryLayout::Multiput | EntryLayout::Sentinel => unsafe {
                 let (size, senti_size, num_locs, has_senti) = {
                     let e = buffer.contents();
