@@ -86,7 +86,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     e.flag_mut().insert(EntryFlag::ReadSuccess);
                     e.as_ref().len()
                 };
-                ptr::copy_nonoverlapping(buffer[..len].as_ptr(), storage, len);
+                ptr::copy_nonoverlapping(buffer[..len].as_ptr(), storage.ptr(), len);
                 buffer.contents_mut().flag_mut().insert(EntryFlag::Skeens1Queued);
             }
             let u = if continue_replication {
@@ -103,8 +103,8 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         Skeens1SingleReplica { buffer, storage, storage_loc, t, } => unsafe {
             trace!("WORKER {} finish skeens single replication", worker_num);
             let len = buffer.contents().non_replicated_len();
-            ptr::copy_nonoverlapping(buffer[..len].as_ptr(), storage, len);
-            let mut e = MutEntry::wrap_slice(slice::from_raw_parts_mut(storage, len));
+            ptr::copy_nonoverlapping(buffer[..len].as_ptr(), storage.ptr(), len);
+            let mut e = MutEntry::wrap_slice(slice::from_raw_parts_mut(storage.ptr(), len));
             e.to_non_replicated();
             e.contents().flag_mut().remove(EntryFlag::Skeens1Queued);
             e.contents().flag_mut().insert(EntryFlag::ReadSuccess);
@@ -126,8 +126,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             //trace!("WORKER {} finish delayed single @ {:?}", worker_num);
             let color;
             let len = {
-                let storage = storage as *mut u8;
-                let mut e = MutEntry::wrap_bytes(&mut *storage).into_contents();
+                let mut e = MutEntry::wrap_bytes(&mut *storage.ptr()).into_contents();
                 {
                     let locs = e.locs_mut();
                     color = locs[0].0;
@@ -138,17 +137,18 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             };
             trace!("WORKER {} finish delayed single @ {:?}",
                 worker_num, OrderIndex(color, entry::from(index as u32)));
-            let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
-            (*trie_entry).store(storage as *mut u8, Ordering::Release);
+            //let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
+            //(*trie_entry).store(storage as *mut u8, Ordering::Release);
+            ValEdge::atomic_store(trie_slot, storage, Ordering::Release);
             let u = if continue_replication {
-                let e = Entry::wrap_bytes(&*storage).contents();
+                let e = storage.as_packet().contents();
                 send(ToSend::Contents(EntryContents::Skeens2ToReplica{
                     id: e.id(),
                     lock: &0,//TODO
                     loc: &OrderIndex(color, entry::from(index as u32)),
                 }), t)
             } else {
-                let ret = slice::from_raw_parts(storage, len);
+                let ret = slice::from_raw_parts(storage.ptr(), len);
                 send(ToSend::StaticSlice(ret), t)
             };
             (None, u)
@@ -165,13 +165,14 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let b = &buffer[..len];
                 trace!("place multi_storage @ {:?}, len {}", multi_storage, b.len());
                 ptr::copy_nonoverlapping(b.as_ptr(), multi_storage, b.len());
-                let places: &[*mut *const u8] = slice::from_raw_parts(
+                let places: &[*mut ValEdge] = slice::from_raw_parts(
                    senti_storage as *const _, num_places
                 );
                 trace!("multi places {:?}, locs {:?}", places, e.locs());
                 debug_assert!(places.len() <= e.locs().len());
                 //alt let mut sentinel_start = places.len();
                 let mut sentinel_start = None;
+                let multi_edge = ValEdge::end_from_ptr(multi_storage);
                 for i in 0..num_places {
 
                     if e.locs()[i] == OrderIndex(0.into(), 0.into()) {
@@ -180,9 +181,10 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         break
                     }
 
-                    let trie_entry: *mut AtomicPtr<u8> = mem::transmute(places[i]);
+                    //let trie_entry: *mut AtomicPtr<u8> = mem::transmute(places[i]);
                     //TODO mem barrier ordering
-                    (*trie_entry).store(multi_storage, Ordering::Release);
+                    //(*trie_entry).store(multi_storage, Ordering::Release);
+                    ValEdge::atomic_store(places[i], multi_edge, Ordering::Release);
                 }
                 let remaining_places = if let Some(i) = sentinel_start {
                     &places[i..]
@@ -215,11 +217,12 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     let senti_storage = slice::from_raw_parts_mut(senti_storage, len);
                     slice_to_sentinel(&mut *senti_storage);
                 }
+                let senti_edge = ValEdge::end_from_ptr(senti_storage);
                 for place in remaining_senti_places {
-                    let _: *mut *const u8 = place;
-                    let trie_entry: *mut AtomicPtr<u8> = mem::transmute(place);
+                    //let trie_entry: *mut AtomicPtr<u8> = mem::transmute(place);
                     //TODO mem barrier ordering
-                    (*trie_entry).store(senti_storage, Ordering::Release);
+                    //(*trie_entry).store(senti_storage, Ordering::Release);
+                    ValEdge::atomic_store(place, senti_edge, Ordering::Release);
                 }
             }
             //TODO is re right for sentinel only writes?

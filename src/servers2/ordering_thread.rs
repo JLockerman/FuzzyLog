@@ -9,7 +9,7 @@ use servers2::skeens::{
     Time,
     QueueIndex,
 };
-use servers2::trie::{AppendSlot, ByteLoc, Trie};
+use servers2::trie::{AppendSlot, ByteLoc, Trie, ValEdge};
 
 
 impl<T: Copy> Chain<T> {
@@ -18,12 +18,12 @@ impl<T: Copy> Chain<T> {
     }
 
     fn handle_skeens_single(&mut self, buffer: &mut BufferSlice, t: T)
-    -> (*mut u8, ByteLoc, Time, QueueIndex) {
+    -> (ValEdge, ByteLoc, Time, QueueIndex) {
         let val = buffer.contents();
         let size = val.len();
         let id = val.id().clone();
         let (slot, storage_loc) = unsafe { self.trie.reserve_space(size) };
-        let ts_and_queue_index = self.skeens.add_single_append(id, slot as *const _, t);
+        let ts_and_queue_index = self.skeens.add_single_append(id, slot, t);
         match ts_and_queue_index {
             SkeensAppendRes::NewAppend(ts, queue_num) => {
                 trace!("singleton skeens @ {:?}", (ts, queue_num));
@@ -62,14 +62,14 @@ impl<T: Copy> Chain<T> {
                         GotMax::SimpleSingle{storage, t, timestamp, ..}
                         | GotMax::Single{storage, t, timestamp, ..} => unsafe {
                             trace!("flush single {:?}", timestamp);
-                            let (loc, ptr) = trie.prep_append(ptr::null());
+                            let (loc, ptr) = trie.prep_append(ValEdge::null());
                             //println!("s id {:?} ts {:?}", id, timestamp);
                             on_finish(Single(loc, ptr, storage, t));
                         },
                         GotMax::Multi{storage, t, id, timestamp, ..} => unsafe {
                             trace!("flush multi {:?}: {:?}", id, timestamp);
                             //println!("m id {:?} ts {:?}", id, timestamp);
-                            let (loc, ptr) = trie.prep_append(ptr::null());
+                            let (loc, ptr) = trie.prep_append(ValEdge::null());
                             on_finish(Multi(loc, ptr, storage, timestamp, t));
                         },
                     }
@@ -104,8 +104,8 @@ fn get_chain<T: Copy>(log: &ChainStore<T>, chain: order) -> Option<&Chain<T>> {
 }
 
 enum FinishSkeens<T> {
-    Single(u64, *mut *const u8, *const u8, T),
-    Multi(u64, *mut *const u8, SkeensMultiStorage, u64, T),
+    Single(u64, *mut ValEdge, ValEdge, T),
+    Multi(u64, *mut ValEdge, SkeensMultiStorage, u64, T),
 }
 
 impl<T: Send + Sync + Copy, ToWorkers> ServerLog<T, ToWorkers>
@@ -338,9 +338,9 @@ where ToWorkers: DistributeToWorkers<T> {
                 }
 
                 let (index, ptr) =
-                    self.ensure_chain(*o).trie.prep_append(ptr::null());
+                    self.ensure_chain(*o).trie.prep_append(ValEdge::null());
                 *i = (index as u32).into();
-                pointers[j] = ptr as *mut *const u8 as usize as u64;
+                pointers[j] = ptr as *mut ValEdge as usize as u64;
             }
         }
 
@@ -677,7 +677,7 @@ where ToWorkers: DistributeToWorkers<T> {
         //LOGIC sentinal storage must contain at least 64b
         //      (128b with 64b entry address space)
         //      thus has at least enough storage for 1 ptr per entry
-        let mut next_ptr_storage = senti_storage as *mut *mut *const u8;
+        let mut next_ptr_storage = senti_storage as *mut *mut ValEdge;
         {
             let mut val = buffer.contents_mut();
             val.flag_mut().insert(EntryFlag::ReadSuccess);
@@ -693,7 +693,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             if kind.contains(EntryFlag::TakeLock) {
                                 chain.increment_lock();
                             }
-                            chain.prep_append(ptr::null()).1
+                            chain.prep_append(ValEdge::null()).1
                         };
                         *next_ptr_storage = ptr;
                         next_ptr_storage = next_ptr_storage.offset(1);
@@ -712,7 +712,7 @@ where ToWorkers: DistributeToWorkers<T> {
                                 if kind.contains(EntryFlag::TakeLock) {
                                     chain.increment_lock()
                                 }
-                                chain.prep_append(ptr::null()).1
+                                chain.prep_append(ValEdge::null()).1
                             };
                             *next_ptr_storage = ptr;
                             next_ptr_storage = next_ptr_storage.offset(1);
@@ -850,7 +850,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     c.skeens.replicate_round2(&id, max_timestamp, index, |rep| match rep {
                         Multi{index, storage, max_timestamp, t} => {
                             trace!("SERVER finish sk multi rep ({:?}, {:?})", o, index);
-                            let slot = unsafe { trie.prep_append_at(index, ptr::null()) };
+                            let slot = unsafe { trie.prep_append_at(index, ValEdge::null()) };
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2MultiReplica {
@@ -866,7 +866,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             //trace!("SERVER finish sk single rep");
                             //let size = buffer.entry_size();
                             trace!("SERVER replicating single sk2 ({:?}, {:?})", o, index);
-                            let slot = trie.prep_append_at(index, ptr::null());
+                            let slot = trie.prep_append_at(index, ValEdge::null());
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2SingleReplica {
@@ -929,7 +929,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 //LOGIC sentinal storage must contain at least 64b
                 //      (128b with 64b entry address space)
                 //      thus has at least enough storage for 1 ptr per entry
-                let mut next_ptr_storage = senti_storage as *mut *mut *const u8;
+                let mut next_ptr_storage = senti_storage as *mut *mut ValEdge;
                 'emplace: for &OrderIndex(chain, index) in buffer.contents().locs() {
                     if (chain, index) == (0.into(), 0.into()) {
                         //*next_ptr_storage = ptr::null_mut();
@@ -942,7 +942,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             let ptr = self.ensure_trie(chain)
                                 .prep_append_at(
                                     u32::from(index) as u64,
-                                    ptr::null(),
+                                    ValEdge::null(),
                                 );
                             *next_ptr_storage = ptr;
                             next_ptr_storage = next_ptr_storage.offset(1);
@@ -959,7 +959,7 @@ where ToWorkers: DistributeToWorkers<T> {
                                 let ptr = self.ensure_trie(chain)
                                     .prep_append_at(
                                         u32::from(index) as u64,
-                                        ptr::null(),
+                                        ValEdge::null(),
                                     );
                                 *next_ptr_storage = ptr;
                                 next_ptr_storage = next_ptr_storage.offset(1);

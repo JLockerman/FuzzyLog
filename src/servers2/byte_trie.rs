@@ -32,7 +32,7 @@ type L3Edge = Option<Box<[L4Edge; ARRAY_SIZE]>>;
 type L4Edge = Option<Box<[ValEdge; ARRAY_SIZE]>>;
 type ValEdge = Option<Box<[u8; LEVEL_BYTES]>>;
 
-const LEVEL_BYTES: usize = 8192;
+pub const LEVEL_BYTES: usize = 8192;
 const ARRAY_SIZE: usize = 8192 / 8;
 const MASK: u64 = ARRAY_SIZE as u64 - 1;
 const SHIFT_LEN: u8 = 10;

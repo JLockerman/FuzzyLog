@@ -33,6 +33,8 @@ use self::trivial_eq_arc::TrivialEqArc;
 
 pub use self::worker_thread::{handle_to_worker2, ToSend};
 
+use self::trie::ValEdge;
+
 pub mod tcp;
 // pub mod udp;
 
@@ -123,7 +125,7 @@ pub enum ToWorker<T: Send + Sync> {
 
     SkeensFinished {
         loc: OrderIndex,
-        trie_slot: *mut *const u8,
+        trie_slot: *mut ValEdge,
         storage: SkeensMultiStorage,
         timestamp: u64,
         t: T,
@@ -135,7 +137,7 @@ pub enum ToWorker<T: Send + Sync> {
     //This is not racey b/c both this and DelayedSingle single get sent to the same thread
     SingleSkeens {
         buffer: BufferSlice,
-        storage: *mut u8,
+        storage: ValEdge,
         storage_loc: u64,
         time: Time,
         queue_num: QueueIndex,
@@ -144,8 +146,8 @@ pub enum ToWorker<T: Send + Sync> {
 
     DelayedSingle {
         index: u64,
-        trie_slot: *mut *const u8,
-        storage: *const u8,
+        trie_slot: *mut ValEdge,
+        storage: ValEdge,
         t: T,
     },
 
@@ -157,7 +159,7 @@ pub enum ToWorker<T: Send + Sync> {
 
     Skeens2MultiReplica {
         loc: OrderIndex,
-        trie_slot: *mut *const u8,
+        trie_slot: *mut ValEdge,
         timestamp: u64,
         storage: SkeensMultiStorage,
         t: T,
@@ -165,15 +167,15 @@ pub enum ToWorker<T: Send + Sync> {
 
     Skeens1SingleReplica {
         buffer: BufferSlice,
-        storage: *mut u8,
+        storage: ValEdge,
         storage_loc: u64,
         t: T,
     },
 
     Skeens2SingleReplica {
         index: u64,
-        trie_slot: *mut *const u8,
-        storage: *const u8,
+        trie_slot: *mut ValEdge,
+        storage: ValEdge,
         t: T,
     },
 

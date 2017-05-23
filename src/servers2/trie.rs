@@ -7,7 +7,7 @@ use std::{mem, ptr, slice};
 use packets::MutEntry as MutPacket;
 use packets::Entry as Packet;
 
-use servers2::byte_trie::Trie as Alloc;
+use servers2::byte_trie::{self, Trie as Alloc};
 
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -54,7 +54,9 @@ type L5Edge = Option<Box<[L6Edge; ARRAY_SIZE]>>;
 //Remaining Address => 10 Bits
 type L6Edge = Option<Box<[ValEdge; ARRAY_SIZE]>>;
 //Remaining Address => 0 Bits
-type ValEdge = *const u8;
+//type ValEdge = *const u8;
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct ValEdge(*mut u8);
 
 /*
 after each level
@@ -132,18 +134,40 @@ impl AllocPtr {
         AllocPtr { alloc: Alloc::new() }
     }
 
-    fn append(&mut self, data: Packet) -> (*mut u8, ByteLoc) {
+    fn append(&mut self, data: Packet) -> (ValEdge, ByteLoc) {
         let bytes = data.bytes();
-        let storage_size = bytes.len(); // FIXME
-        let (append_to, loc) = self.prep_append(storage_size);
+        let mut storage_size = bytes.len(); // FIXME
+        //make sure that everything is 2byte aligned so we can use lsb to store end
+        let alloc_size = if storage_size & 1 != 0 { storage_size + 1 } else { storage_size };
+        let (append_to, loc) = self.prep_append(alloc_size);
         //safe do to: if self.alloc_rem < storage_size {..} at first line of fn prep_append
-        append_to.copy_from_slice(bytes);
-        (append_to.as_mut_ptr(), loc)
+        append_to[..storage_size].copy_from_slice(bytes);
+        let append_ptr = append_to.as_mut_ptr();
+        let val_edge = if loc % byte_trie::LEVEL_BYTES as u64 == 0
+            || loc == ::std::u64::MAX {
+                ValEdge::end_from_ptr
+            } else {
+                ValEdge::mid_from_ptr
+            }(append_ptr);
+        (val_edge, loc)
+    }
+
+    fn reserve_space(&mut self, storage_size: usize) -> (ValEdge, ByteLoc) {
+        let alloc_size = if storage_size & 1 != 0 { storage_size + 1 } else { storage_size };
+        let (append_to, loc) = self.prep_append(alloc_size);
+        let append_ptr = append_to.as_mut_ptr();
+        let val_edge = if loc % byte_trie::LEVEL_BYTES as u64 == 0
+            || loc == ::std::u64::MAX {
+                ValEdge::end_from_ptr
+            } else {
+                ValEdge::mid_from_ptr
+            }(append_ptr);
+        (val_edge, loc)
     }
 
     fn prep_append(&mut self, storage_size: usize) -> (&mut [u8], ByteLoc) {
         if storage_size <= LEVEL_BYTES / 2 {
-                self.alloc.append(storage_size)
+            self.alloc.append(storage_size)
         }
         else {
             let mut storage = Vec::with_capacity(storage_size);
@@ -157,12 +181,32 @@ impl AllocPtr {
         }
     }
 
-    unsafe fn alloc_at(&mut self, start: ByteLoc, size: usize) -> *mut u8 {
-        self.alloc.append_at(start, size).as_mut_ptr()
+    unsafe fn alloc_at(&mut self, start: ByteLoc, size: usize) -> ValEdge {
+        if start == ::std::u64::MAX {
+            let mut storage = Vec::with_capacity(size);
+            return unsafe {
+                storage.set_len(size);
+                let bx = storage.into_boxed_slice();
+                ValEdge::end_from_ptr((&*Box::into_raw(bx)).as_ptr())
+            }
+        }
+        //TODO round up size?
+        let append_ptr = self.alloc.append_at(start, size).as_mut_ptr();
+        if start % byte_trie::LEVEL_BYTES as u64 == 0 {
+            ValEdge::end_from_ptr(append_ptr)
+        } else {
+            ValEdge::mid_from_ptr(append_ptr)
+        }
     }
 
-    unsafe fn get_mut(&mut self, loc: ByteLoc, size: usize) -> *mut u8 {
-        self.alloc.get_mut(loc, size).unwrap().as_mut_ptr()
+    unsafe fn get_mut(&mut self, loc: ByteLoc, size: usize) -> ValEdge {
+        //TODO round up size?
+        let append_ptr = self.alloc.get_mut(loc, size).unwrap().as_mut_ptr();
+        if loc % byte_trie::LEVEL_BYTES as u64 == 0 {
+            ValEdge::end_from_ptr(append_ptr)
+        } else {
+            ValEdge::mid_from_ptr(append_ptr)
+        }
     }
 }
 
@@ -209,14 +253,20 @@ macro_rules! insert {
 }
 
 macro_rules! atomic_index {
-    ($array:ident, $k:expr, $depth:expr) => {
+    ($array:ident, $k:expr, $depth:expr, $ord:expr) => {
         {
             let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE, "index: {}", index);
             match $array {
                 None => return None,
-                Some(ptr) => to_atom(&ptr[index]).load(Ordering::Relaxed).as_ref(),
+                Some(ptr) => atomic_load(&ptr[index], $ord).as_ref(),
             }
+        }
+    };
+
+    ($array:ident, $k:expr, $depth:expr) => {
+        {
+            atomic_index!($array, $k, $depth, Ordering::Relaxed)
         }
     };
 }
@@ -260,8 +310,8 @@ macro_rules! entry {
 #[must_use]
 #[repr(C)]
 pub struct AppendSlot<V> {
-    trie_entry: *mut *const u8,
-    data_ptr: *mut u8,
+    trie_entry: *mut ValEdge,
+    data_ptr: ValEdge,
     data_size: usize,
     storage_loc: ByteLoc,
     _pd: PhantomData<*mut V>,
@@ -277,13 +327,15 @@ impl<'a> AppendSlot<Packet<'a>> {
         let bytes = data.bytes();
         let storage_size = bytes.len();
         assert_eq!(data_size, storage_size);
-        ptr::copy_nonoverlapping::<u8>(bytes.as_ptr(), data_ptr, storage_size);
+        ptr::copy_nonoverlapping::<u8>(bytes.as_ptr(), data_ptr.ptr(), storage_size);
         //*trie_entry = data_ptr;
-        let trie_entry: *mut AtomicPtr<u8> =
-            mem::transmute::<*mut *const u8, *mut AtomicPtr<u8>>(trie_entry);
+        //let trie_entry: *mut AtomicPtr<u8> =
+        //    mem::transmute::<*mut ValEdge, *mut AtomicPtr<u8>>(trie_entry);
         //TODO mem barrier ordering
-        (*trie_entry).store(data_ptr, Ordering::Release);
-        Packet::wrap_slice(slice::from_raw_parts(data_ptr, storage_size))
+        //(*trie_entry).store(data_ptr, Ordering::Release);
+        ValEdge::atomic_store(trie_entry, data_ptr, Ordering::Release);
+        //Packet::wrap_slice(slice::from_raw_parts(data_ptr, storage_size))
+        data_ptr.to_sized_packet(data_size)
     }
 
     pub unsafe fn finish_append_with<F>(self, data: Packet, before_insert: F) -> Packet
@@ -293,13 +345,17 @@ impl<'a> AppendSlot<Packet<'a>> {
         let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
         let bytes = data.bytes();
         assert!(bytes.len() >= data_size);
-        ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, data_size);
-        before_insert(MutPacket::wrap_slice(slice::from_raw_parts_mut(data_ptr, data_size)));
+        ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.ptr(), data_size);
+        before_insert(MutPacket::wrap_slice(
+            slice::from_raw_parts_mut(data_ptr.ptr(), data_size))
+        );
         //*trie_entry = data_ptr;
-        let trie_entry: *mut AtomicPtr<u8> = mem::transmute(trie_entry);
+        //let trie_entry: *mut AtomicPtr<u8> = mem::transmute(trie_entry);
         //TODO mem barrier ordering
-        (*trie_entry).store(data_ptr, Ordering::Release);
-        let p = Packet::wrap_slice(slice::from_raw_parts(data_ptr, data_size));
+        //(*trie_entry).store(data_ptr, Ordering::Release);
+        ValEdge::atomic_store(trie_entry, data_ptr, Ordering::Release);
+        //let p = Packet::wrap_slice(slice::from_raw_parts(data_ptr, data_size));
+        let p = data_ptr.to_sized_packet(data_size);
         assert_eq!(p.bytes().len(), data_size);
         p
     }
@@ -331,13 +387,13 @@ impl Trie
     fn _append(&mut self, data: Packet) -> (TrieIndex, &mut u8) {
         let (val_ptr, _) = self.root.alloc.append(data);
         let (entry, _) = unsafe { self.prep_append(val_ptr) };
-        (entry, unsafe {val_ptr.as_mut().unwrap()})
+        (entry, unsafe {(val_ptr.ptr() as *mut u8).as_mut().unwrap()})
     }
 
     pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
     -> AppendSlot<Packet> {
         use std::cmp::Ordering::*;
-        let trie_entry = self.prep_append_at(key, ptr::null());
+        let trie_entry = self.prep_append_at(key, ValEdge::null());
         let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
         AppendSlot {
             trie_entry: trie_entry,
@@ -349,22 +405,18 @@ impl Trie
     }
 
 
-    pub unsafe fn reserve_space(&mut self, size: usize) -> (*mut u8, u64) {
-        let (val_ptr, loc) = self.root.alloc.prep_append(size);
-        (val_ptr.as_mut_ptr(), loc)
+    pub unsafe fn reserve_space(&mut self, size: usize) -> (ValEdge, u64) {
+        self.root.alloc.reserve_space(size)
     }
 
-    pub unsafe fn reserve_space_at(&mut self, storage_start: ByteLoc, size: usize) -> *mut u8 {
+    pub unsafe fn reserve_space_at(&mut self, storage_start: ByteLoc, size: usize) -> ValEdge {
         let val_ptr = self.root.alloc.alloc_at(storage_start, size);
         val_ptr
     }
 
     pub unsafe fn partial_append(&mut self, size: usize) -> AppendSlot<Packet> {
-        let (val_ptr, loc): (*mut u8, ByteLoc) = {
-            let (val_ptr, loc) = self.root.alloc.prep_append(size);
-            (val_ptr.as_mut_ptr(), loc)
-        };
-        let (_index, trie_entry) = self.prep_append(ptr::null());
+        let (val_ptr, loc) = self.root.alloc.reserve_space(size);
+        let (_index, trie_entry) = self.prep_append(ValEdge::null());
         AppendSlot { trie_entry: trie_entry, data_ptr: val_ptr, data_size: size,
             storage_loc: loc, _pd: Default::default()}
     }
@@ -387,7 +439,7 @@ impl Trie
         }
     }
 
-    pub unsafe fn prep_append_at(&mut self, key: TrieIndex, val_ptr: *const u8) -> *mut *const u8 {
+    pub unsafe fn prep_append_at(&mut self, key: TrieIndex, val_ptr: ValEdge) -> *mut ValEdge {
         if key >= self.root.next_entry { self.root.next_entry = key + 1 }
         let root_index = ((key >> ROOT_SHIFT) & MASK) as usize;
         let l1 = &mut self.root.array[root_index];
@@ -396,11 +448,11 @@ impl Trie
         let l4 = insert!(l3, key, 3);
         let l5 = insert!(l4, key, 4);
         let l6 = insert!(l5, key, 5);
-        let val_ptr: &mut *const u8 = insert!(l6, key, 6);
+        let val_ptr: &mut ValEdge = insert!(l6, key, 6);
         val_ptr
     }
 
-    pub unsafe fn prep_append(&mut self, val_ptr: *const u8) -> (TrieIndex, &mut *const u8) {
+    pub unsafe fn prep_append(&mut self, val_ptr: ValEdge) -> (TrieIndex, &mut ValEdge) {
         let root: &mut RootTable =&mut *self.root;
         let next_entry = root.next_entry;
         //if we're out of address space there's nothing we can do...
@@ -452,7 +504,7 @@ impl Trie
     fn get_append_slot(&mut self, k: TrieIndex, storage_start: ByteLoc, size: usize)
     -> AppendSlot<Packet> {
         unsafe {
-            let trie_entry: *mut *const u8 = self.get_entry_at(k).unwrap();
+            let trie_entry: *mut ValEdge = self.get_entry_at(k).unwrap();
             //TODO these should be interleaved...
             let data_ptr = self.root.alloc.alloc_at(storage_start, size);
             AppendSlot { trie_entry: trie_entry, data_ptr: data_ptr, data_size: size,
@@ -488,7 +540,7 @@ impl Trie
     }
 
     #[inline]
-    fn get_entry_at(&mut self, k: TrieIndex) -> Option<&mut *const u8> {
+    fn get_entry_at(&mut self, k: TrieIndex) -> Option<&mut ValEdge> {
         let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
         let l1 = &mut self.root.array[root_index];
         let l2 = index_mut!(l1, k, 1);
@@ -582,15 +634,7 @@ impl Trie
             let l5 = index!(l4, k, 4);
             let l6 = index!(l5, k, 5);
             let val_ptr = index!(l6, k, 6);
-            let val_ptr = val_ptr.as_ref();
-            match val_ptr {
-                None => None,
-                Some(v) => {
-                    //let size = <V as UnStoreable>::size_from_bytes(v);
-                    //Some(<V as Storeable>::bytes_to_ref(v, size))
-                    Some(Packet::wrap_bytes(v))
-                }
-            }
+            val_ptr.try_packet()
         }
     }
 
@@ -604,16 +648,7 @@ impl Trie
             let l4 = atomic_index!(l3, k, 3);
             let l5 = atomic_index!(l4, k, 4);
             let l6 = atomic_index!(l5, k, 5);
-            let val_ptr = atomic_index!(l6, k, 6);
-            //let val_ptr = val_ptr.as_ref();
-            match val_ptr {
-                None => None,
-                Some(v) => {
-                    //let size = <V as UnStoreable>::size_from_bytes(v);
-                    //Some(<V as Storeable>::bytes_to_ref(v, size))
-                    Some(Packet::wrap_bytes(v))
-                }
-            }
+            atomic_index!(l6, k, 6, Ordering::Acquire)
         }
     }
 
@@ -865,23 +900,57 @@ fn alloc_seg2() -> *mut u8 {
     unsafe { &mut (*b)[0] }
 }
 
-trait NullablePtr {
-  type Output;
+trait NullablePtr: Sized {
+    type Output;
+    type Load;
+
+    unsafe fn atomic_load(&self, order: Ordering) -> Self::Load {
+        <Self as NullablePtr>::to_loaded_form(to_atom(self).load(order))
+    }
+
+    unsafe fn to_loaded_form(ptr: *mut Self::Output) -> Self::Load;
 }
 
 impl<T> NullablePtr for Box<T> {
-  type Output = T;
+    type Output = T;
+    type Load = *const T;
+
+    unsafe fn to_loaded_form(ptr: *mut Self::Output) -> Self::Load {
+        mem::transmute(ptr)
+    }
 }
 impl<T> NullablePtr for Option<Box<T>> {
-  type Output = T;
+    type Output = T;
+    type Load = *const T;
+
+    unsafe fn to_loaded_form(ptr: *mut Self::Output) -> Self::Load {
+        mem::transmute(ptr)
+    }
 }
 impl<T> NullablePtr for *const T {
-  type Output = T;
+    type Output = T;
+    type Load = *const T;
+
+    unsafe fn to_loaded_form(ptr: *mut Self::Output) -> Self::Load {
+        mem::transmute(ptr)
+    }
 }
 impl<T> NullablePtr for *mut T {
-  type Output = T;
-}
+    type Output = T;
+    type Load = *const T;
 
+    unsafe fn to_loaded_form(ptr: *mut Self::Output) -> Self::Load {
+        mem::transmute(ptr)
+    }
+}
+impl NullablePtr for ValEdge {
+    type Output = u8;
+    type Load = ValEdge;
+
+    unsafe fn to_loaded_form(ptr: *mut Self::Output) -> Self::Load {
+        mem::transmute(ptr)
+    }
+}
 
 fn to_atom<'a, P, T>(t: &'a P) -> &'a AtomicPtr<T>
 where
@@ -889,9 +958,63 @@ where
     unsafe { mem::transmute(t) }
 }
 
+fn atomic_load<P, L>(t: &P, order: Ordering) -> L
+where
+  P: NullablePtr<Load=L>, {
+    unsafe { <P as NullablePtr>::to_loaded_form(to_atom(t).load(order)) }
+}
+
 fn to_atomic_usize<T>(t: &T) -> &AtomicUsize {
     assert_eq!(mem::size_of::<T>(), mem::size_of::<AtomicUsize>());
     unsafe { mem::transmute(t) }
+}
+
+impl ValEdge {
+    pub fn end_from_ptr(ptr: *const u8) -> Self {
+        assert!(ptr as usize & 1 == 0);
+        ValEdge((ptr as usize | 1) as *mut _)
+    }
+
+    pub fn mid_from_ptr(ptr: *const u8) -> Self {
+        assert!(ptr as usize & 1 == 0);
+        ValEdge(ptr as *mut _)
+    }
+
+    pub fn null() -> Self {
+        ValEdge(ptr::null_mut())
+    }
+
+    pub fn ptr(self) -> *mut u8 {
+        (self.0 as usize & !1) as *mut _
+    }
+
+    fn bytes(self) -> usize {
+        self.0 as usize
+    }
+
+    pub unsafe fn as_packet(&self) -> Packet {
+        Packet::wrap_bytes(self.ptr())
+    }
+
+    pub unsafe fn try_packet(&self) -> Option<Packet> {
+        self.ptr().as_ref().map(|p| Packet::wrap_bytes(p))
+    }
+
+    unsafe fn as_sized_packet(&self, len: usize) -> Packet {
+        Packet::wrap_slice(slice::from_raw_parts(self.ptr(), len))
+    }
+
+    unsafe fn to_sized_packet<'a>(self, len: usize) -> Packet<'a> {
+        Packet::wrap_slice(slice::from_raw_parts(self.ptr(), len))
+    }
+
+    unsafe fn as_ref<'a>(self) -> Option<Packet<'a>> {
+        self.ptr().as_ref().map(|p| Packet::wrap_bytes(p))
+    }
+
+    pub unsafe fn atomic_store(ptr: *mut ValEdge, val: ValEdge, ord: Ordering) {
+        to_atomic_usize(&*ptr).store(val.bytes(), ord)
+    }
 }
 
 #[cfg(test)]
