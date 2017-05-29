@@ -1,4 +1,5 @@
 use super::*;
+use super::shared_slice::RcSlice;
 
 use servers2::skeens::{
     SkeensState,
@@ -88,7 +89,9 @@ fn ensure_chain<T: Copy>(log: &mut ChainStore<T>, chain: order) -> &mut Chain<T>
 
     let mut t = Trie::new();
     //FIXME remove for GC
-    let _ = unsafe { t.partial_append(1) };
+    unsafe {
+        t.partial_append(1).write_byte(mem::transmute(EntryKind::Read));
+    };
     let contents = TrivialEqArc::new(Chain{ trie: t, skeens: SkeensState::new()});
     log.insert(chain, contents);
     log.refresh();
@@ -144,7 +147,7 @@ where ToWorkers: DistributeToWorkers<T> {
     pub fn handle_op(
         &mut self,
         mut buffer: BufferSlice,
-        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
         self.print_data.msgs_recvd(1);
@@ -271,7 +274,7 @@ where ToWorkers: DistributeToWorkers<T> {
         kind: EntryFlag::Flag,
 
         buffer: BufferSlice,
-        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
         //FXIME fastpath for single server appends
@@ -291,7 +294,7 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryFlag::Flag,
         buffer: BufferSlice,
-        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
         let storage = storage.unwrap_left();
@@ -400,7 +403,7 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryFlag::Flag,
         mut buffer: BufferSlice,
-        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
         trace!("SERVER {:?} new-style multiput {:?}", self.this_server_num, kind);
@@ -518,7 +521,7 @@ where ToWorkers: DistributeToWorkers<T> {
         &mut self,
         kind: EntryFlag::Flag,
         mut buffer: BufferSlice,
-        storage: Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>,
+        storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
         trace!("SERVER {:?} old-style multiput {:?}", self.this_server_num, kind);
@@ -664,15 +667,17 @@ where ToWorkers: DistributeToWorkers<T> {
         trace!("SERVER {:?} appending at {:?}",
             self.this_server_num, buffer.contents().locs());
 
-        let (multi_storage, senti_storage) = *storage.unwrap_right();
+        let mut slices = storage.unwrap_right();
         let multi_storage = unsafe {
+            let mut multi_storage = &mut *slices.0;
             debug_assert_eq!(multi_storage.len(), buffer.entry_size());
-            (*Box::into_raw(multi_storage)).as_mut_ptr()
+            multi_storage.as_mut_ptr()
         };
         trace!("multi_storage @ {:?}", multi_storage);
         let senti_storage = unsafe {
+            let mut senti_storage = &mut *slices.1;
             debug_assert_eq!(senti_storage.len(), buffer.contents().sentinel_entry_size());
-            (*Box::into_raw(senti_storage)).as_mut_ptr()
+            senti_storage.as_mut_ptr()
         };
         //LOGIC sentinal storage must contain at least 64b
         //      (128b with 64b entry address space)
@@ -726,8 +731,7 @@ where ToWorkers: DistributeToWorkers<T> {
         self.to_workers.send_to_worker(
             MultiReplica {
                 buffer: buffer,
-                multi_storage: multi_storage,
-                senti_storage: senti_storage,
+                storage: slices,
                 t: t,
                 num_places: num_places,
             }
@@ -883,7 +887,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 self.to_workers.send_to_worker(ReturnBuffer(buffer, t))
             }
 
-            ToReplicate::Multi(buffer, multi_storage, senti_storage) => {
+            ToReplicate::Multi(buffer, mut storage) => {
                 trace!("SERVER {:?} replicate multiput", self.this_server_num);
 
                 //debug_assert!(self._seen_ids.insert(buffer.entry().id));
@@ -921,10 +925,10 @@ where ToWorkers: DistributeToWorkers<T> {
                     self.this_server_num, buffer.contents().locs());
 
                 let multi_storage = unsafe {
-                    (*Box::into_raw(multi_storage)).as_mut_ptr()
+                    storage.0.as_mut_ptr()
                 };
                 let senti_storage = unsafe {
-                    (*Box::into_raw(senti_storage)).as_mut_ptr()
+                    storage.1.as_mut_ptr()
                 };
                 //LOGIC sentinal storage must contain at least 64b
                 //      (128b with 64b entry address space)
@@ -972,8 +976,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 self.to_workers.send_to_worker(
                     MultiReplica {
                         buffer: buffer,
-                        multi_storage: multi_storage,
-                        senti_storage: senti_storage,
+                        storage: storage,
                         t: t,
                         num_places: num_places,
                     }

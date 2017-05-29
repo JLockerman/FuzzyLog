@@ -6,8 +6,10 @@ use std::{mem, ptr, slice};
 //FIXME
 use packets::MutEntry as MutPacket;
 use packets::Entry as Packet;
+use packets::EntryVar;
 
 use servers2::byte_trie::{self, Trie as Alloc};
+use servers2::shared_slice::RcSlice;
 
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -26,6 +28,7 @@ type RootEdge = Box<RootTable>;
 struct RootTable {
     l6: Shortcut<ValEdge>,
     next_entry: u64,
+    first_entry: u64,
     alloc: AllocPtr,
     last_lock: u64,
     //FIXME if we want to do lock handoff we need to know until where we can read...
@@ -88,6 +91,7 @@ const ARRAY_SIZE: usize = 8192 / 8;
 const MASK: u64 = ARRAY_SIZE as u64 - 1;
 const SHIFT_LEN: u8 = 10;
 const ROOT_SHIFT: u8 = 60;
+const MAX_IN_BLOCK_SIZE: usize = LEVEL_BYTES / 2;
 
 struct Shortcut<V>(*mut [V]);
 
@@ -166,7 +170,7 @@ impl AllocPtr {
     }
 
     fn prep_append(&mut self, storage_size: usize) -> (&mut [u8], ByteLoc) {
-        if storage_size <= LEVEL_BYTES / 2 {
+        if storage_size <= MAX_IN_BLOCK_SIZE {
             self.alloc.append(storage_size)
         }
         else {
@@ -208,6 +212,15 @@ impl AllocPtr {
             ValEdge::mid_from_ptr(append_ptr)
         }
     }
+
+    fn free_first(&mut self, num_blocks: usize) {
+        self.alloc.free_first(num_blocks)
+    }
+}
+
+#[inline(always)]
+fn level_index_for_key(key: u64, depth: u8) {
+    ((key >> (ROOT_SHIFT - (SHIFT_LEN * depth))) & MASK) as usize;
 }
 
 macro_rules! index {
@@ -360,6 +373,14 @@ impl<'a> AppendSlot<Packet<'a>> {
         p
     }
 
+    pub unsafe fn write_byte(self, data: u8) {
+        let AppendSlot {trie_entry, data_ptr, data_size, storage_loc, ..} = self;
+        assert_eq!(data_size, 1);
+        assert_eq!(storage_loc, 0);
+        *data_ptr.ptr() = data;
+        ValEdge::atomic_store(trie_entry, data_ptr, Ordering::Release);
+    }
+
     pub fn loc(&self) -> ByteLoc {
         self.storage_loc
     }
@@ -376,6 +397,7 @@ impl Trie
             //FIXME gratuitously unsafe
             let mut t = Trie { root: Box::new(mem::zeroed()) };
             ::std::ptr::write(&mut t.root.alloc, AllocPtr::new());
+            //t.next_entry = 1;
             t
         }
     }
@@ -605,6 +627,96 @@ impl Trie
                 unreachable!()
             }
         }
+    }
+}
+
+impl Trie
+ {
+    pub fn delete_until(&mut self, len: u64) {
+        let mut next = self.root.first_entry;
+        //((key >> (ROOT_SHIFT - (SHIFT_LEN * depth))) & MASK) as usize;
+        macro_rules! iter {
+            ($slot:ident) => ($slot.as_mut().into_iter().flat_map(|v| v.iter_mut()))
+        }
+
+        macro_rules! walk {
+            (1 $new:ident in $old:ident $body:tt) => {
+                walk!(0 $new, $old, $body; 0)
+            };
+            (0 $new:ident, $old:ident, $body:tt; {{{{{0}}}}}) => {
+                for $new in iter!($old) $body;
+            };
+            (0 $new:ident, $old:ident, $body:tt; $depth:tt) => {
+                for slot in iter!($old) {
+                    walk!(0 $new, slot, $body; {$depth});
+                    *slot = None
+                }
+            };
+        }
+
+        let mut num_removed = 0;
+        'remove: while next < len {
+            for slot0 in self.root.array.iter_mut() {
+                walk!(1 slot6 in slot0 {
+                    if next >= len {
+                        break 'remove
+                    }
+                    if slot6.is_end() {
+                        unsafe {
+                            if slot6.is_multi() {
+                                slot6.free_rc()
+                            } else if slot6.is_big() {
+                                slot6.free_box()
+                            } else {
+                                num_removed += 1
+                            }
+                        }
+                    }
+                    *slot6 = ValEdge::null();
+                    next += 1;
+                });
+                *slot0 = None
+            }
+        }
+
+        self.root.alloc.free_first(num_removed)
+
+        /*'remove: while next < len {
+            for slot0 in self.root.array.iter_mut() {
+                for slot1 in iter!(slot0) {
+                    for slot2 in iter!(slot1) {
+                        for slot3 in iter!(slot2) {
+                            for slot4 in iter!(slot3) {
+                                for slot5 in iter!(slot4) {
+                                    for slot6 in iter!(slot5) {
+                                        if next >= len {
+                                            break 'remove
+                                        }
+                                        if slot6.is_end() {
+                                            if slot6.is_multi() {
+                                                unimplemented!()
+                                            } else if slot6.is_big() {
+                                                unimplemented!()
+                                            } else {
+                                                num_removed += 1;
+                                            }
+                                        }
+                                        *slot6 = ValEdge::null();
+                                        next += 1;
+                                    }
+                                    *slot5 = None
+                                }
+                                *slot4 = None
+                            }
+                            *slot3 = None
+                        }
+                        *slot2 = None
+                    }
+                    *slot1 = None
+                }
+                *slot0 = None
+            }
+        }*/
     }
 }
 
@@ -1014,6 +1126,43 @@ impl ValEdge {
 
     pub unsafe fn atomic_store(ptr: *mut ValEdge, val: ValEdge, ord: Ordering) {
         to_atomic_usize(&*ptr).store(val.bytes(), ord)
+    }
+
+    pub fn is_end(self) -> bool {
+        self.0 as usize & 1 != 0
+    }
+
+    fn is_multi(self) -> bool {
+        unsafe {
+            self.ptr().as_ref().map(|p| unsafe {
+                let var = EntryVar::try_var(slice::from_raw_parts(p, 1));
+                 var == EntryVar::Multi || var == EntryVar::Senti
+            }).unwrap_or(false)
+        }
+    }
+
+    fn is_data(self) -> bool {
+        unsafe {
+            self.ptr().as_ref().map(|p| unsafe {
+                EntryVar::try_var(slice::from_raw_parts(p, 1)) == EntryVar::Single
+            }).unwrap_or(false)
+        }
+    }
+
+    fn is_big(self) -> bool {
+        unsafe { self.is_data() && self.as_packet().bytes().len() > MAX_IN_BLOCK_SIZE }
+    }
+
+    unsafe fn free_box(self) {
+        assert!(self.is_end());
+        let len = self.as_packet().bytes().len();
+        mem::drop(Box::from_raw(slice::from_raw_parts_mut(self.ptr(), len)))
+    }
+
+    unsafe fn free_rc(self) {
+        assert!(self.is_end());
+        let len = self.as_packet().bytes().len();
+        mem::drop(RcSlice::from_ptr(self.ptr(), len))
     }
 }
 

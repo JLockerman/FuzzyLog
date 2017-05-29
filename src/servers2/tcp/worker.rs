@@ -9,6 +9,7 @@ use servers2::{
     DistributeToWorkers, Troption, SkeensMultiStorage,
     ToSend, ChainReader,
 };
+use servers2::shared_slice::RcSlice;
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
@@ -46,7 +47,7 @@ pub enum DistToWorker {
 
 pub enum ToLog<T> {
     //TODO test different layouts.
-    New(Buffer, Troption<SkeensMultiStorage, Box<(Box<[u8]>, Box<[u8]>)>>, T),
+    New(Buffer, Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>, T),
     Replication(ToReplicate, T)
 }
 
@@ -941,11 +942,9 @@ impl WorkerInner {
                     }
                     Troption::Left(storage)
                 } else {
-                    let mut m = Vec::with_capacity(size);
-                    let mut s = Vec::with_capacity(senti_size);
-                    m.set_len(size);
-                    s.set_len(senti_size);
-                    Troption::Right(Box::new((m.into_boxed_slice(), s.into_boxed_slice())))
+                    let mut m = RcSlice::with_len(size);
+                    let mut s = RcSlice::with_len(senti_size);
+                    Troption::Right(Box::new((m, s)))
                 }
             },
             _ => Troption::None,
@@ -984,14 +983,12 @@ impl WorkerInner {
                     let e = buffer.contents();
                     (e.len(), e.sentinel_entry_size())
                 };
-                let (multi_storage, senti_storage) = unsafe {
-                    let mut m = Vec::with_capacity(size);
-                    let mut s = Vec::with_capacity(senti_size);
-                    m.set_len(size);
-                    s.set_len(senti_size);
-                    (m.into_boxed_slice(), s.into_boxed_slice())
+                let storage = unsafe {
+                    let mut m = RcSlice::with_len(size);
+                    let mut s = RcSlice::with_len(senti_size);
+                    Box::new((m, s))
                 };
-                ToReplicate::Multi(buffer, multi_storage, senti_storage)
+                ToReplicate::Multi(buffer, storage)
             },
             EntryKind::SingleToReplica => {
                 trace!("WORKER {} replicate single skeens 1", self.worker_num);

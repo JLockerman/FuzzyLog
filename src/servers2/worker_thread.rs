@@ -157,22 +157,23 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         MultiReplica {
-            buffer, multi_storage, senti_storage, t, num_places,
+            buffer, storage, t, num_places,
         } => unsafe {
+            let storage = *storage;
+            let (mut multi_storage, mut senti_storage) = storage;
             let (remaining_senti_places, len) = {
                 let e = buffer.contents();
                 let len = e.len();
                 let b = &buffer[..len];
                 trace!("place multi_storage @ {:?}, len {}", multi_storage, b.len());
-                ptr::copy_nonoverlapping(b.as_ptr(), multi_storage, b.len());
+                ptr::copy_nonoverlapping(b.as_ptr(), multi_storage.as_mut_ptr(), b.len());
                 let places: &[*mut ValEdge] = slice::from_raw_parts(
-                   senti_storage as *const _, num_places
+                   (&*senti_storage).as_ptr() as *const _, num_places
                 );
                 trace!("multi places {:?}, locs {:?}", places, e.locs());
                 debug_assert!(places.len() <= e.locs().len());
                 //alt let mut sentinel_start = places.len();
                 let mut sentinel_start = None;
-                let multi_edge = ValEdge::end_from_ptr(multi_storage);
                 for i in 0..num_places {
 
                     if e.locs()[i] == OrderIndex(0.into(), 0.into()) {
@@ -180,10 +181,10 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         sentinel_start = Some(i);
                         break
                     }
-
                     //let trie_entry: *mut AtomicPtr<u8> = mem::transmute(places[i]);
                     //TODO mem barrier ordering
                     //(*trie_entry).store(multi_storage, Ordering::Release);
+                    let multi_edge = ValEdge::end_from_ptr(multi_storage.clone().into_ptr());
                     ValEdge::atomic_store(places[i], multi_edge, Ordering::Release);
                 }
                 let remaining_places = if let Some(i) = sentinel_start {
@@ -196,11 +197,11 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 // if there is a second, we'll need auxiliary memory
                 (remaining_places.to_vec(), len)
             };
-            let ret = slice::from_raw_parts(multi_storage, len);
+            let ret = slice::from_raw_parts(multi_storage.as_ptr(), len);
             //TODO is re right for sentinel only writes?
             if remaining_senti_places.len() == 0 {
                 let u = if continue_replication {
-                    send(ToSend::OldReplication(ret, 0), t)
+                    send(ToSend::OldReplication(ret, ::std::u64::MAX), t)
                 } else {
                     send(ToSend::StaticSlice(ret), t)
                 };
@@ -212,25 +213,27 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let len = e.sentinel_entry_size();
                 trace!("place senti_storage @ {:?}, len {}", senti_storage, len);
                 let b = &buffer[..];
-                ptr::copy_nonoverlapping(b.as_ptr(), senti_storage, len);
+                ptr::copy_nonoverlapping(b.as_ptr(), senti_storage.as_mut_ptr(), len);
                 {
-                    let senti_storage = slice::from_raw_parts_mut(senti_storage, len);
+                    let senti_storage = slice::from_raw_parts_mut(
+                        senti_storage.as_mut_ptr(), len);
                     slice_to_sentinel(&mut *senti_storage);
                 }
-                let senti_edge = ValEdge::end_from_ptr(senti_storage);
                 for place in remaining_senti_places {
                     //let trie_entry: *mut AtomicPtr<u8> = mem::transmute(place);
                     //TODO mem barrier ordering
                     //(*trie_entry).store(senti_storage, Ordering::Release);
+                    let senti_edge = ValEdge::end_from_ptr(senti_storage.clone().into_ptr());
                     ValEdge::atomic_store(place, senti_edge, Ordering::Release);
                 }
             }
             //TODO is re right for sentinel only writes?
             let u = if continue_replication {
-                send(ToSend::OldReplication(ret, 0), t)
+                send(ToSend::OldReplication(ret, ::std::u64::MAX), t)
             } else {
                 send(ToSend::StaticSlice(ret), t)
             };
+            mem::drop((multi_storage, senti_storage));
             (Some(buffer), u)
             //ServerResponse::FinishOldMultiappend(buffer, t, ret)
             //(Some(buffer), ret, t, 0, false)
@@ -247,7 +250,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 };
                 st0.copy_from_slice(&buffer[..len]);
                 let was_multi = buffer.to_sentinel();
-                if st1.len() > 0 {
+                if let &mut Some(ref mut st1) = st1 {
                     let len = buffer.contents().len();
                     st1.copy_from_slice(&buffer[..len]);
                 }
@@ -263,21 +266,30 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         if trie_slot == 0 { continue }
 
                         let trie_slot: u64 = trie_slot;
-                        let trie_entry: *mut AtomicPtr<u8> = trie_slot as usize as *mut _;
-                        let to_store: *mut u8 = if is_sentinel {
-                            st1.as_mut_ptr()
+                        let trie_entry: *mut ValEdge = trie_slot as usize as *mut _;
+                        // let trie_entry: *mut AtomicPtr<u8> = trie_slot as usize as *mut _;
+                        // let to_store: *mut u8 = if is_sentinel {
+                        //     st1.as_mut().unwrap().as_mut_ptr()
+                        // } else {
+                        //     st0.as_mut_ptr()
+                        // };
+                        // (*trie_entry).store(to_store, Ordering::Release);
+                        let to_store = if is_sentinel {
+                            let ptr = st1.clone().unwrap();
+                            ValEdge::end_from_ptr(ptr.into_ptr())
                         } else {
-                            st0.as_mut_ptr()
+                            ValEdge::end_from_ptr(st0.clone().into_ptr())
                         };
-                        (*trie_entry).store(to_store, Ordering::Release);
+                        ValEdge::atomic_store(trie_entry, to_store, Ordering::Release);
                     }
                 }
             }
             let (_ptrs, _indicies, st0, _st1) = storage.get();
             let u = if continue_replication {
-                send(ToSend::OldReplication(st0, 0), t)
+                send(ToSend::OldReplication(&*((&**st0) as *const _), 0), t)
             } else {
-                send(ToSend::StaticSlice(st0), t)
+                //send(ToSend::StaticSlice(st0), t)
+                send(ToSend::Slice(st0), t)
             };
             (Some(buffer), u)
         },
@@ -321,7 +333,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             st0.copy_from_slice(&buffer[..len]);
             //TODO just copy from sentinel Ref
             let was_multi = buffer.to_sentinel();
-            if st1.len() > 0 {
+            if let &mut Some(ref mut st1) = st1 {
                 let len = buffer.contents().len();
                 st1.copy_from_slice(&buffer[..len]);
             }
@@ -362,7 +374,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     let i = st0_l.iter().position(|oi| oi.0 == chain).unwrap();
                     //FIXME atomic?
                     st0_l[i].1 = loc.1;
-                    if st1.len() > 0 {
+                    if let &mut Some(ref mut st1) = st1 {
                         bytes_as_entry_mut(st1).locs_mut()[i].1 = loc.1;
                         let s_i = st0_l.iter()
                             .position(|oi| oi == &OrderIndex(0.into(), 0.into()));
@@ -372,39 +384,43 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         false
                     }
                 };
-                let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
                 {
-                    let to_store: *mut u8 = if is_sentinel {
-                        st1.as_mut_ptr()
+                    let to_store = if is_sentinel {
+                        let ptr = st1.clone().unwrap();
+                        ValEdge::end_from_ptr(ptr.into_ptr())
                     } else {
-                        st0.as_mut_ptr()
+                        ValEdge::end_from_ptr(st0.clone().into_ptr())
                     };
-                    (*trie_entry).store(to_store, Ordering::Release);
+                    ValEdge::atomic_store(trie_slot, to_store, Ordering::Release);
                 }
             }
 
-            let to_send = if continue_replication {
+            let u = if continue_replication {
                 trace!("WORKER {} continue skeens2 replication @ {:?}", worker_num, loc);
-                ToSend::Contents(EntryContents::Skeens2ToReplica{
+                send(ToSend::Contents(EntryContents::Skeens2ToReplica{
                     id: &id,
                     lock: &timestamp,
                     loc: &loc,
-                })
+                }), t)
             } else {
                 match SkeensMultiStorage::try_unwrap(storage) {
                     Ok(storage) => {
                         trace!("WORKER {} skeens2 to client @ {:?}", worker_num, loc);
                         let &(_, _, ref st0, ref st1) = &*storage.get();
-                        ToSend::StaticSlice(if st1.len() > 0 { *st1 } else { *st0 })
+                        //ToSend::StaticSlice(if let &Some(st1) = st1 { &*st1 } else { &*st0 })
+                        if st1.is_some() {
+                            send(ToSend::Slice(&*st1.as_ref().unwrap()), t)
+                        } else {
+                            send(ToSend::Slice(&*st0), t)
+                        }
                     }
                     Err(..) => {
                         trace!("WORKER {} incomplete skeens2 @ {:?}", worker_num, loc);
-                        ToSend::Nothing
+                        send(ToSend::Nothing, t)
                     }
                 }
             };
 
-            let u = send(to_send, t);
             (None, u)
 
             //ServerResponse::FinishedSkeens2(if st1.len() > 0 { &**st1 } else { &**st0 }, t)
@@ -431,7 +447,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             trace!("WORKER {} finish skeens1 rep {:?}", worker_num, ts);
             //TODO just copy from sentinel Ref
             let was_multi = buffer.to_sentinel();
-            if st1.len() > 0 {
+            if let &mut Some(ref mut st1) = st1 {
                 trace!("WORKER {} finish skeens1 rep sentinel", worker_num);
                 let len = buffer.contents().len();
                 st1.copy_from_slice(&buffer[..len]);
@@ -459,6 +475,7 @@ pub fn handle_read<U, V: Send + Sync + Copy, SendFn>(
 ) -> U
 where SendFn: for<'a> FnMut(Result<&'a [u8], EntryContents<'a>>) -> U {
     let OrderIndex(chain, index) = buffer.contents().locs()[0];
+    debug_assert!(index > entry::from(0)); //TODO return error on index < GC
     let res = chains.get_and(&chain, |logs| {
         let log = unsafe {&*UnsafeCell::get(&logs[0])};
         match log.trie.atomic_get(u32::from(index) as u64) {

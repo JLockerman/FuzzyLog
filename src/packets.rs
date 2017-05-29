@@ -8,6 +8,7 @@ pub use storeables::{Storeable, UnStoreable};
 
 pub use self::Packet::Ref as EntryContents;
 pub use self::Packet::Mut as EntryContentsMut;
+pub use self::Packet::Var as EntryVar;
 pub use self::EntryKind::EntryLayout;
 
 use self::EntryFlag::Flag;

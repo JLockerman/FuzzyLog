@@ -124,12 +124,19 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
                 quote!( #variant { #(#field: &'a mut #typ),* } )
             });
 
+            let var_variant = variants.iter().map(|v| {
+                let variant = &v.ident;
+                quote!( #variant )
+            });
+
             let try_wrap = enum_try_wrap(&tag_ident, &tag_ty, &variants);
             let fill_vec = enum_fill_vec(&tag_ident, &tag_ty, &variants);
             let get_len = enum_get_len(&tag_ty, &variants);
 
             let try_mut = enum_try_mut(&tag_ident, &tag_ty, &variants);
             let as_ref = enum_mut_as_ref(&variants);
+
+            let try_var = enum_try_var(&tag_ident, &tag_ty, &variants);
 
             let min_len = enum_minsize(&tag_ty, &variants);
             quote!{
@@ -141,6 +148,11 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
                 #[derive(PartialEq, Eq, Debug)]
                 pub enum Mut<'a> {
                     #(#mut_variant),*
+                }
+
+                #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+                pub enum Var {
+                    #(#var_variant),*
                 }
 
                 impl<'a> Ref<'a> {
@@ -155,6 +167,10 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
                     #try_mut
 
                     #as_ref
+                }
+
+                impl Var {
+                    #try_var
                 }
 
                 #min_len
@@ -558,6 +574,33 @@ fn fill_vec_with_counter(&Field{ ref ident, ref ty }: &Field) -> quote::Tokens {
         },
         ty @ &VarArray(..) | ty @ &Array(..) | ty @ &Tuple(..) =>
             panic!("cannot use a {:?} as an array size", ty),
+    }
+}
+
+fn enum_try_var(tag_ident: &Ident, tag_ty: &Ty, variants: &[Variant]) -> quote::Tokens {
+    let bodies = variants.iter().map(|v| {
+        let &Variant{ident: ref variant, flag: ref tag_val, ..} = v;
+        quote!{
+            Some(&#tag_val) => Var::#variant,
+        }
+    });
+    let default = &variants[0].ident;
+    let try_wrap_tag = try_wrap_field(tag_ident, tag_ty, &"'tryvar_tag".into());
+    quote!{
+        #[allow(unused_assignments)]
+        #[inline(always)]
+        pub unsafe fn try_var(mut __packet_macro_bytes: &[u8]) -> Self {
+            let __packet_macro_read_len = 0usize;
+            let mut #tag_ident = None;
+            'tryvar_tag: loop {
+                #try_wrap_tag;
+                return match #tag_ident {
+                     #(#bodies)*
+                    _ => Var::#default,
+                }
+            }
+            Var::#default
+        }
     }
 }
 

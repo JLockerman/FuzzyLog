@@ -35,6 +35,8 @@ pub use self::worker_thread::{handle_to_worker2, ToSend};
 
 use self::trie::ValEdge;
 
+use self::shared_slice::RcSlice;
+
 pub mod tcp;
 // pub mod udp;
 
@@ -50,6 +52,7 @@ pub mod trivial_eq_arc;
 
 mod ordering_thread;
 pub mod worker_thread;
+pub mod shared_slice;
 
 #[cfg(test)]
 mod tests;
@@ -109,8 +112,7 @@ pub enum ToWorker<T: Send + Sync> {
     //TODO shrink?
     MultiReplica {
         buffer: BufferSlice,
-        multi_storage: *mut u8,
-        senti_storage: *mut u8,
+        storage: Box<(RcSlice, RcSlice)>,
         t: T,
         num_places: usize,
     },
@@ -188,7 +190,7 @@ pub enum ToWorker<T: Send + Sync> {
 
 #[derive(Clone, Debug)]
 pub struct SkeensMultiStorage(
-    Arc<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>>
+    Arc<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, RcSlice, Option<RcSlice>)>>
 );
 
 unsafe impl Send for SkeensMultiStorage {}
@@ -197,38 +199,35 @@ impl SkeensMultiStorage {
     fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
             let timestamps = vec![0; num_locs];
             let queue_indicies = vec![0; num_locs];
-            let mut data = Vec::with_capacity(entry_size);
-            unsafe { data.set_len(entry_size) };
+            let mut data = RcSlice::with_len(entry_size);
             let timestamps = timestamps.into_boxed_slice();
             let queue_indicies = queue_indicies.into_boxed_slice();
-            let data = unsafe { &mut *Box::into_raw(data.into_boxed_slice()) };
             let senti = sentinel_size.map(|s| {
-                let mut senti = Vec::with_capacity(s);
-                unsafe { senti.set_len(s) };
-                unsafe { &mut *Box::into_raw(senti.into_boxed_slice()) }
-            }).unwrap_or(&mut []);
+                RcSlice::with_len(s)
+            });
             debug_assert_eq!(timestamps.len(), num_locs);
             debug_assert_eq!(timestamps.len(), queue_indicies.len());
             SkeensMultiStorage(Arc::new(UnsafeCell::new((timestamps, queue_indicies, data, senti))))
     }
 
-    fn try_unwrap(s: Self) -> Result<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>, Self> {
+    fn try_unwrap(s: Self)
+    -> Result<UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, RcSlice, Option<RcSlice>)>, Self> {
         Arc::try_unwrap(s.0).map_err(SkeensMultiStorage)
     }
 
-    unsafe fn get(&self) -> (&Box<[Time]>, &Box<[QueueIndex]>, &'static [u8], &'static [u8]) {
+    unsafe fn get(&self) -> (&Box<[Time]>, &Box<[QueueIndex]>, &RcSlice, &Option<RcSlice>) {
         let &(ref ts, ref indicies, ref st0, ref st1) = &*self.0.get();
-        (ts, indicies, *st0, *st1)
+        (ts, indicies, st0, st1)
     }
 
     unsafe fn get_mut(&self)
-    -> (&mut Box<[Time]>, &mut Box<[QueueIndex]>, &mut [u8], &mut [u8]) {
+    -> (&mut Box<[Time]>, &mut Box<[QueueIndex]>, &mut RcSlice, &mut Option<RcSlice>) {
         let &mut (ref mut ts, ref mut indicies, ref mut st0, ref mut st1) = &mut *self.0.get();
-        (ts, indicies, &mut **st0, &mut **st1)
+        (ts, indicies, st0, st1)
     }
 
     fn ptr(&self)
-    -> *const UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, &'static mut [u8], &'static mut [u8])>
+    -> *const UnsafeCell<(Box<[Time]>, Box<[QueueIndex]>, RcSlice, Option<RcSlice>)>
     {
         &*(self.0)
     }
@@ -244,7 +243,7 @@ impl SkeensMultiStorage {
         st0.copy_from_slice(&buffer[..len]);
         //TODO just copy from sentinel Ref
         let was_multi = buffer.to_sentinel();
-        if st1.len() > 0 {
+        if let Some(st1) = st1.as_mut() {
             let len = buffer.contents().len();
             st1.copy_from_slice(&buffer[..len]);
         }
@@ -306,10 +305,7 @@ pub type SkeensReplicationOrder = u64;
 
 pub enum ToReplicate {
     Data(BufferSlice, u64),
-    //TODO probably needs a custom Rc for garbage collection
-    //     ideally one with the layout { count, entry }
-    //     since the entry's size is stored internally
-    Multi(BufferSlice, Box<[u8]>, Box<[u8]>),
+    Multi(BufferSlice, Box<(RcSlice, RcSlice)>),
     Skeens1(BufferSlice, SkeensMultiStorage),
     SingleSkeens1(BufferSlice, StorageLoc),
 

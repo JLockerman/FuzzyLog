@@ -16,6 +16,7 @@ type RootEdge = Box<RootTable>;
 
 struct RootTable {
     stored_bytes: u64,
+    free_front_blocks: u64,
     storage_val: Shortcut<u8>,
     storage_l4: Shortcut<ValEdge>,
     storage_l3: Shortcut<L4Edge>,
@@ -154,6 +155,38 @@ impl Trie  {
 
     pub fn len(&self) -> u64 {
         self.root.stored_bytes
+    }
+
+    pub fn free_first(&mut self, num_blocks: usize) {
+        macro_rules! iter {
+            ($slot:expr) => ($slot.as_mut().into_iter().flat_map(|v| v.iter_mut()))
+        }
+
+        macro_rules! walk {
+            (1 $new:ident in $old:ident $body:tt) => {
+                walk!(0 $new, $old, $body; 0)
+            };
+            (0 $new:ident, $old:ident, $body:tt; {{{{0}}}}) => {
+                for $new in iter!($old) $body;
+            };
+            (0 $new:ident, $old:ident, $body:tt; $depth:tt) => {
+                for slot in iter!($old) {
+                    walk!(0 $new, slot, $body; {$depth});
+                    *slot = None
+                }
+            };
+        }
+
+        let mut next = 0;
+        let root = &mut self.root.storage_root;
+        walk!(1 slotv in root {
+            if next >= num_blocks {
+                return
+            }
+            let slotv: &mut ValEdge = slotv;
+            *slotv = None;
+            next += 1
+        });
     }
 }
 
