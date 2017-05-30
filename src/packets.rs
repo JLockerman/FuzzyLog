@@ -78,6 +78,8 @@ pub mod EntryKind {
             const Sentinel = 0x6,
             const Skeens2ToReplica = 0x8,
 
+            const GC = 0x10,
+
             const SingleToReplica = Data.bits | ToReplica.bits,
             const MultiputToReplica = Multiput.bits | ToReplica.bits,
             const SentinelToReplica = Sentinel.bits | ToReplica.bits,
@@ -93,6 +95,7 @@ pub mod EntryKind {
         Lock,
         Sentinel,
         Read,
+        GC,
     }
 
     impl EntryLayout {
@@ -103,6 +106,7 @@ pub mod EntryKind {
                 &EntryLayout::Lock => Lock,
                 &EntryLayout::Sentinel => Sentinel,
                 &EntryLayout::Read => Read,
+                &EntryLayout::GC => GC,
             }
         }
 
@@ -122,6 +126,7 @@ pub mod EntryKind {
                 Sentinel | SentinelToReplica => EntryLayout::Sentinel,
                 Lock => EntryLayout::Lock,
                 Read => EntryLayout::Read,
+                GC => EntryLayout::GC,
                 Invalid => panic!("Empty Layout"),
                 _ => unreachable!("no layout {:x}", self.bits()),
             }
@@ -161,6 +166,7 @@ define_packet!{
             dependency_bytes: u16,
             loc: OrderIndex,
             horizon: OrderIndex,
+            min:  OrderIndex,
         },
         Single: EntryKind::Data => {
             id: Uuid,
@@ -233,6 +239,13 @@ define_packet!{
             lock: u64,
             loc: OrderIndex,
         },
+
+        GC: EntryKind::GC => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            cols: u16,
+            locs: [OrderIndex | cols],
+        },
     }
 }
 
@@ -243,7 +256,8 @@ impl<'a> Packet::Ref<'a> {
             Read{flags, ..}
             | Single{flags, ..} | SingleToReplica{flags, ..}
             | Multi{flags, ..} | MultiToReplica{flags, ..}
-            | Senti{flags, ..} | SentiToReplica{flags, ..} =>
+            | Senti{flags, ..} | SentiToReplica{flags, ..}
+            | GC{flags, ..} =>
                 flags,
 
             Skeens2ToReplica{..} => unreachable!(),
@@ -261,6 +275,7 @@ impl<'a> Packet::Ref<'a> {
             MultiToReplica{..} => EntryKind::MultiputToReplica,
             SentiToReplica{..} => EntryKind::SentinelToReplica,
             Skeens2ToReplica{..} => EntryKind::Skeens2ToReplica,
+            GC{..} => EntryKind::GC,
         }
     }
 
@@ -274,7 +289,8 @@ impl<'a> Packet::Ref<'a> {
             Read{id, ..} | Single{id, ..} | Multi{id, ..} | Senti{id, ..}
             | SingleToReplica{id, ..}
             | MultiToReplica{id, ..} | SentiToReplica{id, ..}
-            | Skeens2ToReplica{id, ..} => id,
+            | Skeens2ToReplica{id, ..}
+            | GC{id, ..} => id,
         }
     }
 
@@ -285,7 +301,8 @@ impl<'a> Packet::Ref<'a> {
                 slice::from_raw_parts(loc, 1)
             },
             Multi{locs, ..} | Senti{locs, ..}
-            | MultiToReplica{locs, ..} | SentiToReplica{locs, ..} => locs,
+            | MultiToReplica{locs, ..} | SentiToReplica{locs, ..}
+            | GC{locs, ..} => locs,
         }
     }
 
@@ -303,7 +320,8 @@ impl<'a> Packet::Ref<'a> {
                 locs.iter().zip(queue_nums.iter())
             },
 
-            Read{..} | Single{..} | Multi{..} | Senti{..} | Skeens2ToReplica{..} => unreachable!(),
+            Read{..} | Single{..} | Multi{..} | Senti{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
         }
     }
 
@@ -313,7 +331,8 @@ impl<'a> Packet::Ref<'a> {
             Multi{data, ..} | Single{data, ..}
             | MultiToReplica{data, ..} | SingleToReplica{data, ..} => data,
 
-            Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..} => unreachable!(),
+            Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
         }
     }
 
@@ -337,7 +356,8 @@ impl<'a> Packet::Ref<'a> {
 
             s @ Senti{..} => s.len(),
 
-            Read{..} | Single{..} | SingleToReplica{..} | Skeens2ToReplica{..} => unreachable!(),
+            Read{..} | Single{..} | SingleToReplica{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
         }
     }
 
@@ -349,7 +369,8 @@ impl<'a> Packet::Ref<'a> {
             | SentiToReplica{lock, ..}
             | Skeens2ToReplica{lock, ..} => *lock,
 
-            Read{..} | Single{..} | SingleToReplica{..} => unreachable!(),
+            Read{..} | Single{..} | SingleToReplica{..}
+            | GC{..} => unreachable!(),
         }
     }
 
@@ -357,7 +378,8 @@ impl<'a> Packet::Ref<'a> {
     where V: UnStoreable {
         use self::Packet::Ref::*;
         match self {
-            Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..} => unreachable!(),
+            Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
 
             SingleToReplica{deps, data, ..}
             | MultiToReplica{deps, data, ..}
@@ -375,7 +397,7 @@ impl<'a> Packet::Ref<'a> {
             Single{deps, ..} | Multi{deps, ..} | Senti{deps, ..}
             | SingleToReplica{deps, ..} | MultiToReplica{deps, ..} | SentiToReplica{deps, ..} =>
                 deps,
-            Read{..} | Skeens2ToReplica{..} => unreachable!(),
+            Read{..} | Skeens2ToReplica{..}| GC{..} => unreachable!(),
         }
     }
 
@@ -384,7 +406,7 @@ impl<'a> Packet::Ref<'a> {
         match self {
             Single{..} | Multi{..} | Senti{..}
             | SingleToReplica{..} | MultiToReplica{..} | SentiToReplica{..}
-            | Skeens2ToReplica{..} =>
+            | Skeens2ToReplica{..} | GC{..} =>
                 unreachable!(),
             Read{horizon, ..} => *horizon,
         }
@@ -393,7 +415,7 @@ impl<'a> Packet::Ref<'a> {
     pub fn non_replicated_len(self) -> usize {
         use self::Packet::Ref::*;
         match self {
-            c @ Read {..} | c @ Single {..} | c @ Multi{..} | c @Senti{..} =>
+            c @ Read {..} | c @ Single {..} | c @ Multi{..} | c @Senti{..} | c @ GC{..} =>
                 c.len(),
 
             SingleToReplica{ id, flags, loc, deps, data, ..} =>
@@ -490,7 +512,8 @@ impl<'a> Packet::Mut<'a> {
             | &mut Senti{ref mut flags, ..}
             | &mut SingleToReplica{ref mut flags, ..}
             | &mut MultiToReplica{ref mut flags, ..}
-            | &mut SentiToReplica{ref mut flags, ..} =>
+            | &mut SentiToReplica{ref mut flags, ..}
+            | &mut GC{ref mut flags, ..} =>
                 &mut **flags,
 
             &mut Skeens2ToReplica{..} => unreachable!(),
@@ -506,7 +529,8 @@ impl<'a> Packet::Mut<'a> {
             | &mut Senti{ref mut flags, ..}
             | &mut SingleToReplica{ref mut flags, ..}
             | &mut MultiToReplica{ref mut flags, ..}
-            | &mut SentiToReplica{ref mut flags, ..} =>
+            | &mut SentiToReplica{ref mut flags, ..}
+            | &mut GC{ref mut flags, ..} =>
                 &mut **flags,
 
             &mut Skeens2ToReplica{..} => unreachable!(),
@@ -526,7 +550,8 @@ impl<'a> Packet::Mut<'a> {
             &mut Multi{ref mut locs, ..}
             | &mut Senti{ref mut locs, ..}
             | &mut MultiToReplica{ref mut locs, ..}
-            | &mut SentiToReplica{ref mut locs, ..} => &mut *locs,
+            | &mut SentiToReplica{ref mut locs, ..}
+            | &mut GC{ref mut locs, ..} => &mut *locs,
         }
     }
 
@@ -535,9 +560,12 @@ impl<'a> Packet::Mut<'a> {
         match self {
             &mut Multi{ref mut lock, ..} | &mut Senti{ref mut lock, ..}
             | &mut Skeens2ToReplica {ref mut lock, .. } => &mut *lock,
+
             &mut MultiToReplica{ref mut lock, ..} | &mut SentiToReplica{ref mut lock, ..} =>
                 &mut *lock,
-            &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..} => unreachable!(),
+
+            &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..}
+            | &mut GC{..} => unreachable!(),
         }
     }
 }
@@ -746,7 +774,8 @@ pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
     }*/
     use self::Packet::Ref::*;
     match bytes_as_entry(bytes) {
-        Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..} => unreachable!(),
+        Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
+        | GC{..} => unreachable!(),
 
         Single{data, ..} | Multi{data, ..}
         | SingleToReplica{data, ..} | MultiToReplica{data, ..}=> data,

@@ -728,6 +728,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(0.into(), 0.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
         stream.write_all(buffer.entry_slice()).unwrap();
@@ -789,6 +790,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(0.into(), 0.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         buffer.ensure_len();
         buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
@@ -960,6 +962,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(5.into(), 1.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
@@ -985,6 +988,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(6.into(), 1.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
@@ -1162,6 +1166,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(5.into(), 1.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         read_stream.write_all(buffer.entry_slice()).unwrap();
         read_stream.write_all(&[0; 6]).unwrap();
@@ -1187,6 +1192,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(6.into(), 1.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         read_stream.write_all(buffer.entry_slice()).unwrap();
         read_stream.write_all(&[0; 6]).unwrap();
@@ -1321,6 +1327,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(7.into(), 1.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         read_stream.write_all(buffer.entry_slice()).unwrap();
         read_stream.write_all(&[0; 6]).unwrap();
@@ -1346,6 +1353,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(8.into(), 1.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         read_stream.write_all(buffer.entry_slice()).unwrap();
         read_stream.write_all(&[0; 6]).unwrap();
@@ -1468,6 +1476,7 @@ mod tests {
             dependency_bytes: &0,
             loc: &OrderIndex(0.into(), 0.into()),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         });
         buffer.ensure_len();
         buffer.contents_mut().locs_mut()[0] = OrderIndex(0.into(), 1.into());

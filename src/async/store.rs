@@ -102,6 +102,7 @@ pub enum WriteState {
         u64,
     ),
     UnlockServer(Rc<RefCell<Vec<u8>>>),
+    GC(Vec<u8>),
 }
 
 struct UdpConnection {
@@ -599,6 +600,10 @@ where PerServer<S>: Connected,
                     self.add_get_lock_nums(msg)
                 }
             }
+            EntryLayout::GC => {
+                //TODO be less lazy
+                self.add_gc(msg)
+            },
             r @ EntryLayout::Sentinel | r @ EntryLayout::Lock =>
                 panic!("Invalid send request {:?}", r),
         }
@@ -627,6 +632,27 @@ where PerServer<S>: Connected,
             }
         }
         written
+    }
+
+    fn add_gc(&mut self, msg: Vec<u8>) -> bool {
+        debug_assert_eq!(bytes_as_entry(&msg).len(), msg.len());
+        let mut servers = self.get_servers_for_multi(&msg);
+        let last_server = servers.pop().unwrap();
+        for s in servers {
+            let per_server = &mut self.servers[s];
+            per_server.add_gc(msg.clone());
+            if !per_server.got_new_message {
+                per_server.got_new_message = true;
+                self.awake_io.push_back(s)
+            }
+        }
+        let per_server = &mut self.servers[last_server];
+        per_server.add_gc(msg);
+        if !per_server.got_new_message {
+            per_server.got_new_message = true;
+            self.awake_io.push_back(last_server)
+        }
+        true
     }
 
     fn add_skeens1(&mut self, msg: Vec<u8>) {
@@ -1007,6 +1033,7 @@ where PerServer<S>: Connected,
                     return true
                 }
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
+                WriteState::GC(..) => return false,
             };
 
             fn fill_locs(buf: &mut [u8], e: EntryContents,
@@ -1105,6 +1132,7 @@ where PerServer<S>: Connected,
                         dependency_bytes: &0,
                         loc: &read_loc,
                         horizon: &OrderIndex(0.into(), 0.into()),
+                        min: &OrderIndex(0.into(), 0.into()),
                     }.fill_vec(&mut b);
                     //FIXME better read packet handling
                     Some(WriteState::SingleServer(b))
@@ -1117,6 +1145,7 @@ where PerServer<S>: Connected,
                 trace!("CLIENT unlock failure");
                 None
             }
+            EntryLayout::GC => None,
         };
         if let Some(state) = write_state {
             let re_add = self.server_for_token_mut(token).handle_redo(state, kind);
@@ -1204,6 +1233,7 @@ where PerServer<S>: Connected,
         debug_assert!(
             bytes_as_entry(msg).layout() == EntryLayout::Multiput
             || bytes_as_entry(msg).layout() == EntryLayout::Sentinel
+            || bytes_as_entry(msg).layout() == EntryLayout::GC
         );
         bytes_as_entry(msg).locs()
             .iter()
@@ -1286,6 +1316,11 @@ pub trait Connected {
     );
 
     fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>);
+
+    fn add_gc(&mut self, buffer: Vec<u8>) -> bool {
+        let send = WriteState::GC(buffer);
+        self.add_send(send)
+    }
 
     fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
         let send = WriteState::ToLockServer(msg);
@@ -1983,7 +2018,8 @@ impl WriteState {
     where F: for<'a> FnOnce(&'a [u8]) -> R {
         use self::WriteState::*;
         match self {
-            &SingleServer(ref buf) | &ToLockServer(ref buf) => f(&**buf),
+            &SingleServer(ref buf) | &ToLockServer(ref buf)
+            | &GC(ref buf) => f(&**buf),
             &MultiServer(ref buf, _, _, is_sentinel) => {
                 let mut b = buf.borrow_mut();
                 if is_sentinel { slice_to_sentinel(&mut b[..]); }
@@ -2008,7 +2044,7 @@ impl WriteState {
     fn take(self) -> Vec<u8> {
         use self::WriteState::*;
         match self {
-            SingleServer(buf) | ToLockServer(buf) => buf,
+            SingleServer(buf) | ToLockServer(buf) | GC(buf) => buf,
             MultiServer(buf, ..) | UnlockServer(buf)
             | Skeens1(buf, ..) | Skeens2(buf, ..) =>
                 Rc::try_unwrap(buf).expect("taking from non unique WriteState")

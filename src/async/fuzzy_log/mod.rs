@@ -371,7 +371,7 @@ impl ThreadLog {
                 }
             }
 
-            EntryLayout::Lock => unreachable!(),
+            EntryLayout::Lock | EntryLayout::GC => unreachable!(),
         }
 
         let finished_server = self.continue_fetch_if_needed(read_loc.0);
@@ -462,7 +462,7 @@ impl ThreadLog {
         //      this is unnecessary and should be changed
         let entr = bytes_as_entry(packet);
         let deps = entr.dependencies();
-        let (needed, mut try_ret);
+        let (needed, try_ret);
         {
             let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
             needed = !pc.has_returned(loc.1);
@@ -971,6 +971,7 @@ impl ThreadLog {
             dependency_bytes: &0,
             loc: &OrderIndex(chain, index),
             horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
         }.fill_vec(&mut buffer);
         buffer
     }

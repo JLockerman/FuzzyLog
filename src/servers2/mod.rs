@@ -185,7 +185,7 @@ pub enum ToWorker<T: Send + Sync> {
     Read(Entry<'static>, BufferSlice, T),
     EmptyRead(entry, BufferSlice, T),
     Reply(BufferSlice, T),
-    ReturnBuffer(BufferSlice, T)
+    ReturnBuffer(BufferSlice, T),
 }
 
 #[derive(Clone, Debug)]
@@ -199,7 +199,7 @@ impl SkeensMultiStorage {
     fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
             let timestamps = vec![0; num_locs];
             let queue_indicies = vec![0; num_locs];
-            let mut data = RcSlice::with_len(entry_size);
+            let data = RcSlice::with_len(entry_size);
             let timestamps = timestamps.into_boxed_slice();
             let queue_indicies = queue_indicies.into_boxed_slice();
             let senti = sentinel_size.map(|s| {
@@ -312,6 +312,8 @@ pub enum ToReplicate {
     Skeens2(BufferSlice),
 
     UnLock(BufferSlice),
+
+    GC(BufferSlice),
 }
 
 #[derive(Debug, PartialEq, Eq)]

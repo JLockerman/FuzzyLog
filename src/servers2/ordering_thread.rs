@@ -10,7 +10,7 @@ use servers2::skeens::{
     Time,
     QueueIndex,
 };
-use servers2::trie::{AppendSlot, ByteLoc, Trie, ValEdge};
+use servers2::trie::{ByteLoc, Trie, ValEdge};
 
 
 impl<T: Copy> Chain<T> {
@@ -263,7 +263,13 @@ where ToWorkers: DistributeToWorkers<T> {
                 trace!("SERVER {:?} Lock", self.this_server_num);
                 //FIXME this needs to be perchain now
                 unimplemented!()
-            }
+            },
+
+            /////////////////////////////////////////////////
+
+            EntryLayout::GC => {
+                self.handle_gc(buffer, t)
+            },
         }
     }
 
@@ -668,13 +674,13 @@ where ToWorkers: DistributeToWorkers<T> {
             self.this_server_num, buffer.contents().locs());
 
         let mut slices = storage.unwrap_right();
-        let multi_storage = unsafe {
+        let multi_storage = {
             let mut multi_storage = &mut *slices.0;
             debug_assert_eq!(multi_storage.len(), buffer.entry_size());
             multi_storage.as_mut_ptr()
         };
         trace!("multi_storage @ {:?}", multi_storage);
-        let senti_storage = unsafe {
+        let senti_storage = {
             let mut senti_storage = &mut *slices.1;
             debug_assert_eq!(senti_storage.len(), buffer.contents().sentinel_entry_size());
             senti_storage.as_mut_ptr()
@@ -765,7 +771,6 @@ where ToWorkers: DistributeToWorkers<T> {
         to_replicate: ToReplicate,
         t: T
     ) {
-        use std::ptr;
         match to_replicate {
             ToReplicate::Data(buffer, storage_loc) => {
                 trace!("SERVER {:?} Append", self.this_server_num);
@@ -924,12 +929,8 @@ where ToWorkers: DistributeToWorkers<T> {
                 trace!("SERVER {:?} rep at {:?}",
                     self.this_server_num, buffer.contents().locs());
 
-                let multi_storage = unsafe {
-                    storage.0.as_mut_ptr()
-                };
-                let senti_storage = unsafe {
-                    storage.1.as_mut_ptr()
-                };
+                //let multi_storage = storage.0.as_mut_ptr();
+                let senti_storage = storage.1.as_mut_ptr();
                 //LOGIC sentinal storage must contain at least 64b
                 //      (128b with 64b entry address space)
                 //      thus has at least enough storage for 1 ptr per entry
@@ -995,6 +996,28 @@ where ToWorkers: DistributeToWorkers<T> {
                 //FIXME this needs to be perchain now
                 unimplemented!()
             }
+
+            ToReplicate::GC(buffer) => {
+                self.handle_gc(buffer, t)
+            },
         }
+    }
+
+    fn handle_gc(&mut self, buffer: BufferSlice, t: T) {
+        trace!("SERVER {:?} GC", self.this_server_num);
+        {
+            let locs = buffer.contents().locs();
+            for &OrderIndex(o, i) in locs {
+                let i = u32::from(i) as u64;
+                get_chain_mut(&mut self.log, o).map(|c| c.trie.set_min(i));
+            }
+            self.log.set_meta(());
+            self.log.refresh();
+            for &OrderIndex(o, _) in locs {
+                get_chain_mut(&mut self.log, o).map(|c| c.trie.delete_free());
+            }
+        }
+        //TODO send down before sending to ordering thread...
+        self.to_workers.send_to_worker(Reply(buffer, t));
     }
 }

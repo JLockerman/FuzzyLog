@@ -1,5 +1,4 @@
 use super::*;
-use packets::*;
 
 pub enum ToSend<'a> {
     Nothing,
@@ -59,6 +58,8 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         data_bytes: &0,
                         dependency_bytes: &0,
                         horizon: &OrderIndex(chain, last_valid_loc),
+                        //TODO
+                        min: &OrderIndex(chain, 0.into()),
                     }), t);
             (Some(buffer), u)
             //ServerResponse::EmptyRead(buffer, t)
@@ -485,27 +486,30 @@ where SendFn: for<'a> FnMut(Result<&'a [u8], EntryContents<'a>>) -> U {
                 Ok(send(Ok(packet.bytes())))
             }
 
-            None => Err(entry::from((log.trie.atomic_len() - 1) as u32)),
+            None => Err(log.trie.bounds()),
         }
     })
-    .unwrap_or_else(|| Err(entry::from(0)));
+    .unwrap_or_else(|| Err(0..0));
     match res {
         Ok(u) => u,
-        Err(last_valid_loc) => {
+        Err(valid_locs) => {
             trace!("WORKER {} overread {:?}: {:?} > {:?}",
-                worker_num, chain, index, last_valid_loc);
+                worker_num, chain, index, valid_locs);
             let (old_id, old_loc) = {
                 let e = buffer.contents();
                 (e.id().clone(), e.locs()[0])
             };
             let chain: order = old_loc.0;
+            let max = entry::from(valid_locs.end.saturating_sub(1) as u32);
+            let min = entry::from(valid_locs.start as u32);
             send(Err(EntryContents::Read{
                 id: &old_id,
                 flags: &EntryFlag::Nothing,
                 loc: &old_loc,
                 data_bytes: &0,
                 dependency_bytes: &0,
-                horizon: &OrderIndex(chain, last_valid_loc),
+                horizon: &OrderIndex(chain, max),
+                min: &OrderIndex(chain, min),
             }))
         }
     }

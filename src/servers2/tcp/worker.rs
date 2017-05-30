@@ -469,176 +469,6 @@ impl Worker {
                 self.clients.get_mut(&send_token).map(|p| p.is_staying_awake());
             }
             continue
-
-            /*let work_res = servers2::handle_to_worker(log_work, self.inner.worker_num);
-            //let (buffer, bytes, (wk, token, src_addr), storage_loc, just_ret) = work_res;
-            trace!("WORKER {} recv from log.", self.inner.worker_num);
-            let (recv_token, send_tok, buffer) = match work_res {
-
-                ServerResponse::None(b, (_wk, recv_token, src_addr)) => {
-                    trace!("WORKER {} just ret {:?} for {:?}",
-                        self.inner.worker_num, b.contents(), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    (recv_token, None, Some(b))
-                },
-
-                ServerResponse::Echo(b, (_wk, recv_token, src_addr)) => {
-                    trace!("WORKER {} echo {:?} for {:?}",
-                        self.inner.worker_num, b.contents(), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    //let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr);
-                    //let send_tok = self.send_bytes_down(&b.entry_slice(), next_hop);
-                    debug_assert_eq!(Some((_wk, recv_token)),
-                        self.inner.next_hop(self.inner.worker_num, recv_token, src_addr));
-                    self.clients.get_mut(&recv_token).unwrap().add_downstream_send(b.entry_slice());
-                    (recv_token, None, Some(b))
-                },
-
-                ServerResponse::Read(b, (_wk, recv_token, src_addr), read) => {
-                    trace!("WORKER {} ack read {:?} for {:?}",
-                        self.inner.worker_num, bytes_as_entry(read), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    debug_assert_eq!(Some((_wk, recv_token)),
-                        self.inner.next_hop(self.inner.worker_num, recv_token, src_addr));
-                    self.clients.get_mut(&recv_token).unwrap().add_downstream_send(read);
-                    (recv_token, None, Some(b))
-                },
-
-                ServerResponse::EmptyRead(b, (_wk, recv_token, src_addr)) => {
-                    trace!("WORKER {} ack empty-read {:?} for {:?}",
-                        self.inner.worker_num, b.entry_slice(), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    debug_assert_eq!(Some((_wk, recv_token)),
-                        self.inner.next_hop(self.inner.worker_num, recv_token, src_addr));
-                    //TODO put contents in send directly?
-                    self.clients.get_mut(&recv_token).unwrap().add_downstream_send(b.entry_slice());
-                    (recv_token, None, Some(b))
-                },
-
-                ServerResponse::FinishedAppend(b, (_wk, recv_token, src_addr), written, storage_loc) => {
-                    trace!("WORKER {} ack finished append {:?} for {:?}",
-                        self.inner.worker_num, b.entry_slice(), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr);
-                    let send_token = match next_hop {
-                        None => {
-                            trace!("WORKER {:?} re dist", self.inner.worker_num);
-                            self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, written)).ok().unwrap();
-                            None
-                        },
-                        Some((ref worker, ref tok))
-                            if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
-                            trace!("WORKER {:?} re dist {:?}", self.inner.worker_num, (worker, tok));
-                            self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, written)).ok().unwrap();
-                            None
-                        },
-                        Some((worker, DOWNSTREAM)) if worker == self.inner.worker_num => {
-                            trace!("WORKER {:?} DOWNSTREAM", self.inner.worker_num);
-                            let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
-                            let mut storage_log_bytes: [u8; 8] = [0; 8];
-                            LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                            client.add_downstream_send3(written, src_addr.bytes(), &storage_log_bytes);
-                            Some(DOWNSTREAM)
-                        }
-                        Some((worker, send_token)) if worker == self.inner.worker_num => {
-                            self.clients.get_mut(&send_token).unwrap().add_downstream_send(written);
-                            Some(send_token)
-                        }
-                        _ => unreachable!()
-                    };
-                    (recv_token, send_token, Some(b))
-                },
-
-                ServerResponse::FinishOldMultiappend(b, (_wk, recv_token, src_addr), written) => {
-                    trace!("WORKER {} ack finished append {:?} for {:?}",
-                        self.inner.worker_num, b.entry_slice(), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr);
-                    let send_token = match next_hop {
-                        None => {
-                            trace!("WORKER {:?} re dist", self.inner.worker_num);
-                            self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, written)).ok().unwrap();
-                            None
-                        },
-                        Some((ref worker, ref tok))
-                            if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
-                            trace!("WORKER {:?} re dist {:?}", self.inner.worker_num, (worker, tok));
-                            self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, written)).ok().unwrap();
-                            None
-                        },
-                        Some((worker, DOWNSTREAM)) if worker == self.inner.worker_num => {
-                            trace!("WORKER {:?} DOWNSTREAM", self.inner.worker_num);
-                            let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
-                            let mut storage_log_bytes: [u8; 8] = [0; 8];
-                            LittleEndian::write_u64(&mut storage_log_bytes, 0);
-                            client.add_downstream_send3(written, src_addr.bytes(), &storage_log_bytes);
-                            Some(DOWNSTREAM)
-                        }
-                        Some((worker, send_token)) if worker == self.inner.worker_num => {
-                            self.clients.get_mut(&send_token).unwrap().add_downstream_send(written);
-                            Some(send_token)
-                        }
-                        _ => unreachable!()
-                    };
-                    (recv_token, send_token, Some(b))
-                },
-
-
-                ServerResponse::FinishedSingletonSkeens1(b, (_wk, recv_token, src_addr), storage_loc) => {
-                    trace!("WORKER {} ack finished single skeens1 {:?} for {:?}",
-                        self.inner.worker_num, b.entry_slice(), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    //TODO
-                    //let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr)
-                    //    .expect("skeens replication is not yet implemented");
-                    (recv_token, None, Some(b))
-                }
-
-                ServerResponse::FinishedSingletonSkeens2(written, (_wk, recv_token, src_addr)) => {
-                    trace!("WORKER {} ack finished single skeens2 {:?} for {:?}",
-                        self.inner.worker_num, bytes_as_entry(written), src_addr);
-                    debug_assert_eq!(_wk, self.inner.worker_num);
-                    let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr);
-                    let send_token = match next_hop {
-                        None => {
-                            trace!("WORKER {:?} re dist", self.inner.worker_num);
-                            self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, written)).ok().unwrap();
-                            None
-                        },
-                        Some((ref worker, ref tok))
-                            if *worker != self.inner.worker_num && *tok != DOWNSTREAM => {
-                            trace!("WORKER {:?} re dist {:?}", self.inner.worker_num, (worker, tok));
-                            self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, written)).ok().unwrap();
-                            None
-                        }
-                        Some((worker, DOWNSTREAM)) if worker == self.inner.worker_num => {
-                            unimplemented!()
-                        }
-                        Some((worker, send_token)) if worker == self.inner.worker_num => {
-                            self.clients.get_mut(&send_token).unwrap().add_downstream_send(written);
-                            Some(send_token)
-                        }
-                        _ => unreachable!()
-                    };
-                    (recv_token, send_token, None)
-                },
-
-                ServerResponse::FinishedSkeens1(b, (_wk, recv_token, src_addr)) => {
-                    debug_assert_eq!(Some((_wk, recv_token)),
-                        self.inner.next_hop(self.inner.worker_num, recv_token, src_addr));
-                    //TODO put contents in send directly?
-                    self.clients.get_mut(&recv_token).unwrap().add_downstream_send(b.entry_slice());
-                    (recv_token, None, Some(b))
-                },
-
-                ServerResponse::FinishedSkeens2(written, (_wk, recv_token, src_addr)) => {
-                    debug_assert_eq!(Some((_wk, recv_token)),
-                        self.inner.next_hop(self.inner.worker_num, recv_token, src_addr));
-                    //TODO put contents in send directly?
-                    self.clients.get_mut(&recv_token).unwrap().add_downstream_send(written);
-                    (recv_token, None, None)
-                },
-            };*/
         }
     }// end handle_from_log
 
@@ -947,6 +777,11 @@ impl WorkerInner {
                     Troption::Right(Box::new((m, s)))
                 }
             },
+
+            EntryLayout::GC => {
+                //TODO send downstream first?
+                Troption::None
+            },
             _ => Troption::None,
         };
         self.print_data.new_to_log(1);
@@ -1026,6 +861,10 @@ impl WorkerInner {
                 trace!("WORKER {} replicate skeens 2", self.worker_num);
                 ToReplicate::Skeens2(buffer)
             }
+            EntryKind::GC => {
+                //TODO send downstream first?
+                ToReplicate::GC(buffer)
+            },
             _ => unreachable!(),
         };
         self.print_data.rep_to_log(1);

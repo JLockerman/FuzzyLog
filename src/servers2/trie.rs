@@ -28,6 +28,7 @@ type RootEdge = Box<RootTable>;
 struct RootTable {
     l6: Shortcut<ValEdge>,
     next_entry: u64,
+    min_entry: u64,
     first_entry: u64,
     alloc: AllocPtr,
     last_lock: u64,
@@ -140,7 +141,7 @@ impl AllocPtr {
 
     fn append(&mut self, data: Packet) -> (ValEdge, ByteLoc) {
         let bytes = data.bytes();
-        let mut storage_size = bytes.len(); // FIXME
+        let storage_size = bytes.len(); // FIXME
         //make sure that everything is 2byte aligned so we can use lsb to store end
         let alloc_size = if storage_size & 1 != 0 { storage_size + 1 } else { storage_size };
         let (append_to, loc) = self.prep_append(alloc_size);
@@ -188,7 +189,7 @@ impl AllocPtr {
     unsafe fn alloc_at(&mut self, start: ByteLoc, size: usize) -> ValEdge {
         if start == ::std::u64::MAX {
             let mut storage = Vec::with_capacity(size);
-            return unsafe {
+            return {
                 storage.set_len(size);
                 let bx = storage.into_boxed_slice();
                 ValEdge::end_from_ptr((&*Box::into_raw(bx)).as_ptr())
@@ -203,6 +204,7 @@ impl AllocPtr {
         }
     }
 
+    #[allow(dead_code)]
     unsafe fn get_mut(&mut self, loc: ByteLoc, size: usize) -> ValEdge {
         //TODO round up size?
         let append_ptr = self.alloc.get_mut(loc, size).unwrap().as_mut_ptr();
@@ -219,14 +221,15 @@ impl AllocPtr {
 }
 
 #[inline(always)]
-fn level_index_for_key(key: u64, depth: u8) {
-    ((key >> (ROOT_SHIFT - (SHIFT_LEN * depth))) & MASK) as usize;
+fn level_index_for_key(key: u64, depth: u8) -> usize {
+    ((key >> (ROOT_SHIFT - (SHIFT_LEN * depth))) & MASK) as usize
 }
 
 macro_rules! index {
     ($array:ident, $k:expr, $depth:expr) => {
         {
-            let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            let index = level_index_for_key($k, $depth);
+            //let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE, "index: {}", index);
             match *$array {
                 None => return None,
@@ -239,7 +242,8 @@ macro_rules! index {
 macro_rules! index_mut {
     ($array:ident, $k:expr, $depth:expr) => {
         {
-            let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            let index = level_index_for_key($k, $depth);
+            //let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE, "index: {}", index);
             match *$array {
                 None => return None,
@@ -252,7 +256,8 @@ macro_rules! index_mut {
 macro_rules! insert {
     ($array:ident, $k:expr, $depth:expr) => {
         {
-            let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            let index = level_index_for_key($k, $depth);
+            //let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE, "index: {}", index);
             match $array {
                 &mut Some(ref mut ptr) => &mut (**ptr)[index],
@@ -268,7 +273,8 @@ macro_rules! insert {
 macro_rules! atomic_index {
     ($array:ident, $k:expr, $depth:expr, $ord:expr) => {
         {
-            let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
+            let index = level_index_for_key($k, $depth);
+            //let index = (($k >> (ROOT_SHIFT - (SHIFT_LEN * $depth))) & MASK) as usize;
             assert!(index < ARRAY_SIZE, "index: {}", index);
             match $array {
                 None => return None,
@@ -334,7 +340,7 @@ unsafe impl<V> Send for AppendSlot<V> where V: Sync {}
 
 impl<'a> AppendSlot<Packet<'a>> {
     pub unsafe fn finish_append(self, data: Packet) -> Packet {
-        use std::sync::atomic::{AtomicPtr, Ordering};
+        use std::sync::atomic::Ordering;
 
         let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
         let bytes = data.bytes();
@@ -353,7 +359,7 @@ impl<'a> AppendSlot<Packet<'a>> {
 
     pub unsafe fn finish_append_with<F>(self, data: Packet, before_insert: F) -> Packet
     where F: FnOnce(MutPacket) {
-        use std::sync::atomic::{AtomicPtr, Ordering};
+        use std::sync::atomic::Ordering;
 
         let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
         let bytes = data.bytes();
@@ -414,7 +420,6 @@ impl Trie
 
     pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
     -> AppendSlot<Packet> {
-        use std::cmp::Ordering::*;
         let trie_entry = self.prep_append_at(key, ValEdge::null());
         let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
         AppendSlot {
@@ -461,6 +466,7 @@ impl Trie
         }
     }
 
+    //FIXME
     pub unsafe fn prep_append_at(&mut self, key: TrieIndex, val_ptr: ValEdge) -> *mut ValEdge {
         if key >= self.root.next_entry { self.root.next_entry = key + 1 }
         let root_index = ((key >> ROOT_SHIFT) & MASK) as usize;
@@ -523,6 +529,7 @@ impl Trie
         (next_entry, root.l6.append(val_ptr))
     }
 
+    #[allow(dead_code)]
     fn get_append_slot(&mut self, k: TrieIndex, storage_start: ByteLoc, size: usize)
     -> AppendSlot<Packet> {
         unsafe {
@@ -561,6 +568,7 @@ impl Trie
         (self.root.last_lock, self.root.last_unlock)
     }
 
+    #[allow(dead_code)]
     #[inline]
     fn get_entry_at(&mut self, k: TrieIndex) -> Option<&mut ValEdge> {
         let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
@@ -632,8 +640,13 @@ impl Trie
 
 impl Trie
  {
-    pub fn delete_until(&mut self, len: u64) {
+    pub fn set_min(&mut self, min: u64) {
+        self.root.min_entry = min
+    }
+
+    pub fn delete_free(&mut self) {
         let mut next = self.root.first_entry;
+        let max = self.root.min_entry;
         //((key >> (ROOT_SHIFT - (SHIFT_LEN * depth))) & MASK) as usize;
         macro_rules! iter {
             ($slot:ident) => ($slot.as_mut().into_iter().flat_map(|v| v.iter_mut()))
@@ -655,10 +668,10 @@ impl Trie
         }
 
         let mut num_removed = 0;
-        'remove: while next < len {
+        'remove: while next < max {
             for slot0 in self.root.array.iter_mut() {
                 walk!(1 slot6 in slot0 {
-                    if next >= len {
+                    if next >= max {
                         break 'remove
                     }
                     if slot6.is_end() {
@@ -679,44 +692,9 @@ impl Trie
             }
         }
 
-        self.root.alloc.free_first(num_removed)
+        self.root.first_entry = self.root.min_entry;
 
-        /*'remove: while next < len {
-            for slot0 in self.root.array.iter_mut() {
-                for slot1 in iter!(slot0) {
-                    for slot2 in iter!(slot1) {
-                        for slot3 in iter!(slot2) {
-                            for slot4 in iter!(slot3) {
-                                for slot5 in iter!(slot4) {
-                                    for slot6 in iter!(slot5) {
-                                        if next >= len {
-                                            break 'remove
-                                        }
-                                        if slot6.is_end() {
-                                            if slot6.is_multi() {
-                                                unimplemented!()
-                                            } else if slot6.is_big() {
-                                                unimplemented!()
-                                            } else {
-                                                num_removed += 1;
-                                            }
-                                        }
-                                        *slot6 = ValEdge::null();
-                                        next += 1;
-                                    }
-                                    *slot5 = None
-                                }
-                                *slot4 = None
-                            }
-                            *slot3 = None
-                        }
-                        *slot2 = None
-                    }
-                    *slot1 = None
-                }
-                *slot0 = None
-            }
-        }*/
+        self.root.alloc.free_first(num_removed)
     }
 }
 
@@ -727,6 +705,12 @@ impl Trie {
 
     pub fn atomic_len(&self) -> u64 {
         to_atomic_usize(&self.root.next_entry).load(Ordering::Relaxed) as u64
+    }
+
+    pub fn bounds(&self) -> ::std::ops::Range<u64> {
+        let min = to_atomic_usize(&self.root.min_entry).load(Ordering::Relaxed) as u64;
+        let max = to_atomic_usize(&self.root.next_entry).load(Ordering::Relaxed) as u64;
+        min..max
     }
 }
 
@@ -752,6 +736,9 @@ impl Trie
 
     pub fn atomic_get(&self, k: u64) -> Option<Packet> {
         unsafe {
+            if k < to_atomic_usize(&self.root.min_entry).load(Ordering::Relaxed) as u64 {
+                return None
+            }
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
             let l1: Option<&_> =
                 to_atom(&self.root.array[root_index]).load(Ordering::Relaxed).as_ref();
@@ -1112,6 +1099,7 @@ impl ValEdge {
         self.ptr().as_ref().map(|p| Packet::wrap_bytes(p))
     }
 
+    #[allow(dead_code)]
     unsafe fn as_sized_packet(&self, len: usize) -> Packet {
         Packet::wrap_slice(slice::from_raw_parts(self.ptr(), len))
     }
@@ -1134,7 +1122,7 @@ impl ValEdge {
 
     fn is_multi(self) -> bool {
         unsafe {
-            self.ptr().as_ref().map(|p| unsafe {
+            self.ptr().as_ref().map(|p| {
                 let var = EntryVar::try_var(slice::from_raw_parts(p, 1));
                  var == EntryVar::Multi || var == EntryVar::Senti
             }).unwrap_or(false)
@@ -1143,9 +1131,9 @@ impl ValEdge {
 
     fn is_data(self) -> bool {
         unsafe {
-            self.ptr().as_ref().map(|p| unsafe {
+            self.ptr().as_ref().map(|p|
                 EntryVar::try_var(slice::from_raw_parts(p, 1)) == EntryVar::Single
-            }).unwrap_or(false)
+            ).unwrap_or(false)
         }
     }
 
@@ -1352,6 +1340,57 @@ pub mod test {
 
         for j in 0x18000..0x28000u64 {
             assert!(m.get(j).is_none());
+        }
+    }
+
+    #[test]
+    pub fn gc() {
+        let mut p = Data(&0u8, &[OrderIndex(5.into(), 6.into())]).clone_entry();
+        let mut m = Trie::new();
+        for i in 0..255u8 {
+            unsafe { Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())])
+                .fill_entry(&mut p) }
+            assert_eq!(p.contents().into_singleton_builder(),
+                Data(&i, &[OrderIndex(5.into(), (i as u32).into())]));
+            assert_eq!(m.append(p.entry()), i as u64);
+            // println!("{:#?}", m);
+            // assert_eq!(m.get(&i).unwrap(), &i);
+
+            for j in 0..i + 1 {
+                let r = m.get(j as u64);
+                assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
+                    Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
+            }
+
+            for j in i + 1..255 {
+                let r = m.get(j as u64);
+                assert_eq!(r.map(Packet::contents), None);
+            }
+        }
+
+        m.set_min(128);
+        //TODO assert bounds
+
+        for j in 0..128 {
+            let r = m.atomic_get(j as u64);
+            assert!(r.is_none());
+        }
+        for j in 128..255 {
+            let r = m.atomic_get(j as u64);
+            assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
+                Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
+        }
+
+        m.delete_free();
+
+        for j in 0..128 {
+            let r = m.atomic_get(j as u64);
+            assert!(r.is_none());
+        }
+        for j in 128..255 {
+            let r = m.atomic_get(j as u64);
+            assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
+                Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
         }
     }
 
