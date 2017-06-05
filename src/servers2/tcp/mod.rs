@@ -16,7 +16,7 @@ use mio::tcp::*;
 
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
-use evmap::{self, ReadHandle};
+use evmap;
 
 mod worker;
 mod per_socket;
@@ -652,8 +652,6 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     extern crate env_logger;
-
-    use super::*;
 
     use socket_addr::Ipv4SocketAddr;
 
@@ -1417,7 +1415,7 @@ mod tests {
             lock: &0,
             locs: &[OrderIndex(9.into(), 0.into()), OrderIndex(10.into(), 0.into())],
             deps: &[],
-            data: &[123, 01, 256, 11],
+            data: &[123, 01, 255, 11],
         });
         write_stream.write_all(buffer.entry_slice()).unwrap();
         write_stream.write_all(read_addr.bytes()).unwrap();
@@ -1456,7 +1454,7 @@ mod tests {
             lock: &0,
             locs: &[OrderIndex(9.into(), 2.into()), OrderIndex(10.into(), 2.into())],
             deps: &[],
-            data: &[123, 01, 256, 11],
+            data: &[123, 01, 255, 11],
         });
     }
 

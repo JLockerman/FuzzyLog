@@ -1178,8 +1178,7 @@ pub mod test {
         let mut p = Data(&0u8, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            unsafe { Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())])
-                .fill_entry(&mut p) }
+            Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p);
             assert_eq!(p.contents().into_singleton_builder(),
                 Data(&i, &[OrderIndex(5.into(), (i as u32).into())]));
             assert_eq!(m.append(p.entry()), i as u64);
@@ -1303,11 +1302,10 @@ pub mod test {
     #[test]
     pub fn even_more_append() {
         let mut p = Data(&32u64, &[OrderIndex(5.into(), 6.into())]).clone_entry();
-        let entry_size = p.entry_size();
         let mut m = Trie::new();
         for i in 0..0x18000u64 {
             assert_eq!(m.len(), i);
-            unsafe { Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p) }
+            Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p);
             assert_eq!(m.append(p.entry()), i);
             //println!("{:#?}", m);
             //println!("{:#?}", i);
@@ -1348,8 +1346,7 @@ pub mod test {
         let mut p = Data(&0u8, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            unsafe { Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())])
-                .fill_entry(&mut p) }
+            Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p);
             assert_eq!(p.contents().into_singleton_builder(),
                 Data(&i, &[OrderIndex(5.into(), (i as u32).into())]));
             assert_eq!(m.append(p.entry()), i as u64);

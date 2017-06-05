@@ -3,7 +3,7 @@
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
-#[cfg(test)] #[macro_use] extern crate grabbag_macros;
+// #[cfg(test)] #[macro_use] extern crate grabbag_macros;
 #[macro_use] extern crate log;
 #[macro_use] extern crate newtype_derive;
 #[macro_use] extern crate packet_macro_impl;

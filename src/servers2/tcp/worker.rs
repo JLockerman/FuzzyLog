@@ -35,6 +35,7 @@ pub enum WorkerToDist {
     ToClientB(Ipv4SocketAddr, Box<[u8]>),
 }
 
+#[allow(dead_code)]
 pub enum DistToWorker {
     NewClient(mio::Token, TcpStream),
     //ToClient(ToWorker<(usize, mio::Token, Ipv4SocketAddr)>),
@@ -473,7 +474,7 @@ impl Worker {
     }// end handle_from_log
 
     fn send_downsteam(
-        &mut self, recv_token: mio::Token, src_addr: Ipv4SocketAddr, to_send: ToSend
+        &mut self, _recv_token: mio::Token, src_addr: Ipv4SocketAddr, to_send: ToSend
     ) {
         match to_send {
             ToSend::Nothing => return,
@@ -755,7 +756,7 @@ impl WorkerInner {
                 return
             },
 
-            EntryLayout::Multiput | EntryLayout::Sentinel => unsafe {
+            EntryLayout::Multiput | EntryLayout::Sentinel => {
                 let (size, senti_size, num_locs, has_senti) = {
                     let e = buffer.contents();
                     let locs = e.locs();
@@ -772,8 +773,8 @@ impl WorkerInner {
                     }
                     Troption::Left(storage)
                 } else {
-                    let mut m = RcSlice::with_len(size);
-                    let mut s = RcSlice::with_len(senti_size);
+                    let m = RcSlice::with_len(size);
+                    let s = RcSlice::with_len(senti_size);
                     Troption::Right(Box::new((m, s)))
                 }
             },
@@ -818,9 +819,9 @@ impl WorkerInner {
                     let e = buffer.contents();
                     (e.len(), e.sentinel_entry_size())
                 };
-                let storage = unsafe {
-                    let mut m = RcSlice::with_len(size);
-                    let mut s = RcSlice::with_len(senti_size);
+                let storage = {
+                    let m = RcSlice::with_len(size);
+                    let s = RcSlice::with_len(senti_size);
                     Box::new((m, s))
                 };
                 ToReplicate::Multi(buffer, storage)

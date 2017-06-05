@@ -5,23 +5,17 @@ use std::{mem, ptr, slice};
 //use std::rc::Rc;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::Ordering;
 
 // use prelude::*;
 use buffer::Buffer;
 
 use servers2::skeens::{
     SkeensState,
-    SkeensAppendRes,
-    SkeensSetMaxRes,
-    GotMax,
-    ReplicatedSkeens,
     Time,
     QueueIndex,
 };
-use servers2::trie::{AppendSlot, ByteLoc, Trie};
-
-use hash::HashMap;
+use servers2::trie::{AppendSlot, Trie};
 
 use evmap::{WriteHandle, ReadHandle};
 

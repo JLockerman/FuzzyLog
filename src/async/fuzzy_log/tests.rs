@@ -526,7 +526,7 @@ macro_rules! async_tests {
             lh.snapshot(67.into());
 
             while let Some(..) = lh.get_next() {}
-            let id = lh.simple_causal_append(&111, &mut [69.into()], &mut [67.into(), 68.into()]);
+            let _ = lh.simple_causal_append(&111, &mut [69.into()], &mut [67.into(), 68.into()]);
             lh.wait_for_all_appends();
 
 
@@ -560,7 +560,7 @@ macro_rules! async_tests {
             let _ = lh.append(70.into(), &63,  &[]);
             let _ = lh.append(71.into(), &-2,  &[]);
             let _ = lh.append(71.into(), &-56, &[]);
-            let id = lh.simple_causal_append(&111, &mut [72.into()], &mut [70.into(), 71.into()]);
+            let _ = lh.simple_causal_append(&111, &mut [72.into()], &mut [70.into(), 71.into()]);
             lh.wait_for_all_appends();
 
 
@@ -623,8 +623,8 @@ macro_rules! async_tests {
             });
 
             let mut lh = new_log::<i32>();
-            h1.join();
-            h2.join();
+            h1.join().unwrap();
+            h2.join().unwrap();
 
             lh.snapshot(73.into());
             let num_appends = NUM_APPENDS.load(Ordering::Acquire);
@@ -702,8 +702,8 @@ macro_rules! async_tests {
                 //println!("{:?}", got);
             });
 
-            h0.join();
-            h1.join();
+            h0.join().unwrap();
+            h1.join().unwrap();
         }
 
         #[test]
@@ -917,7 +917,7 @@ macro_rules! async_tests {
             fn start_tcp_servers()
             {
                 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
-                use std::{thread, iter};
+                use std::thread;
 
                 use mio;
 
@@ -949,12 +949,8 @@ macro_rules! async_tests {
     };
     (rstcp) => {
         mod rstcp {
-            use std::sync::{Arc, Mutex};
             use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
             use std::{thread, iter};
-            use async::store::AsyncTcpStore;
-            use std::sync::mpsc;
-            use std::mem;
             use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 
             use mio;
@@ -1062,7 +1058,7 @@ macro_rules! async_tests {
                 start_tcp_servers();
 
                 LogHandle::with_store(interesting_chains.into_iter(), |client| {
-                    let client: ::std::sync::mpsc::Sender<Message> = client;
+                    let client: mpsc::Sender<Message> = client;
                     let to_store_m = Arc::new(Mutex::new(None));
                     let tsm = to_store_m.clone();
                     #[allow(non_upper_case_globals)]
@@ -1072,7 +1068,7 @@ macro_rules! async_tests {
                         let addrs: (SocketAddr, SocketAddr) = (addr_str1.parse().unwrap(), addr_str2.parse().unwrap());
                         let mut event_loop = mio::Poll::new().unwrap();
                         trace!("RTCP make store");
-                        let (store, to_store) = ::async::store::AsyncTcpStore::replicated_tcp(
+                        let (store, to_store) = AsyncTcpStore::replicated_tcp(
                             None::<SocketAddr>,
                             ::std::iter::once::<(SocketAddr, SocketAddr)>(addrs),
                             client, &mut event_loop
@@ -1096,6 +1092,7 @@ macro_rules! async_tests {
             fn start_tcp_servers() {
                 use std::net::{IpAddr, Ipv4Addr};
                 use std::time::Duration;
+                #[allow(non_upper_case_globals)]
                 const addr_strs: &'static [&'static str] = &[&"0.0.0.0:13395", &"0.0.0.0:13396"];
 
                 static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;

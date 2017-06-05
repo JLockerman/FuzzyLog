@@ -442,7 +442,7 @@ pub mod test {
             }
 
             {
-                let (s, l) = trie.append(2);
+                let (s, _l) = trie.append(2);
                 s[0] = 7;
                 s[1] = 9;
             }
@@ -457,9 +457,9 @@ pub mod test {
                 assert_eq!(r, Some(&mut [9][..]), "@ {}", 0x18000);
             }
 
-            let r = trie.get_mut(0x18002 as u64, 8190);
+            let _r = trie.get_mut(0x18002 as u64, 8190);
             //TODO no longer valid now that we use unimplemented for the last level of the trie
-            //assert_eq!(r, Some(&mut [0; 8190][..]), "@ {}", 0x18002);
+            //assert_eq!(_r, Some(&mut [0; 8190][..]), "@ {}", 0x18002);
         }
     }
 
