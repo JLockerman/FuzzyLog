@@ -1,7 +1,7 @@
 //FIXME replace with regular RC one Rc<[u8]> can be implemented stably
 use std::mem::{drop, forget, size_of, size_of_val, transmute};
 use std::ops::{Deref, DerefMut};
-use std::{ptr, slice};
+use std::ptr;
 use std::sync::atomic::{self, AtomicUsize, Ordering};
 
 pub struct RcSlice {
@@ -62,6 +62,7 @@ impl RcSlice {
         drop(Vec::from_raw_parts(ptr, aligned_len, aligned_len));
     }
 
+    #[allow(dead_code)]
     unsafe fn get_mut(&mut self) -> &mut [u8] {
         &mut self.ptr.data
     }
@@ -126,6 +127,7 @@ impl Default for RcSlice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::slice;
 
     #[test]
     fn new() {

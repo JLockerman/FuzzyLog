@@ -408,6 +408,7 @@ pub enum ReplicatedSkeens<T> {
     Single{index: TrieIndex, storage: ValEdge, t: T},
 }
 
+#[allow(dead_code)]
 enum WaitingForMax<T> {
     GotMaxMulti{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
     SimpleSingle{timestamp: u64, node_num: u64, storage: ValEdge, t: T, id: Uuid},
@@ -680,6 +681,7 @@ impl<T> GotMax<T> {
         }
     }
 
+    #[allow(dead_code)]
     fn is_multi(&self) -> bool {
         use self::GotMax::*;
         match self {

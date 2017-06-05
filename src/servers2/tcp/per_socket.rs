@@ -402,6 +402,7 @@ impl PerSocket {
         }
     }
 
+    #[allow(dead_code)]
     pub fn add_downstream_contents2(
         &mut self, to_write: EntryContents, addr: &[u8]
     ) {
