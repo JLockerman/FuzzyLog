@@ -859,7 +859,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     c.skeens.replicate_round2(&id, max_timestamp, index, |rep| match rep {
                         Multi{index, storage, max_timestamp, t} => {
                             trace!("SERVER finish sk multi rep ({:?}, {:?})", o, index);
-                            let slot = unsafe { trie.prep_append_at(index, ValEdge::null()) };
+                            let slot = unsafe { trie.prep_append_at(index) };
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2MultiReplica {
@@ -875,7 +875,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             //trace!("SERVER finish sk single rep");
                             //let size = buffer.entry_size();
                             trace!("SERVER replicating single sk2 ({:?}, {:?})", o, index);
-                            let slot = trie.prep_append_at(index, ValEdge::null());
+                            let slot = trie.prep_append_at(index);
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2SingleReplica {
@@ -945,10 +945,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         assert!(index != entry::from(0));
                         unsafe {
                             let ptr = self.ensure_trie(chain)
-                                .prep_append_at(
-                                    u32::from(index) as u64,
-                                    ValEdge::null(),
-                                );
+                                .prep_append_at(u32::from(index) as u64);
                             *next_ptr_storage = ptr;
                             next_ptr_storage = next_ptr_storage.offset(1);
                         };
@@ -962,10 +959,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             assert!(index != entry::from(0));
                             unsafe {
                                 let ptr = self.ensure_trie(chain)
-                                    .prep_append_at(
-                                        u32::from(index) as u64,
-                                        ValEdge::null(),
-                                    );
+                                    .prep_append_at(u32::from(index) as u64);
                                 *next_ptr_storage = ptr;
                                 next_ptr_storage = next_ptr_storage.offset(1);
                             };

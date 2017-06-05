@@ -420,7 +420,7 @@ impl Trie
 
     pub unsafe fn partial_append_at(&mut self, key: TrieIndex, storage_start: ByteLoc, storage_size: usize)
     -> AppendSlot<Packet> {
-        let trie_entry = self.prep_append_at(key, ValEdge::null());
+        let trie_entry = self.prep_append_at(key);
         let val_ptr = self.root.alloc.alloc_at(storage_start, storage_size);
         AppendSlot {
             trie_entry: trie_entry,
@@ -467,7 +467,7 @@ impl Trie
     }
 
     //FIXME
-    pub unsafe fn prep_append_at(&mut self, key: TrieIndex, val_ptr: ValEdge) -> *mut ValEdge {
+    pub unsafe fn prep_append_at(&mut self, key: TrieIndex) -> *mut ValEdge {
         if key >= self.root.next_entry { self.root.next_entry = key + 1 }
         let root_index = ((key >> ROOT_SHIFT) & MASK) as usize;
         let l1 = &mut self.root.array[root_index];
