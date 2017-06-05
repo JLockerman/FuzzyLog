@@ -65,7 +65,7 @@ pub mod c_binidings {
     use packets::*;
     //use tcp_store::TcpStore;
     // use multitcp_store::TcpStore;
-    use async::fuzzy_log::log_handle::LogHandle;
+    use async::fuzzy_log::log_handle::{LogHandle, GetRes};
 
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
@@ -473,7 +473,7 @@ pub mod c_binidings {
         let val = dag.get_next();
         unsafe {
             let (mycolors, numcolors) = match val {
-                Some((data, inhabited_colors)) => {
+                Ok((data, inhabited_colors)) => {
                     *data_read = <[u8] as Storeable>::copy_to_mut(data, data_out);
                     let numcolors = inhabited_colors.len();
                     let mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
@@ -485,9 +485,10 @@ pub mod c_binidings {
                     //ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
                     (mycolors, numcolors)
                 }
-                None => {
+                Err(GetRes::Done) => {
                     (ptr::null_mut(), 0)
                 }
+                _ => unimplemented!(),
             };
 
             ptr::write(inhabits_out, colors{ numcolors: numcolors, mycolors: mycolors});
@@ -523,19 +524,18 @@ pub mod c_binidings {
         data_read: *mut usize,
         num_locs: *mut usize,
     ) -> Vals {
-        use async::fuzzy_log::log_handle::TryGetNextErr;
-
         assert!(data_read != ptr::null_mut());
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         let val = dag.try_get_next();
         let (data, locs): (&[u8], &[OrderIndex]) = match val {
             Ok((data, locs)) => (data, locs),
-            Err(TryGetNextErr::NothingReady) => (&[], &[]),
-            Err(TryGetNextErr::Done) => {
+            Err(GetRes::NothingReady) => (&[], &[]),
+            Err(GetRes::Done) => {
                 ptr::write(data_read, 0);
                 ptr::write(num_locs, 0);
                 return Vals { data: ptr::null(), locs: ptr::null() }
             },
+            _ => unimplemented!(),
         };
 
         ptr::write(data_read, data.len());

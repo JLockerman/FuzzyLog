@@ -42,10 +42,12 @@ impl<V: ?Sized> Drop for LogHandle<V> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TryGetNextErr {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GetRes {
+    NothingReady,
     Done,
-    NothingReady
+    Disconnected,
+    AlreadyGCd,
 }
 
 impl<V> LogHandle<[V]>
@@ -396,11 +398,11 @@ where V: Storeable {
     }
 
     //TODO return two/three slices?
-    pub fn get_next(&mut self) -> Option<(&V, &[OrderIndex])>
+    pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {
         if self.num_snapshots == 0 {
             trace!("HANDLE read with no snap.");
-            return None
+            return Err(GetRes::Done)
         }
 
         'recv: loop {
@@ -418,7 +420,7 @@ where V: Storeable {
             self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
             if self.num_snapshots == 0 {
                 trace!("HANDLE finished all snaps.");
-                return None
+                return Err(GetRes::Done)
             }
         }
 
@@ -433,14 +435,14 @@ where V: Storeable {
                 *e = i
             }
         }
-        Some((val, locs))
+        Ok((val, locs))
     }
 
-    pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), TryGetNextErr>
+    pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {
         if self.num_snapshots == 0 {
             trace!("HANDLE read with no snap.");
-            return Err(TryGetNextErr::Done)
+            return Err(GetRes::Done)
         }
 
         'recv: loop {
@@ -448,7 +450,7 @@ where V: Storeable {
             let read = self.ready_reads.try_recv();
             let read = match read {
                 Ok(v) => v,
-                Err(..) => return Err(TryGetNextErr::NothingReady),
+                Err(..) => return Err(GetRes::NothingReady),
             };
             let old = mem::replace(&mut self.curr_entry, read);
             if old.capacity() > 0 {
@@ -463,7 +465,7 @@ where V: Storeable {
             self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
             if self.num_snapshots == 0 {
                 trace!("HANDLE finished all snaps.");
-                return Err(TryGetNextErr::Done)
+                return Err(GetRes::Done)
             }
         }
 

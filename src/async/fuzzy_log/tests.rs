@@ -4,7 +4,7 @@ macro_rules! async_tests {
 
         use packets::*;
         use async::fuzzy_log::*;
-        use async::fuzzy_log::log_handle::LogHandle;
+        use async::fuzzy_log::log_handle::{LogHandle, GetRes};
 
         use std::collections::{HashMap, HashSet};
 
@@ -16,7 +16,7 @@ macro_rules! async_tests {
         fn test_get_none() {
             let _ = env_logger::init();
             let mut lh = $new_thread_log::<()>(vec![1.into()]);
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -25,7 +25,7 @@ macro_rules! async_tests {
             let _ = env_logger::init();
             let mut lh = $new_thread_log::<()>(vec![1.into()]);
             lh.snapshot(1.into());
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -39,11 +39,11 @@ macro_rules! async_tests {
             let _ = lh.append(3.into(), &32, &[]);
             let _ = lh.append(3.into(), &-1, &[]);
             lh.snapshot(3.into());
-            assert_eq!(lh.get_next(), Some((&1,  &[OrderIndex(3.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(), Some((&17, &[OrderIndex(3.into(), 2.into())][..])));
-            assert_eq!(lh.get_next(), Some((&32, &[OrderIndex(3.into(), 3.into())][..])));
-            assert_eq!(lh.get_next(), Some((&-1, &[OrderIndex(3.into(), 4.into())][..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Ok((&1,  &[OrderIndex(3.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&17, &[OrderIndex(3.into(), 2.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&32, &[OrderIndex(3.into(), 3.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&-1, &[OrderIndex(3.into(), 4.into())][..])));
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -68,7 +68,7 @@ macro_rules! async_tests {
             let total_len = cols.iter().fold(0, |len, col| len + col.len());
             for _ in 0..total_len {
                 let next = lh.get_next();
-                assert!(next.is_some());
+                assert!(next.is_ok());
                 let (&n, ois) = next.unwrap();
                 assert_eq!(ois.len(), 1);
                 let OrderIndex(o, i) = ois[0];
@@ -79,7 +79,7 @@ macro_rules! async_tests {
                 let c = is[off as usize] - 1;
                 assert_eq!(n, cols[off as usize][c as usize]);
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -97,12 +97,12 @@ macro_rules! async_tests {
             let _ = lh.append(8.into(), &0,   &[OrderIndex(7.into(), 2.into())]);
             lh.snapshot(8.into());
             lh.snapshot(7.into());
-            assert_eq!(lh.get_next(), Some((&63,  &[OrderIndex(7.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(), Some((&-2,  &[OrderIndex(8.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(), Some((&-56, &[OrderIndex(8.into(), 2.into())][..])));
-            assert_eq!(lh.get_next(), Some((&111, &[OrderIndex(7.into(), 2.into())][..])));
-            assert_eq!(lh.get_next(), Some((&0,   &[OrderIndex(8.into(), 3.into())][..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Ok((&63,  &[OrderIndex(7.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&-2,  &[OrderIndex(8.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&-56, &[OrderIndex(8.into(), 2.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&111, &[OrderIndex(7.into(), 2.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&0,   &[OrderIndex(8.into(), 3.into())][..])));
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -120,9 +120,9 @@ macro_rules! async_tests {
             for i in 0..19i32 {
                 let u = i as u32;
                 trace!("LONG read {}", i);
-                assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(9.into(), (u + 1).into())][..])));
+                assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(9.into(), (u + 1).into())][..])));
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -144,9 +144,9 @@ macro_rules! async_tests {
             }
             lh.snapshot(20.into());
             for &i in &interesting_chains {
-                assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(i, 1.into())][..])));
+                assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(i, 1.into())][..])));
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -161,17 +161,17 @@ macro_rules! async_tests {
             }
             lh.snapshot(21.into());
             for i in 0u32..10 {
-                assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
+                assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
             for i in 10u32..21 {
                 let _ = lh.append(21.into(), &i, &[]);
             }
             lh.snapshot(21.into());
             for i in 10u32..21 {
-                assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
+                assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -186,17 +186,17 @@ macro_rules! async_tests {
             }
             lh.snapshot(22.into());
             for i in 0u32..2 {
-                assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
+                assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
             for i in 2u32..4 {
                 let _ = lh.append(22.into(), &i, &[]);
             }
             lh.snapshot(22.into());
             for i in 2u32..4 {
-                assert_eq!(lh.get_next(), Some((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
+                assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -212,15 +212,15 @@ macro_rules! async_tests {
             let _ = lh.multiappend(&columns, &0xcad , &[]);
             let _ = lh.multiappend(&columns, &13    , &[]);
             lh.snapshot(24.into());
-            assert_eq!(lh.get_next(), Some((&0xfeed, &[OrderIndex(23.into(), 1.into()),
+            assert_eq!(lh.get_next(), Ok((&0xfeed, &[OrderIndex(23.into(), 1.into()),
                 OrderIndex(24.into(), 1.into()), OrderIndex(25.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(), Some((&0xbad , &[OrderIndex(23.into(), 2.into()),
+            assert_eq!(lh.get_next(), Ok((&0xbad , &[OrderIndex(23.into(), 2.into()),
                 OrderIndex(24.into(), 2.into()), OrderIndex(25.into(), 2.into())][..])));
-            assert_eq!(lh.get_next(), Some((&0xcad , &[OrderIndex(23.into(), 3.into()),
+            assert_eq!(lh.get_next(), Ok((&0xcad , &[OrderIndex(23.into(), 3.into()),
                 OrderIndex(24.into(), 3.into()), OrderIndex(25.into(), 3.into())][..])));
-            assert_eq!(lh.get_next(), Some((&13    , &[OrderIndex(23.into(), 4.into()),
+            assert_eq!(lh.get_next(), Ok((&13    , &[OrderIndex(23.into(), 4.into()),
                 OrderIndex(24.into(), 4.into()), OrderIndex(25.into(), 4.into())][..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -237,14 +237,14 @@ macro_rules! async_tests {
             }
             lh.snapshot(26.into());
             assert_eq!(lh.get_next(),
-                Some((&2, &[OrderIndex(29.into(), 1.into()), OrderIndex(30.into(), 1.into())][..])));
+                Ok((&2, &[OrderIndex(29.into(), 1.into()), OrderIndex(30.into(), 1.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&4, &[OrderIndex(28.into(), 1.into()), OrderIndex(29.into(), 2.into())][..])));
+                Ok((&4, &[OrderIndex(28.into(), 1.into()), OrderIndex(29.into(), 2.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&6, &[OrderIndex(27.into(), 1.into()), OrderIndex(28.into(), 2.into())][..])));
+                Ok((&6, &[OrderIndex(27.into(), 1.into()), OrderIndex(28.into(), 2.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&8, &[OrderIndex(26.into(), 1.into()), OrderIndex(27.into(), 2.into())][..])));
-            assert_eq!(lh.get_next(), None);
+                Ok((&8, &[OrderIndex(26.into(), 1.into()), OrderIndex(27.into(), 2.into())][..])));
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -262,16 +262,16 @@ macro_rules! async_tests {
             let _ = lh.multiappend(&columns, &17     , &[]);
             lh.snapshot(33.into());
             let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 1.into())).collect();
-            assert_eq!(lh.get_next(), Some((&82352 , &locs[..])));
+            assert_eq!(lh.get_next(), Ok((&82352 , &locs[..])));
             let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 2.into())).collect();
-            assert_eq!(lh.get_next(), Some((&018945, &locs[..])));
+            assert_eq!(lh.get_next(), Ok((&018945, &locs[..])));
             let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 3.into())).collect();
-            assert_eq!(lh.get_next(), Some((&119332, &locs[..])));
+            assert_eq!(lh.get_next(), Ok((&119332, &locs[..])));
             let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 4.into())).collect();
-            assert_eq!(lh.get_next(), Some((&0     , &locs[..])));
+            assert_eq!(lh.get_next(), Ok((&0     , &locs[..])));
             let locs: Vec<_> = columns.iter().map(|&o| OrderIndex(o, 5.into())).collect();
-            assert_eq!(lh.get_next(), Some((&17    , &locs[..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Ok((&17    , &locs[..])));
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -289,9 +289,9 @@ macro_rules! async_tests {
             for i in 1..32 {
                 let locs: Vec<_> = columns.iter()
                     .map(|&o| OrderIndex(o, i.into())).collect();
-                assert_eq!(lh.get_next(), Some((&i , &locs[..])));
+                assert_eq!(lh.get_next(), Ok((&i , &locs[..])));
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -321,13 +321,13 @@ macro_rules! async_tests {
                 }
             }
             assert_eq!(lh.get_next(),
-                Some((&0xbaaa,
+                Ok((&0xbaaa,
                     &[OrderIndex(49.into(), 2.into()),
                       OrderIndex( 0.into(), 0.into()),
                       OrderIndex(50.into(), 2.into()),
                       OrderIndex(51.into(), 2.into())
                      ][..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -360,15 +360,15 @@ macro_rules! async_tests {
                 }
             }
             lh.snapshot(53.into());
-            assert_eq!(lh.get_next(), Some((&101, &[OrderIndex(53.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&101, &[OrderIndex(53.into(), 1.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&-7777,
+                Ok((&-7777,
                     &[OrderIndex(53.into(), 2.into()),
                       OrderIndex( 0.into(), 0.into()),
                       OrderIndex(52.into(), 2.into()),
                       OrderIndex(54.into(), 2.into())
                      ][..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -384,18 +384,18 @@ macro_rules! async_tests {
             let _ = lh.append(57.into(), &-99, &[]);
             let _ = lh.dependent_multiappend(&[55.into()], &[56.into(), 57.into()], &-7777, &[]);
             lh.snapshot(56.into());
-            assert_eq!(lh.get_next(), Some((&101, &[OrderIndex(56.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&101, &[OrderIndex(56.into(), 1.into())][..])));
             lh.snapshot(55.into());
-            assert_eq!(lh.get_next(), Some((&99999, &[OrderIndex(55.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(), Some((&-99, &[OrderIndex(57.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&99999, &[OrderIndex(55.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&-99, &[OrderIndex(57.into(), 1.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&-7777,
+                Ok((&-7777,
                     &[OrderIndex(55.into(), 2.into()),
                       OrderIndex( 0.into(), 0.into()),
                       OrderIndex(56.into(), 2.into()),
                       OrderIndex(57.into(), 2.into())
                      ][..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -414,11 +414,11 @@ macro_rules! async_tests {
             let _ = lh.append(60.into(), &-1 , &[]);
             let _ = lh.multiappend(&[58.into(), 60.into()], &0xdeed, &[]);
             lh.snapshot(58.into());
-            assert_eq!(lh.get_next(), Some((&0xfeed, &[OrderIndex(58.into(), 1.into()),
+            assert_eq!(lh.get_next(), Ok((&0xfeed, &[OrderIndex(58.into(), 1.into()),
                 OrderIndex(60.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(), Some((&0xbad, &[OrderIndex(59.into(), 1.into()),
+            assert_eq!(lh.get_next(), Ok((&0xbad, &[OrderIndex(59.into(), 1.into()),
                 OrderIndex(60.into(), 2.into())][..])));
-            assert_eq!(lh.get_next(), Some((&0xdeed, &[OrderIndex(58.into(), 2.into()),
+            assert_eq!(lh.get_next(), Ok((&0xdeed, &[OrderIndex(58.into(), 2.into()),
                 OrderIndex(60.into(), 4.into())][..])));
         }
 
@@ -436,16 +436,16 @@ macro_rules! async_tests {
             let _ = lh.color_append(&(), &mut [61.into()], &mut [], false);
             lh.snapshot(61.into());
             assert_eq!(lh.get_next(),
-                Some((&(), &[OrderIndex(61.into(), 1.into())][..])));
+                Ok((&(), &[OrderIndex(61.into(), 1.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&(), &[OrderIndex(61.into(), 2.into()),
+                Ok((&(), &[OrderIndex(61.into(), 2.into()),
                     OrderIndex(62.into(), 1.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&(), &[OrderIndex(61.into(), 3.into()),
+                Ok((&(), &[OrderIndex(61.into(), 3.into()),
                     OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
             assert_eq!(lh.get_next(),
-                Some((&(), &[OrderIndex(61.into(), 4.into())][..])));
-            assert_eq!(lh.get_next(), None);
+                Ok((&(), &[OrderIndex(61.into(), 4.into())][..])));
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -460,11 +460,11 @@ macro_rules! async_tests {
             let _ = lh.async_append(63.into(), &-1, &[]);
             lh.wait_for_all_appends();
             lh.snapshot(63.into());
-            assert_eq!(lh.get_next(), Some((&1,  &[OrderIndex(63.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(), Some((&17, &[OrderIndex(63.into(), 2.into())][..])));
-            assert_eq!(lh.get_next(), Some((&32, &[OrderIndex(63.into(), 3.into())][..])));
-            assert_eq!(lh.get_next(), Some((&-1, &[OrderIndex(63.into(), 4.into())][..])));
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Ok((&1,  &[OrderIndex(63.into(), 1.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&17, &[OrderIndex(63.into(), 2.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&32, &[OrderIndex(63.into(), 3.into())][..])));
+            assert_eq!(lh.get_next(), Ok((&-1, &[OrderIndex(63.into(), 4.into())][..])));
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -486,27 +486,27 @@ macro_rules! async_tests {
                     lh.get_next().map(
                         |(&v, l)| (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                     ),
-                    Some((0xfeed, OrderIndex(col, 1.into())))
+                    Ok((0xfeed, OrderIndex(col, 1.into())))
                 );
                 assert_eq!(
                     lh.get_next().map(|(&v, l)|
                         (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                     ),
-                    Some((0xbad, OrderIndex(col, 2.into())))
+                    Ok((0xbad, OrderIndex(col, 2.into())))
                 );
                 assert_eq!(
                     lh.get_next().map(|(&v, l)|
                         (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                     ),
-                    Some((0xcad, OrderIndex(col, 3.into())))
+                    Ok((0xcad, OrderIndex(col, 3.into())))
                 );
                 assert_eq!(
                     lh.get_next().map(|(&v, l)|
                         (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                     ),
-                    Some((13, OrderIndex(col, 4.into())))
+                    Ok((13, OrderIndex(col, 4.into())))
                 );
-                assert_eq!(lh.get_next(), None);
+                assert_eq!(lh.get_next(), Err(GetRes::Done));
             }
         }
 
@@ -525,7 +525,7 @@ macro_rules! async_tests {
             lh.snapshot(68.into());
             lh.snapshot(67.into());
 
-            while let Some(..) = lh.get_next() {}
+            while let Ok(..) = lh.get_next() {}
             let _ = lh.simple_causal_append(&111, &mut [69.into()], &mut [67.into(), 68.into()]);
             lh.wait_for_all_appends();
 
@@ -534,7 +534,7 @@ macro_rules! async_tests {
 
             let mut seen = HashSet::new();
 
-            while let Some((_, locs)) = lh2.get_next() {
+            while let Ok((_, locs)) = lh2.get_next() {
                 for &loc in locs {
                     seen.insert(loc);
                 }
@@ -568,7 +568,7 @@ macro_rules! async_tests {
 
             let mut seen = HashSet::new();
 
-            while let Some((_, locs)) = lh.get_next() {
+            while let Ok((_, locs)) = lh.get_next() {
                 for &loc in locs {
                     seen.insert(loc);
                 }
@@ -629,12 +629,12 @@ macro_rules! async_tests {
             lh.snapshot(73.into());
             let num_appends = NUM_APPENDS.load(Ordering::Acquire);
             for i in 0..num_appends {
-                assert!(lh.get_next().is_some(),
+                assert!(lh.get_next().is_ok(),
                     "got {:?} out of {:?} appends",
                     i, num_appends
                 );
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -657,7 +657,7 @@ macro_rules! async_tests {
             let total_len = cols.iter().fold(0, |len, col| len + col.len());
             for _ in 0..total_len {
                 let next = lh.get_next();
-                assert!(next.is_some());
+                assert!(next.is_ok());
                 let (&n, ois) = next.unwrap();
                 assert_eq!(ois.len(), 1);
                 let OrderIndex(o, i) = ois[0];
@@ -668,7 +668,7 @@ macro_rules! async_tests {
                 let c = is[off as usize] - 1;
                 assert_eq!(n, cols[off as usize][c as usize]);
             }
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         #[test]
@@ -695,7 +695,7 @@ macro_rules! async_tests {
                 let mut lh = $new_thread_log::<(u32, u32)>(vec![78.into(), 79.into()]);
                 while got.len() < 5 * 2 * 100 {
                     lh.take_snapshot();
-                    while let Some((v, ois)) = lh.get_next() {
+                    while let Ok((v, ois)) = lh.get_next() {
                         got.push((v.clone(), ois.to_vec()));
                     }
                 }
@@ -709,8 +709,6 @@ macro_rules! async_tests {
         #[test]
         #[inline(never)]
         pub fn test_try_get_next() {
-            use async::fuzzy_log::log_handle::TryGetNextErr;
-
             let _ = env_logger::init();
             trace!("TEST try get next");
             let mut lh = $new_thread_log::<u32>(vec![80.into()]);
@@ -723,13 +721,14 @@ macro_rules! async_tests {
             loop {
                 let got = lh.try_get_next();
                 match got {
-                    Err(TryGetNextErr::NothingReady) => continue,
-                    Err(TryGetNextErr::Done) => break,
+                    Err(GetRes::NothingReady) => continue,
+                    Err(GetRes::Done) => break,
                     Ok((v, l)) => {
                         num_gotten += 1;
                         assert_eq!(v, &num_gotten);
                         assert_eq!(l, &[OrderIndex(80.into(), num_gotten.into())][..]);
                     }
+                    _ => panic!(),
                 }
             }
             assert_eq!(num_gotten, 4);
@@ -753,27 +752,27 @@ macro_rules! async_tests {
                 lh.get_next().map(
                     |(&v, l)| (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                 ),
-                Some((0xfeed, OrderIndex(col, 1.into())))
+                Ok((0xfeed, OrderIndex(col, 1.into())))
             );
             assert_eq!(
                 lh.get_next().map(|(&v, l)|
                     (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                 ),
-                Some((0xbad, OrderIndex(col, 2.into())))
+                Ok((0xbad, OrderIndex(col, 2.into())))
             );
             assert_eq!(
                 lh.get_next().map(|(&v, l)|
                     (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                 ),
-                Some((0xcad, OrderIndex(col, 3.into())))
+                Ok((0xcad, OrderIndex(col, 3.into())))
             );
             assert_eq!(
                 lh.get_next().map(|(&v, l)|
                     (v, *l.iter().find(|oi| oi.0 == col).unwrap())
                 ),
-                Some((13, OrderIndex(col, 4.into())))
+                Ok((13, OrderIndex(col, 4.into())))
             );
-            assert_eq!(lh.get_next(), None);
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
         //TODO test append after prefetch but before read
@@ -811,11 +810,11 @@ macro_rules! async_tests {
                 let _ = lh.append(1_000_01.into(), &[32u8; 6000][..], &[]);
                 let _ = lh.append(1_000_01.into(), &[0x0fu8; 8000][..], &[]);
                 lh.snapshot(1_000_01.into());
-                assert_eq!(lh.get_next(), Some((&[32u8; 6000][..],
+                assert_eq!(lh.get_next(), Ok((&[32u8; 6000][..],
                     &[OrderIndex(1_000_01.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(), Some((&[0x0fu8; 8000][..],
+                assert_eq!(lh.get_next(), Ok((&[0x0fu8; 8000][..],
                     &[OrderIndex(1_000_01.into(), 2.into())][..])));
-                assert_eq!(lh.get_next(), None);
+                assert_eq!(lh.get_next(), Err(GetRes::Done));
             }
 
             #[test]
@@ -836,16 +835,16 @@ macro_rules! async_tests {
                 let _ = lh.color_append(&[], &mut [1_000_02.into()], &mut [], false);
                 lh.snapshot(1_000_02.into());
                 assert_eq!(lh.get_next(),
-                    Some((&[][..], &[OrderIndex(1_000_02.into(), 1.into())][..])));
+                    Ok((&[][..], &[OrderIndex(1_000_02.into(), 1.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&[][..], &[OrderIndex(1_000_02.into(), 2.into()),
+                    Ok((&[][..], &[OrderIndex(1_000_02.into(), 2.into()),
                         OrderIndex(1_000_03.into(), 1.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&[][..], &[OrderIndex(1_000_02.into(), 3.into()),
+                    Ok((&[][..], &[OrderIndex(1_000_02.into(), 3.into()),
                         OrderIndex(0.into(), 0.into()), OrderIndex(1_000_03.into(), 2.into())][..])));
                 assert_eq!(lh.get_next(),
-                    Some((&[][..], &[OrderIndex(1_000_02.into(), 4.into())][..])));
-                assert_eq!(lh.get_next(), None);
+                    Ok((&[][..], &[OrderIndex(1_000_02.into(), 4.into())][..])));
+                assert_eq!(lh.get_next(), Err(GetRes::Done));
             }
 
             //FIXME should be V: ?Sized
