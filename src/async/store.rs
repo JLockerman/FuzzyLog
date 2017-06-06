@@ -23,6 +23,8 @@ pub trait AsyncStoreClient {
     //TODO what info is needed?
     fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>);
 
+    fn on_io_error(&mut self, err: io::Error, server: usize);
+
     //TODO fn should_shutdown(&mut self) -> bool { false }
 }
 
@@ -65,6 +67,9 @@ pub struct PerServer<Socket> {
     got_new_message: bool,
     receiver: Ipv4SocketAddr,
     stay_awake: bool,
+
+    //TODO store options instead?
+    dead: bool,
 
     print_data: PerServerPrintData,
 }
@@ -408,6 +413,7 @@ impl PerServer<TcpStream> {
             got_new_message: false,
             receiver: Ipv4SocketAddr::from_socket_addr(local_addr),
             stay_awake: true,
+            dead: false,
 
             print_data: Default::default(),
         })
@@ -439,6 +445,7 @@ impl PerServer<UdpConnection> {
             got_new_message: false,
             receiver: Ipv4SocketAddr::nil(),
             stay_awake: true,
+            dead: false,
 
             print_data: Default::default(),
         })
@@ -473,7 +480,9 @@ where PerServer<S>: Connected,
                     }
                 }
                 for ps in self.servers.iter() {
-                    self.awake_io.push_back(ps.token.0)
+                    if !ps.dead {
+                        self.awake_io.push_back(ps.token.0)
+                    }
                 }
                 'new_reqs: loop {
                     if !self.handle_new_requests_from_client() {
@@ -495,20 +504,27 @@ where PerServer<S>: Connected,
                 }
             }
 
-            self.handle_new_events(events.iter());
+            self.handle_new_events(&poll, events.iter());
+
 
             'work: loop {
                 //TODO add recv queue to this loop?
                 let ops_before_poll = self.awake_io.len();
-                for _ in 0..ops_before_poll {
+                'poll: for _ in 0..ops_before_poll {
                     let server = self.awake_io.pop_front().unwrap();
-                    self.handle_server_event(server);
+                    if self.servers[server].dead { continue 'poll }
+                    let err = self.handle_server_event(server);
+                    if err.is_err() {
+                        let ps = &mut self.servers[server];
+                        let _ = poll.deregister(ps.connection());
+                        ps.close()
+                    }
                 }
                 if self.awake_io.is_empty() {
                     break 'work
                 }
                 let _ = poll.poll(&mut events, Some(Duration::from_millis(0)));
-                self.handle_new_events(events.iter());
+                self.handle_new_events(&poll, events.iter());
             }
             #[cfg(debug_assertions)]
             for s in self.servers.iter() {
@@ -531,7 +547,7 @@ where PerServer<S>: Connected,
     #[inline(always)]
     fn print_stats(&self) {}
 
-    fn handle_new_events(&mut self, events: mio::EventsIter) {
+    fn handle_new_events(&mut self, poll: &mio::Poll, events: mio::EventsIter) {
         for event in events {
             let token = event.token();
             if token.0 >= self.servers.len() {
@@ -543,7 +559,13 @@ where PerServer<S>: Connected,
             }
             else {
                 debug_assert!(token.0 < self.servers.len());
-                self.handle_server_event(event.token().0)
+                let err = self.handle_server_event(event.token().0);
+                if err.is_err() {
+                    let server = event.token().0;
+                    let ps = &mut self.servers[server];
+                    let _ = poll.deregister(ps.connection());
+                    ps.close()
+                }
             }
         }
     }
@@ -748,7 +770,7 @@ where PerServer<S>: Connected,
         written
     }
 
-    fn handle_server_event(&mut self, server: usize) {
+    fn handle_server_event(&mut self, server: usize) -> Result<(), ()> {
         trace!("CLIENT handle server {:?} event", server);
         self.servers[server].got_new_message = false;
         //TODO pass in whether a read or write is ready?
@@ -756,34 +778,43 @@ where PerServer<S>: Connected,
         //let mut stay_awake = false;
         let token = Token(server);
         debug_assert_eq!(token, self.servers[server].token);
-        let finished_recv = self.servers[server].recv_packet().expect("cannot recv");
-        if let Some(mut packet) = finished_recv {
-            self.print_data.finished_recvs(1);
-            //stay_awake = true;
-            let (kind, flag) = {
-                let c = packet.contents();
-                (c.kind(), *c.flag())
-            };
-            trace!("CLIENT got a {:?} from {:?}: {:?}",
-                kind, token, packet.contents());
-            if flag.contains(EntryFlag::ReadSuccess) {
-                if !flag.contains(EntryFlag::Unlock) || flag.contains(EntryFlag::NewMultiPut) {
-                    let num_chain_servers = self.num_chain_servers;
-                    self.handle_completion(token, num_chain_servers, &packet)
+        //let finished_recv = self.servers[server].recv_packet().expect("cannot recv");
+        let finished_recv = self.servers[server].recv_packet();
+        match finished_recv {
+            Err(io_err) => {
+                self.client.on_io_error(io_err, server);
+                return Err(())
+            },
+            Ok(Some(mut packet)) => {
+                self.print_data.finished_recvs(1);
+                //stay_awake = true;
+                let (kind, flag) = {
+                    let c = packet.contents();
+                    (c.kind(), *c.flag())
+                };
+                trace!("CLIENT got a {:?} from {:?}: {:?}",
+                    kind, token, packet.contents());
+                if flag.contains(EntryFlag::ReadSuccess) {
+                    if !flag.contains(EntryFlag::Unlock)
+                        || flag.contains(EntryFlag::NewMultiPut) {
+                        let num_chain_servers = self.num_chain_servers;
+                        self.handle_completion(token, num_chain_servers, &packet)
+                    }
                 }
+                //TODO distinguish between locks and empties
+                else if kind.layout() == EntryLayout::Read
+                    && !flag.contains(EntryFlag::TakeLock) {
+                    //A read that found an usused entry still contains useful data
+                    self.handle_completed_read(token, &packet);
+                }
+                //TODO use option instead
+                else {
+                    self.handle_redo(Token(server), kind, &packet)
+                }
+                packet.finished_entry();
+                self.servers.get_mut(server).unwrap().read_buffer = packet;
             }
-            //TODO distinguish between locks and empties
-            else if kind.layout() == EntryLayout::Read
-                && !flag.contains(EntryFlag::TakeLock) {
-                //A read that found an usused entry still contains useful data
-                self.handle_completed_read(token, &packet);
-            }
-            //TODO use option instead
-            else {
-                self.handle_redo(Token(server), kind, &packet)
-            }
-            packet.finished_entry();
-            self.servers.get_mut(server).unwrap().read_buffer = packet;
+            Ok(None) => {}
         }
 
         if self.servers[server].needs_to_write() {
@@ -816,9 +847,7 @@ where PerServer<S>: Connected,
             self.awake_io.push_back(server)
         }
 
-        //if stay_awake && self.servers[server].got_new_message == false {
-        //    self.awake_io.push_back(server)
-        //}
+        Ok(())
     } // end fn handle_server_event
 
     fn handle_completion(&mut self, token: Token, num_chain_servers: usize, packet: &Buffer) {
@@ -1295,6 +1324,9 @@ pub trait Connected {
 
     fn connection(&self) -> &Self::Connection;
 
+    //TODO should just be fn drop
+    fn close(&mut self);
+
     fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind)
     -> Option<WriteState>;
 
@@ -1351,6 +1383,22 @@ impl Connected for PerServer<TcpStream> {
         &self.stream
     }
 
+    fn close(&mut self) {
+        use std::net::Shutdown;
+
+        let _ = self.stream.shutdown(Shutdown::Both);
+        self.awaiting_send.clear();
+        self.being_written.clear();
+        //TODO return these to the client?
+        self.being_sent.clear();
+        self.read_buffer.clear();
+        self.bytes_read = 0;
+        self.bytes_sent = 0;
+        self.got_new_message = false;
+        self.stay_awake = false;
+        self.dead = true;
+    }
+
     fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error> {
         use std::io::ErrorKind;
         use packets::Packet::WrapErr;
@@ -1358,7 +1406,7 @@ impl Connected for PerServer<TcpStream> {
             let to_read = self.read_buffer.finished_at(self.bytes_read);
             let size = match to_read {
                 Err(WrapErr::NotEnoughBytes(needs)) => needs,
-                Err(err) => panic!("{:?}", err),
+                Err(_err) => return Err(io::ErrorKind::InvalidData.into()),
                 Ok(..) => {
                     debug_assert!(self.read_buffer.packet_fits());
                     debug_assert!(self.bytes_read >= self.read_buffer.entry_size());
@@ -1701,6 +1749,19 @@ impl Connected for PerServer<UdpConnection> {
         &self.stream.socket
     }
 
+    fn close(&mut self) {
+        self.awaiting_send.clear();
+        self.being_written.clear();
+        //TODO return these to the client?
+        self.being_sent.clear();
+        self.read_buffer.clear();
+        self.bytes_read = 0;
+        self.bytes_sent = 0;
+        self.got_new_message = false;
+        self.stay_awake = false;
+        self.dead = true;
+    }
+
     fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error> {
         //TODO
         self.read_buffer.ensure_capacity(8192);
@@ -2006,6 +2067,11 @@ impl DoubleBuffer {
 
     fn is_empty(&self) -> bool {
         self.first.is_empty() && self.second.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.first = vec![];
+        self.second = vec![];
     }
 }
 

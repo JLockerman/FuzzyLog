@@ -443,6 +443,8 @@ write_locations wait_for_a_specific_append_and_locations(DAGHandle *handle, writ
 //!         or {.write_id = WRITE_ID_NIL, ...}
 //!         note that iff write_id is non nil
 //!         the field locs is malloc'd and should be free'd
+//!         if there was a non-recoverable IO error
+//!         {.write_id = WRITE_ID_NIL, .write_location = <server which had the error>}
 //!
 write_id_and_locs try_wait_for_any_append_and_location(DAGHandle *handle);
 

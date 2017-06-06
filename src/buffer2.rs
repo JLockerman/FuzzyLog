@@ -46,6 +46,11 @@ impl Buffer {
     pub fn empty() -> Self {
         Buffer { inner: Vec::new(), start: 0, }
     }
+
+    pub fn clear(&mut self) {
+        self.inner = vec![];
+        self.start = 0;
+    }
 /*
     #[cfg(any(debug_assertions, feature="debug_no_drop"))]
     pub fn no_drop() -> Self {

@@ -3,8 +3,9 @@
 use std::{self, iter, mem};
 use std::collections::VecDeque;
 use std::collections::hash_map;
-use std::rc::Rc;
+use std::io;
 use std::sync::mpsc;
+use std::rc::Rc;
 use std::u32;
 
 use mio;
@@ -36,10 +37,10 @@ pub struct ThreadLog {
     blocked_multiappends: HashMap<Uuid, MultiSearchState>,
     per_chains: HashMap<order, PerColor>,
     //TODO replace with queue from deque to allow multiple consumers
-    ready_reads: mpsc::Sender<Vec<u8>>,
+    ready_reads: FinshedReadQueue,
     //TODO blocked_chains: BitSet ?
     //TODO how to multiplex writers finished_writes: Vec<mpsc::Sender<()>>,
-    finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+    finished_writes: FinshedWriteQueue,
     //FIXME is currently unused
     #[allow(dead_code)]
     to_return: VecDeque<Vec<u8>>,
@@ -49,7 +50,22 @@ pub struct ThreadLog {
     chains_currently_being_read: IsRead,
     num_snapshots: usize,
 
+    num_errors: u64,
+
     print_data: PrintData,
+}
+
+pub type FinshedReadQueue = mpsc::Sender<Result<Vec<u8>, Error>>;
+pub type FinshedReadRecv = mpsc::Receiver<Result<Vec<u8>, Error>>;
+
+pub type FinshedWriteQueue = mpsc::Sender<Result<(Uuid, Vec<OrderIndex>), Error>>;
+pub type FinshedWriteRecv = mpsc::Receiver<Result<(Uuid, Vec<OrderIndex>), Error>>;
+
+#[derive(Debug, Clone)]
+pub struct Error {
+    error_num: u64,
+    server: usize,
+    error: io::ErrorKind,
 }
 
 counters!{
@@ -77,6 +93,7 @@ pub enum Message {
 pub enum FromStore {
     WriteComplete(Uuid, Vec<OrderIndex>), //TODO
     ReadComplete(OrderIndex, Vec<u8>),
+    IoError(io::ErrorKind, usize),
 }
 
 pub enum FromClient {
@@ -103,8 +120,8 @@ impl ThreadLog {
     //TODO
     pub fn new<I>(to_store: mio::channel::Sender<Vec<u8>>,
         from_outside: mpsc::Receiver<Message>,
-        ready_reads: mpsc::Sender<Vec<u8>>,
-        finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+        ready_reads: FinshedReadQueue,
+        finished_writes: FinshedWriteQueue,
         interesting_chains: I)
     -> Self
     where I: IntoIterator<Item=order>{
@@ -121,6 +138,7 @@ impl ThreadLog {
             cache: BufferCache::new(),
             chains_currently_being_read: Rc::new(ReadHandle),
             num_snapshots: 0,
+            num_errors: 0,
             print_data: Default::default(),
         }
     }
@@ -212,14 +230,25 @@ impl ThreadLog {
         match msg {
             WriteComplete(id, locs) => {
                 self.print_data.write_done(1);
-                self.finished_writes.send((id, locs)).expect("client is gone")
+                self.finished_writes.send(Ok((id, locs))).expect("client is gone")
             },
             ReadComplete(loc, msg) => {
                 self.print_data.read_done(1);
                 self.handle_completed_read(loc, msg)
             },
+            IoError(kind, server) => {
+                let err = self.make_error(kind, server);
+                let _ = self.finished_writes.send(Err(err.clone()));
+                let _ = self.ready_reads.send(Err(err));
+            }
         }
         true
+    }
+
+    fn make_error(&mut self, error: io::ErrorKind, server: usize) -> Error {
+        let error_num = self.num_errors;
+        self.num_errors += 1;
+        Error {error_num, error, server,}
     }
 
     fn fetch_snapshot(&mut self, chain: order) {
@@ -391,7 +420,7 @@ impl ThreadLog {
                 //FIXME add is_snapshoting to PerColor so this doesn't race?
                 trace!("FUZZY finished reading {:?} snaps", num_completeds);
                 for _ in 0..num_completeds {
-                    let _ = self.ready_reads.send(vec![]);
+                    let _ = self.ready_reads.send(Ok(vec![]));
                 }
                 self.cache.flush();
             } else {
@@ -864,7 +893,7 @@ impl ThreadLog {
         trace!("FUZZY returning read @ {:?}", loc);
         if is_interesting {
             //FIXME first_buffered?
-            self.ready_reads.send(val).expect("client hung up");
+            self.ready_reads.send(Ok(val)).expect("client hung up");
         }
         true
     }
@@ -940,7 +969,7 @@ impl ThreadLog {
         trace!("FUZZY returning read @ {:?}", locs);
         if is_interesting {
             //FIXME first_buffered?
-            self.ready_reads.send(val).expect("client hung up");
+            self.ready_reads.send(Ok(val)).expect("client hung up");
         }
         Some(locs)
     }
@@ -1080,5 +1109,9 @@ impl AsyncStoreClient for mpsc::Sender<Message> {
     //TODO what info is needed?
     fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>) {
         let _ = self.send(Message::FromStore(WriteComplete(write_id, write_locs)));
+    }
+
+    fn on_io_error(&mut self, err: io::Error, server: usize) {
+        let _ = self.send(Message::FromStore(IoError(err.kind(), server)));
     }
 }

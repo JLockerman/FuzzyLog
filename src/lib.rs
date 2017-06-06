@@ -65,7 +65,7 @@ pub mod c_binidings {
     use packets::*;
     //use tcp_store::TcpStore;
     // use multitcp_store::TcpStore;
-    use async::fuzzy_log::log_handle::{LogHandle, GetRes};
+    use async::fuzzy_log::log_handle::{LogHandle, GetRes, TryWaitRes};
 
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
@@ -249,7 +249,12 @@ pub mod c_binidings {
                 &mut []
             }
         };
-        let id = dag.color_append(data, inhabits, depends_on, async != 0);
+        let (id, error) = dag.color_append(data, inhabits, depends_on, async != 0);
+        match error {
+            Ok(()) => {}
+            //TODO set errno?
+            Err(e) => panic!("IO error {:?}", e),
+        }
         WriteId::from_uuid(id)
     }
 
@@ -424,11 +429,16 @@ pub mod c_binidings {
     -> WriteIdAndLocs {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         match dag.try_wait_for_any_append() {
-            None => WriteIdAndLocs {
+            Err(TryWaitRes::NothingReady) => WriteIdAndLocs {
                 write_id: WriteId::nil(),
                 locs: WriteLocations { num_locs: 0, locs: ptr::null_mut() },
             },
-            Some((id, locs)) => WriteIdAndLocs {
+            //TODO what to do with error number?
+            Err(TryWaitRes::IoErr(kind, server)) => WriteIdAndLocs {
+                write_id: WriteId::nil(),
+                locs: WriteLocations { num_locs: server, locs: ptr::null_mut() },
+            },
+            Ok((id, locs)) => WriteIdAndLocs {
                 write_id: WriteId::from_uuid(id),
                 locs: build_write_locs(locs),
             },
