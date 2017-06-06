@@ -262,8 +262,11 @@ impl Worker {
                 let ops_before_poll = self.inner.awake_io.len();
                 for _ in 0..ops_before_poll {
                     let token = self.inner.awake_io.pop_front().unwrap();
-                    if let HashEntry::Occupied(o) = self.clients.entry(token) {
-                        self.inner.handle_burst(token, o.into_mut());
+                    if let HashEntry::Occupied(mut o) = self.clients.entry(token) {
+                        let e = self.inner.handle_burst(token, o.get_mut());
+                        if e.is_err() {
+                            o.remove();
+                        }
                     }
                 }
 
@@ -300,10 +303,13 @@ impl Worker {
                 continue 'event
             }
 
-            if let HashEntry::Occupied(o) = self.clients.entry(token) {
+            if let HashEntry::Occupied(mut o) = self.clients.entry(token) {
                 //TODO check token read/write
-                let state = o.into_mut();
-                self.inner.handle_burst(token, state)
+                //let state = o.into_mut();
+                let e = self.inner.handle_burst(token, o.get_mut());
+                if e.is_err() {
+                    o.remove();
+                }
             }
         }
     }// end handle_new_events
@@ -614,7 +620,7 @@ impl WorkerInner {
         &mut self,
         token: mio::Token,
         socket_state: &mut PerSocket
-    ) {
+    ) -> Result<(), ()> {
         use super::per_socket::PerSocket::*;
         let (send, recv) = match socket_state {
             &mut Upstream {..} => (false, true),
@@ -626,18 +632,19 @@ impl WorkerInner {
         if send {
             trace!("WORKER {} will try to send.", self.worker_num);
             //FIXME need to disinguish btwn to client and to upstream
-            self.send_burst(token, socket_state)
+            self.send_burst(token, socket_state)?
         }
         if recv {
             trace!("WORKER {} will try to recv.", self.worker_num);
             //FIXME need to disinguish btwn from client and from upstream
-            self.recv_packet(token, socket_state)
+            self.recv_packet(token, socket_state)?
         }
 
         if socket_state.needs_to_stay_awake() {
             self.awake_io.push_back(token);
             socket_state.is_staying_awake();
         }
+        Ok(())
     }
 
     //TODO these functions should return Result so we can remove from map
@@ -645,31 +652,34 @@ impl WorkerInner {
         &mut self,
         token: mio::Token,
         socket_state: &mut PerSocket
-    ) {
+    ) -> Result<(), ()> {
         match socket_state.send_burst() {
             //TODO replace with wake function
             Ok(true) => { self.print_data.finished_send(1); } //TODO self.awake_io.push_back(token),
             Ok(false) => {},
             //FIXME remove from map, log
             Err(e) => {
-                error!("send error {:?} @ {:?}", e, token);
+                //error!("send error {:?} @ {:?}", e, token);
                 let _ = self.poll.deregister(socket_state.stream());
+                return Err(())
             }
         }
+        Ok(())
     }
 
     fn recv_packet(
         &mut self,
         token: mio::Token,
         socket_state: &mut PerSocket
-    ) {
+    ) -> Result<(), ()> {
         //TODO let socket_kind = socket_state.kind();
         let packet = socket_state.recv_packet();
         match packet {
             //FIXME remove from map, log
             RecvPacket::Err => {
-                error!("recv error @ {:?}", token);
+                // error!("recv error @ {:?}", token);
                 let _ = self.poll.deregister(socket_state.stream());
+                return Err(())
             },
             RecvPacket::Pending => {},
             RecvPacket::FromClient(packet, src_addr) => {
@@ -688,6 +698,7 @@ impl WorkerInner {
                 //self.awake_io.push_back(token)
             }
         }
+        Ok(())
     }
 
     fn next_hop(

@@ -138,7 +138,7 @@ impl PerSocket {
     */
     pub fn client(stream: TcpStream) -> Self {
         PerSocket::Client {
-            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::no_drop()).collect(),
+            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::empty()).collect(),
             bytes_read: 0,
             stream: stream,
             being_written: DoubleBuffer::with_first_buffer_capacity(WRITE_BUFFER_SIZE),
@@ -153,7 +153,7 @@ impl PerSocket {
 
     pub fn upstream(stream: TcpStream) -> Self {
         PerSocket::Upstream {
-            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::no_drop()).collect(),
+            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::empty()).collect(),
             bytes_read: 0,
             stream: stream,
             needs_to_stay_awake: false,
@@ -286,7 +286,7 @@ impl PerSocket {
                     Err(e) =>
                         if e.kind() == ErrorKind::WouldBlock { return Ok(false) }
                         else {
-                            error!("send error {:?}", e);
+                            //error!("send error {:?}", e);
                             return Err(())
                         },
                     Ok(i) => {
@@ -743,7 +743,7 @@ fn recv_packet(
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => return RecvRes::NeedsMore(read),
             Err(ref e) if e.kind() == ErrorKind::NotConnected => return RecvRes::NeedsMore(read),
             Err(e) => {
-                error!("recv error {:?}", e);
+                // error!("recv error {:?}", e);
                 return RecvRes::Error
             },
         }

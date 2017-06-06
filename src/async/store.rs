@@ -19,11 +19,11 @@ use mio::udp::UdpSocket;
 
 pub trait AsyncStoreClient {
     //TODO nocopy?
-    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>);
+    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>) -> Result<(), ()>;
     //TODO what info is needed?
-    fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>);
+    fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>) -> Result<(), ()>;
 
-    fn on_io_error(&mut self, err: io::Error, server: usize);
+    fn on_io_error(&mut self, err: io::Error, server: usize) -> Result<(), ()>;
 
     //TODO fn should_shutdown(&mut self) -> bool { false }
 }
@@ -42,6 +42,7 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     client: C,
     is_unreplicated: bool,
     new_multi: bool,
+    finished: bool,
 
     print_data: StorePrintData,
 }
@@ -162,6 +163,7 @@ where C: AsyncStoreClient {
             from_client: from_client,
             is_unreplicated: true,
             new_multi: false,
+            finished: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -209,6 +211,7 @@ where C: AsyncStoreClient {
             from_client: from_client,
             is_unreplicated: true,
             new_multi: true,
+            finished: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -273,6 +276,7 @@ where C: AsyncStoreClient {
             from_client: from_client,
             is_unreplicated: false,
             new_multi: true,
+            finished: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -339,6 +343,7 @@ where C: AsyncStoreClient {
             from_client: from_client,
             is_unreplicated: false,
             new_multi: false,
+            finished: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -389,6 +394,7 @@ where C: AsyncStoreClient {
             from_client: from_client,
             is_unreplicated: true,
             new_multi: false,
+            finished: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -459,11 +465,11 @@ impl PerServer<UdpConnection> {
 impl<S, C> AsyncTcpStore<S, C>
 where PerServer<S>: Connected,
       C: AsyncStoreClient {
-    pub fn run(mut self, poll: mio::Poll) -> ! {
+    pub fn run(mut self, poll: mio::Poll) {
         trace!("CLIENT start.");
         let mut events = mio::Events::with_capacity(1024);
         let mut timeout_idx = 0;
-        loop {
+        while !self.finished || !self.sent_writes.is_empty() {
             const TIMEOUTS: [(u64, u32); 9] =
                 [(0, 10_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
                 (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0), (10, 0)];
@@ -577,9 +583,16 @@ where PerServer<S>: Connected,
             Ok(msg) => msg,
             Err(TryRecvError::Empty) => return false,
             //TODO Err(TryRecvError::Disconnected) => panic!("client disconnected.")
-            Err(TryRecvError::Disconnected) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.finished = true;
+                return false
+            },
         };
         self.print_data.from_client(1);
+        if msg.is_empty() {
+            self.finished = true;
+            return false
+        }
         let new_msg_kind = bytes_as_entry(&msg).layout();
         match new_msg_kind {
             EntryLayout::Read => {
@@ -782,7 +795,10 @@ where PerServer<S>: Connected,
         let finished_recv = self.servers[server].recv_packet();
         match finished_recv {
             Err(io_err) => {
-                self.client.on_io_error(io_err, server);
+                let e = self.client.on_io_error(io_err, server);
+                if e.is_err() {
+                    self.finished = true;
+                }
                 return Err(())
             },
             Ok(Some(mut packet)) => {
@@ -936,7 +952,10 @@ where PerServer<S>: Connected,
                             self.add_unlocks(buf);
                             trace!("CLIENT finished multi at {:?}", locs);
                             //TODO
-                            self.client.on_finished_write(id, locs);
+                            let e = self.client.on_finished_write(id, locs);
+                            if e.is_err() {
+                                self.finished = true;
+                            }
                             return true
                         }
                         None => {
@@ -1042,7 +1061,10 @@ where PerServer<S>: Connected,
                             }*/
                             trace!("CLIENT finished sk multi at {:?}", locs);
                             //TODO
-                            self.client.on_finished_write(id, locs);
+                            let e = self.client.on_finished_write(id, locs);
+                            if e.is_err() {
+                                self.finished = true
+                            }
                             return true
                         }
                         None => {
@@ -1058,7 +1080,10 @@ where PerServer<S>: Connected,
                     trace!("CLIENT finished single server");
                     fill_locs(&mut buf, packet.contents(), token, self.num_chain_servers, unreplicated);
                     let locs = packet.contents().locs().to_vec();
-                    self.client.on_finished_write(id, locs);
+                    let e = self.client.on_finished_write(id, locs);
+                    if e .is_err() {
+                        self.finished = true
+                    }
                     return true
                 }
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
@@ -1136,7 +1161,9 @@ where PerServer<S>: Connected,
                     .unwrap_or_else(|| Vec::with_capacity(packet.entry_size()));
                 v.clear();
                 v.extend_from_slice(packet.entry_slice());
-                self.client.on_finished_read(oi, v);
+                if self.client.on_finished_read(oi, v).is_err() {
+                    self.finished = true
+                }
             }
         }
         was_needed

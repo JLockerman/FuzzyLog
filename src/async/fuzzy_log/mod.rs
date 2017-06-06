@@ -52,6 +52,8 @@ pub struct ThreadLog {
 
     num_errors: u64,
 
+    finished: bool,
+
     print_data: PrintData,
 }
 
@@ -140,6 +142,7 @@ impl ThreadLog {
             num_snapshots: 0,
             num_errors: 0,
             print_data: Default::default(),
+            finished: false,
         }
     }
 
@@ -148,11 +151,11 @@ impl ThreadLog {
         use std::time::Duration;
         //FIXME remove
         //let mut num_msgs = 0;
-        loop {
+        'recv: while !self.finished {
             //let msg = self.from_outside.recv().expect("outside is gone");
             if let Ok(msg) = self.from_outside.recv_timeout(Duration::from_secs(10)) {
             //if let Ok(msg) = self.from_outside.recv() {
-                if !self.handle_message(msg) { return }
+                if !self.handle_message(msg) { break 'recv }
                 // num_msgs += 1;
             }
             else {
@@ -220,6 +223,7 @@ impl ThreadLog {
             }
             Shutdown => {
                 self.print_data.shut(1);
+                self.finished = true;
                 //TODO send shutdown
                 false
             }
@@ -230,7 +234,9 @@ impl ThreadLog {
         match msg {
             WriteComplete(id, locs) => {
                 self.print_data.write_done(1);
-                self.finished_writes.send(Ok((id, locs))).expect("client is gone")
+                if self.finished_writes.send(Ok((id, locs))).is_err() {
+                    self.finished = true;
+                }
             },
             ReadComplete(loc, msg) => {
                 self.print_data.read_done(1);
@@ -238,8 +244,11 @@ impl ThreadLog {
             },
             IoError(kind, server) => {
                 let err = self.make_error(kind, server);
-                let _ = self.finished_writes.send(Err(err.clone()));
-                let _ = self.ready_reads.send(Err(err));
+                let e1 = self.finished_writes.send(Err(err.clone()));
+                let e2 = self.ready_reads.send(Err(err));
+                if e1.is_err() || e2.is_err() {
+                    self.finished = true;
+                }
             }
         }
         true
@@ -420,7 +429,9 @@ impl ThreadLog {
                 //FIXME add is_snapshoting to PerColor so this doesn't race?
                 trace!("FUZZY finished reading {:?} snaps", num_completeds);
                 for _ in 0..num_completeds {
-                    let _ = self.ready_reads.send(Ok(vec![]));
+                    if self.ready_reads.send(Ok(vec![])).is_err() {
+                        self.finished = true;
+                    }
                 }
                 self.cache.flush();
             } else {
@@ -893,7 +904,9 @@ impl ThreadLog {
         trace!("FUZZY returning read @ {:?}", loc);
         if is_interesting {
             //FIXME first_buffered?
-            self.ready_reads.send(Ok(val)).expect("client hung up");
+            if self.ready_reads.send(Ok(val)).is_err() {
+                self.finished = true;
+            }
         }
         true
     }
@@ -969,7 +982,9 @@ impl ThreadLog {
         trace!("FUZZY returning read @ {:?}", locs);
         if is_interesting {
             //FIXME first_buffered?
-            self.ready_reads.send(Ok(val)).expect("client hung up");
+            if self.ready_reads.send(Ok(val)).is_err() {
+                self.finished = true;
+            }
         }
         Some(locs)
     }
@@ -987,7 +1002,9 @@ impl ThreadLog {
         };
         for next in low..high+1 {
             let packet = self.make_read_packet(chain, next.into());
-            self.to_store.send(packet).expect("store hung up");
+            if self.to_store.send(packet).is_err() {
+                self.finished = true;
+            }
         }
     }
 
@@ -1102,16 +1119,22 @@ impl BufferCache {
 }
 
 impl AsyncStoreClient for mpsc::Sender<Message> {
-    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>) {
-        let _ = self.send(Message::FromStore(ReadComplete(read_loc, read_packet)));
+    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>)
+    -> Result<(), ()> {
+        self.send(Message::FromStore(ReadComplete(read_loc, read_packet)))
+            .map(|_| ()).map_err(|_| ())
     }
 
     //TODO what info is needed?
-    fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>) {
-        let _ = self.send(Message::FromStore(WriteComplete(write_id, write_locs)));
+    fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>)
+    -> Result<(), ()> {
+        self.send(Message::FromStore(WriteComplete(write_id, write_locs)))
+            .map(|_| ()).map_err(|_| ())
     }
 
-    fn on_io_error(&mut self, err: io::Error, server: usize) {
-        let _ = self.send(Message::FromStore(IoError(err.kind(), server)));
+    fn on_io_error(&mut self, err: io::Error, server: usize)
+    -> Result<(), ()> {
+        self.send(Message::FromStore(IoError(err.kind(), server)))
+            .map(|_| ()).map_err(|_| ())
     }
 }
