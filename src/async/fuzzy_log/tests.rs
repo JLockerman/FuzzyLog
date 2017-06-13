@@ -775,6 +775,22 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
+        #[test]
+        #[inline(never)]
+        pub fn test_only_sentinel() {
+            let _ = env_logger::init();
+            trace!("TEST only_sentinel");
+
+            //let columns = vec![84.into(), 85.into()];
+            let mut lh = $new_thread_log::<u64>(vec![84.into()]);
+            let _ = lh.dependent_multiappend(&[85.into()], &[84.into()], &0xfeed, &[]);
+            let _ = lh.dependent_multiappend(&[85.into()], &[84.into()], &0xbad , &[]);
+            let _ = lh.dependent_multiappend(&[85.into()], &[84.into()], &0xcad , &[]);
+            let _ = lh.dependent_multiappend(&[85.into()], &[84.into()], &13    , &[]);
+            lh.snapshot(84.into());
+            assert_eq!(lh.get_next(), Err(GetRes::Done));
+        }
+
         //TODO test append after prefetch but before read
     );
     () => {

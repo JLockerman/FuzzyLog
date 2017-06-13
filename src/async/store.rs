@@ -597,8 +597,8 @@ where PerServer<S>: Connected,
         match new_msg_kind {
             EntryLayout::Read => {
                 let loc = bytes_as_entry(&msg).locs()[0];
-                trace!("CLIENT got read {:?}", loc);
-                trace!("CLIENT vec len {}, entry len {}", msg.len(), bytes_as_entry(&msg).len());
+                trace!("CLIENT will read {:?}", loc);
+                // trace!("CLIENT vec len {}, entry len {}", msg.len(), bytes_as_entry(&msg).len());
                 let loc = loc.0;
                 let s = self.read_server_for_chain(loc);
                 //TODO if writeable write?
@@ -607,13 +607,13 @@ where PerServer<S>: Connected,
             EntryLayout::Data => {
                 let loc = bytes_as_entry(&msg).locs()[0].0;
                 let s = self.write_server_for_chain(loc);
-                trace!("CLIENT got write {:?}, server {:?}:{:?}",
+                trace!("CLIENT will write {:?}, server {:?}:{:?}",
                     loc, s, self.num_chain_servers);
                 //TODO if writeable write?
                 self.add_single_server_send(s, msg)
             }
             EntryLayout::Multiput => {
-                trace!("CLIENT got multi write");
+                trace!("CLIENT will multi write");
                 if self.is_single_node_append(&msg) {
                     let chain = bytes_as_entry(&msg).locs()[0].0;
                     let s = self.write_server_for_chain(chain);
@@ -784,7 +784,7 @@ where PerServer<S>: Connected,
     }
 
     fn handle_server_event(&mut self, server: usize) -> Result<(), ()> {
-        trace!("CLIENT handle server {:?} event", server);
+        // trace!("CLIENT handle server {:?} event", server);
         self.servers[server].got_new_message = false;
         //TODO pass in whether a read or write is ready?
         self.servers[server].stay_awake = false;
@@ -834,12 +834,12 @@ where PerServer<S>: Connected,
         }
 
         if self.servers[server].needs_to_write() {
-            trace!("CLIENT write");
+            // trace!("CLIENT write");
             self.print_data.finished_sends(1);
             //let num_chain_servers = self.num_chain_servers;
             let finished_send = self.servers[server].send_next_burst();
             if finished_send {
-                trace!("CLIENT finished a send to {:?}", token);
+                // trace!("CLIENT finished a send to {:?}", token);
                 //stay_awake = true;
                 //TODO used to be drain being_sent
             }
@@ -1117,7 +1117,7 @@ where PerServer<S>: Connected,
     fn handle_completed_read(&mut self, token: Token, packet: &Buffer) -> bool {
         use std::collections::hash_map::Entry::Occupied;
 
-        trace!("CLIENT handle completed read?");
+        // trace!("CLIENT handle completed read?");
         if !self.new_multi && token == self.lock_token() { return false }
         //FIXME remove extra index?
         self.servers[token.0].print_data.finished_read(1);
@@ -1437,7 +1437,7 @@ impl Connected for PerServer<TcpStream> {
                 Ok(..) => {
                     debug_assert!(self.read_buffer.packet_fits());
                     debug_assert!(self.bytes_read >= self.read_buffer.entry_size());
-                    trace!("CLIENT finished recv");
+                    // trace!("CLIENT finished recv");
                     {
                         self.print_data.packets_recvd(1);
                         self.print_data.bytes_recvd(self.bytes_read as u64);
@@ -1449,7 +1449,7 @@ impl Connected for PerServer<TcpStream> {
                 },
             };
             let drained = self.read_buffer.ensure_capacity(size);
-            trace!("CLIENT drained {:?}", drained);
+            // trace!("CLIENT drained {:?}", drained);
             self.bytes_read -= drained;
             let r = self.stream.read(&mut self.read_buffer[self.bytes_read..]);
             match r {
@@ -1572,7 +1572,7 @@ impl Connected for PerServer<TcpStream> {
         self.stay_awake = true;
         //DEBUG ME
         if !self.awaiting_send.is_empty() {
-            trace!("FFFFF add to wait");
+            // trace!("FFFFF add to wait");
             self.awaiting_send.push_back(to_send);
             return false
         }
@@ -1581,10 +1581,10 @@ impl Connected for PerServer<TcpStream> {
             self.being_written.try_fill(p, self.receiver));
         if can_write {
             self.print_data.packets_sending(1);
-            trace!("FFFFF add to buffer");
+            // trace!("FFFFF add to buffer");
             self.being_sent.push_back(to_send)
         } else {
-            trace!("FFFFF buffer full");
+            // trace!("FFFFF buffer full");
             self.awaiting_send.push_back(to_send)
         }
         can_write
@@ -2067,7 +2067,7 @@ impl DoubleBuffer {
     }
 
     fn try_fill(&mut self, bytes: &[u8], addr: Ipv4SocketAddr) -> bool {
-        trace!("FFFFF add {} + {} bytes to send", bytes.len(), addr.bytes().len());
+        // trace!("FFFFF add {} + {} bytes to send", bytes.len(), addr.bytes().len());
         debug_assert_eq!(bytes.len(), bytes_as_entry(bytes).len());
         if self.is_filling_first() {
             if buffer_can_hold_bytes(&self.first, bytes.len() + addr.bytes().len())

@@ -186,12 +186,12 @@ impl PerSocket {
     //TODO recv burst
     pub fn recv_packet(&mut self) -> RecvPacket {
         use self::PerSocket::*;
-        trace!("SOCKET try recv");
+        // trace!("SOCKET try recv");
         match self {
             &mut Upstream {ref mut being_read, ref mut bytes_read, ref stream,
                 ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
-                    trace!("SOCKET recv actual");
+                    // trace!("SOCKET recv actual");
                     //TODO audit
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read, mem::size_of::<u64>(), needs_to_stay_awake, print_data);
                     match recv {
@@ -199,7 +199,7 @@ impl PerSocket {
                         RecvRes::Done(src_addr) => {
                             print_data.packets_recvd(1);
                             *bytes_read = 0;
-                            trace!("SOCKET recevd replication for {}.", src_addr);
+                            // trace!("SOCKET recevd replication for {}.", src_addr);
                             *needs_to_stay_awake = true;
                             let entry_size = read_buffer.entry_size();
                             let end = entry_size + mem::size_of::<u64>();
@@ -223,21 +223,21 @@ impl PerSocket {
                     }
                 }
                 else {
-                    trace!("SOCKET Upstream recv no buffer");
+                    // trace!("SOCKET Upstream recv no buffer");
                     RecvPacket::Pending
                 }
             }
             &mut Client {ref mut being_read, ref mut bytes_read, ref stream,
                 ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 if let Some(mut read_buffer) = being_read.pop_front() {
-                    trace!("SOCKET recv actual");
+                    // trace!("SOCKET recv actual");
                     let recv = recv_packet(&mut read_buffer, stream, *bytes_read, 0,  needs_to_stay_awake, print_data);
                     match recv {
                         //TODO send to log
                         RecvRes::Done(src_addr) => {
                             print_data.packets_recvd(1);
                             *bytes_read = 0;
-                            trace!("SOCKET recevd for {}.", src_addr);
+                            // trace!("SOCKET recevd for {}.", src_addr);
                             *needs_to_stay_awake = true;
                             print_data.read_buffers_sent(1);
                             RecvPacket::FromClient(read_buffer, src_addr)
@@ -245,7 +245,7 @@ impl PerSocket {
                         //FIXME remove from map
                         RecvRes::Error => {
                             *bytes_read = 0;
-                            trace!("error; returned buffer now @ {}", being_read.len());
+                            // trace!("error; returned buffer now @ {}", being_read.len());
                             being_read.push_front(read_buffer);
                             RecvPacket::Err
                         },
@@ -258,7 +258,7 @@ impl PerSocket {
                     }
                 }
                 else {
-                    trace!("SOCKET Client recv no buffer");
+                    // trace!("SOCKET Client recv no buffer");
                     RecvPacket::Pending
                 }
             }
@@ -271,13 +271,13 @@ impl PerSocket {
         match self {
             &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..}
             | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..} => {
-                trace!("SOCKET send actual.");
+                // trace!("SOCKET send actual.");
                 if being_written.is_empty() {
                     //debug_assert!(pending.iter().all(|p| p.is_empty()));
                     assert!(pending.is_empty());
                     //TODO remove
                     //assert!(pending.iter().all(|p| p.is_empty()));
-                    trace!("SOCKET empty write.");
+                    // trace!("SOCKET empty write.");
                     //FIXME: this removes the hang? while slowing the server...
                     //*needs_to_stay_awake = true;
                     return Ok(false)
@@ -293,7 +293,7 @@ impl PerSocket {
                         *needs_to_stay_awake = true;
                         print_data.bytes_sent(i as u64);
                         *bytes_written = *bytes_written + i;
-                        trace!("SOCKET sent {}B.", bytes_written);
+                        // trace!("SOCKET sent {}B.", bytes_written);
                     },
                 }
 
@@ -301,7 +301,7 @@ impl PerSocket {
                     return Ok(false)
                 }
 
-                trace!("SOCKET finished sending burst {}B.", *bytes_written);
+                // trace!("SOCKET finished sending burst {}B.", *bytes_written);
                 *bytes_written = 0;
                 being_written.swap_if_needed();
                 print_data.sends(1);
@@ -323,7 +323,7 @@ impl PerSocket {
         //TODO Is there some maximum size at which we shouldn't buffer?
         //TODO can we simply write directly from the trie?
         use self::PerSocket::*;
-        trace!("SOCKET add downstream send");
+        // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
             &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
@@ -331,7 +331,7 @@ impl PerSocket {
             | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
-                trace!("SOCKET send down {}B", to_write.len());
+                // trace!("SOCKET send down {}B", to_write.len());
                 print_data.sends_added(1);
                 print_data.bytes_to_send(to_write.len() as u64);
                 let added = being_written.try_fill(to_write);
@@ -347,7 +347,7 @@ impl PerSocket {
         //TODO Is there some maximum size at which we shouldn't buffer?
         //TODO can we simply write directly from the trie?
         use self::PerSocket::*;
-        trace!("SOCKET add downstream send");
+        // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
             &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data, ref mut needs_to_stay_awake, ..}
@@ -356,7 +356,7 @@ impl PerSocket {
                 *needs_to_stay_awake = true;
                 print_data.sends_added(1);
                 let write_len = to_write0.len() + to_write1.len() + to_write2.len();
-                trace!("SOCKET send down {}B", write_len);
+                // trace!("SOCKET send down {}B", write_len);
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
                     let _added = being_written.try_fill(to_write0);
@@ -377,7 +377,7 @@ impl PerSocket {
 
     pub fn add_downstream_contents(&mut self, to_write: EntryContents) {
         use self::PerSocket::*;
-        trace!("SOCKET add downstream send");
+        // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
             &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
@@ -386,7 +386,7 @@ impl PerSocket {
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len();
-                trace!("SOCKET send down contents {}B", write_len);
+                // trace!("SOCKET send down contents {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
@@ -407,7 +407,7 @@ impl PerSocket {
         &mut self, to_write: EntryContents, addr: &[u8]
     ) {
         use self::PerSocket::*;
-        trace!("SOCKET add downstream send");
+        // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
             &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
@@ -416,7 +416,7 @@ impl PerSocket {
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len() + addr.len();
-                trace!("SOCKET send down contents2 {}B", write_len);
+                // trace!("SOCKET send down contents2 {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
@@ -438,7 +438,7 @@ impl PerSocket {
         &mut self, to_write: EntryContents, to_write1: &[u8], to_write2: &[u8]
     ) {
         use self::PerSocket::*;
-        trace!("SOCKET add downstream send");
+        // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
             &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
@@ -447,7 +447,7 @@ impl PerSocket {
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len() + to_write1.len() + to_write2.len();
-                trace!("SOCKET send down contents3 {}B", write_len);
+                // trace!("SOCKET send down contents3 {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
@@ -476,7 +476,7 @@ impl PerSocket {
             | &mut Upstream {ref mut being_read, ref mut print_data, ..} => {
                 print_data.read_buffers_returned(1);
                 being_read.push_back(buffer);
-                trace!("returned buffer now @ {}", being_read.len());
+                // trace!("returned buffer now @ {}", being_read.len());
                 debug_assert!(being_read.len() <= NUMBER_READ_BUFFERS);
 
             },
@@ -706,7 +706,7 @@ fn recv_packet(
 )  -> RecvRes {
     use packets::Packet::WrapErr;
     loop {
-        trace!("WORKER recved {} bytes extra {}.", read, extra);
+        // trace!("WORKER recved {} bytes extra {}.", read, extra);
         let to_read = buffer.finished_at(read);
         let size = match to_read {
             Err(WrapErr::NotEnoughBytes(needs)) =>
@@ -723,7 +723,7 @@ fn recv_packet(
                 //    &buffer[read-mem::size_of::<Ipv4SocketAddr>()-extra..read-extra]);
                 let src_addr = Ipv4SocketAddr::from_slice(
                    &buffer[read-mem::size_of::<Ipv4SocketAddr>()..read]);
-                trace!("WORKER finished recv {} bytes for {}.", read, src_addr);
+                // trace!("WORKER finished recv {} bytes for {}.", read, src_addr);
                 //TODO ( if is_read { Some((receive_addr)) } else { None } )
                 return RecvRes::Done(src_addr)
             },

@@ -23,6 +23,7 @@ enum Kind {
     SentToServer,
     GottenFromServer,
     ReturnedToClient,
+    Skip,
 }
 
 impl Kind {
@@ -32,6 +33,8 @@ impl Kind {
             (Kind::SentToServer, _) => true,
             (Kind::GottenFromServer, Kind::None) => true,
             (Kind::GottenFromServer, Kind::ReturnedToClient) => true,
+            (Kind::GottenFromServer, Kind::Skip) => true,
+            (Kind::Skip, Kind::ReturnedToClient) => true,
             (_, _) => false,
         }
     }
@@ -53,6 +56,12 @@ impl RangeTree {
     pub fn set_point_as_none(&mut self, point: entry) {
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
         self.set_point_as(point, Kind::None);
+        debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
+    }
+
+    pub fn set_point_as_skip(&mut self, point: entry) {
+        debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
+        self.set_point_as(point, Kind::Skip);
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
     }
 
@@ -105,21 +114,25 @@ impl RangeTree {
             (Some(pre), None) => {
                 self.inner.insert(pre, old_kind);
                 let new_range = Range::point(point);
-                let new_range = try_merge_with_next(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_next(&mut self.inner, new_range, new_kind);
                 self.inner.insert(new_range, new_kind);
             },
 
             (None, Some(post)) => {
                 self.inner.insert(post, old_kind);
                 let new_range = Range::point(point);
-                let new_range = try_merge_with_prior(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_prior(&mut self.inner, new_range, new_kind);
                 self.inner.insert(new_range, new_kind);
             },
 
             (None, None) => {
                 let new_range = Range::point(point);
-                let new_range = try_merge_with_next(&mut self.inner, new_range, new_kind);
-                let new_range = try_merge_with_prior(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_next(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_prior(&mut self.inner, new_range, new_kind);
                 self.inner.insert(new_range, new_kind);
             },
         }
@@ -146,19 +159,23 @@ impl RangeTree {
 
             (Some(pre), None) => {
                 self.inner.insert(pre, old_kind);
-                let new_range = try_merge_with_next(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_next(&mut self.inner, new_range, new_kind);
                 self.inner.insert(new_range, new_kind);
             },
 
             (None, Some(post)) => {
                 self.inner.insert(post, old_kind);
-                let new_range = try_merge_with_prior(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_prior(&mut self.inner, new_range, new_kind);
                 self.inner.insert(new_range, new_kind);
             },
 
             (None, None) => {
-                let new_range = try_merge_with_next(&mut self.inner, new_range, new_kind);
-                let new_range = try_merge_with_prior(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_next(&mut self.inner, new_range, new_kind);
+                let (new_range, new_kind) =
+                    try_merge_with_prior(&mut self.inner, new_range, new_kind);
                 self.inner.insert(new_range, new_kind);
             },
         }
@@ -290,43 +307,57 @@ fn remove_from_map(map: &mut BTreeMap<Range, Kind>, key: Range) -> (Range, Kind)
 
 fn try_merge_with_next(
     inner: &mut BTreeMap<Range, Kind>, current: Range, our_kind: Kind
-) -> Range {
+) -> (Range, Kind) {
+    use self::Kind::*;
     if current.last() >= u32::MAX.into() {
-        return current
+        return (current, our_kind)
     }
 
     match inner.entry(Range::point(current.last() + 1)) {
         Occupied(entr) => {
-            let merge = *entr.get() == our_kind;
-            if merge {
+            let other_kind = *entr.get();
+            let merge_skip =
+                (our_kind == Skip && other_kind == ReturnedToClient)
+                || (our_kind == ReturnedToClient && other_kind == Skip);
+            if other_kind == our_kind {
                 let merge = entr.remove_entry().0;
-                current.merge_with_next(merge)
+                (current.merge_with_next(merge), our_kind)
+            } else if merge_skip {
+                let merge = entr.remove_entry().0;
+                (current.merge_with_next(merge), ReturnedToClient)
             } else {
-                current
+                (current, our_kind)
             }
         },
-        _ => current
+        _ => (current, our_kind)
     }
 }
 
 fn try_merge_with_prior(
     inner: &mut BTreeMap<Range, Kind>, current: Range, our_kind: Kind
-) -> Range {
+) -> (Range, Kind) {
+    use self::Kind::*;
     if current.first() <= 0.into() {
-        return current
+        return (current, our_kind)
     }
 
     match inner.entry(Range::point(current.first() - 1)) {
         Occupied(entr) => {
-            let merge = *entr.get() == our_kind;
-            if merge {
+            let other_kind = *entr.get();
+            let merge_skip =
+                (our_kind == Skip && other_kind == ReturnedToClient)
+                || (our_kind == ReturnedToClient && other_kind == Skip);
+            if other_kind == our_kind {
                 let merge = entr.remove_entry().0;
-                current.merge_with_prior(merge)
+                (current.merge_with_prior(merge), our_kind)
+            } else if merge_skip {
+                let merge = entr.remove_entry().0;
+                (current.merge_with_prior(merge), ReturnedToClient)
             } else {
-                current
+                (current, our_kind)
             }
         },
-        _ => current
+        _ => (current, our_kind)
     }
 }
 

@@ -673,8 +673,12 @@ impl ThreadLog {
             //let mut pieces_remaining = num_pieces;
             trace!("FUZZY first part of multi part read");
             let mut finished = true;
+            let mut is_sentinel = false;
             for &mut OrderIndex(o, ref mut i) in bytes_as_entry_mut(&mut msg).locs_mut() {
-                if o == order::from(0) { continue }
+                if o == order::from(0) {
+                    is_sentinel = true;
+                    continue
+                }
 
                 trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
                 let early_sentinel = self.fetch_multi_parts(&id, o, *i);
@@ -684,6 +688,10 @@ impl ThreadLog {
                     *i = loc;
                 } else if *i != entry::from(0) {
                     trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
+                    if is_sentinel {
+                        self.per_chains.get_mut(&o)
+                            .map(|pc| pc.mark_as_skippable(*i));
+                    }
                 } else {
                     finished = false
                 }
@@ -732,9 +740,13 @@ impl ThreadLog {
                 let my_locs = e.locs_mut();
                 {
                     let locs = my_locs.iter_mut().zip(bytes_as_entry(&msg).locs().iter());
+                    let mut is_sentinel = false;
                     for (my_loc, new_loc) in locs {
                         assert_eq!(my_loc.0, new_loc.0);
-                        if my_loc.0 == order::from(0) { continue }
+                        if my_loc.0 == order::from(0) {
+                            is_sentinel = true;
+                            continue
+                        }
 
                         if my_loc.1 == entry::from(0) && new_loc.1 != entry::from(0) {
                             trace!("FUZZY finished blind seach for {:?}", new_loc);
@@ -742,10 +754,17 @@ impl ThreadLog {
                             let pc = self.per_chains.entry(new_loc.0)
                                 .or_insert_with(|| PerColor::new(new_loc.0));
                             pc.decrement_multi_search();
-                            pc.mark_as_already_fetched(new_loc.1);
-                        }
-                        else if my_loc.1 != entry::from(0) && new_loc.1!= entry::from(0) {
-                            debug_assert_eq!(*my_loc, *new_loc)
+                            if !is_sentinel {
+                                pc.mark_as_already_fetched(new_loc.1);
+                            } else {
+                                pc.mark_as_skippable(new_loc.1);
+                            }
+                        } else if my_loc.1 != entry::from(0) && new_loc.1!= entry::from(0) {
+                            debug_assert_eq!(*my_loc, *new_loc);
+                            if is_sentinel {
+                                self.per_chains.get_mut(&new_loc.0)
+                                    .map(|pc| pc.mark_as_skippable(new_loc.1));
+                            }
                         }
 
                         finished &= my_loc.1 != entry::from(0);
@@ -925,15 +944,26 @@ impl ThreadLog {
                 let no_remote = e.flag().contains(EntryFlag::NoRemote);
                 let locs = e.locs();
                 trace!("FUZZY trying to return read from {:?}", locs);
+                let mut checking_sentinels = false;
                 for &OrderIndex(o, i) in locs.into_iter() {
-                    if o == order::from(0) { continue }
+                    if o == order::from(0) {
+                        checking_sentinels = true;
+                        continue
+                    }
                     match (self.per_chains.get_mut(&o), no_remote) {
                         (None, true) => {}
                         (None, false) => panic!("trying to return boring chain {:?}", o),
                         (Some(pc), _) => {
                             if pc.has_returned(i) {
-                                trace!("FUZZY double return {:?} in {:?}", (o, i), locs);
-                                return None
+                                if !checking_sentinels {
+                                    //TODO is this an error?
+                                    trace!("FUZZY double return {:?} in {:?}", (o, i), locs);
+                                    return None
+                                }
+                            } else if checking_sentinels {
+                                 //FIXME this should be unreachable
+                                panic!("FUZZY must block read on Sentinel {:?}: {:?}",
+                                    (o, i), pc);
                             }
                             if !pc.is_within_snapshot(i) {
                                 trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
@@ -961,7 +991,7 @@ impl ThreadLog {
             let no_remote = e.flag().contains(EntryFlag::NoRemote);
             let locs = e.locs();
             for &OrderIndex(o, i) in locs.into_iter() {
-                if o == order::from(0) { continue }
+                if o == order::from(0) { break }
                 match (self.per_chains.get_mut(&o), no_remote) {
                     (None, true) => {}
                     (None, false) => panic!("trying to return boring chain {:?}", o),

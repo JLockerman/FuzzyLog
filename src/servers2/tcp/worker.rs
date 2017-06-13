@@ -630,14 +630,12 @@ impl WorkerInner {
         socket_state.wake();
 
         if send {
-            trace!("WORKER {} will try to send.", self.worker_num);
             //FIXME need to disinguish btwn to client and to upstream
             self.send_burst(token, socket_state)?
         }
         if recv {
-            trace!("WORKER {} will try to recv.", self.worker_num);
             //FIXME need to disinguish btwn from client and from upstream
-            self.recv_packet(token, socket_state)?
+            for _ in 0..5 { self.recv_packet(token, socket_state)? }
         }
 
         if socket_state.needs_to_stay_awake() {
@@ -683,14 +681,14 @@ impl WorkerInner {
             },
             RecvPacket::Pending => {},
             RecvPacket::FromClient(packet, src_addr) => {
-                trace!("WORKER {} finished recv from client.", self.worker_num);
+                // trace!("WORKER {} finished recv from client.", self.worker_num);
                 self.print_data.finished_recv_from_client(1);
                 let worker = self.worker_num;
                 self.send_to_log(packet, worker, token, src_addr, socket_state);
                 //self.awake_io.push_back(token)
             }
             RecvPacket::FromUpstream(packet, src_addr, storage_loc) => {
-                trace!("WORKER {} finished recv from up.", self.worker_num);
+                // trace!("WORKER {} finished recv from up.", self.worker_num);
                 self.print_data.finished_recv_from_up(1);
                 //let (worker, work_tok) = self.next_hop(token, src_addr, socket_kind);
                 let worker = self.worker_num;
@@ -711,15 +709,15 @@ impl WorkerInner {
         if src_addr == Ipv4SocketAddr::nil() { return Some((worker_num, token)) }
 
         if self.is_unreplicated {
-            trace!("WORKER {} is unreplicated.", self.worker_num);
+            // trace!("WORKER {} is unreplicated.", self.worker_num);
             return Some((self.worker_num, token))
         }
         else if self.downstream_workers == 0 { //if self.is_end_of_chain
-            trace!("WORKER {} is end of chain.", self.worker_num);
+            // trace!("WORKER {} is end of chain.", self.worker_num);
             return match self.worker_and_token_for_addr(src_addr) {
                 Some(worker_and_token) => {
-                    trace!("WORKER {} send to_client to {:?}",
-                        self.worker_num, worker_and_token);
+                    // trace!("WORKER {} send to_client to {:?}",
+                        // self.worker_num, worker_and_token);
                     Some(worker_and_token)
                 },
                 None => None,
@@ -749,7 +747,7 @@ impl WorkerInner {
         src_addr: Ipv4SocketAddr,
         socket_state: &mut PerSocket,
     ) {
-        trace!("WORKER {} send to log", self.worker_num);
+        // trace!("WORKER {} send to log", self.worker_num);
         let (k, f) = {
             let c = buffer.contents();
             (c.kind().clone(), c.flag().clone())

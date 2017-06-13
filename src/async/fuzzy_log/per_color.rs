@@ -96,7 +96,8 @@ impl PerColor {
         );
         debug_assert!(
             self.read_status.first_outstanding().map(|o| o > self.last_snapshot)
-                .unwrap_or(true)
+                .unwrap_or(true),
+            "Wrong end state {:?} > {:?}", self.read_status, self.last_snapshot,
         );
         self.is_being_read = None
     }
@@ -231,6 +232,10 @@ impl PerColor {
 
     pub fn mark_as_already_fetched(&mut self, index: entry) {
         self.read_status.set_point_as_recvd(index);
+    }
+
+    pub fn mark_as_skippable(&mut self, index: entry) {
+        self.read_status.set_point_as_skip(index);
     }
 
     pub fn increment_horizon(&mut self) -> Option<Vec<u8>> {
@@ -373,6 +378,7 @@ impl PerColor {
     pub fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
         assert!(index != 0.into());
         let _old = self.found_but_unused_multiappends.insert(id, index);
+        self.mark_as_skippable(index);
         //TODO I'm not sure this is correct with how we handle overreads
         //debug_assert!(_old.is_none(),
         //    "double sentinel insert {:?}",
