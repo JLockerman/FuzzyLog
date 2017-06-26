@@ -851,21 +851,11 @@ where ToWorkers: DistributeToWorkers<T> {
                 trace!("SERVER {:?} replicate skeens multiput {:?}",
                     self.this_server_num, buffer.contents());
                 let id = *buffer.contents().id();
-                let mut is_sentinel = false;
                 'sk_rep: for (&OrderIndex(o, i), &node_num) in buffer.contents().locs_and_node_nums() {
-                    if o == order::from(0) {
-                        is_sentinel = true;
-                        continue 'sk_rep
-                    }
-                    if !self.stores_chain(o) { continue 'sk_rep }
+                    if o == order::from(0) || !self.stores_chain(o) { continue 'sk_rep }
                     let c = self.ensure_chain(o);
                     c.skeens.replicate_multi_append_round1(
-                        u32::from(i) as u64,
-                        node_num,
-                        id,
-                        storage.clone(),
-                        is_sentinel,
-                        t
+                        u32::from(i) as u64, node_num, id, storage.clone(), false, t,
                     );
                 }
                 self.print_data.msgs_sent(1);
