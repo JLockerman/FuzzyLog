@@ -648,7 +648,7 @@ impl WorkerInner {
     //TODO these functions should return Result so we can remove from map
     fn send_burst(
         &mut self,
-        token: mio::Token,
+        _token: mio::Token,
         socket_state: &mut PerSocket
     ) -> Result<(), ()> {
         match socket_state.send_burst() {
@@ -656,8 +656,8 @@ impl WorkerInner {
             Ok(true) => { self.print_data.finished_send(1); } //TODO self.awake_io.push_back(token),
             Ok(false) => {},
             //FIXME remove from map, log
-            Err(e) => {
-                //error!("send error {:?} @ {:?}", e, token);
+            Err(_e) => {
+                //error!("send error {:?} @ {:?}", _e, _token);
                 let _ = self.poll.deregister(socket_state.stream());
                 return Err(())
             }
@@ -766,15 +766,18 @@ impl WorkerInner {
             },
 
             EntryLayout::Multiput | EntryLayout::Sentinel => {
-                let (size, senti_size, num_locs, has_senti) = {
+                let (size, senti_size, num_locs, has_senti, is_unlock) = {
                     let e = buffer.contents();
                     let locs = e.locs();
                     let num_locs = locs.len();
                     //FIXME
-                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
-                    (e.len(), e.sentinel_entry_size(), num_locs, has_senti)
+                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()))
+                        || !e.flag().contains(EntryFlag::TakeLock);
+                    (e.len(), e.sentinel_entry_size(), num_locs, has_senti, e.flag().contains(EntryFlag::Unlock))
                 };
-                if f.contains(EntryFlag::NewMultiPut) || !f.contains(EntryFlag::TakeLock) {
+                if is_unlock {
+                    Troption::None
+                } else if f.contains(EntryFlag::NewMultiPut) || !f.contains(EntryFlag::TakeLock) {
                     let senti_size = if has_senti { Some(senti_size) } else { None };
                     let mut storage = SkeensMultiStorage::new(num_locs, size, senti_size);
                     if !f.contains(EntryFlag::TakeLock) {
@@ -891,7 +894,7 @@ for Vec<spsc::Sender<ToWorker<(usize, mio::Token, Ipv4SocketAddr)>>> {
     #[inline(always)]
     fn send_to_worker(&mut self, msg: ToWorker<(usize, mio::Token, Ipv4SocketAddr)>) {
         let (which_queue, token, _) = msg.get_associated_data();
-        trace!("SERVER   sending to worker {} {:?} ", which_queue, token);
+        // trace!("SERVER   sending to worker {} {:?} ", which_queue, token);
         self[which_queue].send(msg)
     }
 }

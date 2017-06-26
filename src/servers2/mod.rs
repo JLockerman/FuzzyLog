@@ -67,6 +67,11 @@ where ToWorkers: DistributeToWorkers<T> {
     print_data: LogData,
 }
 
+fn new_chain_store_and_reader<T: Copy>() -> (ChainStore<T>, ChainReader<T>) {
+    let (read, write) = ::evmap::new();
+    (write, read)
+}
+
 counters! {
     struct LogData {
         msgs_recvd: u64,

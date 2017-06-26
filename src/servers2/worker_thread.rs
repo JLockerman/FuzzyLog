@@ -243,31 +243,28 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         MultiFastPath(mut buffer, storage, t) => unsafe {
             trace!("WORKER {} finish fastpath", worker_num);
             {
-                let (ptrs, _indicies, st0, st1) = storage.get_mut();
+                let (_ptrs, _indicies, st0, pointers) = storage.get_mut();
                 let len = {
                     let mut e = buffer.contents_mut();
                     e.flag_mut().insert(EntryFlag::ReadSuccess);
                     e.as_ref().len()
                 };
                 st0.copy_from_slice(&buffer[..len]);
-                let was_multi = buffer.to_sentinel();
-                if let &mut Some(ref mut st1) = st1 {
-                    let len = buffer.contents().len();
-                    st1.copy_from_slice(&buffer[..len]);
-                }
                 {
-                    buffer.from_sentinel(was_multi);
+                    let pointers = &mut **pointers.as_mut().unwrap()
+                        as *mut [u8]  as *mut [*mut ValEdge];
                     let mut is_sentinel = false;
                     let locs = buffer.contents().locs();
-                    for (&oi, &trie_slot) in locs.iter().zip(ptrs.iter()) {
+                    let pointers = &mut (&mut *pointers)[..locs.len()];
+                    for (&oi, &trie_slot) in locs.iter().zip(pointers.iter()) {
                         if oi == OrderIndex(0.into(), 0.into()) {
                             is_sentinel = true;
-                            continue
+                            break
                         }
-                        if trie_slot == 0 { continue }
+                        if is_sentinel { break }
+                        if trie_slot == ptr::null_mut() { continue }
 
-                        let trie_slot: u64 = trie_slot;
-                        let trie_entry: *mut ValEdge = trie_slot as usize as *mut _;
+                        let trie_entry: *mut ValEdge = trie_slot;
                         // let trie_entry: *mut AtomicPtr<u8> = trie_slot as usize as *mut _;
                         // let to_store: *mut u8 = if is_sentinel {
                         //     st1.as_mut().unwrap().as_mut_ptr()
@@ -275,17 +272,12 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                         //     st0.as_mut_ptr()
                         // };
                         // (*trie_entry).store(to_store, Ordering::Release);
-                        let to_store = if is_sentinel {
-                            let ptr = st1.clone().unwrap();
-                            ValEdge::end_from_ptr(ptr.into_ptr())
-                        } else {
-                            ValEdge::end_from_ptr(st0.clone().into_ptr())
-                        };
+                        let to_store = ValEdge::end_from_ptr(st0.clone().into_ptr());
                         ValEdge::atomic_store(trie_entry, to_store, Ordering::Release);
                     }
                 }
             }
-            let (_ptrs, _indicies, st0, _st1) = storage.get();
+            let (_ptrs, _indicies, st0, _pointers) = storage.get();
             let u = if continue_replication {
                 send(ToSend::OldReplication(&*((&**st0) as *const _), 0), t)
             } else {
@@ -296,7 +288,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         },
 
         SingleServerSkeens1(storage, t) => unsafe {
-            let (ts, indicies, st0, _st1) = storage.get_mut();
+            let (ts, indicies, st0, _pointers) = storage.get_mut();
             trace!("WORKER {} finish s skeens1 {:?}", worker_num, ts);
             let mut c = bytes_as_entry_mut(st0);
             c.flag_mut().insert(EntryFlag::ReadSuccess);
@@ -364,6 +356,11 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         SkeensFinished{loc, trie_slot, storage, timestamp, t,}
         | Skeens2MultiReplica{loc, trie_slot, storage, timestamp, t} => unsafe {
             trace!("WORKER {} finish skeens2 @ {:?}", worker_num, loc);
+            if !{ let (_ts, _indicies, st0, _st1) = storage.get();
+                bytes_as_entry(st0).flag().contains(EntryFlag::TakeLock) } {
+                return handle_single_server_skeens_finished(
+                    loc, trie_slot, storage, timestamp, t, continue_replication, send)
+            }
             let chain = loc.0;
             let id;
             {
@@ -372,14 +369,14 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     let mut st0 = bytes_as_entry_mut(st0);
                     id = *st0.as_ref().id();
                     let st0_l = st0.locs_mut();
-                    let i = st0_l.iter().position(|oi| oi.0 == chain).unwrap();
+                    let i = st0_l.iter().position(|oi| oi.0 == chain).expect("no val");
                     //FIXME atomic?
                     st0_l[i].1 = loc.1;
                     if let &mut Some(ref mut st1) = st1 {
                         bytes_as_entry_mut(st1).locs_mut()[i].1 = loc.1;
                         let s_i = st0_l.iter()
                             .position(|oi| oi == &OrderIndex(0.into(), 0.into()));
-                        i > s_i.unwrap()
+                        i > s_i.expect("no index")
                     }
                     else {
                         false
@@ -387,7 +384,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 };
                 {
                     let to_store = if is_sentinel {
-                        let ptr = st1.clone().unwrap();
+                        let ptr = st1.clone().expect("no sentinel storage");
                         ValEdge::end_from_ptr(ptr.into_ptr())
                     } else {
                         ValEdge::end_from_ptr(st0.clone().into_ptr())
@@ -469,6 +466,71 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             (Some(buffer), u)
         },
     }
+}
+
+unsafe fn handle_single_server_skeens_finished<T, U, SendFn>(
+    loc: OrderIndex,
+    slot: *mut ValEdge,
+    storage: SkeensMultiStorage,
+    timestamp: u64,
+    t: T,
+    continue_replication: bool,
+    send: SendFn,
+) -> (Option<Buffer>, U)
+where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
+    let (id, num_locs);
+    {
+        let (_ts, _indicies, st0, pointers) = storage.get_mut();
+        let index = {
+            let chain = loc.0;
+            let mut st0 = bytes_as_entry_mut(st0);
+            id = *st0.as_ref().id();
+            let st0_l = st0.locs_mut();
+            num_locs = st0_l.len();
+            let i = st0_l.iter().position(|oi| oi.0 == chain).expect("must have chain");
+            st0_l[i].1 = loc.1;
+            i
+        };
+
+        if slot != ptr::null_mut() {
+            // Non-Sentinel
+            let pointers = &mut **pointers.as_mut().expect("must have pointers")
+                as *mut [u8]  as *mut [*mut ValEdge];
+            let pointers = &mut (&mut *pointers)[..num_locs];
+            pointers[index] = slot;
+        }
+    }
+
+    let arc;
+    let to_send = match SkeensMultiStorage::try_unwrap(storage) {
+        Ok(storage) => {
+            let &mut (_, _, ref st0, ref mut pointers) = &mut *storage.get();
+            let pointers = &mut **pointers.as_mut().expect("must have pointers 2")
+                as *mut [u8]  as *mut [*mut ValEdge];
+            let pointers = &mut (&mut *pointers)[..num_locs];
+            for &mut trie_slot in pointers {
+                let to_store = ValEdge::end_from_ptr(st0.clone().into_ptr());
+                ValEdge::atomic_store(trie_slot, to_store, Ordering::Release);
+            }
+            st0
+        },
+        Err(r) => {
+            arc = r;
+            let (_, _, st0, _) = arc.get();
+            st0
+        }
+    };
+    let u = if continue_replication {
+        trace!("WORKER continue fast skeens2 replication @ {:?}", loc);
+        send(ToSend::Contents(EntryContents::Skeens2ToReplica{
+            id: &id,
+            lock: &timestamp,
+            loc: &loc,
+        }), t)
+    } else {
+        send(ToSend::Slice(&*to_send), t)
+    };
+    (None, u)
 }
 
 pub fn handle_read<U, V: Send + Sync + Copy, SendFn>(

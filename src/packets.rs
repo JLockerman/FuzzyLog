@@ -250,6 +250,22 @@ define_packet!{
 }
 
 impl<'a> Packet::Ref<'a> {
+    pub fn read(loc: &'a OrderIndex) -> Self {
+        static NoFlag: &'static EntryFlag::Flag = &EntryFlag::Nothing;
+        static ZeroBytes: &'static u16 = &0;
+        static id: &'static Uuid = &::uuid::NAMESPACE_DNS;
+
+        Packet::Ref::Read {
+            id: id,
+            flags: NoFlag,
+            data_bytes: ZeroBytes,
+            dependency_bytes: ZeroBytes,
+            loc: &loc,
+            horizon: &loc,
+            min: &loc,
+        }
+    }
+
     pub fn flag(self) -> &'a Flag {
         use self::Packet::Ref::*;
         match self {

@@ -703,6 +703,10 @@ impl Trie {
         self.root.next_entry
     }
 
+    pub fn horizon(&self) -> u64 {
+        self.root.next_entry - 1
+    }
+
     pub fn atomic_len(&self) -> u64 {
         to_atomic_usize(&self.root.next_entry).load(Ordering::Relaxed) as u64
     }

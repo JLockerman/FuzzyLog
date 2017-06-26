@@ -913,7 +913,7 @@ macro_rules! async_tests {
         }
     );
     (stcp) => {
-        mod stcp {
+        mod pstcp {
             async_tests!(test new_thread_log);
 
             #[allow(non_upper_case_globals)]

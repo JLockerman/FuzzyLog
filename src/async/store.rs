@@ -909,6 +909,11 @@ where PerServer<S>: Connected,
                         for i in 0..msg_locs.len() {
                             debug_assert_eq!(msg_locs[i].0, lock_locs[i].0);
                             msg_locs[i] = lock_locs[i];
+                            if msg_locs[i].0 == order::from(0) {
+                                debug_assert_eq!(msg_locs[i], OrderIndex(0.into(), 0.into()));
+                            } else {
+                                debug_assert!(msg_locs[i].1 != entry::from(0));
+                            }
                             debug_assert!(
                                 if msg_locs[i].0 != order::from(0) {
                                     msg_locs[i].1 != entry::from(0)

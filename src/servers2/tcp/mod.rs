@@ -16,8 +16,6 @@ use mio::tcp::*;
 
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
-use evmap;
-
 mod worker;
 mod per_socket;
 
@@ -300,7 +298,7 @@ pub fn run_with_replication(
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
-    let (log_reader, log_writer) = evmap::new();
+    let (log_writer, log_reader) = ::servers2::new_chain_store_and_reader();
     for n in 0..num_workers {
         //let from_dist = recv_from_dist.clone();
         let to_dist   = workers_to_dist.clone();

@@ -36,9 +36,9 @@ impl<T: Copy> Chain<T> {
     }
 
     fn timestamp_for_multi(
-        &mut self, id: Uuid, storage: SkeensMultiStorage, t: T
+        &mut self, id: Uuid, storage: SkeensMultiStorage, is_sentinel: bool, t: T
     ) -> Result<(Time, QueueIndex), Time> {
-        match self.skeens.add_multi_append(id, storage, t) {
+        match self.skeens.add_multi_append(id, storage, is_sentinel, t) {
             SkeensAppendRes::NewAppend(ts, num) => Ok((ts, num)),
             //TODO
             SkeensAppendRes::OldPhase1(ts) => Err(ts),
@@ -73,6 +73,14 @@ impl<T: Copy> Chain<T> {
                             let (loc, ptr) = trie.prep_append(ValEdge::null());
                             on_finish(Multi(loc, ptr, storage, timestamp, t));
                         },
+                        GotMax::Senti{storage, t, id, timestamp, ..} => unsafe {
+                            trace!("flush senti {:?}: {:?}", id, timestamp);
+                            let loc = trie.horizon();
+                            on_finish(Multi(
+                                loc, unsafe { ptr::null_mut() }, storage, timestamp, t)
+                            );
+                        },
+
                     }
                 })
             }
@@ -283,13 +291,11 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
-        //FXIME fastpath for single server appends
         if !kind.contains(EntryFlag::TakeLock) {
             self.handle_single_server_append(kind, buffer, storage, t)
         } else if kind.contains(EntryFlag::NewMultiPut) {
             self.handle_new_multiappend(kind, buffer, storage, t)
-        }
-        else {
+        } else {
             self.handle_old_multiappend(kind, buffer, storage, t)
         }
     }
@@ -335,21 +341,32 @@ where ToWorkers: DistributeToWorkers<T> {
         t: T
     ) {
         unsafe {
-            let (pointers, _indicies, _st0, _st1) = storage.get_mut();
+            let (_locs, _indicies, _st0, pointers) = storage.get_mut();
+            let pointers = &mut **pointers.as_mut().unwrap()
+                as *mut [u8]  as *mut [*mut ValEdge];
             let mut contents = buffer.contents_mut();
             let locs = contents.locs_mut();
-            let pointers = &mut pointers[..locs.len()];
+            let pointers = &mut (&mut *pointers)[..locs.len()];
+            let mut is_sentinel = false;
             for (j, &mut OrderIndex(ref o, ref mut i)) in locs.into_iter().enumerate() {
                 if *o == order::from(0) || !self.stores_chain(*o) {
                     *i = entry::from(0);
-                    pointers[j] = 0;
+                    pointers[j] = ptr::null_mut();
+                    if *o == order::from(0) { is_sentinel = true }
                     continue
                 }
 
-                let (index, ptr) =
-                    self.ensure_chain(*o).trie.prep_append(ValEdge::null());
-                *i = (index as u32).into();
-                pointers[j] = ptr as *mut ValEdge as usize as u64;
+                if !is_sentinel {
+                    let (index, ptr) =
+                        self.ensure_chain(*o).trie.prep_append(ValEdge::null());
+                    *i =  entry::from(index as u32);
+                    pointers[j] = ptr;
+                } else {
+                    let horizon = get_chain(&self.log, *o)
+                        .map(|c| c.trie.horizon())
+                        .unwrap_or_else(|| 0);
+                    *i = entry::from(horizon as u32);
+                }
             }
         }
 
@@ -364,7 +381,7 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: SkeensMultiStorage,
         t: T
     ) {
-        self.new_multiappend_round1(kind, &mut buffer, &storage, t);
+        self.new_multiappend_round1(kind, &mut buffer, &storage, true, t);
 
         let max_timestamp = unsafe { storage.get().0.iter().cloned().max() };
 
@@ -420,7 +437,7 @@ where ToWorkers: DistributeToWorkers<T> {
             self.to_workers.send_to_worker(ReturnBuffer(buffer, t))
         } else {
             let storage = storage.unwrap_left();
-            self.new_multiappend_round1(kind, &mut buffer, &storage, t);
+            self.new_multiappend_round1(kind, &mut buffer, &storage, false, t);
             self.print_data.msgs_sent(1);
             self.to_workers.send_to_worker(
                 Skeens1 { buffer: buffer, storage: storage, t: t }
@@ -433,6 +450,7 @@ where ToWorkers: DistributeToWorkers<T> {
         kind: EntryFlag::Flag,
         buffer: &mut BufferSlice,
         storage: &SkeensMultiStorage,
+        distinguish_sentinels: bool,
         t: T
     ) {
         trace!("SERVER {:?} new-style multiput Round 1 {:?}", self.this_server_num, kind);
@@ -441,17 +459,24 @@ where ToWorkers: DistributeToWorkers<T> {
         let timestamps = &mut unsafe { storage.get_mut().0 }[..locs.len()];
         let queue_indicies = &mut unsafe { storage.get_mut().1 }[..locs.len()];
         let id = val.id().clone();
+        let mut is_sentinel = false;
         for i in 0..locs.len() {
             let chain = locs[i].0;
             if chain == order::from(0) || !self.stores_chain(chain) {
                 timestamps[i] = 0;
+                if chain == order::from(0) { is_sentinel = true }
                 continue
             }
 
             let chain = self.ensure_chain(chain);
             //FIXME handle repeat skeens-1
             let (local_timestamp, num) =
-                chain.timestamp_for_multi(id, storage.clone(), t).unwrap();
+                chain.timestamp_for_multi(
+                    id,
+                    storage.clone(),
+                    distinguish_sentinels && is_sentinel,
+                    t
+                ).unwrap();
             timestamps[i] = local_timestamp;
             queue_indicies[i] = num;
         }
@@ -826,11 +851,21 @@ where ToWorkers: DistributeToWorkers<T> {
                 trace!("SERVER {:?} replicate skeens multiput {:?}",
                     self.this_server_num, buffer.contents());
                 let id = *buffer.contents().id();
+                let mut is_sentinel = false;
                 'sk_rep: for (&OrderIndex(o, i), &node_num) in buffer.contents().locs_and_node_nums() {
-                    if o == order::from(0) || !self.stores_chain(o) { continue 'sk_rep }
+                    if o == order::from(0) {
+                        is_sentinel = true;
+                        continue 'sk_rep
+                    }
+                    if !self.stores_chain(o) { continue 'sk_rep }
                     let c = self.ensure_chain(o);
                     c.skeens.replicate_multi_append_round1(
-                        u32::from(i) as u64, node_num, id, storage.clone(), t
+                        u32::from(i) as u64,
+                        node_num,
+                        id,
+                        storage.clone(),
+                        is_sentinel,
+                        t
                     );
                 }
                 self.print_data.msgs_sent(1);
@@ -865,6 +900,19 @@ where ToWorkers: DistributeToWorkers<T> {
                                 Skeens2MultiReplica {
                                     loc: OrderIndex(o, (index as u32).into()),
                                     trie_slot: slot,
+                                    storage: storage,
+                                    timestamp: max_timestamp,
+                                    t: t
+                                }
+                            )
+                        },
+                        Senti{index, storage, max_timestamp, t} => {
+                            trace!("SERVER finish sk multi rep ({:?}, {:?})", o, index);
+                            print_data.msgs_sent(1);
+                            to_workers.send_to_worker(
+                                Skeens2MultiReplica {
+                                    loc: OrderIndex(o, (index as u32).into()),
+                                    trie_slot: unsafe{ ptr::null_mut() },
                                     storage: storage,
                                     timestamp: max_timestamp,
                                     t: t

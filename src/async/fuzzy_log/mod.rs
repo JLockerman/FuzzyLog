@@ -641,12 +641,11 @@ impl ThreadLog {
         mut msg: Vec<u8>,
         is_sentinel: bool)
     -> MultiSearch {
-        let id = {
+        let (id, is_multi_server) = {
             let entr = bytes_as_entry(&msg);
             let id = entr.id().clone();
-            let locs = entr.locs();
-            trace!("FUZZY multi part read {:?} @ {:?}", id, locs);
-            id
+            trace!("FUZZY multi part read {:?} @ {:?}", id, entr.locs());
+            (id, entr.flag().contains(EntryFlag::TakeLock))
         };
 
         //TODO this should never really occur...
@@ -681,13 +680,14 @@ impl ThreadLog {
                 }
 
                 trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
-                let early_sentinel = self.fetch_multi_parts(&id, o, *i);
+                let early_sentinel = self.fetch_multi_parts(&id, o, *i, is_multi_server);
                 if let Some(loc) = early_sentinel {
                     trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
                     assert!(loc != entry::from(0));
                     *i = loc;
                 } else if *i != entry::from(0) {
                     trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
+                    //TODO don't mark as skippable once opt version is done
                     if is_sentinel {
                         self.per_chains.get_mut(&o)
                             .map(|pc| pc.mark_as_skippable(*i));
@@ -797,7 +797,8 @@ impl ThreadLog {
         }
     }
 
-    fn fetch_multi_parts(&mut self, id: &Uuid, chain: order, index: entry) -> Option<entry> {
+    fn fetch_multi_parts(&mut self, id: &Uuid, chain: order, index: entry, multi_server: bool)
+    -> Option<entry> {
         //TODO argh, no-alloc
         let (unblocked, early_sentinel) = {
             let pc = self.per_chains.entry(chain)
@@ -818,7 +819,10 @@ impl ThreadLog {
             if index != entry::from(0) /* && !pc.is_within_snapshot(index) */ {
                 trace!("RRRRR non-blind search {:?} {:?}", chain, index);
                 let unblocked = pc.update_horizon(potential_new_horizon);
-                pc.mark_as_already_fetched(index);
+                //TODO with opt, only for non-sentinels
+                if multi_server {
+                    pc.mark_as_already_fetched(index);
+                }
                 (unblocked, early_sentinel)
             } else if early_sentinel.is_some() {
                 trace!("RRRRR already found {:?} {:?}", chain, early_sentinel);
