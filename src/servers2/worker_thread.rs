@@ -162,8 +162,14 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         } => unsafe {
             let storage = *storage;
             let (mut multi_storage, mut senti_storage) = storage;
+            let is_multiserver;
             let (remaining_senti_places, len) = {
                 let e = buffer.contents();
+                is_multiserver = {
+                    let flag = e.flag();
+                    flag.contains(EntryFlag::TakeLock)
+                    || flag.contains(EntryFlag::LockServer)
+                };
                 let len = e.len();
                 let b = &buffer[..len];
                 trace!("place multi_storage @ {:?}, len {}", multi_storage, b.len());
@@ -176,7 +182,6 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 //alt let mut sentinel_start = places.len();
                 let mut sentinel_start = None;
                 for i in 0..num_places {
-
                     if e.locs()[i] == OrderIndex(0.into(), 0.into()) {
                         //alt sentinel_start = i;
                         sentinel_start = Some(i);
@@ -188,12 +193,12 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     let multi_edge = ValEdge::end_from_ptr(multi_storage.clone().into_ptr());
                     ValEdge::atomic_store(places[i], multi_edge, Ordering::Release);
                 }
-                let remaining_places = if let Some(i) = sentinel_start {
-                    &places[i..]
-                }
-                else {
-                    &[]
-                };
+                let remaining_places =
+                    if let (Some(i), true) = (sentinel_start, is_multiserver) {
+                        &places[i..]
+                    } else {
+                        &[]
+                    };
                 // we finished with the first portion,
                 // if there is a second, we'll need auxiliary memory
                 (remaining_places.to_vec(), len)

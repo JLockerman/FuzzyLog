@@ -146,6 +146,7 @@ pub mod EntryFlag {
             const TakeLock = 0x8,
             const Unlock = 0x10,
             const NoRemote = 0x20,
+            const LockServer = 0x40,
         }
     }
 

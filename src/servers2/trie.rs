@@ -6,7 +6,7 @@ use std::{mem, ptr, slice};
 //FIXME
 use packets::MutEntry as MutPacket;
 use packets::Entry as Packet;
-use packets::EntryVar;
+use packets::{EntryVar, EntryContents};
 
 use servers2::byte_trie::{self, Trie as Alloc};
 use servers2::shared_slice::RcSlice;
@@ -355,6 +355,16 @@ impl<'a> AppendSlot<Packet<'a>> {
         ValEdge::atomic_store(trie_entry, data_ptr, Ordering::Release);
         //Packet::wrap_slice(slice::from_raw_parts(data_ptr, storage_size))
         data_ptr.to_sized_packet(data_size)
+    }
+
+    pub unsafe fn finish_append_with_contents(self, data: EntryContents) {
+        use std::sync::atomic::Ordering;
+
+        let AppendSlot {trie_entry, data_ptr, data_size, ..} = self;
+        let storage_size = data.len();
+        assert_eq!(data_size, storage_size);
+        data.write_to(slice::from_raw_parts_mut(data_ptr.ptr(), storage_size));
+        ValEdge::atomic_store(trie_entry, data_ptr, Ordering::Release);
     }
 
     pub unsafe fn finish_append_with<F>(self, data: Packet, before_insert: F) -> Packet

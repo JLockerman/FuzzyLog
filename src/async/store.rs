@@ -630,8 +630,12 @@ where PerServer<S>: Connected,
                     true
                 } else {
                     let mut msg = msg;
-                    bytes_as_entry_mut(&mut msg).locs_mut().into_iter()
-                        .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
+                    {
+                        let mut e = bytes_as_entry_mut(&mut msg);
+                        e.flag_mut().insert(EntryFlag::LockServer);
+                        e.locs_mut().into_iter()
+                            .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
+                    }
                     self.add_get_lock_nums(msg)
                 }
             }

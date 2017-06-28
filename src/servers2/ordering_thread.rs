@@ -47,7 +47,7 @@ impl<T: Copy> Chain<T> {
     }
 
     fn finish_multi<F>(
-        &mut self, id: Uuid, max_timestamp: u64, mut on_finish: F)
+        &mut self, id: Uuid, max_timestamp: u64, chain: order, mut on_finish: F)
     where F: FnMut(FinishSkeens<T>) { //Ret val?
         use self::FinishSkeens::*;
         let r = self.skeens.set_max_timestamp(id, max_timestamp);
@@ -75,7 +75,7 @@ impl<T: Copy> Chain<T> {
                         },
                         GotMax::Senti{storage, t, id, timestamp, ..} => unsafe {
                             trace!("flush senti {:?}: {:?}", id, timestamp);
-                            let loc = trie.horizon();
+                            let loc = horizon_or_add_blank(trie, chain);
                             on_finish(Multi(
                                 loc, unsafe { ptr::null_mut() }, storage, timestamp, t)
                             );
@@ -86,6 +86,25 @@ impl<T: Copy> Chain<T> {
             }
         }
     }
+}
+
+fn horizon_or_add_blank(trie: &mut Trie, chain: order) -> u64 {
+    let horizon = trie.horizon();
+    if horizon > 0 {
+        return horizon
+    }
+
+    let blank = EntryContents::Single {
+        id: &Uuid::nil(),
+        flags: &EntryFlag::ReadSuccess,
+        loc: &OrderIndex(chain, 1.into()),
+        data: &[],
+        deps: &[],
+    };
+    unsafe {
+        trie.partial_append(blank.len()).finish_append_with_contents(blank);
+    }
+    trie.horizon()
 }
 
 //SAFETY: log is single writer and Chain refs never escape this thread
@@ -335,11 +354,12 @@ where ToWorkers: DistributeToWorkers<T> {
 
     fn single_server_single_append_fast_path(
         &mut self,
-        _kind: EntryFlag::Flag,
+        kind: EntryFlag::Flag,
         mut buffer: BufferSlice,
         storage: SkeensMultiStorage,
         t: T
     ) {
+        let is_lock_server = kind.contains(EntryFlag::LockServer);
         unsafe {
             let (_locs, _indicies, _st0, pointers) = storage.get_mut();
             let pointers = &mut **pointers.as_mut().unwrap()
@@ -356,15 +376,13 @@ where ToWorkers: DistributeToWorkers<T> {
                     continue
                 }
 
-                if !is_sentinel {
+                if !is_sentinel || is_lock_server {
                     let (index, ptr) =
                         self.ensure_chain(*o).trie.prep_append(ValEdge::null());
                     *i =  entry::from(index as u32);
                     pointers[j] = ptr;
                 } else {
-                    let horizon = get_chain(&self.log, *o)
-                        .map(|c| c.trie.horizon())
-                        .unwrap_or_else(|| 0);
+                    let horizon = horizon_or_add_blank(&mut self.ensure_chain(*o).trie, *o);
                     *i = entry::from(horizon as u32);
                 }
             }
@@ -514,7 +532,7 @@ where ToWorkers: DistributeToWorkers<T> {
             });*/
             let to_workers = &mut self.to_workers;
             let print_data = &mut self.print_data;
-            chain.finish_multi(id, max_timestamp,
+            chain.finish_multi(id, max_timestamp, chain_num,
                 |finished| match finished {
                     FinishSkeens::Multi(index, trie_slot, storage, timestamp, t) => {
                         trace!("server finish sk multi");
@@ -850,12 +868,27 @@ where ToWorkers: DistributeToWorkers<T> {
             ToReplicate::Skeens1(buffer, storage) => {
                 trace!("SERVER {:?} replicate skeens multiput {:?}",
                     self.this_server_num, buffer.contents());
-                let id = *buffer.contents().id();
+                let (id, flag) = {
+                    let c = buffer.contents();
+                    (*c.id(), *c.flag())
+                };
+                let is_single_server = !flag.contains(EntryFlag::TakeLock);
+                let mut is_sentinel = false;
                 'sk_rep: for (&OrderIndex(o, i), &node_num) in buffer.contents().locs_and_node_nums() {
-                    if o == order::from(0) || !self.stores_chain(o) { continue 'sk_rep }
+                    if o == order::from(0) || !self.stores_chain(o) {
+                        if o == order::from(0) {
+                            is_sentinel = true;
+                        }
+                        continue 'sk_rep
+                    }
                     let c = self.ensure_chain(o);
                     c.skeens.replicate_multi_append_round1(
-                        u32::from(i) as u64, node_num, id, storage.clone(), false, t,
+                        u32::from(i) as u64,
+                        node_num,
+                        id,
+                        storage.clone(),
+                        is_single_server && is_sentinel,
+                        t,
                     );
                 }
                 self.print_data.msgs_sent(1);
@@ -940,9 +973,15 @@ where ToWorkers: DistributeToWorkers<T> {
 
                 let mut sentinel_start_index = None;
                 let mut num_places = 0;
+                let is_multiserver;
                 {
                     let val = buffer.contents();
                     let locs = val.locs();
+                    is_multiserver = {
+                        let flag = val.flag();
+                        flag.contains(EntryFlag::TakeLock)
+                        || flag.contains(EntryFlag::LockServer)
+                    };
                     //FIXME handle duplicates
                     'update_append_horizon: for i in 0..locs.len() {
                         if locs[i] == OrderIndex(0.into(), 0.into()) {
@@ -989,7 +1028,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         };
                     }
                 }
-                if let Some(ssi) = sentinel_start_index {
+                if let (Some(ssi), true) = (sentinel_start_index, is_multiserver) {
                     trace!("SERVER {:?} sentinal locs {:?}",
                         self.this_server_num, &buffer.contents().locs()[ssi..]);
                     for &OrderIndex(chain, index) in &buffer.contents().locs()[ssi..] {
