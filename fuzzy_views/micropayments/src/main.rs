@@ -69,7 +69,7 @@ fn main() {
 
     let (avg_incs, avg_decs) =
         crossbeam::scope(|scope| {
-            let mut joins = Vec::with_capacity(2);
+            let mut joins = Vec::with_capacity(3);
             match (args.single_thread, args.baseline) {
                 (true, true) => {
                     let log = scope.spawn(|| baseline(&num_incs, &num_decs, &done, &args));
@@ -81,21 +81,27 @@ fn main() {
                 },
                 (false, true) => {
                     if args.split {
-                        let inc = scope.spawn(|| baseline_inc(&num_incs, &done, &args));
-                        joins.push(inc);
+                        let inc0 = scope.spawn(|| baseline_inc(&num_incs, &done, &args));
+                        joins.push(inc0);
+                        let inc1 = scope.spawn(|| baseline_inc(&num_incs, &done, &args));
+                        joins.push(inc1);
                         let dec = scope.spawn(|| baseline_dec(&num_decs, &done, &args));
                         joins.push(dec)
                     } else {
                         let t0 = scope.spawn(|| baseline(&num_incs, &num_decs, &done, &args));
                         joins.push(t0);
                         let t1 = scope.spawn(|| baseline(&num_incs, &num_decs, &done, &args));
-                        joins.push(t1)
+                        joins.push(t1);
+                        let t2 = scope.spawn(|| baseline(&num_incs, &num_decs, &done, &args));
+                        joins.push(t2)
                     }
 
                 },
                 (false, false) => {
-                    let inc = scope.spawn(|| fuzzy_inc(&num_incs, &done, &args));
-                    joins.push(inc);
+                    let inc0 = scope.spawn(|| fuzzy_inc(&num_incs, &done, &args));
+                    joins.push(inc0);
+                    let inc1 = scope.spawn(|| fuzzy_inc(&num_incs, &done, &args));
+                    joins.push(inc1);
                     let dec = scope.spawn(|| fuzzy_dec(&num_decs, &done, &args));
                     joins.push(dec)
                 },
