@@ -461,9 +461,11 @@ impl ThreadLog {
             if loc.0 == order::from(0) { continue }
             let (is_next_in_chain, needs_to_be_returned);
             {
-                let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
-                is_next_in_chain = pc.next_return_is(loc.1);
-                needs_to_be_returned = !pc.has_returned(loc.1);
+                let (is_next, ntbr) = self.per_chains.get(&loc.0).map(|pc| {
+                    (pc.next_return_is(loc.1), !pc.has_returned(loc.1))
+                }).unwrap_or((true, false));
+                is_next_in_chain = is_next;
+                needs_to_be_returned = ntbr;
             }
             needed |= needs_to_be_returned;
             if !needs_to_be_returned { continue }
@@ -479,8 +481,8 @@ impl ThreadLog {
         trace!("FUZZY checking {:?} for blockers in {:?}", locs, deps);
         for &OrderIndex(chain, index) in deps {
             let blocker_already_returned = self.per_chains.get_mut(&chain)
-                .expect("read uninteresting chain")
-                .has_returned(index);
+                .map(|pc| pc.has_returned(index))
+                .unwrap_or(true);
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", locs, (chain, index));
                 //TODO no-alloc?
@@ -504,7 +506,7 @@ impl ThreadLog {
         let deps = entr.dependencies();
         let (needed, try_ret);
         {
-            let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
+            let pc = self.per_chains.get(&loc.0).expect("blocking uninteresting chain");
             needed = !pc.has_returned(loc.1);
             try_ret = pc.next_return_is(loc.1);
         }
@@ -514,9 +516,9 @@ impl ThreadLog {
         }
         trace!("FUZZY checking {:?} for blockers in {:?}", loc, deps);
         for &OrderIndex(chain, index) in deps {
-            let blocker_already_returned = self.per_chains.get_mut(&chain)
-                .expect("read uninteresting chain")
-                .has_returned(index);
+            let blocker_already_returned = self.per_chains.get_mut(&chain).map(|pc|{
+                pc.has_returned(index)
+            }).unwrap_or(true);
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", loc, (chain, index));
                 //TODO no-alloc?
@@ -544,10 +546,12 @@ impl ThreadLog {
     fn fetch_blocker_at(&mut self, chain: order, index: entry) {
         let unblocked;
         let to_fetch: NextToFetch = {
-            let pc = self.per_chains.get_mut(&chain)
-                .expect("tried reading uninteresting chain");
-            unblocked = pc.update_horizon(index);
-            pc.next_range_to_fetch()
+            let (ub, to_fetch) = self.per_chains.get_mut(&chain).map(|pc|{
+                let ub = pc.update_horizon(index);
+                (ub, pc.next_range_to_fetch())
+            }).unwrap_or_else(|| (None, NextToFetch::None));
+            unblocked = ub;
+            to_fetch
         };
         trace!("FUZZY blocker {:?} needs additional reads {:?}", chain, to_fetch);
         if let NextToFetch::BelowHorizon(low, high) = to_fetch {
@@ -713,7 +717,7 @@ impl ThreadLog {
         else if !is_later_piece && is_sentinel {
             trace!("FUZZY early sentinel");
             self.per_chains.get_mut(&read_loc.0)
-                .expect("boring chain")
+                .expect("boring sentinel")
                 .add_early_sentinel(id, read_loc.1);
             return MultiSearch::EarlySentinel
         }
@@ -802,7 +806,7 @@ impl ThreadLog {
         //TODO argh, no-alloc
         let (unblocked, early_sentinel) = {
             let pc = self.per_chains.entry(chain)
-                .or_insert_with(|| PerColor::new(chain));
+                .or_insert_with(|| PerColor::new(chain)); //FIXME
 
             let early_sentinel = pc.take_early_sentinel(&id);
             let potential_new_horizon = match early_sentinel {
@@ -907,7 +911,11 @@ impl ThreadLog {
         let OrderIndex(o, i) = loc;
 
         let is_interesting = {
-            let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
+            let pc = match self.per_chains.get_mut(&o) {
+                Some(pc) => pc,
+                //TODO or true?
+                None => return false,
+            };
 
             if pc.has_returned(i) {
                 return false
@@ -955,8 +963,8 @@ impl ThreadLog {
                         continue
                     }
                     match (self.per_chains.get_mut(&o), no_remote) {
-                        (None, true) => {}
-                        (None, false) => panic!("trying to return boring chain {:?}", o),
+                        (None, _) => {}
+                        // (None, false) => panic!("trying to return boring chain {:?}", o),
                         (Some(pc), _) => {
                             if pc.has_returned(i) {
                                 if !checking_sentinels {
@@ -980,7 +988,8 @@ impl ThreadLog {
             if let Some((o, i)) = should_block_on {
                 let is_next;
                 {
-                    let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
+                    let pc = self.per_chains.get_mut(&o)
+                        .expect("blocking on uninteresting chain");
                     is_next = pc.next_return_is(i);
                     if is_next {
                         pc.block_on_snapshot(val);
@@ -997,8 +1006,8 @@ impl ThreadLog {
             for &OrderIndex(o, i) in locs.into_iter() {
                 if o == order::from(0) { break }
                 match (self.per_chains.get_mut(&o), no_remote) {
-                    (None, true) => {}
-                    (None, false) => panic!("trying to return boring chain {:?}", o),
+                    (None, _) => {}
+                    //(None, false) => panic!("trying to return boring chain {:?}", o),
                     (Some(pc), _) => {
                         trace!("QQQQ setting returned {:?}", (o, i));
                         debug_assert!(pc.is_within_snapshot(i));

@@ -1545,14 +1545,14 @@ impl Connected for PerServer<TcpStream> {
                 },
                 Err(e) => match e.kind() {
                     ErrorKind::WouldBlock => {
-                        trace!("FFFFF would block @ {:?}", self.token);
+                        // trace!("FFFFF would block @ {:?}", self.token);
                     }
                     _ => panic!("CLIENT send error {}", e),
                 }
             }
-            trace!("FFFFF {:?} sent {:?}/{:?}",
-                self.token, self.bytes_sent, self.being_written.first_bytes().len()
-            );
+            // trace!("FFFFF {:?} sent {:?}/{:?}",
+                // self.token, self.bytes_sent, self.being_written.first_bytes().len()
+            // );
             if self.bytes_sent < self.being_written.first_bytes().len() {
                 return false
             }
