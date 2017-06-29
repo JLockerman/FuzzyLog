@@ -49,6 +49,9 @@ struct Args {
 
     #[structopt(short = "s", long = "single_threaded", help = "Handle both increments and decrements in the same thread.")]
     single_thread: bool,
+
+    #[structopt(short = "l", long = "split", help = "split threads in a basic into increment and decerement threads.")]
+    split: bool,
 }
 
 //remove range normal around 10_000
@@ -77,10 +80,18 @@ fn main() {
                     joins.push(log)
                 },
                 (false, true) => {
-                    let inc = scope.spawn(|| baseline_inc(&num_incs, &done, &args));
-                    joins.push(inc);
-                    let dec = scope.spawn(|| baseline_dec(&num_decs, &done, &args));
-                    joins.push(dec)
+                    if args.split {
+                        let inc = scope.spawn(|| baseline_inc(&num_incs, &done, &args));
+                        joins.push(inc);
+                        let dec = scope.spawn(|| baseline_dec(&num_decs, &done, &args));
+                        joins.push(dec)
+                    } else {
+                        let t0 = scope.spawn(|| baseline(&num_incs, &num_decs, &done, &args));
+                        joins.push(t0);
+                        let t1 = scope.spawn(|| baseline(&num_incs, &num_decs, &done, &args));
+                        joins.push(t1)
+                    }
+
                 },
                 (false, false) => {
                     let inc = scope.spawn(|| fuzzy_inc(&num_incs, &done, &args));
@@ -137,8 +148,11 @@ fn baseline(num_incs: &AtomicUsize, num_decs: &AtomicUsize, done: &AtomicBool, a
         )
     };
 
-    let mut outstanding_incs = VecDeque::with_capacity(args.inc_window);
-    let mut outstanding_decs = VecDeque::with_capacity(args.dec_window);
+    let mut outstanding_incs = VecDeque::with_capacity(
+        args.inc_window / if args.single_thread { 1 } else { 2 }
+    );
+    let mut outstanding_decs = VecDeque::with_capacity(args.dec_window
+        / if args.single_thread { 1 } else { 2 });
 
     let mut rng = rand::thread_rng();
     let mut dist = Normal::new(10.0, 2.0);
@@ -165,7 +179,7 @@ fn baseline(num_incs: &AtomicUsize, num_decs: &AtomicUsize, done: &AtomicBool, a
                 outstanding_decs.pop_front();
                 num_decs.fetch_add(1, Ordering::Relaxed);
             } else {
-                panic!("bad op {:?}", id);
+                //
             }
             if v.is_sign_positive() {
                 balance += v
@@ -191,7 +205,6 @@ fn baseline(num_incs: &AtomicUsize, num_decs: &AtomicUsize, done: &AtomicBool, a
             for _ in 0..num_new_ops {
                 let id = log.async_append(chain, &dec_sample(), &[]);
                 outstanding_decs.push_back(id);
-
             }
             new_snap = true;
         }
@@ -307,8 +320,126 @@ fn baseline_dec(num_decs: &AtomicUsize, done: &AtomicBool, args: &Args) {
 }
 
 fn fuzzy(num_incs: &AtomicUsize, num_decs: &AtomicUsize, done: &AtomicBool, args: &Args) {
-    unimplemented!()
+    let inc_chain = order::from(1);
+    let dec_chain = order::from(2);
+
+    let mut inc_log = if let Some(tail_server) = args.tail_server {
+        LogHandle::new_tcp_log_with_replication(
+            iter::once((args.head_server, tail_server)), iter::once(inc_chain)
+        )
+    } else {
+        LogHandle::new_tcp_log(
+            iter::once(args.head_server), iter::once(order::from(inc_chain))
+        )
+    };
+
+    let mut dec_log = if let Some(tail_server) = args.tail_server {
+        LogHandle::new_tcp_log_with_replication(
+            iter::once((args.head_server, tail_server)), iter::once(dec_chain)
+        )
+    } else {
+        LogHandle::new_tcp_log(
+            iter::once(args.head_server), iter::once(order::from(dec_chain))
+        )
+    };
+
+    let mut outstanding_incs = VecDeque::with_capacity(args.inc_window);
+    let mut outstanding_digests = VecDeque::with_capacity(args.inc_window);
+    let mut outstanding_decs = VecDeque::with_capacity(args.dec_window);
+
+    let mut rng = rand::thread_rng();
+    let mut dist = Normal::new(10.0, 2.0);
+    let mut inc_sample = || dist.sample(&mut rng).abs();
+    for _ in 0..outstanding_incs.capacity() {
+        let val = inc_sample();
+        let id = inc_log.async_append(inc_chain, &val, &[]);
+        // let id = log.async_dependent_multiappend(
+        //     &[inc_chain], &[dec_chain], &inc_sample(), &[]
+        // );
+        outstanding_incs.push_back((val, id));
+    }
+
+    let mut rng = rand::thread_rng();
+    let mut dist = Normal::new(10_000.0, 200.0);
+    let mut dec_sample = || -dist.sample(&mut rng).abs();
+
+    let mut inc_balance = 0.0;
+    let mut inc_added = 0.0;
+
+    let mut dec_balance = 0.0;
+    inc_log.snapshot(inc_chain);
+    dec_log.snapshot(dec_chain);
+    while !done.load(Ordering::Relaxed) {
+        while let Ok((id, locs)) = inc_log.try_wait_for_any_append() {
+            //TODO
+            //if loc != expected {
+                // read others change and update out state
+            //}
+            if Some(id) == outstanding_incs.front().map(|i| i.1) {
+                let (v, _) = outstanding_incs.pop_front().unwrap();
+                inc_balance += v;
+                inc_added += v;
+                if inc_added < 5_000.0 {
+                    num_incs.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let id = inc_log.async_append(dec_chain, &inc_added, &[locs[0]]);
+                    outstanding_digests.push_back(id);
+                    inc_added = 0.0;
+                }
+            } else if Some(&id) == outstanding_digests.front() {
+                outstanding_digests.pop_front();
+                num_incs.fetch_add(1, Ordering::Relaxed);
+            } else {
+
+            }
+        }
+        let _ = dec_log.flush_completed_appends();
+
+        while let Ok((&v, l, id)) = dec_log.try_get_next2() {
+            assert_eq!(l.len(), 1);
+            let v: f64 = v;
+            if outstanding_decs.front() == Some(id) {
+                outstanding_decs.pop_front();
+                num_decs.fetch_add(1, Ordering::Relaxed);
+            }
+
+            if v.is_sign_positive() {
+                dec_balance += v
+            } else if dec_balance >= v {
+                dec_balance += v
+            } else {
+                //TODO num_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if outstanding_incs.len() < outstanding_incs.capacity() {
+            let num_new_ops = outstanding_incs.capacity() - outstanding_incs.len();
+            for _ in 0..num_new_ops {
+                let v = inc_sample();
+                let id = inc_log.async_append(inc_chain, &v, &[]);
+                // let id = log.async_dependent_multiappend(
+                //     &[inc_chain], &[dec_chain], &inc_sample(), &[]
+                // );
+                outstanding_incs.push_back((v, id));
+            }
+            inc_log.snapshot(inc_chain)
+        }
+
+        if outstanding_decs.len() < outstanding_decs.capacity() {
+            let num_new_ops = outstanding_decs.capacity() - outstanding_decs.len();
+            for _ in 0..num_new_ops {
+                let id = dec_log.async_append(dec_chain, &dec_sample(), &[]);
+                // let id = log.async_dependent_multiappend(
+                //     &[dec_chain], &[inc_chain], &dec_sample(), &[]
+                // );
+                outstanding_decs.push_back(id);
+
+            }
+            dec_log.snapshot(dec_chain)
+        }
+    }
 }
+
 fn fuzzy_inc(num_incs: &AtomicUsize, done: &AtomicBool, args: &Args) {
     let inc_chain = order::from(1);
     let dec_chain = order::from(2);
@@ -329,11 +460,12 @@ fn fuzzy_inc(num_incs: &AtomicUsize, done: &AtomicBool, args: &Args) {
     let mut dist = Normal::new(10.0, 2.0);
     let mut inc_sample = || dist.sample(&mut rng).abs();
     for _ in 0..outstanding_incs.capacity() {
-        let id = log.async_append(inc_chain, &inc_sample(), &[]);
+        let val = inc_sample();
+        let id = log.async_append(inc_chain, &val, &[]);
         // let id = log.async_dependent_multiappend(
         //     &[inc_chain], &[dec_chain], &inc_sample(), &[]
         // );
-        outstanding_incs.push_back(id);
+        outstanding_incs.push_back((val, id));
     }
 
     let mut balance = 0.0;
@@ -341,41 +473,59 @@ fn fuzzy_inc(num_incs: &AtomicUsize, done: &AtomicBool, args: &Args) {
 
     log.snapshot(inc_chain);
     while !done.load(Ordering::Relaxed) {
-        while let Ok((id, _)) = log.try_wait_for_any_append() {
-            if Some(&id) == outstanding_digests.front() {
+        while let Ok((id, locs)) = log.try_wait_for_any_append() {
+            //TODO
+            //if loc != expected {
+                // read others change and update out state
+            //}
+            if Some(id) == outstanding_incs.front().map(|i| i.1) {
+                let (v, _) = outstanding_incs.pop_front().unwrap();
+                balance += v;
+                added += v;
+                if added < 5_000.0 {
+                    num_incs.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let id = log.async_append(dec_chain, &added, &[locs[0]]);
+                    outstanding_digests.push_back(id);
+                    added = 0.0;
+                }
+            } else if Some(&id) == outstanding_digests.front() {
                 outstanding_digests.pop_front();
                 num_incs.fetch_add(1, Ordering::Relaxed);
+            } else {
+
             }
         }
 
-        while let Ok((v, loc, id)) = log.try_get_next2()
-            .map(|(&v, l, &i)| { assert_eq!(l.len(), 1); (v, l[0], i) }) {
-            let v: f64 = v;
-            let my_inc = outstanding_incs.front() == Some(&id);
-            if my_inc { outstanding_incs.pop_front(); }
+        // while let Ok((v, loc, id)) = log.try_get_next2()
+        //     .map(|(&v, l, &i)| { assert_eq!(l.len(), 1); (v, l[0], i) }) {
+        //     let v: f64 = v;
+        //     let my_inc = outstanding_incs.front() == Some(&id);
+        //     if my_inc { outstanding_incs.pop_front(); }
 
-            assert!(v.is_sign_positive());
-            balance += v;
-            added += v;
-            if added >= 5_000.0 {
-                if my_inc {
-                    let id = log.async_append(dec_chain, &added, &[loc]);
-                    outstanding_digests.push_back(id);
-                }
-                added = 0.0;
-            } else if my_inc {
-                num_incs.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        //     assert!(v.is_sign_positive());
+        //     balance += v;
+        //     added += v;
+        //     if added >= 5_000.0 {
+        //         if my_inc {
+        //             let id = log.async_append(dec_chain, &added, &[loc]);
+        //             outstanding_digests.push_back(id);
+        //         }
+        //         added = 0.0;
+        //     } else if my_inc {
+        //         num_incs.fetch_add(1, Ordering::Relaxed);
+        //     }
+        // }
 
         if outstanding_incs.len() < outstanding_incs.capacity() {
             let num_new_ops = outstanding_incs.capacity() - outstanding_incs.len();
             for _ in 0..num_new_ops {
-                let id = log.async_append(inc_chain, &inc_sample(), &[]);
+                let v = inc_sample();
+                let id = log.async_append(inc_chain, &v, &[]);
                 // let id = log.async_dependent_multiappend(
                 //     &[inc_chain], &[dec_chain], &inc_sample(), &[]
                 // );
-                outstanding_incs.push_back(id);
+                outstanding_incs.push_back((v, id));
             }
             log.snapshot(inc_chain)
         }
