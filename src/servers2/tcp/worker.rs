@@ -465,13 +465,13 @@ impl Worker {
                 }
             );
 
-            buffer.map(|b| self.clients.get_mut(&recv_token).unwrap().return_buffer(b));
-            if self.clients[&recv_token].needs_to_stay_awake() {
+            buffer.map(|b| self.clients.get_mut(&recv_token).map(|c| c.return_buffer(b)));
+            if self.clients.get(&recv_token).map(|c| c.needs_to_stay_awake()).unwrap_or(false) {
                 self.inner.awake_io.push_back(recv_token);
                 self.clients.get_mut(&recv_token).map(|p| p.is_staying_awake());
             }
-            if let Some((send_token, true)) = send_token.map(
-                |t| (t, self.clients[&t].needs_to_stay_awake())) {
+            if let Some((send_token, Some(true))) = send_token.map(
+                |t| (t, self.clients.get(&t).map(|c| c.needs_to_stay_awake()))) {
                 self.inner.awake_io.push_back(send_token);
                 self.clients.get_mut(&send_token).map(|p| p.is_staying_awake());
             }
@@ -526,17 +526,17 @@ impl Worker {
             ToSend::OldReplication(..) => unreachable!(),
 
             ToSend::Contents(to_send) | ToSend::OldContents(to_send, _) =>
-                self.clients.get_mut(&send_token).unwrap().add_downstream_contents(to_send),
+                self.clients.get_mut(&send_token).map(|c| c.add_downstream_contents(to_send)),
 
             ToSend::Slice(to_send) =>
-                self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
+                self.clients.get_mut(&send_token).map(|c| c.add_downstream_send(to_send)),
 
             ToSend::StaticSlice(to_send) =>
-                self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
+                self.clients.get_mut(&send_token).map(|c| c.add_downstream_send(to_send)),
 
             ToSend::Read(to_send) =>
-                self.clients.get_mut(&send_token).unwrap().add_downstream_send(to_send),
-        }
+                self.clients.get_mut(&send_token).map(|c| c.add_downstream_send(to_send)),
+        };
     }
 
     fn redist_downstream(&mut self, worker: WorkerNum, src_addr: Ipv4SocketAddr, to_send: ToSend) {

@@ -510,6 +510,54 @@ where V: Storeable {
         Ok((val, locs))
     }
 
+    pub fn try_get_next2(&mut self) -> Result<(&V, &[OrderIndex], &Uuid), GetRes>
+    where V: UnStoreable {
+        if self.num_snapshots == 0 {
+            trace!("HANDLE read with no snap.");
+            return Err(GetRes::Done)
+        }
+
+        'recv: loop {
+            //TODO use recv_timeout in real version
+            let read = self.ready_reads.try_recv()
+                .or_else(|_| Err(GetRes::NothingReady))?;
+            let read = match read.map_err(|e| self.make_read_error(e)) {
+                Ok(v) => v,
+                //TODO Gc err
+                Err(Some(e)) => return Err(e),
+                Err(None) => continue 'recv,
+            };
+            let old = mem::replace(&mut self.curr_entry, read);
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
+            }
+            if self.curr_entry.len() != 0 {
+                break 'recv
+            }
+
+            trace!("HANDLE finished snap.");
+            assert!(self.num_snapshots > 0);
+            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+            if self.num_snapshots == 0 {
+                trace!("HANDLE finished all snaps.");
+                return Err(GetRes::Done)
+            }
+        }
+
+        trace!("HANDLE got val.");
+        let (val, locs, id) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs(), e.id())
+        };
+        for &OrderIndex(o, i) in locs {
+            let e = self.last_seen_entries.entry(o).or_insert(0.into());
+            if *e < i {
+                *e = i
+            }
+        }
+        Ok((val, locs, id))
+    }
+
     pub fn color_append(
         &mut self,
         data: &V,
