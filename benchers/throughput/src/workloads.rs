@@ -1,7 +1,7 @@
-use fuzzy_log::async::fuzzy_log::log_handle::LogHandle;
-use fuzzy_log::packets::EntryContents;
+use fuzzy_log::async::fuzzy_log::log_handle::{LogHandle, GetRes};
+use fuzzy_log::packets::SingletonBuilder;
 
-use rand::{SeedableRng, XorShiftRng as RandGen};
+use rand::{SeedableRng, XorShiftRng as RandGen, Rng};
 use rand::distributions::Sample;
 use rand::distributions::range::Range as RandRange;
 
@@ -123,7 +123,7 @@ fn write_read(
                 handle.append(admin_chain, &[][..], &[]);
                 while num_clients_started < total_clients {
                     handle.snapshot(admin_chain);
-                    while handle.get_next().is_some() {
+                    while handle.get_next().is_ok() {
                         num_clients_started += 1;
                     }
                 }
@@ -144,9 +144,9 @@ fn write_read(
                     &[]
                 );
                 sent += 1;
-                handle.flush_completed_appends();
+                let _ = handle.flush_completed_appends();
             }
-            handle.wait_for_all_appends();
+            let _ = handle.wait_for_all_appends();
             let write_start = Instant::now();
             let mut sent = 0;
             while sent < num_writes {
@@ -156,9 +156,9 @@ fn write_read(
                     &[]
                 );
                 sent += 1;
-                handle.flush_completed_appends();
+                let _ = handle.flush_completed_appends();
             }
-            handle.wait_for_all_appends();
+            let _ = handle.wait_for_all_appends();
             let write_time = write_start.elapsed();
             let mut sent = 0;
             while sent < num_writes {
@@ -168,9 +168,9 @@ fn write_read(
                     &[]
                 );
                 sent += 1;
-                handle.flush_completed_appends();
+                let _ = handle.flush_completed_appends();
             }
-            handle.wait_for_all_appends();
+            let _ = handle.wait_for_all_appends();
 
             trace!("client {} finished write.", client_num);
 
@@ -182,7 +182,7 @@ fn write_read(
                 handle.append(admin_chain, &[][..], &[]);
                 while num_clients_started < total_clients {
                     handle.snapshot(admin_chain);
-                    while handle.get_next().is_some() {
+                    while handle.get_next().is_ok() {
                         num_clients_started += 1;
                     }
                 }
@@ -196,18 +196,18 @@ fn write_read(
             trace!("client {} starting read.", client_num);
 
             handle.snapshot(read_chain);
-            while let Some(..) = handle.get_next() {}
+            while let Ok(..) = handle.get_next() {}
 
             let read_start = Instant::now();
             handle.snapshot(read_chain + num_chains);
             let mut num_entries = 0usize;
-            while let Some(..) = handle.get_next() {
+            while let Ok(..) = handle.get_next() {
                 num_entries += 1;
             }
             let read_time = read_start.elapsed();
 
             handle.snapshot(read_chain + 2 * num_chains);
-            while let Some(..) = handle.get_next() {}
+            while let Ok(..) = handle.get_next() {}
 
             trace!("client {} finished read.", client_num);
 
@@ -247,9 +247,92 @@ fn write_read(
 
 ///////////////////////////////////////
 
+///////////////////////////////////////
+
+pub fn dependent_cost(
+    server_addr: SocketAddr,
+    jobsize: usize,
+    num_writes: u32,
+    non_dep_portion: u32,
+    random_seed: Option<[u32; 4]>
+) {
+    println!(
+        "# Starting dependent cost with jobsize {} for {} iterations running against:\n#\t{:?}",
+        jobsize, num_writes, server_addr,
+    );
+
+    if let Some(seed) = random_seed {
+        println!("# with random spray, seed: {:?}.", seed);
+    }
+
+    let mut handle = {
+        let chains = (1..3).map(Into::into);
+        LogHandle::new_tcp_log(iter::once(server_addr), chains)
+
+    };
+
+    let start = Instant::now();
+    {
+        let data = vec![0u8; jobsize];
+
+        let mut rand = random_seed.map(RandGen::from_seed).unwrap_or_else(RandGen::new_unseeded);
+
+        trace!("client starting writes.");
+
+        let mut sent = 0;
+        while sent < num_writes {
+            if rand.gen_weighted_bool(non_dep_portion) {
+                handle.async_dependent_multiappend(
+                    &[2.into()],
+                    &[1.into()],
+                    &*data,
+                    &[]
+                );
+            } else {
+                handle.async_append(1.into(), &*data, &[]);
+            }
+            sent += 1;
+            handle.flush_completed_appends().unwrap();
+        }
+        handle.wait_for_all_appends().unwrap();
+
+        trace!("client finished writes, starting read.");
+
+        ////////////////////////////////////////
+
+        let read_start = Instant::now();
+        handle.snapshot(1.into());
+        let mut num_entries = 0usize;
+        'recv: loop {
+            match handle.get_next() {
+                Ok(..) => num_entries += 1,
+                Err(GetRes::Done) => break 'recv,
+                Err(e) => panic!("{:?}", e),
+            }
+        }
+        let read_time = read_start.elapsed();
+
+        trace!("client finished read.");
+
+        let read_s = read_time.as_secs() as f64 + (read_time.subsec_nanos() as f64 * 10.0f64.powi(-9));
+        let read_hz = num_entries as f64 / read_s;
+        let read_bits = read_hz * (data.len() * 8) as f64;
+        println!(
+            "elapsed time for {} reads 1/{} non_dependent",
+            num_entries, non_dep_portion
+        );
+        println!("{:?}\n{}s\t{:.3} Hz\t{}b/s", read_time, read_s, read_hz, read_bits);
+    }
+
+    let end = start.elapsed();
+    println!("#elapsed time {}s", end.as_secs());
+}
+
+///////////////////////////////////////
+
 fn packetsize_for_jobsize(jobsize: usize) -> usize {
     let data = vec![0u8; jobsize];
-    EntryContents::Data(&data[..], &[]).fill_vec(&mut vec![]).entry_size()
+    SingletonBuilder(&data[..], &[]).clone_entry().entry_size()
 }
 
 ///////////////////////////////////////

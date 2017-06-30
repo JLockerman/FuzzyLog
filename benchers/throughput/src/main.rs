@@ -84,11 +84,20 @@ fn main() {
             (@arg total_clients: -t --total_clients +takes_value requires[clients]
                "Number of clients involved in the experiment.")
             (@arg jobsize: -j --jobsize  +takes_value "Number of bytes per entry.")
-            (@arg num_writes: -w --num_writes +takes_value "Number writes tp perform.")
+            (@arg num_writes: -w --num_writes +takes_value "Number writes to perform.")
             (@arg random_colors: -r --random_colors
                "If set clients will randomly spray their writes across total-clients colors, otherwise each client will write to its own color.")
             (@arg random_seed: -e --radom_seed +takes_value requires[random_colors]
                 "Sets the random seed random color selection uses.")
+        )
+
+        (@subcommand dc =>
+            (about: "dependent multiappend cost evaluation.")
+            (@arg server: -s +required +takes_value "Server addr.")
+            (@arg jobsize: -j --jobsize  +takes_value "Number of bytes per entry.")
+            (@arg num_writes: -w --num_writes +takes_value "Number writes tp perform.")
+            (@arg non_dep_portion: -d +takes_value "1/d writes will be non-dependent, default 2")
+            (@arg random_seed: -e --radom_seed +takes_value "Sets the random seed.")
         )
 
         (@subcommand server =>
@@ -199,6 +208,34 @@ fn main() {
                 random_seed,
             )
         },
+
+        ///////////////////////////////////////
+
+        "dc" => {
+            value_if!(let server; args, SocketAddr);
+            let server = server.unwrap_or_else(|| invalid_value!("", "server").exit());
+            value_or!(let jobsize; args, usize, 1);
+            value_or!(let num_writes; args, u32, 100_000);
+            value_or!(let non_dep_portion; args, u32, 2);
+            let mut random_seed = None;
+            if args.is_present("random_seed") {
+                let mut seed = [0x193a6754, 0xa8a7d469, 0x97830e05, 0x113ba7bb];
+                if let Some(v) = args.values_of("random_seed") {
+                    seed.iter_mut().zip(v).fold((), |_, (s, v)|
+                        *s = v.parse().unwrap_or_else(|_|
+                            invalid_value!(v, "random_seed").exit()))
+                };
+                random_seed = Some(seed)
+            }
+            drop(help);
+            workloads::dependent_cost(
+                server,
+                jobsize,
+                num_writes,
+                non_dep_portion,
+                random_seed,
+            )
+        }
 
         ///////////////////////////////////////
 

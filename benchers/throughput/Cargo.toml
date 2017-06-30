@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Joshua Lockerman <Joshua.Lockerman@yale.edu>"]
 
 [dependencies]
-clap = "2.20.3"
+clap = "2.24"
 env_logger = "0.3"
 fuzzy_log = {path = "../.."}
 log = "0.3"
