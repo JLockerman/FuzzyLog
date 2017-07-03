@@ -42,6 +42,7 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     client: C,
     is_unreplicated: bool,
     new_multi: bool,
+    reads_my_writes: bool,
     finished: bool,
 
     print_data: StorePrintData,
@@ -164,6 +165,7 @@ where C: AsyncStoreClient {
             is_unreplicated: true,
             new_multi: false,
             finished: false,
+            reads_my_writes: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -212,6 +214,7 @@ where C: AsyncStoreClient {
             is_unreplicated: true,
             new_multi: true,
             finished: false,
+            reads_my_writes: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -277,6 +280,7 @@ where C: AsyncStoreClient {
             is_unreplicated: false,
             new_multi: true,
             finished: false,
+            reads_my_writes: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -344,9 +348,14 @@ where C: AsyncStoreClient {
             is_unreplicated: false,
             new_multi: false,
             finished: false,
+            reads_my_writes: false,
 
             print_data: Default::default(),
         }, to_store))
+    }
+
+    pub fn set_reads_my_writes(&mut self, reads_my_writes: bool) {
+        self.reads_my_writes = reads_my_writes
     }
 }
 
@@ -395,6 +404,7 @@ where C: AsyncStoreClient {
             is_unreplicated: true,
             new_multi: false,
             finished: false,
+            reads_my_writes: false,
 
             print_data: Default::default(),
         }, to_store))
@@ -825,7 +835,7 @@ where PerServer<S>: Connected,
                 else if kind.layout() == EntryLayout::Read
                     && !flag.contains(EntryFlag::TakeLock) {
                     //A read that found an usused entry still contains useful data
-                    self.handle_completed_read(token, &packet);
+                    self.handle_completed_read(token, &packet, false);
                 }
                 //TODO use option instead
                 else {
@@ -875,7 +885,7 @@ where PerServer<S>: Connected,
         //let mut was_needed = self.sent_writes.contains_key(&packet.entry().id);
         let write_completed = self.handle_completed_write(token, num_chain_servers, packet);
         if write_completed {
-            self.handle_completed_read(token, packet);
+            self.handle_completed_read(token, packet, write_completed);
         }
         //FIXME remove
         //if !was_needed {
@@ -1123,7 +1133,7 @@ where PerServer<S>: Connected,
         }
     }// end handle_completed_write
 
-    fn handle_completed_read(&mut self, token: Token, packet: &Buffer) -> bool {
+    fn handle_completed_read(&mut self, token: Token, packet: &Buffer, my_write: bool) -> bool {
         use std::collections::hash_map::Entry::Occupied;
 
         // trace!("CLIENT handle completed read?");
@@ -1173,6 +1183,16 @@ where PerServer<S>: Connected,
                 if self.client.on_finished_read(oi, v).is_err() {
                     self.finished = true
                 }
+            }
+        }
+        if my_write && !was_needed {
+            let oi = packet.contents().locs()[0];
+            let mut v = self.waiting_buffers.pop_front()
+                .unwrap_or_else(|| Vec::with_capacity(packet.entry_size()));
+            v.clear();
+            v.extend_from_slice(packet.entry_slice());
+            if self.client.on_finished_read(oi, v).is_err() {
+                self.finished = true
             }
         }
         was_needed

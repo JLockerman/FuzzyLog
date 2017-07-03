@@ -104,6 +104,8 @@ pub enum FromClient {
     MultiSnapshotAndPrefetch(Vec<order>),
     PerformAppend(Vec<u8>),
     ReturnBuffer(Vec<u8>),
+    ReadUntil(OrderIndex),
+    Fastforward(OrderIndex),
     Shutdown,
 }
 
@@ -219,6 +221,28 @@ impl ThreadLog {
             ReturnBuffer(buffer) => {
                 self.print_data.ret(1);
                 self.cache.cache_buffer(buffer);
+                true
+            }
+            ReadUntil(OrderIndex(chain, index)) => {
+                self.num_snapshots = self.num_snapshots.saturating_add(1);
+                let unblocked = {
+                    let mut pc = self.per_chains.entry(chain)
+                        .or_insert_with(|| PerColor::new(chain));
+                    pc.increment_outstanding_snapshots(&self.chains_currently_being_read);
+                    pc.give_new_snapshot(index)
+                };
+                if let Some(val) = unblocked {
+                    let locs = self.return_entry(val);
+                    if let Some(locs) = locs { self.stop_blocking_on(locs) }
+                }
+                self.continue_fetch(chain);
+                true
+            }
+            Fastforward(loc) => {
+                let pc = self.per_chains.entry(loc.0)
+                    .or_insert_with(|| PerColor::new(loc.0));
+                //FIXME drain irrelevant entries
+                pc.give_new_snapshot(loc.1);
                 true
             }
             Shutdown => {
@@ -412,17 +436,21 @@ impl ThreadLog {
             EntryLayout::Lock | EntryLayout::GC => unreachable!(),
         }
 
-        let finished_server = self.continue_fetch_if_needed(read_loc.0);
-        if finished_server {
-            trace!("FUZZY finished reading {:?}", read_loc.0);
+        self.continue_fetch(read_loc.0)
+    }
 
-            self.per_chains.get_mut(&read_loc.0).map(|pc| {
+    fn continue_fetch(&mut self, chain: order) {
+        let finished_server = self.continue_fetch_if_needed(chain);
+        if finished_server {
+            trace!("FUZZY finished reading {:?}", chain);
+
+            self.per_chains.get_mut(&chain).map(|pc| {
                 debug_assert!(pc.is_finished());
                 trace!("FUZZY chain {:?} is finished", pc.chain);
                 pc.set_finished_reading();
             });
             if self.finshed_reading() {
-                trace!("FUZZY finished reading all chains after {:?}", read_loc.0);
+                trace!("FUZZY finished reading all chains after {:?}", chain);
                 //TODO do we need a better system?
                 let num_completeds = mem::replace(&mut self.num_snapshots, 0);
                 //assert!(num_completeds > 0);
@@ -435,12 +463,12 @@ impl ThreadLog {
                 }
                 self.cache.flush();
             } else {
-                trace!("FUZZY chains other than {:?} not finished", read_loc.0);
+                trace!("FUZZY chains other than {:?} not finished", chain);
             }
         }
         else {
             #[cfg(debug_assertions)]
-            self.per_chains.get(&read_loc.0).map(|pc| {
+            self.per_chains.get(&chain).map(|pc| {
                 pc.trace_unfinished()
             });
 

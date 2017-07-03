@@ -919,6 +919,44 @@ macro_rules! async_tests {
             #[allow(non_upper_case_globals)]
             const addr_strs: &'static [&'static str] = &["0.0.0.0:13490", "0.0.0.0:13491"];
 
+            #[test]
+            #[inline(never)]
+            pub fn test_rmw() {
+                use std::net::SocketAddr;
+                let _ = env_logger::init();
+                trace!("TEST rmw");
+
+                start_tcp_servers();
+
+                let addrs: Vec<SocketAddr> =
+                    addr_strs.into_iter().map(|s| s.parse().unwrap()).collect();
+                let interesting_columns: Vec<order> = vec![1_000_02.into(), 1_000_03.into()];
+                start_tcp_servers();
+                let mut lh =
+                    LogHandle::unreplicated_with_servers(addrs)
+                    .chains(interesting_columns)
+                    .reads_my_writes()
+                    .build();
+                let _ = lh.append(1_000_02.into(), &[32u8; 3][..], &[]);
+                let l0 = lh.append(1_000_02.into(), &[32u8; 7][..], &[])[0];
+                let l1 = lh.append(1_000_03.into(), &[0x0fu8; 13][..], &[])[0];
+                lh.read_until(l0);
+                println!("a");
+                assert_eq!(lh.get_next(), Ok((&[32u8; 3][..],
+                    &[OrderIndex(1_000_02.into(), 1.into())][..])));
+                println!("b");
+                assert_eq!(lh.get_next(), Ok((&[32u8; 7][..],
+                    &[OrderIndex(1_000_02.into(), 2.into())][..])));
+                println!("c");
+                assert_eq!(lh.get_next(), Err(GetRes::Done));
+                println!("d");
+                lh.read_until(l1);
+                assert_eq!(lh.get_next(), Ok((&[0x0fu8; 13][..],
+                    &[OrderIndex(1_000_03.into(), 1.into())][..])));
+                println!("e");
+                assert_eq!(lh.get_next(), Err(GetRes::Done));
+            }
+
             fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
                 start_tcp_servers();
 

@@ -1,9 +1,11 @@
 
+use std::borrow::Borrow;
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::net::SocketAddr;
-use std::sync::mpsc;
+use std::thread;
+use std::sync::{mpsc, Arc, Mutex};
 
 use mio;
 
@@ -146,12 +148,106 @@ where V: Storeable {
     }
 }
 
+#[derive(Debug)]
+pub struct LogBuilder<V: ?Sized> {
+    servers: Servers,
+    chains: Vec<order>,
+    reads_my_writes: bool,
+    _pd: PhantomData<Box<V>>,
+}
+
+#[derive(Debug)]
+enum Servers {
+    Unreplicated(Vec<SocketAddr>),
+    Replicated(Vec<(SocketAddr, SocketAddr)>),
+    OldUnreplicated(SocketAddr, Vec<SocketAddr>),
+    OldReplicated(SocketAddr, Vec<(SocketAddr, SocketAddr)>)
+}
+
+impl<V: ?Sized> LogBuilder<V>
+where V: Storeable {
+    pub fn chains<C, O>(self, chains: C) -> Self
+    where
+        C: IntoIterator<Item=O>,
+        O: Borrow<order>, {
+        let chains = chains.into_iter().map(|o| o.borrow().clone()).collect();
+        LogBuilder{ chains: chains, .. self}
+    }
+
+    pub fn reads_my_writes(self) -> Self {
+        LogBuilder{ reads_my_writes: true, .. self}
+    }
+
+    pub fn build(self) -> LogHandle<V> {
+        let LogBuilder {
+            servers, chains, reads_my_writes, _pd,
+        } = self;
+
+        let make_store = |client| {
+            let to_store_m = Arc::new(Mutex::new(None));
+            let tsm = to_store_m.clone();
+            let _ = thread::spawn(move || {
+                let mut event_loop = mio::Poll::new().unwrap();
+                match servers {
+                    Servers::Unreplicated(servers) => {
+                        let (mut store, to_store) =
+                            ::async::store::AsyncTcpStore::new_tcp(
+                                servers.into_iter(),
+                                client,
+                                &mut event_loop
+                            ).expect("could not start store.");
+                        *tsm.lock().unwrap() = Some(to_store);
+                        store.set_reads_my_writes(reads_my_writes);
+                        store.run(event_loop);
+                    },
+                    Servers::Replicated(servers) => {
+                        let (mut store, to_store) =
+                            ::async::store::AsyncTcpStore::replicated_new_tcp(
+                                servers.into_iter(),
+                                client,
+                                &mut event_loop
+                            ).expect("could not start store.");
+                        *tsm.lock().unwrap() = Some(to_store);
+                        store.set_reads_my_writes(reads_my_writes);
+                        store.run(event_loop);
+                    },
+                    _ => unimplemented!(),
+                }
+            });
+            let to_store;
+            loop {
+                let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                if let Some(s) = ts {
+                    to_store = s;
+                    break
+                }
+            }
+            to_store
+        };
+
+        LogHandle::with_store(chains, make_store)
+    }
+}
+
 //TODO I kinda get the feeling that this should send writes directly to the store without
 //     the AsyncLog getting in the middle
 //     Also, I think if I can send associated data with the wites I could do multiplexing
 //     over different writers very easily
 impl<V: ?Sized> LogHandle<V>
 where V: Storeable {
+
+    pub fn unreplicated_with_servers<S, A>(servers: S) -> LogBuilder<V>
+    where
+        S: IntoIterator<Item=A>,
+        A: Borrow<SocketAddr>, {
+        let servers = servers.into_iter().map(|s| s.borrow().clone()).collect();
+        LogBuilder {
+            servers: Servers::Unreplicated(servers),
+            chains: vec![],
+            reads_my_writes: false,
+            _pd: PhantomData,
+        }
+    }
 
     pub fn with_store<C, F>(
         interesting_chains: C,
@@ -424,7 +520,7 @@ where V: Storeable {
 
         'recv: loop {
             //TODO use recv_timeout in real version
-            let read = self.ready_reads.recv().unwrap();
+            let read = self.ready_reads.recv().expect("log hung up");
             let read = match read.map_err(|e| self.make_read_error(e)) {
                 Ok(v) => v,
                 //TODO Gc err
@@ -955,5 +1051,16 @@ where V: Storeable {
         } else {
             None
         }
+    }
+}
+
+impl<V: ?Sized> LogHandle<V> {
+    pub fn read_until(&mut self, loc: OrderIndex) {
+        self.to_log.send(Message::FromClient(ReadUntil(loc))).unwrap();
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+    }
+
+    pub fn fastforward(&mut self, loc: OrderIndex) {
+        self.to_log.send(Message::FromClient(Fastforward(loc))).unwrap();
     }
 }
