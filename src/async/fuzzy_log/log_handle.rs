@@ -249,6 +249,19 @@ where V: Storeable {
         }
     }
 
+    pub fn replicated_with_servers<S, A>(servers: S) -> LogBuilder<V>
+    where
+        S: IntoIterator<Item=A>,
+        A: Borrow<(SocketAddr, SocketAddr)>, {
+        let servers = servers.into_iter().map(|s| s.borrow().clone()).collect();
+        LogBuilder {
+            servers: Servers::Replicated(servers),
+            chains: vec![],
+            reads_my_writes: false,
+            _pd: PhantomData,
+        }
+    }
+
     pub fn with_store<C, F>(
         interesting_chains: C,
         store_builder: F,
