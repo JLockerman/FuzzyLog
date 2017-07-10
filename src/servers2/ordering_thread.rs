@@ -94,11 +94,12 @@ fn horizon_or_add_blank(trie: &mut Trie, chain: order) -> u64 {
         return horizon
     }
 
-    let blank = EntryContents::Single {
+    let blank = EntryContents::Senti {
         id: &Uuid::nil(),
         flags: &EntryFlag::ReadSuccess,
-        loc: &OrderIndex(chain, 1.into()),
-        data: &[],
+        locs: &[OrderIndex(chain, 1.into())],
+        lock: &0,
+        data_bytes: &0,
         deps: &[],
     };
     unsafe {
