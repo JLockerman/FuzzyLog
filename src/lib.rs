@@ -1,5 +1,21 @@
+/*!
+
+This crate contains a combined version of the fuzzy log client and server code.
+
+*/
+
 //#![cfg_attr(test, feature(test))]
 #![allow(deprecated)]
+#![allow(unused_imports)]
+#![allow(non_camel_case_types)]
+#![allow(unused_variables)]
+#![allow(unused_must_use)]
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(unused_unsafe)]
+#![allow(dead_code)]
+#![allow(non_upper_case_globals)]
+
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
@@ -25,6 +41,7 @@ extern crate mio;
 extern crate nix;
 extern crate net2;
 extern crate time;
+extern crate toml;
 extern crate rand;
 extern crate uuid;
 extern crate libc;
@@ -32,33 +49,67 @@ extern crate lazycell;
 extern crate env_logger;
 extern crate evmap;
 
-//FIXME only needed until repeated multiput returns is fixed
-extern crate linked_hash_map;
+/// The fuzzy log client.
+pub use packets::{order, entry, OrderIndex};
+
+/// The fuzzy log client.
+pub use async::fuzzy_log::log_handle::LogHandle;
 
 #[macro_use] mod counter_macro;
 
 #[macro_use]
 mod general_tests;
 
+/// The asynchronous version of the fuzzy log client.
+pub mod async;
 pub mod storeables;
 pub mod packets;
-//pub mod prelude;
-/*pub mod local_store;
-pub mod udp_store;
-pub mod tcp_store;
-pub mod multitcp_store;
-pub mod skeens_store;
-pub mod servers;*/
+
+/// Libraries to assist in the creation of fuzzy log servers.
 pub mod servers2;
-//pub mod color_api;
-pub mod async;
 mod hash;
-pub mod socket_addr;
+mod socket_addr;
 //TODO only for testing, should be private
-pub mod buffer;
-pub mod buffer2;
+mod buffer;
+mod buffer2;
 mod vec_deque_map;
 mod range_tree;
+
+/// Start a fuzzy log TCP server.
+///
+/// This function takes over the current thread and never returns.
+/// It will spawn at least two additional threads, one to perform ordering and
+/// at least one worker.
+///
+/// # Args
+///  * `addr` the address on which the server should accept connection.
+///  * `server_num` the the number which this server is in it's server group
+///                 must be in `0..group_size`.
+///  * `group_size` the number of servers in this servers server-group,
+///                 must be at least 1.
+///  * `prev_server` the server which precedes this one in the replication chain,
+///                  if it exists.
+///  * `next_server` the server which comes after this one in the replication chain,
+///                  if it exists.
+///  * `num_worker_threads` the number of workers that should be spawned,
+///                         must be at least 1.
+///  * `started` an atomic counter which will be incremented once the server starts.
+///
+pub fn run_server(
+    addr: std::net::SocketAddr,
+    server_num: u32,
+    group_size: u32,
+    prev_server: Option<std::net::SocketAddr>,
+    next_server: Option<std::net::IpAddr>,
+    num_worker_threads: usize,
+    started: &std::sync::atomic::AtomicUsize,
+) -> ! {
+    use std::sync::atomic::AtomicUsize;
+
+    let acceptor = mio::tcp::TcpListener::bind(&addr)
+        .expect("Bind error");
+    servers2::tcp::run(acceptor, server_num, group_size, num_worker_threads, started)
+}
 
 pub mod c_binidings {
 
@@ -71,7 +122,7 @@ pub mod c_binidings {
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
 
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
     use std::net::SocketAddr;
     use std::os::raw::c_char;
 
@@ -223,6 +274,40 @@ pub mod c_binidings {
             server_heads.zip(server_tails),
             colors.into_iter().cloned().map(order::from)
         ))
+    }
+
+    #[no_mangle]
+    pub extern "C" fn new_dag_handle_from_config(
+        config_filename: *const c_char, color: *const colors
+    ) -> Box<DAG> {
+        assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
+        assert!(color != ptr::null());
+        assert!(colors_valid(color));
+        let _ = ::env_logger::init();
+        let (_, chain_server_addrs, chain_server_tails) = read_config_file(config_filename);
+        let server_addrs = chain_server_addrs.into_iter()
+            .map(|s| s.parse().expect("Invalid server addr"))
+            .collect::<Vec<SocketAddr>>();
+        let chain_server_tails = chain_server_tails.into_iter()
+            .map(|s| s.parse().expect("Invalid server addr"))
+            .collect::<Vec<SocketAddr>>();
+        let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
+        if chain_server_tails.is_empty() {
+            Box::new(
+                LogHandle::new_tcp_log(
+                    server_addrs.into_iter(),
+                    colors.into_iter().cloned().map(order::from)
+            ))
+        } else {
+            assert_eq!(
+                server_addrs.len(), chain_server_tails.len(),
+                "Must have a tail server for each head server.");
+            Box::new(
+                LogHandle::new_tcp_log_with_replication(
+                    server_addrs.into_iter().zip(chain_server_tails),
+                    colors.into_iter().cloned().map(order::from)
+            ))
+        }
     }
 
     //NOTE currently can only use 31bits of return value
@@ -579,6 +664,7 @@ pub mod c_binidings {
         assert!(dag != ptr::null_mut());
         Box::from_raw(dag);
     }
+
     ////////////////////////////////////
     //         Server bindings        //
     ////////////////////////////////////
@@ -596,6 +682,10 @@ pub mod c_binidings {
     #[no_mangle]
     pub extern "C" fn start_fuzzy_log_server_for_group(server_ip: *const c_char,
         server_number: u32, total_servers_in_group: u32) -> ! {
+        assert!(server_ip != ptr::null());
+        let server_ip = unsafe {
+            CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
+        };
         start_server(server_ip, server_number,
             total_servers_in_group, &AtomicUsize::new(0));
     }
@@ -605,11 +695,14 @@ pub mod c_binidings {
         server_number: u32, total_servers_in_group: u32) {
             assert!(server_ip != ptr::null());
             let server_started = AtomicUsize::new(0);
-            let (started, server_ip) = unsafe {
+            let started = unsafe {
                 //This should be safe since the while loop at the of the function
                 //prevents it from exiting until the server is started and
                 //server_started is no longer used
-                (extend_lifetime(&server_started), &*server_ip)
+                (extend_lifetime(&server_started))
+            };
+            let server_ip = unsafe {
+                CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
             };
             let handle = ::std::thread::spawn(move || {
                 start_server(server_ip, server_number, total_servers_in_group, &started)
@@ -623,12 +716,9 @@ pub mod c_binidings {
             }
     }
 
-    fn start_server(server_ip: *const c_char,
+    fn start_server(server_ip: &str,
         server_num: u32, total_num_servers: u32, servers_ready: &AtomicUsize) -> ! {
-        let server_addr_str = unsafe {
-            CStr::from_ptr(server_ip).to_str().expect("invalid IP string")
-        };
-        let ip_addr = server_addr_str.parse().expect("invalid IP addr");
+        let ip_addr = server_ip.parse().expect("invalid IP addr");
         let acceptor = mio::tcp::TcpListener::bind(&ip_addr).expect("cannot start server");
         ::servers2::tcp::run(
             acceptor,
@@ -637,6 +727,58 @@ pub mod c_binidings {
             1,
             &servers_ready,
         )
+    }
+
+    #[no_mangle]
+    pub extern "C" fn start_servers_from_config(file_name: *const c_char) {
+        assert!(file_name != ptr::null());
+        let (lock_server_addr, chain_server_addrs, _) = read_config_file(file_name);
+        if let Some(addr) = lock_server_addr {
+            let addr = CString::new(addr).unwrap();
+            start_fuzzy_log_server_thread_from_group(addr.into_raw(), 0, 1);
+        }
+        let total_chain_servers = chain_server_addrs.len() as u32;
+        for (i, addr) in chain_server_addrs.into_iter().enumerate() {
+            let addr = CString::new(addr).unwrap();
+            start_fuzzy_log_server_thread_from_group(addr.into_raw(), i as u32, total_chain_servers);
+        }
+    }
+
+    ////////////////////////////////////
+    //           Config I/O           //
+    ////////////////////////////////////
+
+    fn read_config_file(file_name: *const c_char)
+    -> (Option<String>, Vec<String>, Vec<String>) {
+        use std::fs::File;
+        use std::io::Read;
+        use toml::{self, Value};
+
+        let file_name = unsafe { CStr::from_ptr(file_name) }
+            .to_str().expect("Can only hanlde utf-8 filenames.");
+        let mut config_string = String::new();
+        {
+            let mut config = File::open(file_name)
+                .expect("Could not open config file.");
+            config.read_to_string(&mut config_string)
+                .expect("Invalid config file encoding.");
+        }
+        let mut vals = toml::Parser::new(&config_string)
+            .parse().expect("Invalid config file format.");
+        let lock_server_str =
+            if let Some(Value::String(s)) = vals.remove("DELOS_LOCK_SERVER") {
+                Some(s)
+            } else { None };
+        let css = vals.remove("DELOS_CHAIN_SERVERS")
+            .expect("Must provide at least one chain server addr.");
+        let chain_server_strings = if let Value::String(s) = css {
+                s.split_whitespace().map(|s| s.to_string()).collect()
+            } else { panic!("Must provide at least one chain server addr.") };
+        let csst = match vals.remove("DELOS_CHAIN_SERVERS_TAILS") {
+            Some(Value::String(s)) => s.split_whitespace().map(|s| s.to_string()).collect(),
+            _ => vec![],
+        };
+        (lock_server_str, chain_server_strings, csst)
     }
 
     ////////////////////////////////////

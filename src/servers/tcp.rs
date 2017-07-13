@@ -29,7 +29,7 @@ struct PerClient {
 }
 
 impl Server {
-    pub fn new(server_addr: &SocketAddr, this_server_num: u32, total_chain_servers: u32, event_loop: &mut EventLoop<Self>) -> io::Result<Self> {
+    pub fn new<'a, 'e>(server_addr: &'a SocketAddr, this_server_num: u32, total_chain_servers: u32, event_loop: &'e mut EventLoop<Self>) -> io::Result<Self> {
         let acceptor = try!(TcpListener::bind(server_addr));
         try!(event_loop.register(&acceptor,
                                  mio::Token(0),
