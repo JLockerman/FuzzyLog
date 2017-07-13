@@ -8,6 +8,8 @@
 #![allow(non_camel_case_types)]
 #![allow(unused_unsafe)]
 #![allow(dead_code)]
+#![allow(non_upper_case_globals)]
+
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
@@ -223,6 +225,40 @@ pub mod c_binidings {
             server_heads.zip(server_tails),
             colors.into_iter().cloned().map(order::from)
         ))
+    }
+
+    #[no_mangle]
+    pub extern "C" fn new_dag_handle_from_config(
+        config_filename: *const c_char, color: *const colors
+    ) -> Box<DAG> {
+        assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
+        assert!(color != ptr::null());
+        assert!(colors_valid(color));
+        let _ = ::env_logger::init();
+        let (_, chain_server_addrs, chain_server_tails) = read_config_file(config_filename);
+        let server_addrs = chain_server_addrs.into_iter()
+            .map(|s| s.parse().expect("Invalid server addr"))
+            .collect::<Vec<SocketAddr>>();
+        let chain_server_tails = chain_server_tails.into_iter()
+            .map(|s| s.parse().expect("Invalid server addr"))
+            .collect::<Vec<SocketAddr>>();
+        let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
+        if chain_server_tails.is_empty() {
+            Box::new(
+                LogHandle::new_tcp_log(
+                    server_addrs.into_iter(),
+                    colors.into_iter().cloned().map(order::from)
+            ))
+        } else {
+            assert_eq!(
+                server_addrs.len(), chain_server_tails.len(),
+                "Must have a tail server for each head server.");
+            Box::new(
+                LogHandle::new_tcp_log_with_replication(
+                    server_addrs.into_iter().zip(chain_server_tails),
+                    colors.into_iter().cloned().map(order::from)
+            ))
+        }
     }
 
     //NOTE currently can only use 31bits of return value
@@ -647,7 +683,7 @@ pub mod c_binidings {
     #[no_mangle]
     pub extern "C" fn start_servers_from_config(file_name: *const c_char) {
         assert!(file_name != ptr::null());
-        let (lock_server_addr, chain_server_addrs) = read_config_file(file_name);
+        let (lock_server_addr, chain_server_addrs, _) = read_config_file(file_name);
         if chain_server_addrs.len() > 1 && lock_server_addr.is_none() {
             panic!("Must provide a lock server if there are multiple chain servers")
         }
@@ -667,7 +703,7 @@ pub mod c_binidings {
     ////////////////////////////////////
 
     fn read_config_file(file_name: *const c_char)
-    -> (Option<String>, Vec<String>) {
+    -> (Option<String>, Vec<String>, Vec<String>) {
         use std::fs::File;
         use std::io::Read;
         use toml::{self, Value};
@@ -692,7 +728,11 @@ pub mod c_binidings {
         let chain_server_strings = if let Value::String(s) = css {
                 s.split_whitespace().map(|s| s.to_string()).collect()
             } else { panic!("Must provide at least one chain server addr.") };
-        (lock_server_str, chain_server_strings)
+        let csst = match vals.remove("DELOS_CHAIN_SERVERS_TAILS") {
+            Some(Value::String(s)) => s.split_whitespace().map(|s| s.to_string()).collect(),
+            _ => vec![],
+        };
+        (lock_server_str, chain_server_strings, csst)
     }
 
     ////////////////////////////////////
