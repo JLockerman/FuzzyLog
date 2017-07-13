@@ -46,6 +46,9 @@ extern crate evmap;
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;
 
+pub use async::fuzzy_log::log_handle::LogHandle;
+pub use packets::{order, entry, OrderIndex};
+
 #[macro_use] mod counter_macro;
 
 #[macro_use]
@@ -61,6 +64,22 @@ mod socket_addr;
 mod buffer;
 mod buffer2;
 mod vec_deque_map;
+
+pub fn run_server(
+    addr: std::net::SocketAddr,
+    server_num: u32,
+    group_size: u32,
+    prev_server: Option<std::net::SocketAddr>,
+    next_server: Option<std::net::IpAddr>,
+    num_worker_threads: usize,
+    started: &std::sync::atomic::AtomicUsize,
+) -> ! {
+    use std::sync::atomic::AtomicUsize;
+
+    let acceptor = mio::tcp::TcpListener::bind(&addr)
+        .expect("Bind error");
+    servers2::tcp::run(acceptor, server_num, group_size, num_worker_threads, started)
+}
 
 pub mod c_binidings {
 

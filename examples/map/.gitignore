@@ -1,6 +1,0 @@
-target
-Cargo.lock
-*.rlib
-*.a
-*.o
-out
