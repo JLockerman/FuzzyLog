@@ -19,8 +19,8 @@ A CLI binding for starting Fuzzy Log servers can be found in [servers/tcp_server
 
 ## C Bindings
 
-C bindings are currently located in [examples/c_linking](examples/c_linking).
-Examples and build instructions for C applications can be found there
+C bindings are currently located in [`fuzzy_log.h`](examples/c_linking.h) in [examples/c_linking](examples/c_linking).
+Examples and build instructions for C applications can be found there.
 
 ## Directory Outline
 [src](src) fuzzy log client library  
