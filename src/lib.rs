@@ -51,21 +51,13 @@ mod general_tests;
 
 pub mod storeables;
 pub mod packets;
-//pub mod prelude;
-/*pub mod local_store;
-pub mod udp_store;
-pub mod tcp_store;
-pub mod multitcp_store;
-pub mod skeens_store;
-pub mod servers;*/
 pub mod servers2;
-//pub mod color_api;
 pub mod async;
 mod hash;
-pub mod socket_addr;
+mod socket_addr;
 //TODO only for testing, should be private
-pub mod buffer;
-pub mod buffer2;
+mod buffer;
+mod buffer2;
 mod vec_deque_map;
 
 pub mod c_binidings {
