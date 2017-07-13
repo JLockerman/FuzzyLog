@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use prelude::*;
+// use prelude::*;
 use servers2::{spsc, ServerLog};
 use hash::{HashMap, FxHasher};
 use socket_addr::Ipv4SocketAddr;
@@ -16,38 +16,48 @@ use mio::tcp::*;
 
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
+use evmap;
+
 mod worker;
 mod per_socket;
 
 /*
   GC with parrallel readers plan:
     each worker will have a globally visible field
-      currently_reading
+      epoch
     padded to a cache line to prevent false sharing
-    the GC core (which need not be the same as the index core)
-    has a globally visible field (per chain?)
-      greatest_collected
+    the GC core (which need not be the same as the index core) has a globally visible epoch
+    each chain has a minimum (and maximum?) valid location
     to read:
-      a worker first sets its currently_reading field to the loc it wants to read,
-      it then checks greatest_collected,
-      if greatest_collected >= currently_reading the entry is already gc'd and the worker returns the needed respose
+      a worker updates its epoch to the GC epoch,
+      if the entry is already gc'd (< min or > max) the worker returns the needed response
       otherwise it returns the found value
     to gc:
-      the gcer first sets greatest_collected to the point it wants to collect,
-      then waits until none of the worker are reading a value in the collection range
+      the gc'er increments the epoch,
+      the gc'er broadcasts update-epoch to all workers
+      then waits until all of the workers have seen the new epoch,
 
       we don't worry about gc during write (that seems like a silly scenario),
       so we can send the log's copy downstream and don't have to worry about returning buffers.
       during reads, the worker which receives the read req is the one which sends,
       so the above scheme will work
 
-    this does not deadlock b/c if the worker sets its then the gcer its the worker will abort
+    this does not deadlock b/c gc'er must wait for at most 1 read per worker
 
-    this should be efficient b/c in normal operation the workers are just writing to a local value
+    this should be efficient b/c in normal operation the workers are just
+      reading an immutable shared value
+      and writing to a local value
+      (addtnl we could only have the checks immediately after update-epoch is recv'd)
 
     for multi entry values store refcount before entry,
-    we want bit field which tells us where seq of entries end in allocator,
-    use to distinguish btwn single and multi entries...
+
+    (we want bit field which tells us where seq of entries end in allocator,
+    use to distinguish btwn single and multi entries?)
+
+    store bit in flags saying start-of-run
+    for now check each val to see if start-of-run if is free previous run (on other thread?),
+    if multi decrement refcount
+    want to use bit in pointer instead
 */
 
 /*
@@ -131,7 +141,7 @@ const DOWNSTREAM: mio::Token = mio::Token(3);
 // can determine who is responsible for a client
 const FIRST_CLIENT_TOKEN: mio::Token = mio::Token(10);
 
-const NUMBER_READ_BUFFERS: usize = 5;
+const NUMBER_READ_BUFFERS: usize = 15;
 
 type WorkerNum = usize;
 
@@ -290,6 +300,7 @@ pub fn run_with_replication(
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
+    let (log_reader, log_writer) = evmap::new();
     for n in 0..num_workers {
         //let from_dist = recv_from_dist.clone();
         let to_dist   = workers_to_dist.clone();
@@ -299,12 +310,14 @@ pub fn run_with_replication(
         let (dist_to_worker, from_dist) = spsc::channel();
         let upstream = upstream.pop();
         let downstream = downstream.pop();
+        let log_reader = log_reader.clone();
         thread::spawn(move ||
             Worker::new(
                 from_dist,
                 to_dist,
                 from_log,
                 to_log,
+                log_reader,
                 upstream,
                 downstream,
                 num_downstream,
@@ -326,9 +339,10 @@ pub fn run_with_replication(
         // mio::Ready::readable(),
         // mio::PollOpt::level()
     // ).expect("cannot pol from log on dist");
-
     thread::spawn(move || {
-        let mut log = ServerLog::new(this_server_num, total_chain_servers, log_to_workers);
+        let mut log = ServerLog::new(
+            this_server_num, total_chain_servers, log_to_workers, log_writer
+        );
         #[cfg(not(feature = "print_stats"))]
         for to_log in recv_from_workers.iter() {
             match to_log {
@@ -372,7 +386,7 @@ pub fn run_with_replication(
             }
             worker
         } else {
-            worker_for_ip(addr.ip(), num_workers as u64)
+            worker_for_ip(addr, num_workers as u64)
         };
         dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
         worker_for_client.insert(
@@ -388,7 +402,6 @@ pub fn run_with_replication(
                     match acceptor.accept() {
                         Err(e) => trace!("error {}", e),
                         Ok((socket, addr)) => {
-                            trace!("SERVER accepting client @ {:?}", addr);
                             let _ = socket.set_keepalive_ms(Some(1000));
                             let _ = socket.set_nodelay(true);
                             //TODO oveflow
@@ -408,8 +421,10 @@ pub fn run_with_replication(
                                 }
                                 worker
                             } else {
-                                worker_for_ip(addr.ip(), num_workers as u64)
+                                worker_for_ip(addr, num_workers as u64)
                             };
+                            trace!("SERVER accepting client @ {:?} => {:?}",
+                                addr, (worker, tok));
                             dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
                             worker_for_client.insert(
                                 Ipv4SocketAddr::from_socket_addr(addr), (worker, tok));
@@ -428,6 +443,22 @@ pub fn run_with_replication(
                                 (worker, DOWNSTREAM, buffer, addr, storage_loc)
                             },
 
+                            WorkerToDist::DownstreamB(worker, addr, buffer, storage_loc) => {
+                                trace!("DIST {} downstream worker for {} is {}.",
+                                    this_server_num, addr, worker);
+                                let sent = dist_to_workers.get_mut(worker)
+                                    .map(|s| {
+                                        s.send(DistToWorker::ToClientB(
+                                            DOWNSTREAM, buffer, addr, storage_loc));
+                                        true
+                                }).unwrap_or(false);
+                                if !sent {
+                                    panic!("No downstream for {:?} in {:?}",
+                                        worker, dist_to_workers.len())
+                                }
+                                continue
+                            },
+
                             WorkerToDist::ToClient(addr, buffer) => {
                                 trace!("DIST {} looking for worker for {}.",
                                     this_server_num, addr);
@@ -435,9 +466,28 @@ pub fn run_with_replication(
                                 let (worker, token) = worker_for_client[&addr].clone();
                                 (worker, token, buffer, addr, 0)
                             }
+
+                            WorkerToDist::ToClientB(addr, buffer) => {
+                                trace!("DIST {} looking for worker for {}.",
+                                    this_server_num, addr);
+                                //FIXME this is racey, if we don't know who gets the message it fails
+                                let (worker, token) = worker_for_client.get(&addr)
+                                    .cloned().unwrap_or_else(||
+                                        panic!(
+                                            "No worker found for {:?} in {:?}",
+                                            addr, worker_for_client,
+                                        )
+                                );
+
+                                dist_to_workers[worker].send(
+                                    DistToWorker::ToClientB(token, buffer, addr, 0)
+                                );
+                                continue
+                            }
                         };
                         dist_to_workers[worker].send(
-                            DistToWorker::ToClient(token, buffer, addr, storage_loc))
+                            DistToWorker::ToClient(token, buffer, addr, storage_loc));
+                        continue
 
                     }
                     /*while let Ok((buffer, socket, tok)) = dist_from_workers.try_recv() {
@@ -520,9 +570,7 @@ fn negotiate_num_upstreams(
         'write: loop {
             let r = blocking_write(socket, &to_write);
             match r {
-                Err(ref e)
-                    if e.kind() == io::ErrorKind::ConnectionRefused
-                    || e.kind() == io::ErrorKind::NotConnected => {
+                Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
                     if refusals >= 60000 { panic!("write fail {:?}", e) }
                     refusals += 1;
                     trace!("upstream refused reconnect attempt {}", refusals);
@@ -530,6 +578,12 @@ fn negotiate_num_upstreams(
                     **socket = TcpStream::connect(&remote_addr).unwrap();
                     let _ = socket.set_keepalive_ms(Some(1000));
                     let _ = socket.set_nodelay(true);
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::NotConnected => {
+                    if refusals >= 60000 { panic!("write fail {:?}", e) }
+                    refusals += 1;
+                    trace!("upstream connection not ready {}", refusals);
+                    thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) => panic!("write fail {:?}", e),
                 Ok(..) => break 'write,
@@ -599,8 +653,6 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
 mod tests {
     extern crate env_logger;
 
-    use super::*;
-
     use socket_addr::Ipv4SocketAddr;
 
     use buffer::Buffer;
@@ -608,6 +660,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
     use std::io::{Read, Write};
     use std::net::TcpStream;
+
+    use packets::{OrderIndex, EntryFlag, EntryContents, Uuid};
+    use packets::SingletonBuilder as Data;
 
     /*pub fn run(
         acceptor: TcpListener,
@@ -633,17 +688,15 @@ mod tests {
         let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
         let _ = stream.set_nodelay(true);
         let mut buffer = Buffer::empty();
-        buffer.fill_from_entry_contents(EntryContents::Data(&12i32, &[]));
-        {
-            buffer.entry_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
-        }
+        Data(&12i32, &[]).fill_entry(&mut buffer);
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
-        stream.read_exact(&mut buffer[..]).unwrap();
-        assert!(buffer.entry().kind.contains(EntryKind::ReadSuccess));
-        assert_eq!(buffer.entry().locs()[0], OrderIndex(1.into(), 1.into()));
-        assert_eq!(Entry::<i32>::wrap_bytes(&buffer[..]).contents(), EntryContents::Data(&12i32, &[]));
+        recv_packet(&mut buffer, &mut stream);
+        assert!(buffer.contents().flag().contains(EntryFlag::ReadSuccess));
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(1.into(), 1.into()));
+        assert_eq!(buffer.contents().into_singleton_builder(), Data(&12i32, &[]));
     }
 
     #[test]
@@ -655,30 +708,34 @@ mod tests {
         let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
         let _ = stream.set_nodelay(true);
         let mut buffer = Buffer::empty();
-        buffer.fill_from_entry_contents(EntryContents::Data(&92u64, &[]));
+        Data(&92u64, &[]).fill_entry(&mut buffer);
         {
-            buffer.entry_mut().locs_mut()[0] = OrderIndex(2.into(), 0.into());
+            buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 0.into());
         }
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
-        stream.read_exact(&mut buffer[..]).unwrap();
-        assert!(buffer.entry().kind.contains(EntryKind::ReadSuccess));
-        assert_eq!(buffer.entry().locs()[0], OrderIndex(2.into(), 1.into()));
-        assert_eq!(Entry::<u64>::wrap_bytes(&buffer[..]).contents(), EntryContents::Data(&92, &[]));
-        buffer.fill_from_entry_contents(EntryContents::Data(&(), &[]));
-        buffer.ensure_len();
-        {
-            buffer.entry_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
-            buffer.entry_mut().kind = EntryKind::Read;
-        }
+        recv_packet(&mut buffer, &mut stream);
+        assert!(buffer.contents().flag().contains(EntryFlag::ReadSuccess));
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(2.into(), 1.into()));
+        assert_eq!(buffer.contents().into_singleton_builder(), Data(&92u64, &[]));
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(0.into(), 0.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
-        stream.read_exact(&mut buffer[..]).unwrap();
-        assert!(buffer.entry().kind.contains(EntryKind::ReadSuccess));
-        assert_eq!(buffer.entry().locs()[0], OrderIndex(2.into(), 1.into()));
-        assert_eq!(Entry::<u64>::wrap_bytes(&buffer[..]).contents(), EntryContents::Data(&92, &[]));
+        recv_packet(&mut buffer, &mut stream);
+        assert!(buffer.contents().flag().contains(EntryFlag::ReadSuccess));
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(2.into(), 1.into()));
+        assert_eq!(buffer.contents().into_singleton_builder(), Data(&92u64, &[]));
     }
 
     #[test]
@@ -691,20 +748,18 @@ mod tests {
         let mut read_stream = TcpStream::connect(&"127.0.0.1:13492").unwrap();
         let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
         let mut buffer = Buffer::empty();
-        buffer.fill_from_entry_contents(EntryContents::Data(&12i32, &[]));
-        {
-            buffer.entry_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
-        }
+        Data(&12i32, &[]).fill_entry(&mut buffer);
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(1.into(), 0.into());
         trace!("sending write");
         write_stream.write_all(buffer.entry_slice()).unwrap();
         write_stream.write_all(read_addr.bytes()).unwrap();
         trace!("finished sending write, waiting for ack");
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
-        read_stream.read_exact(&mut buffer[..]).unwrap();
+        recv_packet(&mut buffer, &mut read_stream);
         trace!("finished waiting for ack");
-        assert!(buffer.entry().kind.contains(EntryKind::ReadSuccess));
-        assert_eq!(buffer.entry().locs()[0], OrderIndex(1.into(), 1.into()));
-        assert_eq!(Entry::<i32>::wrap_bytes(&buffer[..]).contents(), EntryContents::Data(&12i32, &[]));
+        assert!(buffer.contents().flag().contains(EntryFlag::ReadSuccess));
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(1.into(), 1.into()));
+        assert_eq!(buffer.contents().into_singleton_builder(), Data(&12i32, &[]));
     }
 
     #[test]
@@ -717,30 +772,690 @@ mod tests {
         let mut read_stream = TcpStream::connect(&"127.0.0.1:13492").unwrap();
         let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
         let mut buffer = Buffer::empty();
-        buffer.fill_from_entry_contents(EntryContents::Data(&92u64, &[]));
-        {
-            buffer.entry_mut().locs_mut()[0] = OrderIndex(2.into(), 0.into());
-        }
+        Data(&92u64, &[]).fill_entry(&mut buffer);;
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 0.into());
         write_stream.write_all(buffer.entry_slice()).unwrap();
         write_stream.write_all(read_addr.bytes()).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
-        read_stream.read_exact(&mut buffer[..]).unwrap();
-        assert!(buffer.entry().kind.contains(EntryKind::ReadSuccess));
-        assert_eq!(buffer.entry().locs()[0], OrderIndex(2.into(), 1.into()));
-        assert_eq!(Entry::<u64>::wrap_bytes(&buffer[..]).contents(), EntryContents::Data(&92, &[]));
-        buffer.fill_from_entry_contents(EntryContents::Data(&(), &[]));
+        recv_packet(&mut buffer, &mut read_stream);
+        assert!(buffer.entry().flag().contains(EntryFlag::ReadSuccess));
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(2.into(), 1.into()));
+        assert_eq!(buffer.contents().into_singleton_builder(), Data(&92u64, &[]));
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(0.into(), 0.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
         buffer.ensure_len();
-        {
-            buffer.entry_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
-            buffer.entry_mut().kind = EntryKind::Read;
-        }
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(2.into(), 1.into());
         read_stream.write_all(buffer.entry_slice()).unwrap();
         read_stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
-        read_stream.read_exact(&mut buffer[..]).unwrap();
-        assert!(buffer.entry().kind.contains(EntryKind::ReadSuccess));
-        assert_eq!(buffer.entry().locs()[0], OrderIndex(2.into(), 1.into()));
-        assert_eq!(Entry::<u64>::wrap_bytes(&buffer[..]).contents(), EntryContents::Data(&92, &[]));
+        recv_packet(&mut buffer, &mut read_stream);
+        assert!(buffer.entry().flag().contains(EntryFlag::ReadSuccess));
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(2.into(), 1.into()));
+        assert_eq!(buffer.contents().into_singleton_builder(), Data(&92u64, &[]));
+    }
+
+    #[test]
+    fn test_skeens_write() {
+        let _ = env_logger::init();
+        trace!("TCP test write");
+        start_servers(basic_addr, &BASIC_SERVER_READY);
+        trace!("TCP test write start");
+        let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
+        let _ = stream.set_nodelay(true);
+        let mut buffer = Buffer::empty();
+        let id = Uuid::new_v4();
+        buffer.fill_from_entry_contents(EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock),
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 0.into()), OrderIndex(4.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+        stream.write_all(buffer.entry_slice()).unwrap();
+        stream.write_all(&[0; 6]).unwrap();
+        buffer[..].iter_mut().fold((), |_, i| *i = 0);
+        recv_packet(&mut buffer, &mut stream);
+        assert!(buffer.contents().flag().contains(EntryFlag::Skeens1Queued));
+        assert_eq!(buffer.contents(), EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::Skeens1Queued | EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            data_bytes: &3, //TODO make 0
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 1.into()), OrderIndex(4.into(), 1.into())],
+            deps: &[],
+        });
+        let max_timestamp = buffer.contents().locs().iter()
+        .fold(0, |max_ts, &OrderIndex(_, i)|
+            ::std::cmp::max(max_ts, u32::from(i) as u64)
+        );
+        assert!(max_timestamp > 0);
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::Unlock),
+            data_bytes: &0,
+            lock: &max_timestamp,
+            locs: &[OrderIndex(3.into(), 0.into()), OrderIndex(4.into(), 0.into())],
+            deps: &[],
+        });
+        stream.write_all(buffer.entry_slice()).unwrap();
+        stream.write_all(&[0; 6]).unwrap();
+
+        /*buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 1.into()), OrderIndex(4.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });*/
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 1.into()), OrderIndex(4.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+    }
+
+    #[test]
+    fn test_skeens_write_read() {
+        let _ = env_logger::init();
+        trace!("TCP test write");
+        start_servers(basic_addr, &BASIC_SERVER_READY);
+        trace!("TCP test write start");
+        let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
+        let _ = stream.set_nodelay(true);
+        let mut buffer = Buffer::empty();
+        let id = Uuid::new_v4();
+        buffer.fill_from_entry_contents(EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 0.into()), OrderIndex(6.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+        stream.write_all(buffer.entry_slice()).unwrap();
+        stream.write_all(&[0; 6]).unwrap();
+        buffer[..].iter_mut().fold((), |_, i| *i = 0);
+        recv_packet(&mut buffer, &mut stream);
+        assert!(buffer.contents().flag().contains(EntryFlag::Skeens1Queued));
+        assert_eq!(buffer.contents(), EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::Skeens1Queued | EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            data_bytes: &3, //TODO make 0
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+        });
+        let max_timestamp = buffer.contents().locs().iter()
+        .fold(0, |max_ts, &OrderIndex(_, i)|
+            ::std::cmp::max(max_ts, u32::from(i) as u64)
+        );
+        assert!(max_timestamp > 0);
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::Unlock),
+            data_bytes: &0,
+            lock: &max_timestamp,
+            locs: &[OrderIndex(5.into(), 0.into()), OrderIndex(6.into(), 0.into())],
+            deps: &[],
+        });
+        stream.write_all(buffer.entry_slice()).unwrap();
+        stream.write_all(&[0; 6]).unwrap();
+
+        /*buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });*/
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(5.into(), 1.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
+        stream.write_all(buffer.entry_slice()).unwrap();
+        stream.write_all(&[0; 6]).unwrap();
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(6.into(), 1.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
+        stream.write_all(buffer.entry_slice()).unwrap();
+        stream.write_all(&[0; 6]).unwrap();
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+    }
+
+    #[test]
+    fn test_replicated_skeens_write() {
+        let _ = env_logger::init();
+        trace!("TCP test replicated write");
+        start_servers(replicas_addr, &REPLICAS_READY);
+        trace!("TCP test replicated write start");
+        let mut write_stream = TcpStream::connect(&"127.0.0.1:13491").unwrap();
+        let mut read_stream = TcpStream::connect(&"127.0.0.1:13492").unwrap();
+        let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
+
+        let mut buffer = Buffer::empty();
+        let id = Uuid::new_v4();
+        buffer.fill_from_entry_contents(EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock),
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 0.into()), OrderIndex(4.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+        buffer[..].iter_mut().fold((), |_, i| *i = 0);
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::Skeens1Queued | EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            data_bytes: &3, //TODO make 0
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 1.into()), OrderIndex(4.into(), 1.into())],
+            deps: &[],
+        });
+        let max_timestamp = buffer.contents().locs().iter()
+        .fold(0, |max_ts, &OrderIndex(_, i)|
+            ::std::cmp::max(max_ts, u32::from(i) as u64)
+        );
+        assert!(max_timestamp > 0);
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::Unlock),
+            data_bytes: &0,
+            lock: &max_timestamp,
+            locs: &[OrderIndex(3.into(), 0.into()), OrderIndex(4.into(), 0.into())],
+            deps: &[],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+
+        /*buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 1.into()), OrderIndex(4.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });*/
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(3.into(), 1.into()), OrderIndex(4.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+    }
+
+    #[test]
+    fn test_replicated_skeens_write_read() {
+        let _ = env_logger::init();
+        trace!("TCP test replicated write");
+        start_servers(replicas_addr, &REPLICAS_READY);
+        trace!("TCP test replicated write start");
+        let mut write_stream = TcpStream::connect(&"127.0.0.1:13491").unwrap();
+        let mut read_stream = TcpStream::connect(&"127.0.0.1:13492").unwrap();
+        let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
+
+        let mut buffer = Buffer::empty();
+        let id = Uuid::new_v4();
+        buffer.fill_from_entry_contents(EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 0.into()), OrderIndex(6.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+        buffer[..].iter_mut().fold((), |_, i| *i = 0);
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::Skeens1Queued | EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            data_bytes: &3, //TODO make 0
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+        });
+        let max_timestamp = buffer.contents().locs().iter()
+        .fold(0, |max_ts, &OrderIndex(_, i)|
+            ::std::cmp::max(max_ts, u32::from(i) as u64)
+        );
+        assert!(max_timestamp > 0);
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::Unlock),
+            data_bytes: &0,
+            lock: &max_timestamp,
+            locs: &[OrderIndex(5.into(), 0.into()), OrderIndex(6.into(), 0.into())],
+            deps: &[],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+
+        /*buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });*/
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+        ///
+
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(5.into(), 1.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
+        read_stream.write_all(buffer.entry_slice()).unwrap();
+        read_stream.write_all(&[0; 6]).unwrap();
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(6.into(), 1.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
+        read_stream.write_all(buffer.entry_slice()).unwrap();
+        read_stream.write_all(&[0; 6]).unwrap();
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(5.into(), 1.into()), OrderIndex(6.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+    }
+
+    #[test]
+    fn test_replicated_skeens_single_write_read() {
+        let _ = env_logger::init();
+        trace!("TCP test replicated s write/r");
+        start_servers(replicas_addr, &REPLICAS_READY);
+        trace!("TCP test replicated write start");
+        let mut write_stream = TcpStream::connect(&"127.0.0.1:13491").unwrap();
+        let mut read_stream = TcpStream::connect(&"127.0.0.1:13492").unwrap();
+        let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
+
+        let mut buffer = Buffer::empty();
+        let id = Uuid::new_v4();
+        buffer.fill_from_entry_contents(EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock),
+            lock: &0,
+            locs: &[OrderIndex(7.into(), 0.into()), OrderIndex(8.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+        buffer[..].iter_mut().fold((), |_, i| *i = 0);
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::Skeens1Queued | EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            data_bytes: &3, //TODO make 0
+            lock: &0,
+            locs: &[OrderIndex(7.into(), 1.into()), OrderIndex(8.into(), 1.into())],
+            deps: &[],
+        });
+        let max_timestamp = buffer.contents().locs().iter()
+        .fold(0, |max_ts, &OrderIndex(_, i)|
+            ::std::cmp::max(max_ts, u32::from(i) as u64)
+        );
+        assert!(max_timestamp > 0);
+
+        buffer.clear_data();
+
+        trace!("test_replicated_skeens_single_write_read finished phase 1");
+
+        let id2 = Uuid::new_v4();
+
+        buffer.fill_from_entry_contents(EntryContents::Single {
+            id: &id2,
+            flags: &EntryFlag::Nothing,
+            loc: &OrderIndex(7.into(), 0.into()),
+            deps: &[],
+            data: &[1, 1, 1, 1, 2],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::Unlock),
+            data_bytes: &0,
+            lock: &max_timestamp,
+            locs: &[OrderIndex(7.into(), 0.into()), OrderIndex(8.into(), 0.into())],
+            deps: &[],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+
+        buffer.clear_data();
+
+        /*trace!("test_replicated_skeens_single_write_read finished phase 2");
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(7.into(), 1.into()), OrderIndex(8.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+        buffer.clear_data();*/
+
+        trace!("test_replicated_skeens_single_write_read finished phase 3");
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Single {
+            id: &id2,
+            flags: &EntryFlag::ReadSuccess,
+            loc: &OrderIndex(7.into(), 2.into()),
+            deps: &[],
+            data: &[1, 1, 1, 1, 2],
+        });
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(7.into(), 1.into()), OrderIndex(8.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+        trace!("test_replicated_skeens_single_write_read finished phase 4");
+
+        ///
+
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::ReadSuccess,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(7.into(), 1.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
+        read_stream.write_all(buffer.entry_slice()).unwrap();
+        read_stream.write_all(&[0; 6]).unwrap();
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(7.into(), 1.into()), OrderIndex(8.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(8.into(), 1.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
+        read_stream.write_all(buffer.entry_slice()).unwrap();
+        read_stream.write_all(&[0; 6]).unwrap();
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(7.into(), 1.into()), OrderIndex(8.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+    }
+
+    #[test]
+    fn test_replicated_skeens_single_server_multi() {
+        let _ = env_logger::init();
+        trace!("TCP test replicated ssm");
+        start_servers(replicas_addr, &REPLICAS_READY);
+        trace!("TCP test replicated write ssm start");
+        let mut write_stream = TcpStream::connect(&"127.0.0.1:13491").unwrap();
+        let mut read_stream = TcpStream::connect(&"127.0.0.1:13492").unwrap();
+        let read_addr = Ipv4SocketAddr::from_socket_addr(read_stream.local_addr().unwrap());
+
+        let mut buffer = Buffer::empty();
+        let id = Uuid::new_v4();
+        let id2 = Uuid::new_v4();;
+        buffer.fill_from_entry_contents(EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock),
+            lock: &0,
+            locs: &[OrderIndex(9.into(), 0.into()), OrderIndex(10.into(), 0.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+        buffer.clear_data();
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::Skeens1Queued | EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            data_bytes: &3, //TODO make 0
+            lock: &0,
+            locs: &[OrderIndex(9.into(), 1.into()), OrderIndex(10.into(), 1.into())],
+            deps: &[],
+        });
+        let max_timestamp = buffer.contents().locs().iter()
+        .fold(0, |max_ts, &OrderIndex(_, i)|
+            ::std::cmp::max(max_ts, u32::from(i) as u64)
+        );
+        assert!(max_timestamp > 0);
+        buffer.clear_data();
+
+        buffer.fill_from_entry_contents(EntryContents::Multi{
+            id: &id2,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &[OrderIndex(9.into(), 0.into()), OrderIndex(10.into(), 0.into())],
+            deps: &[],
+            data: &[123, 01, 255, 11],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+        buffer.clear_data();
+
+
+        buffer.fill_from_entry_contents(EntryContents::Senti{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::Unlock),
+            data_bytes: &0,
+            lock: &max_timestamp,
+            locs: &[OrderIndex(9.into(), 0.into()), OrderIndex(10.into(), 0.into())],
+            deps: &[],
+        });
+        write_stream.write_all(buffer.entry_slice()).unwrap();
+        write_stream.write_all(read_addr.bytes()).unwrap();
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id,
+            flags: &(EntryFlag::NewMultiPut | EntryFlag::TakeLock | EntryFlag::ReadSuccess),
+            lock: &0,
+            locs: &[OrderIndex(9.into(), 1.into()), OrderIndex(10.into(), 1.into())],
+            deps: &[],
+            data: &[94, 49, 0xff],
+        });
+
+        buffer.clear_data();
+
+        recv_packet(&mut buffer, &mut read_stream);
+        assert_eq!(buffer.contents(), EntryContents::Multi{
+            id: &id2,
+            flags: &EntryFlag::ReadSuccess,
+            lock: &0,
+            locs: &[OrderIndex(9.into(), 2.into()), OrderIndex(10.into(), 2.into())],
+            deps: &[],
+            data: &[123, 01, 255, 11],
+        });
     }
 
     #[test]
@@ -751,26 +1466,50 @@ mod tests {
         trace!("TCP test write_read start");
         let mut stream = TcpStream::connect(&"127.0.0.1:13490").unwrap();
         let mut buffer = Buffer::empty();
-        buffer.fill_from_entry_contents(EntryContents::Data(&(),
-            &[OrderIndex(0.into(), 0.into())]));
-        buffer.fill_from_entry_contents(EntryContents::Data(&(), &[]));
+        Data(&(), &[OrderIndex(0.into(), 0.into())]).fill_entry(&mut buffer);
+        buffer.fill_from_entry_contents(EntryContents::Read {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(0.into(), 0.into()),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        });
         buffer.ensure_len();
-        {
-            buffer.entry_mut().locs_mut()[0] = OrderIndex(0.into(), 1.into());
-            buffer.entry_mut().kind = EntryKind::Read;
-        }
+        buffer.contents_mut().locs_mut()[0] = OrderIndex(0.into(), 1.into());
         stream.write_all(buffer.entry_slice()).unwrap();
         stream.write_all(&[0; 6]).unwrap();
         buffer[..].iter_mut().fold((), |_, i| *i = 0);
-        stream.read_exact(&mut buffer[..]).unwrap();
-        assert!(!buffer.entry().kind.contains(EntryKind::ReadSuccess));
-        assert_eq!(Entry::<()>::wrap_bytes(&buffer[..]).dependencies(), &[OrderIndex(0.into(), 0.into())]);
+        recv_packet(&mut buffer, &mut stream);
+        assert!(!buffer.entry().flag().contains(EntryFlag::ReadSuccess));
+        assert_eq!(buffer.contents().locs()[0], OrderIndex(0.into(), 1.into()));
+        assert_eq!(buffer.contents().horizon(), OrderIndex(0.into(), 0.into()));
     }
 
     //FIXME add empty read tests
 
+    fn recv_packet(buffer: &mut Buffer, mut stream: &TcpStream) {
+        use packets::Packet::WrapErr;
+        let mut read = 0;
+        loop {
+            let to_read = buffer.finished_at(read);
+            let size = match to_read {
+                Err(WrapErr::NotEnoughBytes(needs)) => needs,
+                Err(err) => panic!("{:?}", err),
+                Ok(size) if read < size => size,
+                Ok(..) => return,
+            };
+            let r = stream.read(&mut buffer[read..size]);
+            match r {
+                Ok(i) => read += i,
+                Err(e) => panic!("recv error {:?}", e),
+            }
+        }
+    }
+
     fn start_servers<'a, 'b>(addr_strs: &'a [&'b str], server_ready: &'static AtomicUsize) {
-        use std::{thread, iter};
+        use std::thread;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         use mio;
@@ -824,13 +1563,11 @@ mod tests {
 }
 
 fn get_next_token(token: &mut mio::Token) -> mio::Token {
-    let next = token.0.wrapping_add(1);
-    if next == 0 { *token = mio::Token(2) }
-    else { *token = mio::Token(next) };
+    *token = mio::Token(token.0.checked_add(1).unwrap());
     *token
 }
 
-fn worker_for_ip(ip: IpAddr, num_workers: u64) -> usize {
+fn worker_for_ip(ip: SocketAddr, num_workers: u64) -> usize {
     use std::hash::{Hash, Hasher};
     let mut hasher: FxHasher = Default::default();
     ip.hash(&mut hasher);

@@ -9,9 +9,10 @@ bit-set = "0.4.0"
 byteorder = "1"
 custom_derive = "0.1"
 deque = "0.3.1"
-grabbag_macros = "0.1"
+#grabbag_macros = "0.1"
 newtype_derive = "0.1"
-packet-macro = {path = "./packet-macro"}
+packet-macro2 = {path = "./packet-macro2"}
+packet-macro-impl = {path = "./packet-macro2/packet-macro-impl"}
 uuid = { version = "0.4", features = ["v4"] }
 lazycell = "0.5.0"
 libc = "0.2"
@@ -21,10 +22,11 @@ rand = "0.3"
 rustc-serialize = "0.3"
 time = "0.1"
 toml = "0.2"
-mio = "0.6"
+mio = "0.6.6"
 nix = "*"
 net2 = "0.2"
 env_logger = "0.3"
+evmap = "0.6.4"
 
 [features]
 no_trace = ["log/max_level_info"]

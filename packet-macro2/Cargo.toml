@@ -1,0 +1,7 @@
+[package]
+name = "packet-macro2"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+packet-macro-impl = {path = "./packet-macro-impl"}

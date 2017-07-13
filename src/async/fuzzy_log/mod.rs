@@ -3,8 +3,9 @@
 use std::{self, iter, mem};
 use std::collections::VecDeque;
 use std::collections::hash_map;
-use std::rc::Rc;
+use std::io;
 use std::sync::mpsc;
+use std::rc::Rc;
 use std::u32;
 
 use mio;
@@ -16,15 +17,16 @@ use self::FromClient::*;
 
 use hash::HashMap;
 
-use self::per_color::{PerColor, IsRead, ReadHandle};
+use self::per_color::{PerColor, IsRead, ReadHandle, NextToFetch};
 
 pub mod log_handle;
 mod per_color;
+mod range_tree;
 
 #[cfg(test)]
 mod tests;
 
-const MAX_PREFETCH: u32 = 8;
+const MAX_PREFETCH: u32 = 40;
 
 type ChainEntry = Rc<Vec<u8>>;
 
@@ -35,10 +37,10 @@ pub struct ThreadLog {
     blocked_multiappends: HashMap<Uuid, MultiSearchState>,
     per_chains: HashMap<order, PerColor>,
     //TODO replace with queue from deque to allow multiple consumers
-    ready_reads: mpsc::Sender<Vec<u8>>,
+    ready_reads: FinshedReadQueue,
     //TODO blocked_chains: BitSet ?
     //TODO how to multiplex writers finished_writes: Vec<mpsc::Sender<()>>,
-    finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+    finished_writes: FinshedWriteQueue,
     //FIXME is currently unused
     #[allow(dead_code)]
     to_return: VecDeque<Vec<u8>>,
@@ -48,7 +50,24 @@ pub struct ThreadLog {
     chains_currently_being_read: IsRead,
     num_snapshots: usize,
 
+    num_errors: u64,
+
+    finished: bool,
+
     print_data: PrintData,
+}
+
+pub type FinshedReadQueue = mpsc::Sender<Result<Vec<u8>, Error>>;
+pub type FinshedReadRecv = mpsc::Receiver<Result<Vec<u8>, Error>>;
+
+pub type FinshedWriteQueue = mpsc::Sender<Result<(Uuid, Vec<OrderIndex>), Error>>;
+pub type FinshedWriteRecv = mpsc::Receiver<Result<(Uuid, Vec<OrderIndex>), Error>>;
+
+#[derive(Debug, Clone)]
+pub struct Error {
+    error_num: u64,
+    server: usize,
+    error: io::ErrorKind,
 }
 
 counters!{
@@ -64,7 +83,7 @@ counters!{
 
 struct MultiSearchState {
     val: Vec<u8>,
-    pieces_remaining: usize,
+    //pieces_remaining: usize,
 }
 
 pub enum Message {
@@ -76,6 +95,7 @@ pub enum Message {
 pub enum FromStore {
     WriteComplete(Uuid, Vec<OrderIndex>), //TODO
     ReadComplete(OrderIndex, Vec<u8>),
+    IoError(io::ErrorKind, usize),
 }
 
 pub enum FromClient {
@@ -102,8 +122,8 @@ impl ThreadLog {
     //TODO
     pub fn new<I>(to_store: mio::channel::Sender<Vec<u8>>,
         from_outside: mpsc::Receiver<Message>,
-        ready_reads: mpsc::Sender<Vec<u8>>,
-        finished_writes: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+        ready_reads: FinshedReadQueue,
+        finished_writes: FinshedWriteQueue,
         interesting_chains: I)
     -> Self
     where I: IntoIterator<Item=order>{
@@ -120,7 +140,9 @@ impl ThreadLog {
             cache: BufferCache::new(),
             chains_currently_being_read: Rc::new(ReadHandle),
             num_snapshots: 0,
+            num_errors: 0,
             print_data: Default::default(),
+            finished: false,
         }
     }
 
@@ -129,11 +151,11 @@ impl ThreadLog {
         use std::time::Duration;
         //FIXME remove
         //let mut num_msgs = 0;
-        loop {
+        'recv: while !self.finished {
             //let msg = self.from_outside.recv().expect("outside is gone");
             if let Ok(msg) = self.from_outside.recv_timeout(Duration::from_secs(10)) {
             //if let Ok(msg) = self.from_outside.recv() {
-                if !self.handle_message(msg) { return }
+                if !self.handle_message(msg) { break 'recv }
                 // num_msgs += 1;
             }
             else {
@@ -157,8 +179,8 @@ impl ThreadLog {
         match msg {
             SnapshotAndPrefetch(chain) => {
                 self.print_data.snap(1);
-                trace!("FUZZY snapshot");
                 self.num_snapshots = self.num_snapshots.saturating_add(1);
+                trace!("FUZZY snapshot {:?}: {:?}", chain, self.num_snapshots);
                 //FIXME
                 if chain != 0.into() {
                     self.fetch_snapshot(chain);
@@ -176,6 +198,9 @@ impl ThreadLog {
                 true
             }
             MultiSnapshotAndPrefetch(chains) => {
+                self.print_data.snap(1);
+                self.num_snapshots = self.num_snapshots.saturating_add(1);
+                trace!("FUZZY snapshot {:?}: {:?}", chains, self.num_snapshots);
                 for chain in chains {
                     self.fetch_snapshot(chain);
                     self.prefetch(chain);
@@ -185,7 +210,7 @@ impl ThreadLog {
             PerformAppend(msg) => {
                 self.print_data.append(1);
                 {
-                    let layout = bytes_as_entry(&msg).kind.layout();
+                    let layout = bytes_as_entry(&msg).layout();
                     assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
                 }
                 self.to_store.send(msg).expect("store hung up");
@@ -198,6 +223,7 @@ impl ThreadLog {
             }
             Shutdown => {
                 self.print_data.shut(1);
+                self.finished = true;
                 //TODO send shutdown
                 false
             }
@@ -208,14 +234,30 @@ impl ThreadLog {
         match msg {
             WriteComplete(id, locs) => {
                 self.print_data.write_done(1);
-                self.finished_writes.send((id, locs)).expect("client is gone")
+                if self.finished_writes.send(Ok((id, locs))).is_err() {
+                    self.finished = true;
+                }
             },
             ReadComplete(loc, msg) => {
                 self.print_data.read_done(1);
                 self.handle_completed_read(loc, msg)
             },
+            IoError(kind, server) => {
+                let err = self.make_error(kind, server);
+                let e1 = self.finished_writes.send(Err(err.clone()));
+                let e2 = self.ready_reads.send(Err(err));
+                if e1.is_err() || e2.is_err() {
+                    self.finished = true;
+                }
+            }
         }
         true
+    }
+
+    fn make_error(&mut self, error: io::ErrorKind, server: usize) -> Error {
+        let error_num = self.num_errors;
+        self.num_errors += 1;
+        Error {error_num, error, server,}
     }
 
     fn fetch_snapshot(&mut self, chain: order) {
@@ -227,30 +269,55 @@ impl ThreadLog {
     fn prefetch(&mut self, chain: order) {
         //TODO allow new chains?
         //TODO how much to fetch
-        let num_to_fetch = {
+        let to_fetch = {
             let pc = &mut self.per_chains.get_mut(&chain).expect("boring server read");
             pc.increment_outstanding_snapshots(&self.chains_currently_being_read);
-            let num_to_fetch = pc.num_to_fetch();
-            let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
-            let currently_buffering = pc.currently_buffering();
-            //FIXME use outstanding reads
-            if currently_buffering < num_to_fetch { num_to_fetch - currently_buffering }
-            else { 0 }
+            let next = pc.next_range_to_fetch();
+            match next {
+                NextToFetch::None => None,
+                NextToFetch::AboveHorizon(low, high) => {
+                    let num_to_fetch = (high - low) + 1;
+                    let num_to_fetch = std::cmp::min(num_to_fetch, MAX_PREFETCH);
+                    let currently_buffering = pc.currently_buffering();
+                    if num_to_fetch == 0 {
+                        None
+                    } else if currently_buffering < num_to_fetch {
+                        let num_to_fetch = num_to_fetch - currently_buffering;
+                        let high = std::cmp::min(high, low + num_to_fetch - 1);
+                        Some((low, high))
+                    } else { None }
+                },
+                NextToFetch::BelowHorizon(low, high) => {
+                    let num_to_fetch = (high - low) + 1;
+                    let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
+                    let currently_buffering = pc.currently_buffering();
+                    if num_to_fetch == 0 {
+                        None
+                    } else if currently_buffering < num_to_fetch {
+                        let num_to_fetch = num_to_fetch - currently_buffering;
+                        let high = std::cmp::min(high, high + num_to_fetch - 1);
+                        Some((low, high))
+                    } else { None }
+                },
+            }
         };
-        for _ in 0..num_to_fetch {
-            self.fetch_next(chain)
+        if let Some((low, high)) = to_fetch {
+            self.fetch_next(chain, low, high)
         }
     }
 
     fn handle_completed_read(&mut self, read_loc: OrderIndex, msg: Vec<u8>) {
         //TODO right now this assumes order...
-        let kind = bytes_as_entry(&msg).kind;
+        let (kind, flag) = {
+            let e = bytes_as_entry(&msg);
+            (e.kind(), *e.flag())
+        };
         trace!("FUZZY handle read @ {:?}", read_loc);
 
         match kind.layout() {
             EntryLayout::Read => {
                 trace!("FUZZY read has no data");
-                debug_assert!(!kind.contains(EntryKind::ReadSuccess));
+                debug_assert!(!flag.contains(EntryFlag::ReadSuccess));
                 debug_assert!(bytes_as_entry(&msg).locs()[0] == read_loc);
                 if read_loc.1 < u32::MAX.into() {
                     trace!("FUZZY overread at {:?}", read_loc);
@@ -260,15 +327,15 @@ impl ThreadLog {
                     //     it might be better to switch to a buffer per-chain model
                     self.per_chains.get_mut(&read_loc.0).map(|s| {
                         s.overread_at(read_loc.1);
-                        s.decrement_outstanding_reads();
+                        //s.decrement_outstanding_reads();
                     });
                 }
                 else {
                     let unblocked = self.per_chains.get_mut(&read_loc.0).and_then(|s| {
                         let e = bytes_as_entry(&msg);
                         assert_eq!(e.locs()[0].1, u32::MAX.into());
-                        debug_assert!(!e.kind.contains(EntryKind::ReadSuccess));
-                        let new_horizon = e.dependencies()[0].1;
+                        debug_assert!(!e.flag().contains(EntryFlag::ReadSuccess));
+                        let new_horizon = e.horizon().1;
                         trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
                         s.give_new_snapshot(new_horizon)
                     });
@@ -280,7 +347,7 @@ impl ThreadLog {
             }
             EntryLayout::Data => {
                 trace!("FUZZY read is single");
-                debug_assert!(kind.contains(EntryKind::ReadSuccess));
+                debug_assert!(flag.contains(EntryFlag::ReadSuccess));
                 //assert!(read_loc.1 >= pc.first_buffered);
                 //TODO check that read is needed?
                 //TODO no-alloc?
@@ -289,11 +356,13 @@ impl ThreadLog {
                     //s.decrement_outstanding_reads());
                 if needed {
                     let packet = Rc::new(msg);
-                    self.add_blockers_at(read_loc, &packet);
-                    self.try_returning_at(read_loc, packet);
+                    let try_ret = self.add_blockers_at(read_loc, &packet);
+                    if try_ret {
+                        self.try_returning_at(read_loc, packet);
+                    }
                 }
             }
-            EntryLayout::Multiput if kind.contains(EntryKind::NoRemote) => {
+            EntryLayout::Multiput if flag.contains(EntryFlag::NoRemote) => {
                 trace!("FUZZY read is atom");
                 let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
                     s.got_read(read_loc.1)).unwrap_or(false);
@@ -301,15 +370,16 @@ impl ThreadLog {
                 if needed {
                     //FIXME ensure other pieces get fetched if reading those chains
                     let packet = Rc::new(msg);
+                    self.ensure_read(read_loc, &packet);
                     self.add_blockers_at(read_loc, &packet);
                     self.try_returning_at(read_loc, packet);
                 }
             }
             layout @ EntryLayout::Multiput | layout @ EntryLayout::Sentinel => {
                 trace!("FUZZY read is multi");
-                debug_assert!(kind.contains(EntryKind::ReadSuccess));
+                debug_assert!(flag.contains(EntryFlag::ReadSuccess));
                 let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.got_read(read_loc.1)).unwrap_or(false);
+                    s.got_read(read_loc.1)).unwrap_or(false); //FIXME only call got_read on success otherwise call overread
                     //s.decrement_outstanding_reads());
                 if needed {
                     let is_sentinel = layout == EntryLayout::Sentinel;
@@ -329,15 +399,17 @@ impl ThreadLog {
                             //TODO it would be nice to fetch the blockers in parallel...
                             //     we can add a fetch blockers call in update_multi_part_read
                             //     which updates the horizon but doesn't actually add the block
-                            self.add_blockers(&packet);
-                            self.try_returning(packet);
+                            let try_ret = self.add_blockers(&packet);
+                            if try_ret {
+                                self.try_returning(packet);
+                            }
                         }
                         MultiSearch::Repeat => {}
                     }
                 }
             }
 
-            EntryLayout::Lock => unreachable!(),
+            EntryLayout::Lock | EntryLayout::GC => unreachable!(),
         }
 
         let finished_server = self.continue_fetch_if_needed(read_loc.0);
@@ -350,16 +422,20 @@ impl ThreadLog {
                 pc.set_finished_reading();
             });
             if self.finshed_reading() {
-                trace!("FUZZY finished reading all chains");
+                trace!("FUZZY finished reading all chains after {:?}", read_loc.0);
                 //TODO do we need a better system?
                 let num_completeds = mem::replace(&mut self.num_snapshots, 0);
                 //assert!(num_completeds > 0);
                 //FIXME add is_snapshoting to PerColor so this doesn't race?
                 trace!("FUZZY finished reading {:?} snaps", num_completeds);
                 for _ in 0..num_completeds {
-                    let _ = self.ready_reads.send(vec![]);
+                    if self.ready_reads.send(Ok(vec![])).is_err() {
+                        self.finished = true;
+                    }
                 }
                 self.cache.flush();
+            } else {
+                trace!("FUZZY chains other than {:?} not finished", read_loc.0);
             }
         }
         else {
@@ -373,12 +449,33 @@ impl ThreadLog {
 
     /// Blocks a packet on entries a it depends on. Will increment the refcount for each
     /// blockage.
-    fn add_blockers(&mut self, packet: &ChainEntry) {
+    fn add_blockers(&mut self, packet: &ChainEntry) -> bool {
         //FIXME dependencies currently assumes you gave it the correct type
         //      this is unnecessary and should be changed
         let entr = bytes_as_entry(packet);
         let deps = entr.dependencies();
         let locs = entr.locs();
+        let mut needed = false;
+        let mut try_ret = false;
+        for &loc in locs {
+            if loc.0 == order::from(0) { continue }
+            let (is_next_in_chain, needs_to_be_returned);
+            {
+                let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
+                is_next_in_chain = pc.next_return_is(loc.1);
+                needs_to_be_returned = !pc.has_returned(loc.1);
+            }
+            needed |= needs_to_be_returned;
+            if !needs_to_be_returned { continue }
+
+            try_ret |= is_next_in_chain;
+            if !is_next_in_chain {
+                self.enqueue_packet(loc, packet.clone());
+            }
+        }
+        if !needed {
+            return false
+        }
         trace!("FUZZY checking {:?} for blockers in {:?}", locs, deps);
         for &OrderIndex(chain, index) in deps {
             let blocker_already_returned = self.per_chains.get_mut(&chain)
@@ -387,32 +484,34 @@ impl ThreadLog {
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", locs, (chain, index));
                 //TODO no-alloc?
-                let blocked = self.blockers.entry(OrderIndex(chain, index))
-                    .or_insert_with(Vec::new);
-                blocked.push(packet.clone());
+                self.blockers.entry(OrderIndex(chain, index))
+                    .or_insert_with(Vec::new)
+                    .push(packet.clone());
+                self.fetch_blocker_at(chain, index);
             } else {
                 trace!("FUZZY read @ {:?} need not wait for {:?}", locs, (chain, index));
             }
         }
-        for &loc in locs {
-            if loc.0 == order::from(0) { continue }
-            let (is_next_in_chain, needs_to_be_returned) = {
-                let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
-                (pc.next_return_is(loc.1), !pc.has_returned(loc.1))
-            };
-            if !is_next_in_chain && needs_to_be_returned {
-                self.enqueue_packet(loc, packet.clone());
-            }
-        }
+        try_ret
     }
 
     /// Blocks a packet on entries a it depends on. Will increment the refcount for each
     /// blockage.
-    fn add_blockers_at(&mut self, loc: OrderIndex, packet: &ChainEntry) {
+    fn add_blockers_at(&mut self, loc: OrderIndex, packet: &ChainEntry) -> bool {
         //FIXME dependencies currently assumes you gave it the correct type
         //      this is unnecessary and should be changed
         let entr = bytes_as_entry(packet);
         let deps = entr.dependencies();
+        let (needed, try_ret);
+        {
+            let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
+            needed = !pc.has_returned(loc.1);
+            try_ret = pc.next_return_is(loc.1);
+        }
+        if !needed { return false }
+        if !try_ret {
+            self.enqueue_packet(loc, Rc::clone(packet));
+        }
         trace!("FUZZY checking {:?} for blockers in {:?}", loc, deps);
         for &OrderIndex(chain, index) in deps {
             let blocker_already_returned = self.per_chains.get_mut(&chain)
@@ -421,42 +520,42 @@ impl ThreadLog {
             if !blocker_already_returned {
                 trace!("FUZZY read @ {:?} blocked on {:?}", loc, (chain, index));
                 //TODO no-alloc?
-                let blocked = self.blockers.entry(OrderIndex(chain, index))
-                    .or_insert_with(Vec::new);
-                blocked.push(packet.clone());
+                self.blockers.entry(OrderIndex(chain, index))
+                    .or_insert_with(Vec::new)
+                    .push(Rc::clone(packet));
+                self.fetch_blocker_at(chain, index);
             } else {
                 trace!("FUZZY read @ {:?} need not wait for {:?}", loc, (chain, index));
             }
         }
-        let (is_next_in_chain, needs_to_be_returned) = {
-            let pc = self.per_chains.get(&loc.0).expect("fetching uninteresting chain");
-            (pc.next_return_is(loc.1), !pc.has_returned(loc.1))
-        };
-        if !is_next_in_chain && needs_to_be_returned {
-            self.enqueue_packet(loc, packet.clone());
-        }
+        try_ret
     }
 
+    // FIXME This is unneeded
     fn fetch_blockers_if_needed(&mut self, packet: &ChainEntry) {
         //TODO num_to_fetch
         //FIXME only do if below last_snapshot?
         let deps = bytes_as_entry(packet).dependencies();
         for &OrderIndex(chain, index) in deps {
-            let unblocked;
-            let num_to_fetch: u32 = {
-                let pc = self.per_chains.get_mut(&chain)
-                    .expect("tried reading uninteresting chain");
-                unblocked = pc.update_horizon(index);
-                pc.num_to_fetch()
-            };
-            trace!("FUZZY blocker {:?} needs {:?} additional reads", chain, num_to_fetch);
-            for _ in 0..num_to_fetch {
-                self.fetch_next(chain)
-            }
-            if let Some(val) = unblocked {
-                let locs = self.return_entry(val);
-                if let Some(locs) = locs { self.stop_blocking_on(locs) }
-            }
+            self.fetch_blocker_at(chain, index)
+        }
+    }
+
+    fn fetch_blocker_at(&mut self, chain: order, index: entry) {
+        let unblocked;
+        let to_fetch: NextToFetch = {
+            let pc = self.per_chains.get_mut(&chain)
+                .expect("tried reading uninteresting chain");
+            unblocked = pc.update_horizon(index);
+            pc.next_range_to_fetch()
+        };
+        trace!("FUZZY blocker {:?} needs additional reads {:?}", chain, to_fetch);
+        if let NextToFetch::BelowHorizon(low, high) = to_fetch {
+            self.fetch_next(chain, low, high)
+        }
+        if let Some(val) = unblocked {
+            let locs = self.return_entry(val);
+            if let Some(locs) = locs { self.stop_blocking_on(locs) }
         }
     }
 
@@ -515,10 +614,24 @@ impl ThreadLog {
                         }
                         self.return_entry(val);
                     }
-                    Err(still_blocked) =>
-                        trace!("FUZZY {:?} no longer by {:?} but still blocked",
-                            bytes_as_entry(&still_blocked).locs(), loc),
+                    Err(still_blocked) => {
+                        trace!("FUZZY {:?} no longer by {:?} but still blocked by {:?}",
+                            bytes_as_entry(&still_blocked).locs(), loc,
+                                Rc::strong_count(&still_blocked))
+                    }
                 }
+            }
+        }
+    }
+
+    fn ensure_read(&mut self, read_loc: OrderIndex, packet: &ChainEntry) {
+        let e = bytes_as_entry(packet);
+        let id = e.id();
+        let first = self.per_chains.get_mut(&read_loc.0).map(|p| p.got_no_remote(id));
+        if let Some(true) = first {
+            for &OrderIndex(ref o, _) in e.locs() {
+                if o == &read_loc.0 { continue }
+                self.per_chains.get_mut(o).map(|p| p.add_no_remote(id));
             }
         }
     }
@@ -528,24 +641,20 @@ impl ThreadLog {
         mut msg: Vec<u8>,
         is_sentinel: bool)
     -> MultiSearch {
-        let (id, num_pieces) = {
+        let id = {
             let entr = bytes_as_entry(&msg);
-            let id = entr.id;
+            let id = entr.id().clone();
             let locs = entr.locs();
-            let num_pieces = locs.into_iter()
-                .filter(|&&OrderIndex(o, _)| o != order::from(0))
-                .count();
-            trace!("FUZZY multi part read {:?} @ {:?}, {:?} pieces", id, locs, num_pieces);
-            (id, num_pieces)
+            trace!("FUZZY multi part read {:?} @ {:?}", id, locs);
+            id
         };
 
         //TODO this should never really occur...
-        if num_pieces == 1 {
-            return MultiSearch::Finished(msg)
-        }
+        // if num_pieces == 1 {
+        //     return MultiSearch::Finished(msg)
+        // }
 
         let is_later_piece = self.blocked_multiappends.contains_key(&id);
-        let mut omsg = None;
         if !is_later_piece && !is_sentinel {
             {
                 let pc = &self.per_chains[&read_loc.0];
@@ -561,36 +670,45 @@ impl ThreadLog {
                 }
             }
 
-            let mut pieces_remaining = num_pieces;
+            //let mut pieces_remaining = num_pieces;
             trace!("FUZZY first part of multi part read");
+            let mut finished = true;
+            let mut is_sentinel = false;
             for &mut OrderIndex(o, ref mut i) in bytes_as_entry_mut(&mut msg).locs_mut() {
-                if o != order::from(0) {
-                    trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
-                    let early_sentinel = self.fetch_multi_parts(&id, o, *i);
-                    if let Some(loc) = early_sentinel {
-                        trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
-                        assert!(loc != entry::from(0));
-                        *i = loc;
-                        pieces_remaining -= 1
-                    } else if *i != entry::from(0) {
-                        trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
-                        pieces_remaining -= 1
+                if o == order::from(0) {
+                    is_sentinel = true;
+                    continue
+                }
+
+                trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
+                let early_sentinel = self.fetch_multi_parts(&id, o, *i);
+                if let Some(loc) = early_sentinel {
+                    trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
+                    assert!(loc != entry::from(0));
+                    *i = loc;
+                } else if *i != entry::from(0) {
+                    trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
+                    if is_sentinel {
+                        self.per_chains.get_mut(&o)
+                            .map(|pc| pc.mark_as_skippable(*i));
                     }
                 } else {
-                    trace!("FUZZY no need to fetch multi part @ {:?}", (o, *i));
+                    finished = false
                 }
             }
 
-            if pieces_remaining == 0 {
+            if finished {
                 trace!("FUZZY all sentinels had already been found for {:?}", read_loc);
                 return MultiSearch::Finished(msg)
             }
 
-            trace!("FUZZY {:?} waiting for {:?} pieces", read_loc, pieces_remaining);
+            //trace!("FUZZY {:?} waiting", read_loc, pieces_remaining);
             self.blocked_multiappends.insert(id, MultiSearchState {
                 val: msg,
-                pieces_remaining: pieces_remaining
+                //pieces_remaining: pieces_remaining
             });
+
+            return MultiSearch::InProgress
         }
         else if !is_later_piece && is_sentinel {
             trace!("FUZZY early sentinel");
@@ -599,50 +717,73 @@ impl ThreadLog {
                 .add_early_sentinel(id, read_loc.1);
             return MultiSearch::EarlySentinel
         }
-        else { omsg = Some(msg); trace!("FUZZY later part of multi part read"); }
+
+        trace!("FUZZY later part of multi part read");
 
         debug_assert!(self.per_chains[&read_loc.0].is_within_snapshot(read_loc.1));
 
-        let was_blind_search;
-        let finished = {
-            if let hash_map::Entry::Occupied(mut found) = self.blocked_multiappends.entry(id) {
-                let finished = {
-                    let multi = found.get_mut();
-                    //FIXME ensure this only happens if debug assertions
-                    if let (Some(msg), false) = (omsg, is_sentinel) {
-                        unsafe { debug_assert_eq!(data_bytes(&multi.val), data_bytes(&msg)) }
-                    }
-                    let loc_ptr = bytes_as_entry_mut(&mut multi.val)
-                        .locs_mut().into_iter()
-                        .find(|&&mut OrderIndex(o, _)| o == read_loc.0)
-                        .unwrap();
-                    //FIXME
-                    was_blind_search = loc_ptr.1 == entry::from(0);
-                    if !was_blind_search {
-                        debug_assert_eq!(*loc_ptr, read_loc)
-                    } else {
-                        multi.pieces_remaining -= 1;
-                        trace!("FUZZY multi pieces remaining {:?}", multi.pieces_remaining);
-                        *loc_ptr = read_loc;
-                    }
 
-                    multi.pieces_remaining == 0
-                };
-                match finished {
-                    true => Some(found.remove().val),
-                    false => None,
+        let mut finished = true;
+        let mut found = match self.blocked_multiappends.entry(id) {
+            hash_map::Entry::Occupied(o) => o,
+            _ => unreachable!(),
+        };
+        {
+            let multi = found.get_mut();
+            if !is_sentinel {
+                unsafe {
+                    debug_assert_eq!(data_bytes(&multi.val), data_bytes(&msg))
                 }
             }
-            else { unreachable!() }
+            {
+                let mut e = bytes_as_entry_mut(&mut multi.val);
+                let my_locs = e.locs_mut();
+                {
+                    let locs = my_locs.iter_mut().zip(bytes_as_entry(&msg).locs().iter());
+                    let mut is_sentinel = false;
+                    for (my_loc, new_loc) in locs {
+                        assert_eq!(my_loc.0, new_loc.0);
+                        if my_loc.0 == order::from(0) {
+                            is_sentinel = true;
+                            continue
+                        }
+
+                        if my_loc.1 == entry::from(0) && new_loc.1 != entry::from(0) {
+                            trace!("FUZZY finished blind seach for {:?}", new_loc);
+                            *my_loc = *new_loc;
+                            let pc = self.per_chains.entry(new_loc.0)
+                                .or_insert_with(|| PerColor::new(new_loc.0));
+                            pc.decrement_multi_search();
+                            if !is_sentinel {
+                                pc.mark_as_already_fetched(new_loc.1);
+                            } else {
+                                pc.mark_as_skippable(new_loc.1);
+                            }
+                        } else if my_loc.1 != entry::from(0) && new_loc.1!= entry::from(0) {
+                            debug_assert_eq!(*my_loc, *new_loc);
+                            if is_sentinel {
+                                self.per_chains.get_mut(&new_loc.0)
+                                    .map(|pc| pc.mark_as_skippable(new_loc.1));
+                            }
+                        }
+
+                        finished &= my_loc.1 != entry::from(0);
+                    }
+                }
+                trace!("FUZZY multi pieces remaining {:?}", my_locs);
+            }
+        }
+        let finished = match finished {
+            true => Some(found.remove().val),
+            false => None,
         };
 
-        //self.found_multi_part(read_loc.0, read_loc.1, was_blind_search);
-        if was_blind_search {
-            trace!("FUZZY finished blind seach for {:?}", read_loc);
-            let pc = self.per_chains.entry(read_loc.0)
-                .or_insert_with(|| PerColor::new(read_loc.0));
-            pc.decrement_multi_search();
-        }
+        // if was_blind_search {
+        //     trace!("FUZZY finished blind seach for {:?}", read_loc);
+        //     let pc = self.per_chains.entry(read_loc.0)
+        //         .or_insert_with(|| PerColor::new(read_loc.0));
+        //     pc.decrement_multi_search();
+        // }
 
         match finished {
             Some(val) => {
@@ -703,25 +844,29 @@ impl ThreadLog {
         //TODO num_to_fetch
         let (num_to_fetch, unblocked) = {
             let pc = self.per_chains.entry(chain).or_insert_with(|| PerColor::new(chain));
-            let num_to_fetch = pc.num_to_fetch();
+            let to_fetch = pc.next_range_to_fetch();
             //TODO should fetch == number of multis searching for
-            if num_to_fetch > 0 {
-                trace!("FUZZY {:?} needs {:?} additional reads", chain, num_to_fetch);
-                (num_to_fetch, None)
-            } else if pc.has_more_multi_search_than_outstanding_reads() {
-                trace!("FUZZY {:?} updating horizon due to multi search", chain);
-                (1, pc.increment_horizon())
-            }
-            else {
-                trace!("FUZZY {:?} needs no more reads", chain);
-                (0, None)
+            match to_fetch {
+                NextToFetch::BelowHorizon(low, high) => {
+                    trace!("FUZZY {:?} needs additional reads {:?}", chain, (low, high));
+                    (Some((low, high)), None)
+                },
+                NextToFetch::AboveHorizon(low, _)
+                    if pc.has_more_multi_search_than_outstanding_reads() => {
+                    trace!("FUZZY {:?} updating horizon due to multi search", chain);
+                    (Some((low, low)), pc.increment_horizon())
+                },
+                _ => {
+                    trace!("FUZZY {:?} needs no more reads", chain);
+                    (None, None)
+                },
             }
         };
 
-        for _ in 0..num_to_fetch {
+        if let Some((low, high)) = num_to_fetch {
             //FIXME check if we have a cached version before issuing fetch
             //      laking this can cause unsound behzvior on multipart reads
-            self.fetch_next(chain)
+            self.fetch_next(chain, low, high)
         }
 
         if let Some(unblocked) = unblocked {
@@ -771,13 +916,16 @@ impl ThreadLog {
             }
 
             trace!("QQQQQ setting returned {:?}", (o, i));
+            assert!(i > entry::from(0));
             pc.set_returned(i);
             pc.is_interesting
         };
         trace!("FUZZY returning read @ {:?}", loc);
         if is_interesting {
             //FIXME first_buffered?
-            self.ready_reads.send(val).expect("client hung up");
+            if self.ready_reads.send(Ok(val)).is_err() {
+                self.finished = true;
+            }
         }
         true
     }
@@ -792,32 +940,68 @@ impl ThreadLog {
         let (locs, is_interesting) = {
             let mut should_block_on = None;
             {
-                let locs = bytes_as_entry(&val).locs();
+                let e = bytes_as_entry(&val);
+                let no_remote = e.flag().contains(EntryFlag::NoRemote);
+                let locs = e.locs();
                 trace!("FUZZY trying to return read from {:?}", locs);
+                let mut checking_sentinels = false;
                 for &OrderIndex(o, i) in locs.into_iter() {
-                    if o == order::from(0) { continue }
-                    let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
-                    if pc.has_returned(i) { return None }
-                    if !pc.is_within_snapshot(i) {
-                        trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
-                        should_block_on = Some(o);
+                    if o == order::from(0) {
+                        checking_sentinels = true;
+                        continue
+                    }
+                    match (self.per_chains.get_mut(&o), no_remote) {
+                        (None, true) => {}
+                        (None, false) => panic!("trying to return boring chain {:?}", o),
+                        (Some(pc), _) => {
+                            if pc.has_returned(i) {
+                                if !checking_sentinels {
+                                    //TODO is this an error?
+                                    trace!("FUZZY double return {:?} in {:?}", (o, i), locs);
+                                    return None
+                                }
+                            } else if checking_sentinels {
+                                 //FIXME this should be unreachable
+                                panic!("FUZZY must block read on Sentinel {:?}: {:?}",
+                                    (o, i), pc);
+                            }
+                            if !pc.is_within_snapshot(i) {
+                                trace!("FUZZY must block read @ {:?}, waiting for snapshot", (o, i));
+                                should_block_on = Some((o, i));
+                            }
+                        },
                     }
                 }
             }
-            if let Some(o) = should_block_on {
-                let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
-                pc.block_on_snapshot(val);
+            if let Some((o, i)) = should_block_on {
+                let is_next;
+                {
+                    let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
+                    is_next = pc.next_return_is(i);
+                    if is_next {
+                        pc.block_on_snapshot(val);
+                        return None
+                    }
+                }
+                self.enqueue_packet(OrderIndex(o, i), Rc::new(val));
                 return None
             }
             let mut is_interesting = false;
-            let locs = bytes_as_entry(&val).locs();
+            let e = bytes_as_entry(&val);
+            let no_remote = e.flag().contains(EntryFlag::NoRemote);
+            let locs = e.locs();
             for &OrderIndex(o, i) in locs.into_iter() {
-                if o == order::from(0) { continue }
-                trace!("QQQQ setting returned {:?}", (o, i));
-                let pc = self.per_chains.get_mut(&o).expect("fetching uninteresting chain");
-                debug_assert!(pc.is_within_snapshot(i));
-                pc.set_returned(i);
-                is_interesting |= pc.is_interesting;
+                if o == order::from(0) { break }
+                match (self.per_chains.get_mut(&o), no_remote) {
+                    (None, true) => {}
+                    (None, false) => panic!("trying to return boring chain {:?}", o),
+                    (Some(pc), _) => {
+                        trace!("QQQQ setting returned {:?}", (o, i));
+                        debug_assert!(pc.is_within_snapshot(i));
+                        pc.set_returned(i);
+                        is_interesting |= pc.is_interesting;
+                    },
+                }
             }
             //TODO no-alloc
             //     a better solution might be to have this function push onto a temporary
@@ -828,35 +1012,43 @@ impl ThreadLog {
         trace!("FUZZY returning read @ {:?}", locs);
         if is_interesting {
             //FIXME first_buffered?
-            self.ready_reads.send(val).expect("client hung up");
+            if self.ready_reads.send(Ok(val)).is_err() {
+                self.finished = true;
+            }
         }
         Some(locs)
     }
 
-    fn fetch_next(&mut self, chain: order) {
-        let next = {
+    fn fetch_next(&mut self, chain: order, low: u32, high: u32) {
+        {
             let per_chain = &mut self.per_chains.get_mut(&chain)
                 .expect("fetching uninteresting chain");
             //assert!(per_chain.last_read_sent_to_server < per_chain.last_snapshot,
             //    "last_read_sent_to_server {:?} >= {:?} last_snapshot @ fetch_next",
             //    per_chain.last_read_sent_to_server, per_chain.last_snapshot,
             //);
-            per_chain.increment_fetch(&self.chains_currently_being_read)
+            per_chain.fetching_range((low.into(), high.into()),
+                &self.chains_currently_being_read)
         };
-        let packet = self.make_read_packet(chain, next);
-
-        self.to_store.send(packet).expect("store hung up");
+        for next in low..high+1 {
+            let packet = self.make_read_packet(chain, next.into());
+            if self.to_store.send(packet).is_err() {
+                self.finished = true;
+            }
+        }
     }
 
     fn make_read_packet(&mut self, chain: order, index: entry) -> Vec<u8> {
         let mut buffer = self.cache.alloc();
-        {
-            let e = EntryContents::Data(&(), &[]).fill_vec(&mut buffer);
-            e.kind = EntryKind::Read;
-            e.locs_mut()[0] = OrderIndex(chain, index);
-            debug_assert_eq!(e.data_bytes, 0);
-            debug_assert_eq!(e.dependency_bytes, 0);
-        }
+        EntryContents::Read{
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            data_bytes: &0,
+            dependency_bytes: &0,
+            loc: &OrderIndex(chain, index),
+            horizon: &OrderIndex(0.into(), 0.into()),
+            min: &OrderIndex(0.into(), 0.into()),
+        }.fill_vec(&mut buffer);
         buffer
     }
 
@@ -957,12 +1149,22 @@ impl BufferCache {
 }
 
 impl AsyncStoreClient for mpsc::Sender<Message> {
-    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>) {
-        let _ = self.send(Message::FromStore(ReadComplete(read_loc, read_packet)));
+    fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>)
+    -> Result<(), ()> {
+        self.send(Message::FromStore(ReadComplete(read_loc, read_packet)))
+            .map(|_| ()).map_err(|_| ())
     }
 
     //TODO what info is needed?
-    fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>) {
-        let _ = self.send(Message::FromStore(WriteComplete(write_id, write_locs)));
+    fn on_finished_write(&mut self, write_id: Uuid, write_locs: Vec<OrderIndex>)
+    -> Result<(), ()> {
+        self.send(Message::FromStore(WriteComplete(write_id, write_locs)))
+            .map(|_| ()).map_err(|_| ())
+    }
+
+    fn on_io_error(&mut self, err: io::Error, server: usize)
+    -> Result<(), ()> {
+        self.send(Message::FromStore(IoError(err.kind(), server)))
+            .map(|_| ()).map_err(|_| ())
     }
 }

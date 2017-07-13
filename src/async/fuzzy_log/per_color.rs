@@ -2,14 +2,17 @@
 use std::mem;
 use std::rc::Rc;
 
-use hash::HashMap;
+use hash::{HashMap, HashSet};
 use packets::{order, entry, OrderIndex, bytes_as_entry};
 
 use uuid::Uuid;
 
+use super::range_tree::RangeTree;
+
 //TODO we could add messages from the client on read, and keep a counter of messages sent
 //     this would allow us to ensure that every client gets an end-of-data message, as long
 //     ad there're no concurrent snapshots...
+#[derive(Debug)]
 pub struct PerColor {
     //TODO repr?
     //blocking: HashMap<entry, OrderIndex>,
@@ -18,20 +21,17 @@ pub struct PerColor {
     //found_sentinels: HashSet<Uuid>,
     pub chain: order,
     last_snapshot: entry,
-    last_read_sent_to_server: entry,
-    //TODO is this necessary first_buffered: entry,
-    last_returned_to_client: entry,
-    last_gotten_from_server: entry,
+    read_status: RangeTree,
     blocked_on_new_snapshot: Option<Vec<u8>>,
     //TODO this is where is might be nice to have a more structured id format
     found_but_unused_multiappends: HashMap<Uuid, entry>,
+    required_no_remotes: HashSet<Uuid>,
     is_being_read: Option<ReadState>,
     pub is_interesting: bool,
 }
 
 #[derive(Debug)]
 struct ReadState {
-    outstanding_reads: u32, //TODO what size should this be
     outstanding_snapshots: u32,
     num_multiappends_searching_for: u32,
     _being_read: IsRead,
@@ -40,7 +40,7 @@ struct ReadState {
 impl ReadState {
     fn new(being_read: &IsRead) -> Self {
         ReadState {
-            outstanding_reads: 0,
+            //outstanding_reads: 0,
             outstanding_snapshots: 0,
             num_multiappends_searching_for: 0,
             _being_read: being_read.clone(),
@@ -48,8 +48,8 @@ impl ReadState {
     }
 
     fn is_finished(&self) -> bool {
-        self.outstanding_reads == 0
-        && self.outstanding_snapshots == 0
+        //self.outstanding_reads == 0
+        self.outstanding_snapshots == 0
         && self.num_multiappends_searching_for == 0
     }
 }
@@ -59,17 +59,23 @@ pub type IsRead = Rc<ReadHandle>;
 #[derive(Debug)]
 pub struct ReadHandle;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NextToFetch {
+    None,
+    BelowHorizon(u32, u32),
+    AboveHorizon(u32, u32),
+}
+
 impl PerColor {
     pub fn new(chain: order) -> Self {
         PerColor {
             chain: chain,
             last_snapshot: 0.into(),
-            last_read_sent_to_server: 0.into(),
             //outstanding_reads: 0,
-            last_returned_to_client: 0.into(),
-            last_gotten_from_server: 0.into(),
             blocked_on_new_snapshot: None,
             found_but_unused_multiappends: Default::default(),
+            read_status: RangeTree::new(),
+            required_no_remotes: Default::default(),
             is_being_read: None,
             is_interesting: false,
         }
@@ -88,18 +94,22 @@ impl PerColor {
             "Unfinished @ {:?}:{:?}",
             self.chain, self.is_being_read
         );
+        debug_assert!(
+            self.read_status.first_outstanding().map(|o| o > self.last_snapshot)
+                .unwrap_or(true),
+            "Wrong end state {:?} > {:?}", self.read_status, self.last_snapshot,
+        );
         self.is_being_read = None
     }
 
     #[inline(always)]
     pub fn set_returned(&mut self, index: entry) {
         assert!(self.next_return_is(index));
-        assert!(index > self.last_returned_to_client);
         assert!(index <= self.last_snapshot);
         trace!("QQQQQ returning {:?}", (self.chain, index));
-        self.last_returned_to_client = index;
+        self.read_status.set_point_as_returned(index);
         if self.is_finished() {
-            trace!("QQQQQ {:?} is finished", self.chain);
+            trace!("QQQQQ {:?} is finished, ret, {:#?}, {:?}", self.chain, self.read_status, self.is_being_read);
             self.is_being_read = None
         }
     }
@@ -107,15 +117,9 @@ impl PerColor {
     pub fn overread_at(&mut self, index: entry) {
         // The conditional is needed because sends we sent before reseting
         // last_read_sent_to_server race future calls to this function
-        trace!("FUZZY overread {:?}, {:?} >= {:?} && > {:?}",
-            self.chain, self.last_read_sent_to_server, index, self.last_returned_to_client);
-        if self.last_read_sent_to_server >= index
-            && self.last_read_sent_to_server > self.last_returned_to_client {
-            trace!("FUZZY resetting read loc for {:?} from {:?} to {:?}",
-                self.chain, self.last_read_sent_to_server, index - 1);
-            //self.last_read_sent_to_server = index - 1;
-            self.last_read_sent_to_server = self.last_gotten_from_server;
-        }
+        trace!("FUZZY overread {:?}, {:?}, {:?} >= {:?}",
+            self.chain, self.read_status, self.last_snapshot, index);
+        self.read_status.set_point_as_none(index);
     }
 
     pub fn increment_outstanding_snapshots(&mut self, is_being_read: &IsRead) -> u32 {
@@ -138,17 +142,13 @@ impl PerColor {
         out
     }
 
-    pub fn decrement_outstanding_snapshots(&mut self) -> u32 {
-        let (snap, finished) = self.is_being_read.as_mut().map(|r|{
+    fn decrement_outstanding_snapshots(&mut self) -> u32 {
+        self.is_being_read.as_mut().map(|r|{
             //TODO saturating arith
             r.outstanding_snapshots = r.outstanding_snapshots - 1;
-            (r.outstanding_snapshots, r.is_finished())
+            r.outstanding_snapshots
             //TODO should this set is_being_read to None when last_returned == last snap?
-        }).expect("tried to decrement snapshots on a chain not being read");
-        if finished {
-            self.is_being_read = None
-        }
-        snap
+        }).expect("tried to decrement snapshots on a chain not being read")
     }
 
     pub fn increment_multi_search(&mut self, is_being_read: &IsRead) {
@@ -170,56 +170,37 @@ impl PerColor {
     }
 
     pub fn decrement_multi_search(&mut self) {
-        let (num_search, finished) = self.is_being_read.as_mut().map(|r| {
+        let num_search = self.is_being_read.as_mut().map(|r| {
             debug_assert!(r.num_multiappends_searching_for > 0);
             //TODO saturating arith
             r.num_multiappends_searching_for = r.num_multiappends_searching_for - 1;
-            (r.num_multiappends_searching_for, r.is_finished())
+            r.num_multiappends_searching_for
             //TODO should this set is_being_read to None when last_returned == last snap?
         }).expect("tried to decrement multi_search in a chain not being read");
         trace!("QQQQQ {:?} - now searching for {:?} multis",
             self.chain, num_search);
-        if finished {
+        if self.is_finished() {
+            trace!("QQQQQ {:?} is finished, mult, {:#?}, {:?}", self.chain, self.read_status, self.is_being_read);
             self.is_being_read = None
         }
     }
 
-    #[inline(always)]
-    fn increment_outstanding_reads(&mut self, is_being_read: &IsRead) {
-        trace!("QQQQQ {:?} + out reads", self.chain);
-        match &mut self.is_being_read {
-            &mut Some(ref mut read_state) => read_state.outstanding_reads += 1,
-            o @ &mut None => {
-                let mut read_state = ReadState::new(is_being_read);
-                read_state.outstanding_reads += 1;
-                *o = Some(read_state)
-            },
-        }
-    }
-
-    #[inline(always)]
-    pub fn decrement_outstanding_reads(&mut self) {
-        let finished = self.is_being_read.as_mut().map(|read_state| {
-            read_state.outstanding_reads -= 1;
-            read_state.is_finished()
-        });
-        if let Some(true) = finished {
-            self.is_being_read = None
-        }
-    }
-
-    #[inline(always)]
     pub fn got_read(&mut self, index: entry) -> bool {
-        self.decrement_outstanding_reads();
-        if index == self.last_gotten_from_server + 1 {
-            self.last_gotten_from_server = index
-        }
+        self.read_status.set_point_as_recvd(index)
 
-        index > self.last_returned_to_client
+        //index > self.last_returned_to_client
     }
 
     pub fn has_read_state(&self) -> bool {
         self.is_being_read.is_some()
+    }
+
+    pub fn got_no_remote(&mut self, id: &Uuid) -> bool {
+        !self.required_no_remotes.remove(id)
+    }
+
+    pub fn add_no_remote(&mut self, id: &Uuid) {
+        self.required_no_remotes.insert(*id);
     }
 
     #[allow(dead_code)]
@@ -228,23 +209,20 @@ impl PerColor {
     }
 
     pub fn has_returned(&self, index: entry) -> bool {
-        trace!{"QQQQQ last return for {:?}: {:?}", self.chain, self.last_returned_to_client};
-        index <= self.last_returned_to_client
+        trace!{"QQQQQ last return for {:?}: {:?}, snapshot {:?}",
+        self.chain, self.read_status, self.last_snapshot};
+        self.read_status.is_returned(index)
     }
 
     pub fn next_return_is(&self, index: entry) -> bool {
-        trace!("QQQQQ check {:?} next return for {:?}: {:?}",
-            index, self.chain, self.last_returned_to_client + 1);
-        index == self.last_returned_to_client + 1
+        trace!("QQQQQ check {:?} next return for {:?}: {:?}, snapshot: {:?}",
+            index, self.chain, self.read_status, self.last_snapshot);
+        self.read_status.next_return_is(index)
     }
 
     pub fn is_within_snapshot(&self, index: entry) -> bool {
         trace!("QQQQQ {:?}: {:?} <= {:?}", self.chain, index, self.last_snapshot);
         index <= self.last_snapshot
-    }
-
-    fn is_next_to_fetch(&self, index: entry) -> bool {
-        self.last_read_sent_to_server + 1 == index
     }
 
     pub fn is_searching_for_multi(&self) -> bool {
@@ -253,16 +231,11 @@ impl PerColor {
     }
 
     pub fn mark_as_already_fetched(&mut self, index: entry) {
-        if self.is_next_to_fetch(index) {
-            self.last_read_sent_to_server = self.last_read_sent_to_server + 1
-        }
+        self.read_status.set_point_as_recvd(index);
     }
 
-    pub fn increment_fetch(&mut self, is_being_read: &IsRead) -> entry {
-        //TODO assert horizon?
-        self.last_read_sent_to_server = self.last_read_sent_to_server + 1;
-        self.increment_outstanding_reads(is_being_read);
-        self.last_read_sent_to_server
+    pub fn mark_as_skippable(&mut self, index: entry) {
+        self.read_status.set_point_as_skip(index);
     }
 
     pub fn increment_horizon(&mut self) -> Option<Vec<u8>> {
@@ -277,7 +250,9 @@ impl PerColor {
             // and we have no pending snapshots,
             // then any possible read we receive would be an overread,
             // so there is no reason to wait for them
-            if self.is_being_read.as_ref().map_or(false, |r| r.num_multiappends_searching_for == 0 && r.outstanding_snapshots == 0) {
+            if self.is_being_read.as_ref().map_or(false, |r| r.num_multiappends_searching_for == 0 && r.outstanding_snapshots == 0)
+                && self.read_status.first_outstanding().map(|o| o > self.last_snapshot)
+                    .unwrap_or(true)  {
                 trace!("FUZZY {:?} dropping irrelevant reads", self.chain);
                 self.is_being_read = None
             }
@@ -293,10 +268,6 @@ impl PerColor {
         if self.last_snapshot < new_horizon {
             trace!("FUZZY update horizon {:?}", (self.chain, new_horizon));
             self.last_snapshot = new_horizon;
-            if self.last_read_sent_to_server > new_horizon {
-                //see also fn overread_at
-                self.last_read_sent_to_server = new_horizon;
-            }
             if entry_is_unblocked(&self.blocked_on_new_snapshot, self.chain, new_horizon) {
                 trace!("FUZZY unblocked entry");
                 return mem::replace(&mut self.blocked_on_new_snapshot, None)
@@ -323,13 +294,25 @@ impl PerColor {
     }
 
     pub fn block_on_snapshot(&mut self, val: Vec<u8>) {
-        debug_assert!(bytes_as_entry(&val).locs().into_iter()
-            .find(|&&OrderIndex(o, _)| o == self.chain).unwrap().1 == self.last_snapshot + 1);
-        assert!(self.blocked_on_new_snapshot.is_none());
+        assert_eq!(bytes_as_entry(&val).locs().into_iter()
+            .find(|&&OrderIndex(o, _)| o == self.chain).unwrap().1, self.last_snapshot + 1);
+        assert!(self.blocked_on_new_snapshot.as_ref().map(|b|
+            bytes_as_entry(b).id() == bytes_as_entry(&val).id()).unwrap_or(true),
+            "multiple next entries {:?} != {:?} @ {:?} snap: {:?}",
+            {
+                let e = self.blocked_on_new_snapshot.as_ref().map(|b| bytes_as_entry(b));
+                e.map(|e| (e, e.locs()))
+            },
+            {
+                let e = bytes_as_entry(&val);
+                (e, e.locs())
+            },
+            self.read_status, self.last_snapshot
+        );
         self.blocked_on_new_snapshot = Some(val)
     }
 
-    pub fn num_to_fetch(&self) -> u32 {
+    pub fn next_range_to_fetch(&self) -> NextToFetch {
         use std::cmp::min;
         //TODO this decision needs to be made at the store level for this to really work
         //     a better solutions is the log tells store what range of entries it wants
@@ -342,44 +325,60 @@ impl PerColor {
         //      see TODO above
         const MAX_PIPELINED: u32 = 20000;
         //TODO switch to saturating sub?
-        assert!(self.last_returned_to_client <= self.last_snapshot,
-            "FUZZY returned value early. {:?} should be less than {:?}",
-            self.last_returned_to_client, self.last_snapshot);
-        let outstanding_reads = self.is_being_read.as_ref()
-            .map(|r| r.outstanding_reads).unwrap_or(0);
-        if self.last_read_sent_to_server < self.last_snapshot
-            && outstanding_reads < MAX_PIPELINED {
-            let needed_reads =
-                (self.last_snapshot - self.last_read_sent_to_server.into()).into();
-            let to_read = min(needed_reads, MAX_PIPELINED - outstanding_reads);
-            to_read
-            //std::cmp::min(
-            //    (self.last_snapshot - self.last_read_sent_to_server.into()).into(),
-            //    MAX_PIPELINED
-            //)
-        } else {
-            0
+        //assert!(self.last_returned_to_client <= self.last_snapshot,
+        //    "FUZZY returned value early. {:?} should be less than {:?}",
+        //    self.last_returned_to_client, self.last_snapshot);
+
+        let outstanding_reads = self.read_status.num_outstanding() as u32;
+        if outstanding_reads >= MAX_PIPELINED {
+            return NextToFetch::None
         }
+
+        let (first_needed, last_needed) = self.read_status.min_range_to_fetch();
+        if entry::from(first_needed) > self.last_snapshot {
+            return NextToFetch::AboveHorizon(first_needed, last_needed)
+        }
+
+        let last_needed = min(last_needed, u32::from(self.last_snapshot));
+        let last_needed = min(
+            last_needed,
+            first_needed + (MAX_PIPELINED - outstanding_reads)
+        );
+
+        NextToFetch::BelowHorizon(first_needed, last_needed)
+    }
+
+    pub fn fetching_range(&mut self, (low, high): (entry, entry), is_being_read: &IsRead) {
+        //FIXME is_being_read?
+        debug_assert!(low <= high);
+        if self.is_being_read.is_none() {
+            self.is_being_read = Some(ReadState::new(is_being_read))
+        }
+        self.read_status.set_range_as_sent(low, high);
     }
 
     pub fn has_more_multi_search_than_outstanding_reads(&self) -> bool {
-        self.is_being_read.as_ref().map_or(false, |r| {
-            debug_assert!(!(r.num_multiappends_searching_for > r.outstanding_reads + 1));
-            r.num_multiappends_searching_for > r.outstanding_reads
+        let outstanding_reads = self.read_status.num_outstanding();
+        let chain = self.chain;
+        let num_required_no_remotes = self.required_no_remotes.len() as u32;
+        let need_due_to_no_remote = num_required_no_remotes > 0;
+        self.is_being_read.as_ref().map_or(need_due_to_no_remote, |r| {
+            debug_assert!(!(r.num_multiappends_searching_for > (outstanding_reads + 1)
+                as u32));
+            trace!("QQQQQ {:?} num multi > out? {:?} > {:?}?",
+                chain, r.num_multiappends_searching_for, outstanding_reads);
+            r.num_multiappends_searching_for + num_required_no_remotes > outstanding_reads as u32
         })
     }
 
     pub fn currently_buffering(&self) -> u32 {
-        //TODO switch to saturating sub?
-        let currently_buffering = self.last_read_sent_to_server
-            - self.last_returned_to_client.into();
-        let currently_buffering: u32 = currently_buffering.into();
-        currently_buffering
+        self.read_status.num_buffered() as u32
     }
 
     pub fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
         assert!(index != 0.into());
         let _old = self.found_but_unused_multiappends.insert(id, index);
+        self.mark_as_skippable(index);
         //TODO I'm not sure this is correct with how we handle overreads
         //debug_assert!(_old.is_none(),
         //    "double sentinel insert {:?}",
@@ -397,11 +396,12 @@ impl PerColor {
     }
 
     pub fn has_outstanding_reads(&self) -> bool {
-        self.is_being_read.as_ref().map_or(false, |r| r.outstanding_reads > 0)
+        self.read_status.num_outstanding() > 0
     }
 
     pub fn has_pending_reads_reqs(&self) -> bool {
-        self.last_read_sent_to_server < self.last_snapshot
+        self.read_status.first_outstanding().map(|p| p < self.last_snapshot)
+            .unwrap_or(false)
     }
 
     fn has_outstanding_snapshots(&self) -> bool {
@@ -410,28 +410,27 @@ impl PerColor {
     }
 
     pub fn finished_until_snapshot(&self) -> bool {
-        self.last_returned_to_client == self.last_snapshot
+        self.read_status.is_returned(self.last_snapshot)
             && !self.has_outstanding_snapshots()
     }
 
     pub fn is_finished(&self) -> bool {
-        let outstanding_reads = self.is_being_read.as_ref()
-            .map(|r| r.outstanding_reads).unwrap_or(0);
-        debug_assert!(!(outstanding_reads == 0
-            && self.last_read_sent_to_server < self.last_snapshot),
-            "outstanding_reads {:?}, last_read_sent_to_server {:?}, last_snapshot {:?}",
-            outstanding_reads, self.last_read_sent_to_server, self.last_snapshot,
-        );
+        /*debug_assert!(!(self.read_status.num_outstanding() == 0
+            && self.read_status.last_outstanding().map(|o| o < self.last_snapshot)
+                ,
+            "reads {:?}, last_snapshot {:?}",
+            self.read_status, self.last_snapshot,
+        );*/
         self.finished_until_snapshot()
             && !(self.is_searching_for_multi() || self.has_outstanding_snapshots())
     }
 
     pub fn trace_unfinished(&self) {
-        trace!("chain {:?} finished? {:?}, last_ret {:?}, last_snap {:?}",
+        trace!("chain {:?} finished? {:?}, last_snap {:?}, {:?}",
             self.chain,
             self.is_being_read,
-            self.last_returned_to_client,
-            self.last_snapshot
+            self.last_snapshot,
+            self.read_status,
         )
     }
 }

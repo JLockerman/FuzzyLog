@@ -8,6 +8,7 @@ use std::ops::BitXor;
 
 
 pub type HashMap<K, V> = DefaultHashMap<K, V, BuildHasherDefault<FxHasher>>;
+#[allow(dead_code)]
 pub type HashSet<K> = DefaultHashSet<K, BuildHasherDefault<FxHasher>>;
 
 pub struct FxHasher {

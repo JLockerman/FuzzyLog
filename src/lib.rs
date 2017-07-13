@@ -1,3 +1,5 @@
+//#![cfg_attr(test, feature(test))]
+#![allow(deprecated)]
 #![allow(unused_imports)]
 #![allow(non_camel_case_types)]
 #![allow(unused_variables)]
@@ -9,10 +11,11 @@
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
-#[cfg(test)] #[macro_use] extern crate grabbag_macros;
+// #[cfg(test)] #[macro_use] extern crate grabbag_macros;
 #[macro_use] extern crate log;
 #[macro_use] extern crate newtype_derive;
-#[macro_use] extern crate packet_macro;
+#[macro_use] extern crate packet_macro_impl;
+#[macro_use] extern crate packet_macro2;
 
 #[cfg(feature = "dynamodb_tests")]
 extern crate hyper;
@@ -36,6 +39,7 @@ extern crate uuid;
 extern crate libc;
 extern crate lazycell;
 extern crate env_logger;
+extern crate evmap;
 
 //FIXME only needed until repeated multiput returns is fixed
 extern crate linked_hash_map;
@@ -47,29 +51,32 @@ mod general_tests;
 
 pub mod storeables;
 pub mod packets;
-pub mod prelude;
-pub mod local_store;
+//pub mod prelude;
+/*pub mod local_store;
 pub mod udp_store;
 pub mod tcp_store;
 pub mod multitcp_store;
-pub mod servers;
+pub mod skeens_store;
+pub mod servers;*/
 pub mod servers2;
-pub mod color_api;
+//pub mod color_api;
 pub mod async;
 mod hash;
 pub mod socket_addr;
 //TODO only for testing, should be private
 pub mod buffer;
+pub mod buffer2;
+mod vec_deque_map;
 
 pub mod c_binidings {
 
-    use prelude::*;
-    use local_store::LocalHorizon;
+    // use prelude::*;
+    use packets::*;
     //use tcp_store::TcpStore;
-    use multitcp_store::TcpStore;
-    use async::fuzzy_log::log_handle::LogHandle;
+    // use multitcp_store::TcpStore;
+    use async::fuzzy_log::log_handle::{LogHandle, GetRes, TryWaitRes};
 
-    use std::collections::HashMap;
+    //use std::collections::HashMap;
     use std::{mem, ptr, slice};
 
     use std::ffi::{CStr, CString};
@@ -82,8 +89,6 @@ pub mod c_binidings {
 
     use byteorder::{ByteOrder, NativeEndian};
 
-    //pub type DAG = DAGHandle<[u8], TcpStore<[u8]>, LocalHorizon>;
-    //pub type DAG = DAGHandle<[u8], Box<Store<[u8]>>, LocalHorizon>;
     pub type DAG = LogHandle<[u8]>;
     pub type ColorID = u32;
 
@@ -175,7 +180,7 @@ pub mod c_binidings {
         assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
         //assert_eq!(num_ips, 1, "Multiple servers are not yet supported via the C API");
         assert!(chain_server_ips != ptr::null());
-        assert!(unsafe {*chain_server_ips != ptr::null()});
+        assert!(*chain_server_ips != ptr::null());
         assert!(num_chain_ips >= 1);
         assert!(color != ptr::null());
         assert!(colors_valid(color));
@@ -186,36 +191,46 @@ pub mod c_binidings {
                 CStr::from_ptr(s).to_str().expect("invalid IP string")
                     .parse().expect("invalid IP addr")
             ).collect::<Vec<SocketAddr>>();
-        let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
+        let colors = slice::from_raw_parts((*color).mycolors, (*color).numcolors);
         Box::new(LogHandle::new_tcp_log(server_addrs.into_iter(),
             colors.into_iter().cloned().map(order::from)))
     }
 
     #[no_mangle]
-    pub extern "C" fn new_dag_handle_from_config(config_filename: *const c_char,
-        color: *const colors) -> Box<DAG> {
+    pub unsafe extern "C" fn new_dag_handle_with_replication(
+        num_chain_ips: usize,
+        chain_server_head_ips: *const *const c_char,
+        chain_server_tail_ips: *const *const c_char,
+        color: *const colors
+    ) -> Box<DAG> {
         assert_eq!(mem::size_of::<Box<DAG>>(), mem::size_of::<*mut u8>());
-        assert!(config_filename != ptr::null());
+
+        assert!(chain_server_head_ips != ptr::null());
+        assert!(chain_server_tail_ips != ptr::null());
+        assert!(*chain_server_head_ips != ptr::null());
+        assert!(*chain_server_tail_ips != ptr::null());
+        assert!(num_chain_ips >= 1);
+
         assert!(color != ptr::null());
         assert!(colors_valid(color));
-        let _ = ::env_logger::init();
 
-        let (lock_server_addr, chain_server_addrs) = read_config_file(config_filename);
-        let (lock_server_addr, server_addrs) = {
-            let addrs = chain_server_addrs.into_iter()
-                .map(|s| s.parse().expect("Invalid server addr"))
-                .collect::<Vec<SocketAddr>>();
-            let lock_server_addr = lock_server_addr.map(|a| a.parse().expect("Invalid lockserver addr"));
-            if let Some(a) = lock_server_addr {
-                (a, addrs)
-            }
-            else {
-                (addrs[0], addrs)
-            }
-        };
-        let colors = unsafe {slice::from_raw_parts((*color).mycolors, (*color).numcolors)};
-        Box::new(LogHandle::spawn_tcp_log2(lock_server_addr, server_addrs.into_iter(),
-            colors.into_iter().cloned().map(order::from)))
+        let _ = ::env_logger::init();
+        trace!("Lib num chain servers {:?}", num_chain_ips);
+        let server_heads = slice::from_raw_parts(chain_server_head_ips, num_chain_ips)
+            .into_iter().map(|&s|
+                CStr::from_ptr(s).to_str().expect("invalid IP string")
+                    .parse().expect("invalid IP addr")
+            );
+        let server_tails = slice::from_raw_parts(chain_server_tail_ips, num_chain_ips)
+            .into_iter().map(|&s|
+                CStr::from_ptr(s).to_str().expect("invalid IP string")
+                    .parse().expect("invalid IP addr")
+            );
+        let colors = slice::from_raw_parts((*color).mycolors, (*color).numcolors);
+        Box::new(LogHandle::new_tcp_log_with_replication(
+            server_heads.zip(server_tails),
+            colors.into_iter().cloned().map(order::from)
+        ))
     }
 
     //NOTE currently can only use 31bits of return value
@@ -243,7 +258,12 @@ pub mod c_binidings {
                 &mut []
             }
         };
-        let id = dag.color_append(data, inhabits, depends_on, async != 0);
+        let (id, error) = dag.color_append(data, inhabits, depends_on, async != 0);
+        match error {
+            Ok(()) => {}
+            //TODO set errno?
+            Err(e) => panic!("IO error {:?}", e),
+        }
         WriteId::from_uuid(id)
     }
 
@@ -418,11 +438,16 @@ pub mod c_binidings {
     -> WriteIdAndLocs {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         match dag.try_wait_for_any_append() {
-            None => WriteIdAndLocs {
+            Err(TryWaitRes::NothingReady) => WriteIdAndLocs {
                 write_id: WriteId::nil(),
                 locs: WriteLocations { num_locs: 0, locs: ptr::null_mut() },
             },
-            Some((id, locs)) => WriteIdAndLocs {
+            //TODO what to do with error number?
+            Err(TryWaitRes::IoErr(kind, server)) => WriteIdAndLocs {
+                write_id: WriteId::nil(),
+                locs: WriteLocations { num_locs: server, locs: ptr::null_mut() },
+            },
+            Ok((id, locs)) => WriteIdAndLocs {
                 write_id: WriteId::from_uuid(id),
                 locs: build_write_locs(locs),
             },
@@ -467,7 +492,7 @@ pub mod c_binidings {
         let val = dag.get_next();
         unsafe {
             let (mycolors, numcolors) = match val {
-                Some((data, inhabited_colors)) => {
+                Ok((data, inhabited_colors)) => {
                     *data_read = <[u8] as Storeable>::copy_to_mut(data, data_out);
                     let numcolors = inhabited_colors.len();
                     let mycolors = ::libc::malloc(mem::size_of::<ColorID>() * numcolors) as *mut _;
@@ -479,9 +504,10 @@ pub mod c_binidings {
                     //ptr::copy_nonoverlapping(&inhabited_colors[0], mycolors, numcolors);
                     (mycolors, numcolors)
                 }
-                None => {
+                Err(GetRes::Done) => {
                     (ptr::null_mut(), 0)
                 }
+                _ => unimplemented!(),
             };
 
             ptr::write(inhabits_out, colors{ numcolors: numcolors, mycolors: mycolors});
@@ -501,9 +527,35 @@ pub mod c_binidings {
         num_locs: *mut usize,
     ) -> Vals {
         assert!(data_read != ptr::null_mut());
-        let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
         let val = dag.get_next();
         let (data, locs) = val.unwrap_or((&[], &[]));
+
+        ptr::write(data_read, data.len());
+        ptr::write(num_locs, locs.len());
+
+        Vals { data: data.as_ptr(), locs: locs.as_ptr() }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn async_get_next2(
+        dag: *mut DAG,
+        data_read: *mut usize,
+        num_locs: *mut usize,
+    ) -> Vals {
+        assert!(data_read != ptr::null_mut());
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        let val = dag.try_get_next();
+        let (data, locs): (&[u8], &[OrderIndex]) = match val {
+            Ok((data, locs)) => (data, locs),
+            Err(GetRes::NothingReady) => (&[], &[]),
+            Err(GetRes::Done) => {
+                ptr::write(data_read, 0);
+                ptr::write(num_locs, 0);
+                return Vals { data: ptr::null(), locs: ptr::null() }
+            },
+            _ => unimplemented!(),
+        };
 
         ptr::write(data_read, data.len());
         ptr::write(num_locs, locs.len());
@@ -655,54 +707,30 @@ pub mod c_binidings {
     //    Old fuzzy log C bindings    //
     ////////////////////////////////////
 
-    pub type Log = FuzzyLog<[u8], TcpStore<[u8]>, LocalHorizon>;
+    type Log = ();
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_new(server_addr: *const c_char, relevent_chains: *const u32,
-        num_relevent_chains: u16, callback: extern fn(*const u8, u16) -> u8) -> Box<Log> {
-        let mut callbacks = HashMap::new();
-        let relevent_chains = unsafe { slice::from_raw_parts(relevent_chains, num_relevent_chains as usize) };
-        for &chain in relevent_chains {
-            let callback: Box<Fn(&Uuid, &OrderIndex, &[u8]) -> bool> = Box::new(move |_, _, val| { callback(&val[0], val.len() as u16) != 0 });
-            callbacks.insert(chain.into(), callback);
-        }
-        let server_addr_str = unsafe { CStr::from_ptr(server_addr).to_str().expect("invalid IP string") };
-        //let ip_addr = server_addr_str.parse().expect("invalid IP addr");
-        let log = FuzzyLog::new(TcpStore::new(server_addr_str, server_addr_str).unwrap(), LocalHorizon::new(), callbacks);
-        Box::new(log)
+    pub extern "C" fn fuzzy_log_new(_server_addr: *const c_char, _relevent_chains: *const u32,
+        _num_relevent_chains: u16, _callback: extern fn(*const u8, u16) -> u8) -> Box<Log> {
+        unimplemented!()
     }
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_append(log: &mut Log,
-        chain: u32, val: *const u8, len: u16, deps: *const OrderIndex, num_deps: u16) -> OrderIndex {
-        unsafe {
-            let val = slice::from_raw_parts(val, len as usize);
-            let deps = slice::from_raw_parts(deps, num_deps as usize);
-            log.append(chain.into(), val, deps)
-        }
+    pub extern "C" fn fuzzy_log_append(_log: &mut Log,
+        _chain: u32, _val: *const u8, _len: u16, _deps: *const OrderIndex, _num_deps: u16) -> OrderIndex {
+        unimplemented!()
     }
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_multiappend(log: &mut Log,
-        chains: *mut OrderIndex, num_chains: u16,
-        val: *const u8, len: u16, deps: *const OrderIndex, num_deps: u16) {
-        assert!(num_chains > 1);
-        unsafe {
-            let val = slice::from_raw_parts(val, len as usize);
-            let deps = slice::from_raw_parts(deps, num_deps as usize);
-            let chains = slice::from_raw_parts_mut(chains, num_chains as usize);
-            log.multiappend2(chains, val, deps);
-        }
+    pub extern "C" fn fuzzy_log_multiappend(_log: &mut Log,
+        _chains: *mut OrderIndex, _num_chains: u16,
+        _val: *const u8, _len: u16, _deps: *const OrderIndex, _num_deps: u16) {
+        unimplemented!()
     }
 
     #[no_mangle]
-    pub extern "C" fn fuzzy_log_play_forward(log: &mut Log, chain: u32) -> OrderIndex {
-        if let Some(oi) = log.play_foward(order::from(chain)) {
-            oi
-        }
-        else {
-            OrderIndex(0.into(), 0.into())
-        }
+    pub extern "C" fn fuzzy_log_play_forward(_log: &mut Log, _chain: u32) -> OrderIndex {
+        unimplemented!()
     }
 
 }

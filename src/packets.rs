@@ -1,16 +1,17 @@
 use std::fmt;
-use std::marker::PhantomData;
-use std::mem::{self, size_of};
-use std::ptr;
+use std::mem;
 use std::slice;
 
 pub use uuid::Uuid;
 
 pub use storeables::{Storeable, UnStoreable};
 
-use self::EntryContents::*;
-
+pub use self::Packet::Ref as EntryContents;
+pub use self::Packet::Mut as EntryContentsMut;
+pub use self::Packet::Var as EntryVar;
 pub use self::EntryKind::EntryLayout;
+
+use self::EntryFlag::Flag;
 
 custom_derive! {
     #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeBitAnd(u32), NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
@@ -68,31 +69,22 @@ pub struct OrderIndex(pub order, pub entry);
 pub mod EntryKind {
     #![allow(non_upper_case_globals)]
     bitflags! {
-        #[derive(RustcDecodable, RustcEncodable)]
-        flags Kind: u16 {
+        flags Kind: u8 {
             const Invalid = 0x0,
             const Data = 0x1,
             const Multiput = 0x2,
+            const Read = 0x3,
             const Lock = 0x4,
-            //TODO sentinel should be multi + no-remote + no-data
-            const Sentinel = Lock.bits | Multiput.bits,
-            const Read = Data.bits | Multiput.bits,
-            const Layout = Data.bits | Multiput.bits | Sentinel.bits,
+            const Sentinel = 0x6,
+            const Skeens2ToReplica = 0x8,
 
-            const TakeLock = 0x8,
-            const Unlock = 0x10,
-            const NoRemote = 0x20,
+            const GC = 0x10,
 
-            const ReadSuccess = 0x80,
+            const SingleToReplica = Data.bits | ToReplica.bits,
+            const MultiputToReplica = Multiput.bits | ToReplica.bits,
+            const SentinelToReplica = Sentinel.bits | ToReplica.bits,
 
-            const ReadData = Data.bits | ReadSuccess.bits,
-            const ReadMulti = Multiput.bits | ReadSuccess.bits,
-            const ReadSenti = Sentinel.bits | ReadSuccess.bits,
-            //const GotValue = Read.bits | Success.bits,
-            const NoValue = Read.bits,
-
-            const NewMultiPut = 0x100,
-            const Skeens1Queued = 0x200,
+            const ToReplica = 0x80,
         }
     }
 
@@ -103,6 +95,7 @@ pub mod EntryKind {
         Lock,
         Sentinel,
         Read,
+        GC,
     }
 
     impl EntryLayout {
@@ -113,6 +106,7 @@ pub mod EntryKind {
                 &EntryLayout::Lock => Lock,
                 &EntryLayout::Sentinel => Sentinel,
                 &EntryLayout::Read => Read,
+                &EntryLayout::GC => GC,
             }
         }
 
@@ -126,802 +120,688 @@ pub mod EntryKind {
 
     impl Kind {
         pub fn layout(&self) -> EntryLayout {
-            match *self & Layout {
-                Data => EntryLayout::Data,
-                Multiput => EntryLayout::Multiput,
+            match *self {
+                Data | SingleToReplica => EntryLayout::Data,
+                Multiput | MultiputToReplica => EntryLayout::Multiput,
+                Sentinel | SentinelToReplica => EntryLayout::Sentinel,
                 Lock => EntryLayout::Lock,
-                Sentinel => EntryLayout::Sentinel,
                 Read => EntryLayout::Read,
+                GC => EntryLayout::GC,
                 Invalid => panic!("Empty Layout"),
                 _ => unreachable!("no layout {:x}", self.bits()),
             }
         }
+    }
+}
 
+#[allow(non_snake_case)]
+pub mod EntryFlag {
+    #![allow(non_upper_case_globals)]
+    bitflags! {
+        flags Flag: u8 {
+            const Nothing = 0x0,
+            const ReadSuccess = 0x1,
+            const NewMultiPut = 0x2,
+            const Skeens1Queued = 0x4,
+            const TakeLock = 0x8,
+            const Unlock = 0x10,
+            const NoRemote = 0x20,
+        }
+    }
+
+    impl Flag {
         pub fn is_taking_lock(&self) -> bool {
             self.contains(TakeLock)
         }
     }
 }
-/*
-packet! {
-    enum ServerToClient {
-        tag: u16,
-        EmptyRead: 0x3 => {
+
+define_packet!{
+    enum Packet {
+        tag: EntryKind::Kind,
+        Read: EntryKind::Read => {
             id: Uuid,
-            _padding: [u8; 2],
+            flags: EntryFlag::Flag,
             data_bytes: u16,
             dependency_bytes: u16,
             loc: OrderIndex,
-            horizon: OrderIndex
+            horizon: OrderIndex,
+            min:  OrderIndex,
         },
-        SingletonRead: 0x81 => {
+        Single: EntryKind::Data => {
             id: Uuid,
-            _padding: [u8; 2],
-            data_bytes: u16,
-            dependency_bytes: u16,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
             loc: OrderIndex,
+            deps: [OrderIndex | num_deps],
             data: [u8 | data_bytes],
-            deps: [u8 | dependency_bytes],
         },
-        MultiRead: 0x82 => {
+        Multi: EntryKind::Multiput => {
             id: Uuid,
-            _padding: [u8; 2],
-            data_bytes: u16,
-            dependency_bytes: u16,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
             lock: u64,
-            _padding2: [u8; 6],
+            locs: [OrderIndex | cols],
+            deps: [OrderIndex | num_deps],
+            data: [u8 | data_bytes],
+        },
+        Senti: EntryKind::Sentinel => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+            deps: [OrderIndex | num_deps],
+        },
+
+        SingleToReplica: EntryKind::SingleToReplica => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            loc: OrderIndex,
+            deps: [OrderIndex | num_deps],
+            data: [u8 | data_bytes],
+            timestamp: u64,
+            queue_num: u64,
+        },
+        MultiToReplica: EntryKind::MultiputToReplica => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+            deps: [OrderIndex | num_deps],
+            data: [u8 | data_bytes],
+            queue_nums: [u64 | cols],
+        },
+        SentiToReplica: EntryKind::SentinelToReplica => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+            deps: [OrderIndex | num_deps],
+            queue_nums: [u64 | cols],
+        },
+
+        Skeens2ToReplica: EntryKind::Skeens2ToReplica => {
+            id: Uuid,
+            lock: u64,
+            loc: OrderIndex,
+        },
+
+        GC: EntryKind::GC => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
             cols: u16,
             locs: [OrderIndex | cols],
-            data: [u8 | data_bytes],
-            deps: [u8 | dependency_bytes],
         },
-        SentiRead: 0x86 => {
-            id: Uuid,
-            _padding: [u8; 2],
-            data_bytes: u16,
-            dependency_bytes: u16,
-            lock: u64,
-            _padding2: [u8; 6],
-            cols: u16,
-            locs: [OrderIndex | cols],
-            deps: [u8 | dependency_bytes],
-        },
-        Skeens1: 0x100 => {
-            id: Uuid,
-            num_timestamps: u16,
-            timestamps: [u64 | num_timestamps],
-        }
     }
-}*/
-
-pub const MAX_DATA_LEN: usize = 4096 - 8 - (4 + 8 + 16); //TODO
-
-pub const MAX_DATA_LEN2: usize = 4096 - 24; //TODO
-
-//TODO as much as possible we want fields in fixed locations to reduce
-//     branchieness and to allow to make it easier to FPGAify
-//     All writes need an ID, and num locations, and num bytes
-
-#[repr(C)] //TODO
-pub struct Entry<V: ?Sized, F: ?Sized = [u8; MAX_DATA_LEN2]> {
-    pub _pd: PhantomData<V>,
-    pub kind: EntryKind::Kind,
-    pub id: Uuid,
-    pub _padding: [u8; 2],
-    pub data_bytes: u16,
-    pub dependency_bytes: u16,
-    pub flex: F,
 }
 
-pub const MAX_DATA_DATA_LEN: usize = MAX_DATA_LEN2 - 8; //TODO
+impl<'a> Packet::Ref<'a> {
+    pub fn flag(self) -> &'a Flag {
+        use self::Packet::Ref::*;
+        match self {
+            Read{flags, ..}
+            | Single{flags, ..} | SingleToReplica{flags, ..}
+            | Multi{flags, ..} | MultiToReplica{flags, ..}
+            | Senti{flags, ..} | SentiToReplica{flags, ..}
+            | GC{flags, ..} =>
+                flags,
 
-#[repr(C)]
-pub struct DataFlex<D: ?Sized = [u8; MAX_DATA_DATA_LEN]> {
-    pub loc: OrderIndex,
-    pub data: D,
-}
-
-pub const MAX_MULTI_DATA_LEN: usize = MAX_DATA_LEN2 - 8 - 6 - 2; //TODO
-
-#[repr(C)]
-pub struct MultiFlex<D: ?Sized = [u8; MAX_MULTI_DATA_LEN]> {
-    pub lock: u64, //TODO should be in multiflex but padding
-    pub _padding: [u8; 6],
-    pub cols: u16,
-    pub data: D,
-}
-
-#[repr(C)]
-pub struct Lock {
-    pub id: Uuid,
-    pub kind: EntryKind::Kind,
-    pub _padding: [u8; 3],
-    pub lock: u64,
-}
-
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum EntryContents<'e, V:'e + ?Sized> {
-    Data(&'e V, &'e [OrderIndex]),
-    // Data:
-    // | Kind: 8 | data_bytes: u16 | dependency_bytes: u16 | data: data_bytes | dependencies: dependency_bytes
-    Multiput{data: &'e V, uuid: &'e Uuid, columns: &'e [OrderIndex], deps: &'e [OrderIndex]}, //TODO id? committed?
-    // Multiput
-    // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps
-    Sentinel(&'e Uuid),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum EntryContentsMut<'e, V:'e + ?Sized> {
-    Data(&'e mut V, &'e mut [OrderIndex]),
-    // Data:
-    // | Kind: 8 | data_bytes: u16 | dependency_bytes: u16 | data: data_bytes | dependencies: dependency_bytes
-    // Data section: data: data_bytes | dependencies: dependency_bytes
-    Multiput{data: &'e mut V, uuid: &'e mut Uuid, columns: &'e mut [OrderIndex], deps: &'e mut [OrderIndex]}, //TODO id? committed?
-    // Multiput
-    // | 8 | cols: u16 (from padding) | 16 | 16 | uuid | start_entries: [order; cols] | data | deps
-    // Data section: [OrderIndex; cols] | data: data_bytes | dependencies: dependency_bytes
-    Sentinel(&'e mut Uuid),
-}
-
-pub struct MultiputContentsMut<'e, V: 'e + ?Sized> {
-    pub data: &'e mut V,
-    pub uuid: &'e mut Uuid,
-    pub columns: &'e mut [OrderIndex],
-    pub deps: &'e mut [OrderIndex],
-}
-
-impl<V: Storeable + ?Sized, F> Entry<V, F> {
-
-    pub fn contents<'s>(&'s self) -> EntryContents<'s, V> {
-        //TODO I should really not need this
-        assert!(self as *const _ != ptr::null());
-        if self.kind & EntryKind::Layout == EntryKind::Sentinel {
-            return Sentinel(&self.id)
-        }
-        unsafe {
-            let data_bytes = self.data_bytes;
-            let dependency_bytes = self.dependency_bytes;
-            let uuid = &self.id;
-            match self.kind & EntryKind::Layout {
-                EntryKind::Data => {
-                    let r = self.as_data_entry();
-                    assert_eq!(r as *const _ as *const u8,
-                        self as *const _ as *const u8);
-                    r.data_contents(data_bytes)
-                }
-
-                EntryKind::Multiput => {
-                    let r = self.as_multi_entry();
-                    assert_eq!(r as *const _ as *const u8,
-                        self as *const _ as *const u8);
-                    assert!(r as *const _ != ptr::null());
-                    r.multi_contents(data_bytes, dependency_bytes, uuid)
-                }
-                EntryKind::Lock => panic!("unimpl"),
-                _ => unreachable!()
-            }
+            Skeens2ToReplica{..} => unreachable!(),
         }
     }
 
-    fn data_and_deps<'s, D: Storeable + ?Sized>(&'s self, contents_ptr: *const u8, data_bytes: u16, data_offset: isize)
-    -> (&'s D, &'s [OrderIndex]) {
-        unsafe {
-            //assert_eq!(data_bytes as usize, mem::size_of::<V>());
-            let data_ptr = contents_ptr.offset(data_offset);
-            let dep_ptr:*const OrderIndex = data_ptr.offset(self.data_bytes as isize) as *const _;
-
-            //let data = Storeable::bytes_to_ref(data_ptr.as_ref().unwrap(), data_bytes as usize);
-            let data = Storeable::bytes_to_ref(mem::transmute(data_ptr), data_bytes as usize);
-
-            let num_deps = (self.dependency_bytes as usize)
-                .checked_div(mem::size_of::<OrderIndex>()).unwrap();
-            let deps = slice::from_raw_parts(dep_ptr, num_deps);
-            (data, deps)
+    pub fn kind(self) -> EntryKind::Kind {
+        use self::Packet::Ref::*;
+        match self {
+            Read{..} => EntryKind::Read,
+            Single{..} => EntryKind::Data,
+            Multi{..} => EntryKind::Multiput,
+            Senti{..} => EntryKind::Sentinel,
+            SingleToReplica{..} => EntryKind::SingleToReplica,
+            MultiToReplica{..} => EntryKind::MultiputToReplica,
+            SentiToReplica{..} => EntryKind::SentinelToReplica,
+            Skeens2ToReplica{..} => EntryKind::Skeens2ToReplica,
+            GC{..} => EntryKind::GC,
         }
     }
 
-    /*pub fn contents_mut<'s>(&'s mut self) -> EntryContentsMut<'s, V> {
-        unsafe {
-            use self::EntryContentsMut::*;
-            //let contents_ptr: *mut u8 = &self.data as *mut _;
-            //TODO this might be invalid...
-            let contents_ptr: *mut u8 = &mut self.data as *mut _ as *mut u8;
-            let data_ptr = contents_ptr.offset(self.data_start_offset());
-            let dep_ptr:*mut OrderIndex = data_ptr.offset(self.data_bytes as isize)
-                as *mut _;
-            //println!("datap {:?} depp {:?}", data_ptr, dep_ptr);
-            let num_deps = (self.dependency_bytes as usize)
-                .checked_div(size_of::<OrderIndex>()).unwrap();
-            let deps = slice::from_raw_parts_mut(dep_ptr, num_deps);
-            match self.kind & EntryKind::Layout {
-                EntryKind::Data => {
-                    //TODO assert_eq!(self.data_bytes as usize, size_of::<V>());
-                    let data = (data_ptr as *mut _).as_mut().unwrap();
-                    Data(data, deps)
-                }
-                EntryKind::Multiput => {
-                	let id_ptr: *mut Uuid = contents_ptr as *mut Uuid;
-                	let cols_ptr: *mut order = contents_ptr.offset(size_of::<Uuid>() as isize)
-                		as *mut _;
-
-                	let data = (data_ptr as *mut _).as_mut().unwrap();
-                	let uuid = id_ptr.as_mut().unwrap();
-                	let cols = slice::from_raw_parts_mut(cols_ptr, self.cols as usize);
-                	Multiput{data: data, uuid: uuid, columns: cols, deps: deps}
-                }
-                o => unreachable!("{:?}", o),
-            }
-        }
-        panic!()
-    }*/
-
-    unsafe fn read_deps(&self) -> &[OrderIndex] {
-        assert_eq!(self.kind, EntryKind::NoValue);
-        let s = mem::transmute::<_, &Entry<(), DataFlex>>(self);
-        let contents_ptr: *const u8 = &s.flex.data as *const _ as *const u8;
-        let dep_ptr:*const OrderIndex = contents_ptr as *const _;
-
-        let num_deps = (self.dependency_bytes as usize)
-            .checked_div(mem::size_of::<OrderIndex>()).unwrap();
-        slice::from_raw_parts(dep_ptr, num_deps)
+    pub fn layout(self) -> EntryLayout {
+        self.kind().layout()
     }
 
-    pub fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
-        if self.kind == EntryKind::NoValue {
-            return unsafe { self.read_deps() };
-        }
-        if self.is_sentinel() {
-            return &[]
-        }
-        match self.contents() {
-            Data(_, ref deps) => &deps,
-            Multiput{ref deps, ..} => deps,
-            Sentinel(..) => unreachable!(),
+    pub fn id(self) -> &'a Uuid {
+        use self::Packet::Ref::*;
+        match self {
+            Read{id, ..} | Single{id, ..} | Multi{id, ..} | Senti{id, ..}
+            | SingleToReplica{id, ..}
+            | MultiToReplica{id, ..} | SentiToReplica{id, ..}
+            | Skeens2ToReplica{id, ..}
+            | GC{id, ..} => id,
         }
     }
 
-    pub unsafe fn from_bytes(bytes: &[u8]) -> Self {
-        assert_eq!(bytes.len(), mem::size_of::<Self>());
-        let mut entr = mem::uninitialized::<Self>();
-        let ptr: *mut _ = &mut entr;
-        let ptr: *mut u8 = ptr as *mut _;
-        ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, mem::size_of::<Self>());
-        entr
-    }
-
-    pub unsafe fn wrap_byte(byte: &u8) -> &Self {
-        mem::transmute(byte)
-    }
-
-    pub unsafe fn wrap_mut(byte: &mut u8) -> &mut Self {
-        mem::transmute(byte)
-    }
-
-    //FIXME wow this is unsafe
-    pub fn wrap_bytes(bytes: &[u8]) -> &Self {
-        //assert_eq!(bytes.len(), mem::size_of::<Self>());
-        unsafe {
-            mem::transmute(bytes.as_ptr())
-        }
-    }
-
-    //FIXME wow this is unsafe
-    pub fn wrap_bytes_mut(bytes: &mut [u8]) -> &mut Self {
-        //assert_eq!(bytes.len(), mem::size_of::<Self>());
-        unsafe {
-            mem::transmute(bytes.as_mut_ptr())
-        }
-    }
-
-    pub unsafe fn as_data_entry(&self) -> &Entry<V, DataFlex> {
-        mem::transmute(self)
-    }
-
-    pub unsafe fn as_data_entry_mut(&mut self) -> &mut Entry<V, DataFlex> {
-        mem::transmute(self)
-    }
-
-    pub unsafe fn as_multi_entry(&self) -> &Entry<V, MultiFlex> {
-        mem::transmute(self)
-    }
-
-    pub unsafe fn as_multi_entry_mut(&mut self) -> &mut Entry<V, MultiFlex> {
-        mem::transmute(self)
-    }
-
-    pub unsafe fn as_sentinel_entry(&self) -> &Entry<V, MultiFlex> {
-        mem::transmute(self)
-    }
-
-    pub unsafe fn as_sentinel_entry_mut(&mut self) -> &mut Entry<V, MultiFlex> {
-        mem::transmute(self)
-    }
-
-    pub unsafe fn as_lock_entry(&self) -> &Lock {
-        mem::transmute(self)
-    }
-
-    pub unsafe fn as_lock_entry_mut(&mut self) -> &mut Lock {
-        mem::transmute(self)
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        unsafe {
-            let ptr: *const _ = self;
-            let ptr: *const u8 = ptr as *const _;
-            let size = self.entry_size();
-            slice::from_raw_parts(ptr, size)
-        }
-    }
-
-    pub fn bytes_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            let ptr: *mut _ = self;
-            let ptr: *mut u8 = ptr as *mut _;
-            let size = self.entry_size();
-            slice::from_raw_parts_mut(ptr, size)
-        }
-    }
-
-    //TODO remove after switching servers and clients to use [u8] as partial packets?
-    pub fn sized_bytes_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            let ptr: *mut _ = self;
-            let ptr: *mut u8 = ptr as *mut _;
-            slice::from_raw_parts_mut(ptr, mem::size_of::<Self>())
-        }
-    }
-
-    pub fn lock_num(&self) -> u64 {
-        match self.kind & EntryKind::Layout {
-            EntryKind::Multiput => unsafe {
-                self.as_multi_entry().flex.lock
+    pub fn locs(self) -> &'a [OrderIndex] {
+        use self::Packet::Ref::*;
+        match self {
+            Read{loc, ..} | Single{loc, ..} | SingleToReplica{loc, ..} | Skeens2ToReplica{loc, ..} => unsafe {
+                slice::from_raw_parts(loc, 1)
             },
-            EntryKind::Sentinel => unsafe {
-                //TODO currently we treat a Sentinel like a multiappend with no data
-                //     nor deps
-                self.as_multi_entry().flex.lock
-            },
-            EntryKind::Lock => unsafe {
-                self.as_lock_entry().lock
-            },
-            _ => unreachable!(),
+            Multi{locs, ..} | Senti{locs, ..}
+            | MultiToReplica{locs, ..} | SentiToReplica{locs, ..}
+            | GC{locs, ..} => locs,
         }
     }
 
-    pub fn locs(&self) -> &[OrderIndex] {
-        unsafe {
-            match self.kind & EntryKind::Layout {
-                EntryKind::Read | EntryKind::Data =>
-                    slice::from_raw_parts(&self.as_data_entry().flex.loc, 1),
-                EntryKind::Multiput => self.as_multi_entry().mlocs(),
-                EntryKind::Sentinel => self.as_multi_entry().mlocs(),
-                EntryKind::Lock => &[],
-                _ => unreachable!()
+    pub fn locs_and_node_nums(self) ->
+        ::std::iter::Zip<::std::slice::Iter<'a, OrderIndex>, ::std::slice::Iter<'a, u64>> {
+        use self::Packet::Ref::*;
+        match self {
+            SingleToReplica{loc, queue_num, ..} => unsafe {
+                slice::from_raw_parts(loc, 1).iter().zip(
+                    slice::from_raw_parts(queue_num, 1)
+                )
+            },
+
+            MultiToReplica{locs, queue_nums, ..} | SentiToReplica{locs, queue_nums, ..}  => {
+                locs.iter().zip(queue_nums.iter())
+            },
+
+            Read{..} | Single{..} | Multi{..} | Senti{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
+        }
+    }
+
+    pub fn data(self) -> &'a [u8] {
+        use self::Packet::Ref::*;
+        match self {
+            Multi{data, ..} | Single{data, ..}
+            | MultiToReplica{data, ..} | SingleToReplica{data, ..} => data,
+
+            Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
+        }
+    }
+
+    pub fn sentinel_entry_size(self) -> usize {
+        use self::Packet::Ref::*;
+        match self {
+            MultiToReplica{ id, flags, lock, locs, deps, ..} =>
+                Senti{
+                    id:id, flags:flags, data_bytes:&0, lock:lock, locs:locs, deps:deps
+                }.len(),
+
+            SentiToReplica{ id, flags, data_bytes, lock, locs, deps, ..} =>
+                Senti{
+                    id:id, flags:flags, data_bytes:data_bytes, lock:lock, locs:locs, deps:deps,
+                }.len(),
+
+            Multi{ id, flags, lock, locs, deps, ..} =>
+                Senti{
+                    id:id, flags:flags, data_bytes:&0, lock:lock, locs:locs, deps:deps
+                }.len(),
+
+            s @ Senti{..} => s.len(),
+
+            Read{..} | Single{..} | SingleToReplica{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
+        }
+    }
+
+    pub fn lock_num(self) -> u64 {
+        use self::Packet::Ref::*;
+        match self {
+            Multi{lock, ..} | Senti{lock, ..}
+            | MultiToReplica{lock, ..}
+            | SentiToReplica{lock, ..}
+            | Skeens2ToReplica{lock, ..} => *lock,
+
+            Read{..} | Single{..} | SingleToReplica{..}
+            | GC{..} => unreachable!(),
+        }
+    }
+
+    pub fn into_singleton_builder<V: ?Sized>(self) -> SingletonBuilder<'a, V>
+    where V: UnStoreable {
+        use self::Packet::Ref::*;
+        match self {
+            Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
+            | GC{..} => unreachable!(),
+
+            SingleToReplica{deps, data, ..}
+            | MultiToReplica{deps, data, ..}
+            | Multi{deps, data, ..}
+            | Single{deps, data, ..} => {
+                let data = unsafe { V::unstore(data) };
+                SingletonBuilder(data, deps)
+            },
+        }
+    }
+
+    pub fn dependencies(self) -> &'a [OrderIndex] {
+        use self::Packet::Ref::*;
+        match self {
+            Single{deps, ..} | Multi{deps, ..} | Senti{deps, ..}
+            | SingleToReplica{deps, ..} | MultiToReplica{deps, ..} | SentiToReplica{deps, ..} =>
+                deps,
+            Read{..} | Skeens2ToReplica{..}| GC{..} => unreachable!(),
+        }
+    }
+
+    pub fn horizon(self) -> OrderIndex {
+        use self::Packet::Ref::*;
+        match self {
+            Single{..} | Multi{..} | Senti{..}
+            | SingleToReplica{..} | MultiToReplica{..} | SentiToReplica{..}
+            | Skeens2ToReplica{..} | GC{..} =>
+                unreachable!(),
+            Read{horizon, ..} => *horizon,
+        }
+    }
+
+    pub fn non_replicated_len(self) -> usize {
+        use self::Packet::Ref::*;
+        match self {
+            c @ Read {..} | c @ Single {..} | c @ Multi{..} | c @Senti{..} | c @ GC{..} =>
+                c.len(),
+
+            SingleToReplica{ id, flags, loc, deps, data, ..} =>
+                Single{id: id, flags: flags, loc: loc, deps: deps, data: data}.len(),
+
+            MultiToReplica{ id, flags, lock, locs, deps, data, ..} =>
+                Multi{
+                    id:id, flags:flags, lock:lock, locs:locs, deps:deps, data:data,
+                }.len(),
+
+            SentiToReplica{ id, flags, data_bytes, lock, locs, deps, ..} =>
+                Senti{
+                    id:id, flags:flags, data_bytes:data_bytes, lock:lock, locs:locs, deps:deps,
+                }.len(),
+
+            Skeens2ToReplica{..} => unreachable!(),
+        }
+    }
+
+    pub fn single_skeens_to_replication(self, time: &'a u64, queue_num: &'a u64) -> Self {
+        use self::Packet::Ref::*;
+        match self {
+            Single{id, flags, loc, deps, data} => {
+                SingleToReplica{
+                    id: id,
+                    flags: flags,
+                    loc: loc,
+                    deps: deps,
+                    data: data,
+                    timestamp: time,
+                    queue_num: queue_num,
+                }
             }
+
+            o => panic!("tried to turn {:?} into a singleton skeens replica.", o),
+        }
+    }
+
+    pub fn multi_skeens_to_replication(self, queue_nums: &'a [u64]) -> Self {
+        use self::Packet::Ref::*;
+        match self {
+            Multi{id, flags, lock, locs, deps, data} => {
+                MultiToReplica{
+                    id: id,
+                    flags: flags,
+                    lock: lock,
+                    locs: locs,
+                    deps: deps,
+                    data: data,
+                    queue_nums: queue_nums,
+                }
+            }
+
+            Senti{id, flags, data_bytes, lock, locs, deps} => {
+                SentiToReplica{
+                    id: id,
+                    flags: flags,
+                    data_bytes: data_bytes,
+                    lock: lock,
+                    locs: locs,
+                    deps: deps,
+                    queue_nums: queue_nums,
+                }
+            }
+
+            o => panic!("tried to turn {:?} into a singleton skeens replica.", o),
+        }
+    }
+
+    pub fn queue_nums(self) -> &'a [u64] {
+        use self::Packet::Ref::*;
+        match self {
+            MultiToReplica{queue_nums, ..} | SentiToReplica{queue_nums, ..} =>
+                queue_nums,
+
+            o => panic!("tried to get queue_nums from {:?}.", o),
+        }
+    }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        let mut v = Vec::new();
+        self.fill_vec(&mut v);
+        v
+    }
+}
+
+impl<'a> Packet::Mut<'a> {
+    pub fn flag_mut(&mut self) -> &mut EntryFlag::Flag {
+        use self::Packet::Mut::*;
+        match self {
+            &mut Read{ref mut flags, ..}
+            | &mut Single{ref mut flags, ..}
+            | &mut Multi{ref mut flags, ..}
+            | &mut Senti{ref mut flags, ..}
+            | &mut SingleToReplica{ref mut flags, ..}
+            | &mut MultiToReplica{ref mut flags, ..}
+            | &mut SentiToReplica{ref mut flags, ..}
+            | &mut GC{ref mut flags, ..} =>
+                &mut **flags,
+
+            &mut Skeens2ToReplica{..} => unreachable!(),
+        }
+    }
+
+    pub fn flag_mut_a(&'a mut self) -> &'a mut EntryFlag::Flag {
+        use self::Packet::Mut::*;
+        match self {
+            &mut Read{ref mut flags, ..}
+            | &mut Single{ref mut flags, ..}
+            | &mut Multi{ref mut flags, ..}
+            | &mut Senti{ref mut flags, ..}
+            | &mut SingleToReplica{ref mut flags, ..}
+            | &mut MultiToReplica{ref mut flags, ..}
+            | &mut SentiToReplica{ref mut flags, ..}
+            | &mut GC{ref mut flags, ..} =>
+                &mut **flags,
+
+            &mut Skeens2ToReplica{..} => unreachable!(),
         }
     }
 
     pub fn locs_mut(&mut self) -> &mut [OrderIndex] {
-        unsafe {
-            match self.kind & EntryKind::Layout {
-                EntryKind::Read | EntryKind::Data =>
-                    slice::from_raw_parts_mut(&mut self.as_data_entry_mut().flex.loc, 1),
-                EntryKind::Multiput => self.as_multi_entry_mut().mlocs_mut(),
-                EntryKind::Sentinel => self.as_multi_entry_mut().mlocs_mut(),
-                EntryKind::Lock => &mut [],
-                _ => unreachable!()
+        use self::Packet::Mut::*;
+        match self {
+            &mut Read{ref mut loc, ..}
+            | &mut Single{ref mut loc, ..}
+            | &mut SingleToReplica{ref mut loc, ..}
+            | &mut Skeens2ToReplica{ref mut loc, ..} => unsafe {
+                slice::from_raw_parts_mut(&mut **loc, 1)
+            },
+
+            &mut Multi{ref mut locs, ..}
+            | &mut Senti{ref mut locs, ..}
+            | &mut MultiToReplica{ref mut locs, ..}
+            | &mut SentiToReplica{ref mut locs, ..}
+            | &mut GC{ref mut locs, ..} => &mut *locs,
+        }
+    }
+
+    pub fn lock_mut(&mut self) -> &mut u64 {
+        use self::Packet::Mut::*;
+        match self {
+            &mut Multi{ref mut lock, ..} | &mut Senti{ref mut lock, ..}
+            | &mut Skeens2ToReplica {ref mut lock, .. } => &mut *lock,
+
+            &mut MultiToReplica{ref mut lock, ..} | &mut SentiToReplica{ref mut lock, ..} =>
+                &mut *lock,
+
+            &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..}
+            | &mut GC{..} => unreachable!(),
+        }
+    }
+}
+
+//FIXME make slice
+#[derive(Copy, Clone)]
+pub struct Entry<'a> {
+    inner: &'a [u8],
+}
+
+//FIXME make slice
+pub struct MutEntry<'a> {
+    inner: &'a mut [u8],
+}
+
+impl<'a> Entry<'a> {
+
+    pub unsafe fn wrap_bytes(byte: *const u8) -> Self {
+        let mut size = Packet::min_len();
+        loop {
+            let slice = slice::from_raw_parts(byte, size);
+            match Packet::Ref::try_ref(slice) {
+                Err(Packet::WrapErr::NotEnoughBytes(n)) => size = n,
+                Err(e) => panic!("{:?}", e),
+                Ok((c, _)) => {
+                    debug_assert_eq!(slice.len(), c.len());
+                    return Entry { inner: slice }
+                }
             }
         }
+
     }
 
-    pub fn val_locs_and_deps(&self) -> (&V, &[OrderIndex], &[OrderIndex]) {
-        match self.contents() {
-            Data(ref data, ref deps) => (data, self.locs(), deps),
-            Multiput{ref data, ref columns, ref deps, ..} => {
-                (data, columns, deps)
-            }
-            Sentinel(..) => panic!("a sentinel has no value"),
-        }
+    pub fn wrap_slice(slice: &'a [u8]) -> Self {
+        Entry { inner: slice }
     }
 
-    pub fn header_size(&self) -> usize {
-        match self.kind & EntryKind::Layout {
-            EntryKind::Data | EntryKind::Read => mem::size_of::<Entry<(), DataFlex<()>>>(),
-            EntryKind::Multiput => mem::size_of::<Entry<(), MultiFlex<()>>>(),
-            EntryKind::Sentinel => {
-                //TODO currently we treat a Sentinel like a multiappend with no data
-                //     nor deps
-                mem::size_of::<Entry<(), MultiFlex<()>>>()
-            }
-            EntryKind::Lock => mem::size_of::<Lock>(),
-            _ => panic!("header_size: invalid layout {:x} {:?}", self.kind.bits(), self.kind),
-        }
+    pub fn bytes(self) -> &'a [u8] {
+        self.inner
     }
 
-    pub fn payload_size(&self) -> usize {
-        if self.is_lock() {
-            return 0
-        }
-        let mut size = self.data_bytes as usize + self.dependency_bytes as usize;
-        if self.is_multi() || self.is_sentinel() {
-            //TODO currently we treat a Sentinel like a multiappend with no data
-            //     nor deps
-            let header = unsafe { mem::transmute::<_, &Entry<V, MultiFlex<()>>>(self) };
-            size += header.flex.cols as usize * mem::size_of::<OrderIndex>();
-        }
-        assert!(size + mem::size_of::<Entry<(), ()>>() <= 8192);
-        size
+    pub fn contents(self) -> EntryContents<'a> {
+        unsafe { EntryContents::try_ref(self.inner).unwrap().0 }
     }
 
-    pub fn entry_size(&self) -> usize {
-        let size = match self.kind & EntryKind::Layout {
-            EntryKind::Data | EntryKind::Read => self.data_entry_size(),
-            EntryKind::Multiput => self.multi_entry_size(),
-            EntryKind::Sentinel => self.sentinel_entry_size(),
-            EntryKind::Lock => mem::size_of::<Lock>(),
-            _ => panic!("invalid layout {:?}", self.kind & EntryKind::Layout),
-        };
-        assert!(size >= base_header_size());
-        size
+    pub fn flag(self) -> &'a EntryFlag::Flag {
+        self.contents().flag()
     }
 
-    fn data_entry_size(&self) -> usize {
-        assert!(self.kind & EntryKind::Layout == EntryKind::Data
-            || self.kind & EntryKind::Layout == EntryKind::Read);
-        let size = mem::size_of::<Entry<(), DataFlex<()>>>()
-            + self.data_bytes as usize
-            + self.dependency_bytes as usize;
-        //trace!("data size {}", size);
-        assert!(size <= 8192);
-        size
-    }
-
-    fn multi_entry_size(&self) -> usize {
-        assert!(self.kind & EntryKind::Layout == EntryKind::Multiput);
-        unsafe {
-            let header = self.as_multi_entry();
-            let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
-                + header.data_bytes as usize
-                + header.dependency_bytes as usize
-                + (header.flex.cols as usize * mem::size_of::<OrderIndex>());
-            //trace!("multi size {}", size);
-            assert!(size <= 8192);
-            size
-        }
-    }
-
-    pub fn sentinel_entry_size(&self) -> usize {
-        assert!(self.kind & EntryKind::Layout == EntryKind::Sentinel
-            || self.kind & EntryKind::Layout == EntryKind::Multiput);
-        //TODO currently we treat a Sentinel like a multiappend with no data
-        //     nor deps
-        unsafe {
-            let header = self.as_multi_entry();
-            let size = mem::size_of::<Entry<(), MultiFlex<()>>>()
-                + (header.flex.cols as usize * mem::size_of::<OrderIndex>());
-            //trace!("multi size {}", size);
-            assert!(size <= 8192);
-            size
-        }
-    }
-
-    pub fn is_multi(&self) -> bool {
-        self.kind & EntryKind::Layout == EntryKind::Multiput
-    }
-
-    pub fn is_data(&self) -> bool {
-        self.kind & EntryKind::Layout == EntryKind::Data
-    }
-
-    pub fn is_sentinel(&self) -> bool {
-        self.kind & EntryKind::Layout == EntryKind::Sentinel
-    }
-
-    pub fn is_lock(&self) -> bool {
-        self.kind &EntryKind::Layout == EntryKind::Lock
+    pub unsafe fn extend_lifetime<'b>(self) -> Entry<'b> {
+        mem::transmute(self)
     }
 }
 
-impl<V: Storeable + ?Sized> Entry<V, DataFlex> {
-    fn data_contents<'s>(&'s self, data_bytes: u16) -> EntryContents<'s, V> { //TODO to DataContents<..>?
-        //TODO I _really_ should not need to do this...
-        let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
-        let (data, deps) = self.data_and_deps(contents_ptr, data_bytes, 0);
-        Data(data, deps)
-    }
-}
-
-impl<V: Storeable + ?Sized> Entry<V, MultiFlex> {
-    pub fn multi_contents_mut<'s>(&'s mut self) -> MultiputContentsMut<'s, V> {
-        unsafe {
-            //let data_bytes = self.data_bytes;
-            //let dependency_bytes = self.dependency_bytes;
-            let uuid = &mut self.id;
-            let contents_ptr: *mut u8 = &mut self.flex.data as *mut _ as *mut u8;
-            let cols_ptr = contents_ptr;
-
-
-            let cols_ptr = cols_ptr as *mut _;
-            let num_cols = self.flex.cols;
-            let cols = slice::from_raw_parts_mut(cols_ptr, num_cols as usize);
-            assert!(cols.len() > 0);
-
-            let data_offset = (self.flex.cols as usize * mem::size_of::<OrderIndex>()) as isize;
-            let data_ptr = contents_ptr.offset(data_offset);
-            let dep_ptr:*mut OrderIndex = data_ptr.offset(self.data_bytes as isize) as *mut _;
-            //let data = Storeable::bytes_to_mut(data_ptr.as_mut().unwrap(), self.data_bytes as usize);
-            let data = Storeable::bytes_to_mut(mem::transmute(data_ptr), self.data_bytes as usize);
-
-            let num_deps = (self.dependency_bytes as usize)
-                .checked_div(mem::size_of::<OrderIndex>()).unwrap();
-            let deps = slice::from_raw_parts_mut(dep_ptr, num_deps);
-            MultiputContentsMut{data: data, uuid: uuid, columns: cols, deps: deps}
-        }
-    }
-
-    fn mlocs(&self) -> &[OrderIndex] {
-        unsafe {
-            let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
-            let cols_ptr = contents_ptr;
-            let cols_ptr = cols_ptr as *const _;
-            let num_cols = match self.kind & EntryKind::Layout {
-                EntryKind::Multiput | EntryKind::Sentinel => self.flex.cols,
-                _ => unreachable!()
-            };
-            assert!(num_cols > 0);
-            slice::from_raw_parts(cols_ptr, num_cols as usize)
-        }
-    }
-
-    fn mlocs_mut(&mut self) -> &mut [OrderIndex] {
-        unsafe {
-            let contents_ptr: *mut u8 = &mut self.flex.data as *mut _ as *mut u8;
-            let cols_ptr = contents_ptr;
-            let cols_ptr = cols_ptr as *mut _;
-            let num_cols = match self.kind & EntryKind::Layout {
-                EntryKind::Multiput | EntryKind::Sentinel => self.flex.cols,
-                EntryKind::Lock => panic!("unimpl"), //TODO
-                _ => unreachable!()
-            };
-            assert!(num_cols > 0);
-            slice::from_raw_parts_mut(cols_ptr, num_cols as usize)
-        }
-    }
-
-    fn multi_contents<'s>(&'s self, data_bytes: u16, _: u16, uuid: &'s Uuid)
-    -> EntryContents<'s, V> { //TODO to DataContents<..>?
-        unsafe {
-            let contents_ptr: *const u8 = &self.flex.data as *const _ as *const u8;
-            let cols_ptr = contents_ptr;
-
-
-            let cols_ptr = cols_ptr as *const _;
-            let num_cols = self.flex.cols;
-            assert!(num_cols > 0);
-            let cols = slice::from_raw_parts(cols_ptr, num_cols as usize);
-            assert!(cols.len() > 0);
-
-            let data_offset = (self.flex.cols as usize * mem::size_of::<OrderIndex>()) as isize;
-            let (data, deps) = self.data_and_deps(contents_ptr, data_bytes, data_offset);
-            Multiput{data: data, uuid: uuid, columns: cols, deps: deps}
-        }
-    }
-}
-
-impl Lock {
-    pub fn bytes(&self) -> &[u8] {
-        unsafe {
-            slice::from_raw_parts(self as *const _ as *const u8, mem::size_of::<Self>())
-        }
-    }
-}
-
-pub fn base_header_size() -> usize {
-    mem::size_of::<Entry<(), ()>>()
-}
-
-impl<V: PartialEq + Storeable + ?Sized> PartialEq for Entry<V> {
-    fn eq(&self, other: &Self) -> bool {
-        //TODO
-        self.contents() == other.contents()
-    }
-}
-
-impl<V: Eq + Storeable + ?Sized> Eq for Entry<V> {}
-
-impl<V: fmt::Debug + Storeable + ?Sized> fmt::Debug for Entry<V> {
+impl<'a> fmt::Debug for Entry<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        if self.kind == EntryKind::Invalid {
-            panic!("invalid entry")
-        }
-        else if self.kind == EntryKind::Read {
-            let s = unsafe { self.as_data_entry() };
-            f.debug_struct("Entry")
-                .field("kind", &"Read")
-                .field("id", &s.id)
-                .field("loc", &s.flex.loc)
-            .finish()
-        }
-        else {
-            write!(f, "{:?} with id: {:?}", self.contents(), self.id)
-        }
+        self.contents().fmt(f)
     }
 }
 
-impl<V: ?Sized> Clone for Entry<V> {
-    fn clone(&self) -> Self {
-        //TODO
+#[allow(dead_code)]
+impl<'a> MutEntry<'a> {
+
+    pub unsafe fn wrap_bytes(byte: *mut u8) -> Self {
+        let mut size = Packet::min_len();
+        loop {
+            let slice = slice::from_raw_parts_mut(byte, size);
+            match Packet::Mut::try_mut(slice) {
+                Err(Packet::WrapErr::NotEnoughBytes(n)) => size = n,
+                Err(e) => panic!("{:?}", e),
+                Ok((c, _)) => {
+                    debug_assert_eq!(slice.len(), c.as_ref().len());
+                    return MutEntry { inner: slice }
+                }
+            }
+        }
+    }
+
+    pub fn wrap_slice(slice: &'a mut [u8]) -> Self {
+        MutEntry { inner: slice }
+    }
+
+    pub fn to_non_replicated(&mut self) {
         unsafe {
-            let mut entr: Entry<V> = mem::uninitialized();
-            ptr::copy(self as *const _ as *const u8, &mut entr as *mut _ as *mut u8, self.size());
-            entr
+            let mut kind: EntryKind::Kind = mem::transmute::<u8, _>(self.inner[0]);
+            let () = kind.remove(EntryKind::ToReplica);
+            self.inner[0] = mem::transmute::<EntryKind::Kind, u8>(kind);
         }
-        //self.contents().clone_entry()
+    }
+
+    pub fn bytes(&mut self) -> &mut [u8] {
+        &mut *self.inner
+    }
+    pub fn bytes_a(&'a mut self) -> &'a mut [u8] {
+        &mut *self.inner
+    }
+
+    pub fn contents(&mut self) -> EntryContentsMut {
+        unsafe { EntryContentsMut::try_mut(self.bytes()).unwrap().0 }
+    }
+
+    pub fn into_contents(mut self) -> EntryContentsMut<'a> {
+        unsafe { EntryContentsMut::try_mut(self.bytes()).unwrap().0 }
+    }
+
+    pub fn contents_a(&'a mut self) -> EntryContentsMut<'a> {
+        unsafe { EntryContentsMut::try_mut(self.inner).unwrap().0 }
     }
 }
 
-impl<'e, V: Storeable + ?Sized> Clone for EntryContents<'e, V> {
-    fn clone(&self) -> Self {
-        match self {
-            &Data(ref data, ref deps) => Data(data.clone(), deps.clone()),
-            &Multiput{ref data, ref uuid, ref columns, ref deps} => {
-                Multiput{data: data.clone(), uuid: uuid.clone(), columns: columns.clone(), deps: deps.clone()}
-            }
-            &Sentinel(ref id) => Sentinel(id.clone()),
-        }
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct SingletonBuilder<'a, V:'a + ?Sized>(pub &'a V, pub &'a [OrderIndex]);
+
+impl<'a, V:'a + ?Sized> SingletonBuilder<'a, V> {
+    pub fn dependencies(self) -> &'a [OrderIndex] {
+        self.1
     }
 }
 
-impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
-    pub fn dependencies<'s>(&'s self) -> &'s [OrderIndex] {
-        match self {
-            &Data(_, ref deps) => &deps,
-            &Multiput{ref deps, ..} => deps,
-            &Sentinel(..) => &[],
-        }
-    }
-}
-
-impl <'e, V: ?Sized> EntryContents<'e, V> {
-    fn kind(&self) -> EntryKind::Kind {
-        match self {
-            &Data(..) => EntryKind::Data,
-            &Multiput{..} => EntryKind::Multiput,
-            &Sentinel(..) => EntryKind::Sentinel,
-        }
-    }
-}
-
-impl<'e, V: Storeable + ?Sized> EntryContents<'e, V> {
-
-    pub fn clone_entry(&self) -> Entry<V> {
-        unsafe {
-            let mut entr = mem::uninitialized::<Entry<V>>();
-            self.fill_entry(&mut entr);
-            entr
-        }
-    }
-
-    pub unsafe fn fill_entry(&self, e: &mut Entry<V>) {
-        use std::u16;
-        e.kind = self.kind();
-        let (data_ptr, data, deps) = match self {
-            &Data(data, deps) => {
-                assert!(deps.len() < u16::MAX as usize);
-                let e = e.as_data_entry_mut();
-                let data_ptr: *mut u8 = &mut (&mut e.flex.data)[0];
-                (data_ptr, data, deps)
+impl<'a, V:'a> SingletonBuilder<'a, V> {
+    pub fn clone_entry(self) -> ::buffer::Buffer
+    where V: Storeable {
+        let SingletonBuilder(data, deps) = self;
+        let mut buffer = ::buffer::Buffer::empty();
+        let daya = unsafe { V::ref_to_slice(data) };
+        buffer.fill_from_entry_contents(
+            EntryContents::Single{
+                id: &Uuid::new_v4(),
+                flags: &EntryFlag::Nothing,
+                loc: &OrderIndex(0.into(), 0.into()),
+                deps: deps,
+                data: daya,
             }
-            &Multiput{data, uuid, columns, deps} => {
-                assert!(deps.len() < u16::MAX as usize);
-                assert!(columns.len() < u16::MAX as usize);
-                assert!(columns.len() > 0);
-                let e = e.as_multi_entry_mut();
-                let cols_ptr: *mut OrderIndex = (&mut e.flex.data[0]) as *mut _ as *mut _;
-                e.flex.cols = columns.len() as u16;
-                assert!(e.flex.cols > 0);
-                e.id = uuid.clone();
-
-                ptr::copy(columns.as_ptr() as *mut _, cols_ptr, columns.len());
-
-                let data_ptr = cols_ptr.offset(columns.len() as isize) as *mut u8;
-                e.flex.lock = 0;
-                (data_ptr, data, deps)
-            }
-            &Sentinel(id) => {
-                e.id = id.clone();
-                return
-            }
-        };
-        assert!(Storeable::size(data) < u16::MAX as usize);
-        assert!(deps.len() * size_of::<OrderIndex>() < u16::MAX as usize);
-        e.data_bytes = Storeable::size(data) as u16;
-        e.dependency_bytes = (deps.len() * size_of::<OrderIndex>()) as u16;
-        let dep_ptr = data_ptr.offset(e.data_bytes as isize);
-
-        //trace!("assembing {:?} entry: base {:?}, data @ {:?} len {:?}, deps @ {:?} len {:?}",
-        //    self.kind(), e as *mut _, data_ptr, Storeable::size(data), dep_ptr, deps.len());
-
-        //ptr::write(data_ptr as *mut _, data.clone()); //TODO why did this fail?
-        ptr::copy(Storeable::ref_to_bytes(data), data_ptr as *mut _, e.data_bytes as usize);
-        ptr::copy(deps.as_ptr(), dep_ptr as *mut _, deps.len());
-        if e.kind == EntryKind::Multiput {
-            let e = e.as_multi_entry_mut();
-            assert!(e.flex.cols > 0);
-        }
-    }
-
-    pub fn clone_bytes(&self) -> Vec<u8> {
-        let size = match self {
-            &Data(data, deps) =>
-                mem::size_of::<Entry<(), DataFlex<()>>>()
-                 + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>()),
-            &Multiput{ data, columns, deps, ..} =>
-                mem::size_of::<Entry<(), MultiFlex<()>>>()
-                + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>())
-                + (columns.len() * size_of::<OrderIndex>()),
-            &Sentinel(..) => {
-                //TODO currently we treat a Sentinel like a multiappend with no data
-                //     nor deps
-                mem::size_of::<Entry<(), MultiFlex<()>>>()
-                + size_of::<OrderIndex>()
-            }
-        };
-        //FIXME
-        //assert!(size <= 4096);
-        //assert!(size <= 8192);
-        let mut buffer = Vec::with_capacity(size);
-        unsafe {
-            buffer.set_len(size);
-            self.fill_entry(Entry::wrap_bytes_mut(&mut buffer));
-        }
+        );
         buffer
     }
 
-    pub fn fill_vec<'s, 'a>(&'s self, vec: &'a mut Vec<u8>) -> &'a mut Entry<V> {
-        let size = match self {
-            &Data(data, deps) =>
-                mem::size_of::<Entry<(), DataFlex<()>>>()
-                 + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>()),
-            &Multiput{ data, columns, deps, ..} =>
-                mem::size_of::<Entry<(), MultiFlex<()>>>()
-                + Storeable::size(data) + (deps.len() * size_of::<OrderIndex>())
-                + (columns.len() * size_of::<OrderIndex>()),
-            &Sentinel(..) => {
-                //TODO currently we treat a Sentinel like a multiappend with no data
-                //     nor deps
-                mem::size_of::<Entry<(), MultiFlex<()>>>()
-                + size_of::<OrderIndex>()
+    pub fn fill_entry(self, buffer: &mut ::buffer::Buffer) {
+        let SingletonBuilder(data, deps) = self;
+        let daya = unsafe { V::ref_to_slice(data) };
+        buffer.fill_from_entry_contents(
+            EntryContents::Single{
+                id: &Uuid::new_v4(),
+                flags: &EntryFlag::Nothing,
+                loc: &OrderIndex(0.into(), 0.into()),
+                deps: deps,
+                data: daya,
             }
-        };
-        if vec.capacity() < size {
-            let add_cap = size - vec.capacity();
-            vec.reserve_exact(add_cap)
-        }
-        unsafe {
-            vec.set_len(size);
-            let e = Entry::wrap_bytes_mut(&mut *vec);
-            self.fill_entry(e);
-            e
-        }
+        );
     }
 }
 
-pub fn bytes_as_entry(bytes: &[u8]) -> &Entry<()> {
-    Entry::<()>::wrap_bytes(bytes)
+impl<'a, V:'a> SingletonBuilder<'a, [V]> {
+    pub fn clone_entry(self) -> ::buffer::Buffer
+    where V: Storeable {
+        let SingletonBuilder(data, deps) = self;
+        let mut buffer = ::buffer::Buffer::empty();
+        let daya = unsafe { <[V]>::ref_to_slice(data) };
+        buffer.fill_from_entry_contents(
+            EntryContents::Single{
+                id: &Uuid::new_v4(),
+                flags: &EntryFlag::Nothing,
+                loc: &OrderIndex(0.into(), 0.into()),
+                deps: deps,
+                data: daya,
+            }
+        );
+        buffer
+    }
+
+    pub fn fill_entry(self, buffer: &mut ::buffer::Buffer) {
+        let SingletonBuilder(data, deps) = self;
+        let daya = unsafe { <[V]>::ref_to_slice(data) };
+        buffer.fill_from_entry_contents(
+            EntryContents::Single{
+                id: &Uuid::new_v4(),
+                flags: &EntryFlag::Nothing,
+                loc: &OrderIndex(0.into(), 0.into()),
+                deps: deps,
+                data: daya,
+            }
+        );
+    }
 }
 
-pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> &mut Entry<()> {
-    Entry::<()>::wrap_bytes_mut(bytes)
+pub fn data_to_slice<V: ?Sized + Storeable>(data: &V) -> &[u8] {
+    unsafe { <V as Storeable>::ref_to_slice(data) }
+}
+
+pub fn slice_to_data<V: ?Sized + UnStoreable + Storeable>(data: &[u8]) -> &V {
+    unsafe { <V as UnStoreable>::unstore(data) }
+}
+
+pub fn bytes_as_entry(bytes: &[u8]) -> EntryContents {
+    unsafe { Packet::Ref::try_ref(bytes).unwrap().0 }
+}
+
+pub fn bytes_as_entry_mut(bytes: &mut [u8]) -> EntryContentsMut {
+    unsafe { Packet::Mut::try_mut(bytes).unwrap().0 }
 }
 
 pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
-    match Entry::<[u8]>::wrap_bytes(bytes).contents() {
+    /*match Entry::<[u8]>::wrap_bytes(bytes).contents() {
         EntryContents::Data(data, ..) | EntryContents::Multiput{data, ..} => data,
         EntryContents::Sentinel(..) => &[],
+    }*/
+    use self::Packet::Ref::*;
+    match bytes_as_entry(bytes) {
+        Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
+        | GC{..} => unreachable!(),
+
+        Single{data, ..} | Multi{data, ..}
+        | SingleToReplica{data, ..} | MultiToReplica{data, ..}=> data,
     }
+}
+
+pub fn slice_to_sentinel(bytes: &mut [u8]) -> bool {
+    let old_kind: EntryKind::Kind = unsafe { ::std::mem::transmute(bytes[0]) };
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::Sentinel) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
+    old_kind == EntryKind::Multiput || old_kind == EntryKind::MultiputToReplica
+}
+
+pub fn slice_to_multi(bytes: &mut [u8]) {
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::Multiput) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
+}
+
+pub fn slice_to_skeens1_multirep(bytes: &mut [u8]) {
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::MultiputToReplica) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
+}
+
+pub fn slice_to_skeens1_sentirep(bytes: &mut [u8]) {
+    bytes[0] = unsafe { ::std::mem::transmute(EntryKind::SentinelToReplica) };
+    unsafe { debug_assert!(EntryContents::try_ref(bytes).is_ok()) }
 }
 
 ///////////////////////////////////////
@@ -934,10 +814,91 @@ mod test {
 
     use super::*;
 
-    use std::marker::PhantomData;
+    use byteorder::{ByteOrder, LittleEndian};
 
+    //use std::marker::PhantomData;
 
     #[test]
+    fn packet_size_check() {
+        let b = Packet::Ref::Single {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            loc: &OrderIndex(0.into(), 0.into()),
+            deps: &[],
+            data: &[],
+        }.len();
+        assert!(
+            Packet::min_len() >= b,
+            "{} >= {}",
+            Packet::min_len(), b,
+        );
+        /*let b = Packet::Ref::Multi {
+            id: &Uuid::nil(),
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &[],
+            deps: &[],
+            data: &[],
+        }.len();
+        assert!(
+            Packet::min_len() >= b,
+            "{} >= {}",
+            Packet::min_len(), b,
+        );*/
+    }
+
+    #[test]
+    fn packet_sanity_check() {
+        let id = Uuid::new_v4();
+        let flag = EntryFlag::ReadSuccess;
+        let data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 99, 10];
+        let deps = [OrderIndex(1.into(), 1.into()), OrderIndex(2.into(), 1.into()), OrderIndex(3.into(), 3.into())];
+        let locs = [OrderIndex(5.into(), 55.into()), OrderIndex(37.into(), 8.into()),
+            OrderIndex(1000000000.into(), 0xffffffff.into())];
+        let lock = 0xdeadbeef;
+        let mut bytes = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &flag,
+            //data_bytes: u32,
+            //num_deps: u16,
+            //cols: u16,
+            lock: &lock,
+            locs: &locs,
+            deps: &deps,
+            data: &data,
+        }.fill_vec(&mut bytes);
+        let mut data_bytes = [0u8; 4];
+        LittleEndian::write_u32(&mut data_bytes, data.len() as u32);
+        let mut num_deps = [0u8; 2];
+        LittleEndian::write_u16(&mut num_deps, deps.len() as u16);
+        let mut cols = [0u8; 2];
+        LittleEndian::write_u16(&mut cols, locs.len() as u16);
+        let mut lock_bytes = [0u8; 8];
+        LittleEndian::write_u64(&mut lock_bytes, lock);
+
+        let locs_as_bytes = unsafe { slice::from_raw_parts(
+            &locs as *const _ as *const u8, locs.len() * mem::size_of::<OrderIndex>()) };
+        let deps_as_bytes = unsafe { slice::from_raw_parts(
+            &deps as *const _ as *const u8, deps.len() * mem::size_of::<OrderIndex>()) };
+
+        let mut cannonical = Vec::new();
+        cannonical.extend_from_slice(id.as_bytes());
+        unsafe { cannonical.push(mem::transmute(flag)) };
+        cannonical.extend_from_slice(&data_bytes);
+        cannonical.extend_from_slice(&num_deps);
+        cannonical.extend_from_slice(&cols);
+        cannonical.extend_from_slice(&lock_bytes);
+        cannonical.extend_from_slice(&locs_as_bytes);
+        cannonical.extend_from_slice(&deps_as_bytes);
+        cannonical.extend_from_slice(&data);
+
+
+        assert_eq!(&bytes[1..], &cannonical[..]);
+    }
+
+
+    /*#[test]
     fn test_entry2_header_size() {
         use std::mem::size_of;
         assert_eq!(size_of::<Entry<(), ()>>(), 24);
@@ -1054,7 +1015,8 @@ mod test {
             let ent2 = entr.contents();
             assert_eq!(ent1, ent2);
         }
-    }
+    }*/
+
 /*
     #[test]
     fn new_packets_multi() {

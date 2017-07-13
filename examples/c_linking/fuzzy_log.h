@@ -94,6 +94,39 @@ DAGHandle *new_dag_handle_with_skeens(
 //! Creates a new DAGHandle for a server group based on a config file.
 DAGHandle *new_dag_handle_from_config(const char *config_filename,
 	struct colors *interesting_colors);
+
+//! Creates a new DAGHandle for a replicated server group
+//! which uses the skeens based multiappend protocol.
+//!
+//!
+//! @param num_chain_servers
+//!     The number of chain servers in the server group.
+//!
+//! @param chain_server_head_ips
+//!     The IP address of the head of every replication-chain in the server group.
+//!     NOTE Currently the ordering of the IP addresses must be the same as the
+//!          ordering of the servers.
+//!     NOTE the ordering of the replication-chains must be the same in both this
+//!          and chain_server_tail_ips
+//!
+//! @param chain_server_tail_ips
+//!     The IP address of the tail of every replication-chain in the server group.
+//!     NOTE Currently the ordering of the IP addresses must be the same as the
+//!          ordering of the servers.
+//!     NOTE the ordering of the replication-chains must be the same in both this
+//!          and chain_server_tail_ips
+//!
+//!
+//! @param interesting_colors
+//!     The colors this DAGHandle is interested in reading.
+//!
+DAGHandle *new_dag_handle_with_replication(
+        size_t num_chain_servers,
+        const char * const* chain_server_head_ips,
+        const char * const* chain_server_tail_ips,
+        struct colors *interesting_colors
+);
+
 write_id do_append(DAGHandle *handle, char *data, size_t data_size,
 	struct colors* inhabits, struct colors* depends_on, uint8_t async);
 
@@ -305,7 +338,6 @@ write_id async_simple_causal_append(
 // greater than DELOS_MAX_DATA_SIZE
 void get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
 
-
 typedef struct get_next_val {
 	const uint8_t *data;
 	const fuzzy_log_location *locs;
@@ -330,6 +362,30 @@ typedef struct get_next_val {
 //!              they are maintained by the dag handle.
 //!
 get_next_val get_next2(DAGHandle *handle, size_t *data_size, size_t *locs_read);
+
+
+//! Tries to read a valid next node from the new nodes discovered with the latests
+//! snapshot.
+//! If there are no nodes ready data_read and locs_read will be set to 0
+//! If there are no such nodes remaining (i.e. all new nodes have been read)
+//! additionally the pointers in get_next_val will be NULL
+//!
+//! @param handle
+//!     The DAGHandle being worked through.
+//!
+//! @param[out] data_size
+//!     The size in bytes of the data that was read.
+//!
+//! @param[out] locs_read
+//!     The number of locations that the entry inhabited.
+//!
+//! @return
+//!     Pointers to the data and locations that were read,
+//!     or null if there are no nodes remaining in the snapshot
+//!     @warning do _not_ write to or free the data return by this function;
+//!              they are maintained by the dag handle.
+//!
+get_next_val async_get_next2(DAGHandle *handle, size_t *data_size, size_t *locs_read);
 
 //! Flush all appends that have already been completed.
 //!
@@ -390,6 +446,8 @@ write_locations wait_for_a_specific_append_and_locations(DAGHandle *handle, writ
 //!         or {.write_id = WRITE_ID_NIL, ...}
 //!         note that iff write_id is non nil
 //!         the field locs is malloc'd and should be free'd
+//!         if there was a non-recoverable IO error
+//!         {.write_id = WRITE_ID_NIL, .write_location = <server which had the error>}
 //!
 write_id_and_locs try_wait_for_any_append_and_location(DAGHandle *handle);
 

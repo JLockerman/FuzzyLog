@@ -1,7 +1,7 @@
 macro_rules! counters {
     (struct $name:ident { $($field:ident: $typ:tt),* $(,)* }) => {
         #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-        struct $name {
+        pub struct $name {
             $(#[cfg(feature = "print_stats")] $field: $typ),*
         }
 

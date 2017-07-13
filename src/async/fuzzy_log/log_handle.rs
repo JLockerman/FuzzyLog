@@ -1,4 +1,5 @@
 
+use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::net::SocketAddr;
@@ -8,17 +9,28 @@ use mio;
 
 use hash::HashMap;
 
-use async::fuzzy_log::{Message, ThreadLog};
+use async::fuzzy_log::{
+    self,
+    Message,
+    ThreadLog,
+    FinshedReadQueue,
+    FinshedReadRecv,
+    FinshedWriteQueue,
+    FinshedWriteRecv,
+};
 use async::fuzzy_log::FromClient::*;
 use packets::{
     entry,
-    Entry,
     EntryContents,
     OrderIndex,
     Uuid,
     Storeable,
+    UnStoreable,
     order,
-    bytes_as_entry_mut
+    bytes_as_entry,
+    data_to_slice,
+    slice_to_data,
+    EntryFlag,
 };
 
 pub struct LogHandle<V: ?Sized> {
@@ -26,17 +38,32 @@ pub struct LogHandle<V: ?Sized> {
     num_snapshots: usize,
     num_async_writes: usize,
     to_log: mpsc::Sender<Message>,
-    ready_reads: mpsc::Receiver<Vec<u8>>,
-    finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>,
+    ready_reads: FinshedReadRecv,
+    finished_writes: FinshedWriteRecv,
     //TODO finished_writes: ..
     curr_entry: Vec<u8>,
     last_seen_entries: HashMap<order, entry>,
+    num_errors: u64,
 }
 
 impl<V: ?Sized> Drop for LogHandle<V> {
     fn drop(&mut self) {
         let _ = self.to_log.send(Message::FromClient(Shutdown));
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GetRes {
+    NothingReady,
+    Done,
+    IoErr(io::ErrorKind, usize),
+    AlreadyGCd(order, entry),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TryWaitRes {
+    NothingReady,
+    IoErr(io::ErrorKind, usize),
 }
 
 impl<V> LogHandle<[V]>
@@ -102,8 +129,8 @@ where V: Storeable {
         fn run_log(
             to_store: mio::channel::Sender<Vec<u8>>,
             from_outside: mpsc::Receiver<Message>,
-            ready_reads_s: mpsc::Sender<Vec<u8>>,
-            finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+            ready_reads_s: FinshedReadQueue,
+            finished_writes_s: FinshedWriteQueue,
             interesting_chains: Vec<order>,
         ) {
             let log = ThreadLog::new(
@@ -135,7 +162,10 @@ where V: Storeable {
         let (to_log, from_outside) = mpsc::channel();
         let to_store = store_builder(to_log.clone());
         let (ready_reads_s, ready_reads_r) = mpsc::channel();
-        let interesting_chains: Vec<_> = interesting_chains.into_iter().collect();
+        let interesting_chains: Vec<_> = interesting_chains
+            .into_iter()
+            .inspect(|c| assert!(c != &0.into(), "Don't register interest in color 0."))
+            .collect();
         let (finished_writes_s, finished_writes_r) = mpsc::channel();
         ::std::thread::spawn(move || {
             ThreadLog::new(
@@ -229,6 +259,47 @@ where V: Storeable {
         LogHandle::with_store(interesting_chains, make_store)
     }
 
+    pub fn new_tcp_log_with_replication<S, C>(
+        chain_servers: S,
+        interesting_chains: C,
+    ) -> Self
+    where
+        S: IntoIterator<Item=(SocketAddr, SocketAddr)>,
+        C: IntoIterator<Item=order>,
+    {
+        use std::thread;
+        use std::sync::{Arc, Mutex};
+
+        let chain_servers: Vec<_> = chain_servers.into_iter().collect();
+        trace!("LogHandle for servers {:?}", chain_servers);
+
+        let make_store = |client| {
+            let to_store_m = Arc::new(Mutex::new(None));
+            let tsm = to_store_m.clone();
+            thread::spawn(move || {
+                let mut event_loop = mio::Poll::new().unwrap();
+                let (store, to_store) = ::async::store::AsyncTcpStore::replicated_new_tcp(
+                    chain_servers.into_iter(),
+                    client,
+                    &mut event_loop
+                ).expect("could not start store.");
+                *tsm.lock().unwrap() = Some(to_store);
+                store.run(event_loop);
+            });
+            let to_store;
+            loop {
+                let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
+                if let Some(s) = ts {
+                    to_store = s;
+                    break
+                }
+            }
+            to_store
+        };
+
+        LogHandle::with_store(interesting_chains, make_store)
+    }
+
     pub fn spawn_tcp_log<S, C>(
         lock_server: SocketAddr,
         chain_servers: S,
@@ -289,8 +360,8 @@ where V: Storeable {
         fn run_log(
             to_store: mio::channel::Sender<Vec<u8>>,
             from_outside: mpsc::Receiver<Message>,
-            ready_reads_s: mpsc::Sender<Vec<u8>>,
-            finished_writes_s: mpsc::Sender<(Uuid, Vec<OrderIndex>)>,
+            ready_reads_s: FinshedReadQueue,
+            finished_writes_s: FinshedWriteQueue,
             interesting_chains: Vec<order>,
         ) {
             let log = ThreadLog::new(
@@ -307,8 +378,8 @@ where V: Storeable {
 
     pub fn new(
         to_log: mpsc::Sender<Message>,
-        ready_reads: mpsc::Receiver<Vec<u8>>,
-        finished_writes: mpsc::Receiver<(Uuid, Vec<OrderIndex>)>
+        ready_reads: FinshedReadRecv,
+        finished_writes: FinshedWriteRecv,
     ) -> Self {
         LogHandle {
             to_log: to_log,
@@ -319,6 +390,7 @@ where V: Storeable {
             num_snapshots: 0,
             num_async_writes: 0,
             last_seen_entries: Default::default(),
+            num_errors: 0,
         }
     }
 
@@ -331,6 +403,7 @@ where V: Storeable {
     pub fn snapshot_colors(&mut self, colors: &[order]) {
         trace!("HANDLE send snap {:?}.", colors);
         let colors = colors.to_vec();
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
         self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
     }
 
@@ -342,15 +415,23 @@ where V: Storeable {
     }
 
     //TODO return two/three slices?
-    pub fn get_next(&mut self) -> Option<(&V, &[OrderIndex])> {
+    pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
+    where V: UnStoreable {
         if self.num_snapshots == 0 {
             trace!("HANDLE read with no snap.");
-            return None
+            return Err(GetRes::Done)
         }
 
         'recv: loop {
             //TODO use recv_timeout in real version
-            let old = mem::replace(&mut self.curr_entry, self.ready_reads.recv().unwrap());
+            let read = self.ready_reads.recv().unwrap();
+            let read = match read.map_err(|e| self.make_read_error(e)) {
+                Ok(v) => v,
+                //TODO Gc err
+                Err(Some(e)) => return Err(e),
+                Err(None) => continue 'recv,
+            };
+            let old = mem::replace(&mut self.curr_entry, read);
             if old.capacity() > 0 {
                 self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
             }
@@ -363,19 +444,70 @@ where V: Storeable {
             self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
             if self.num_snapshots == 0 {
                 trace!("HANDLE finished all snaps.");
-                return None
+                return Err(GetRes::Done)
             }
         }
 
         trace!("HANDLE got val.");
-        let (val, locs, _) = Entry::<V>::wrap_bytes(&self.curr_entry).val_locs_and_deps();
+        let (val, locs) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs())
+        };
         for &OrderIndex(o, i) in locs {
             let e = self.last_seen_entries.entry(o).or_insert(0.into());
             if *e < i {
                 *e = i
             }
         }
-        Some((val, locs))
+        Ok((val, locs))
+    }
+
+    pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
+    where V: UnStoreable {
+        if self.num_snapshots == 0 {
+            trace!("HANDLE read with no snap.");
+            return Err(GetRes::Done)
+        }
+
+        'recv: loop {
+            //TODO use recv_timeout in real version
+            let read = self.ready_reads.try_recv()
+                .or_else(|_| Err(GetRes::NothingReady))?;
+            let read = match read.map_err(|e| self.make_read_error(e)) {
+                Ok(v) => v,
+                //TODO Gc err
+                Err(Some(e)) => return Err(e),
+                Err(None) => continue 'recv,
+            };
+            let old = mem::replace(&mut self.curr_entry, read);
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
+            }
+            if self.curr_entry.len() != 0 {
+                break 'recv
+            }
+
+            trace!("HANDLE finished snap.");
+            assert!(self.num_snapshots > 0);
+            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+            if self.num_snapshots == 0 {
+                trace!("HANDLE finished all snaps.");
+                return Err(GetRes::Done)
+            }
+        }
+
+        trace!("HANDLE got val.");
+        let (val, locs) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs())
+        };
+        for &OrderIndex(o, i) in locs {
+            let e = self.last_seen_entries.entry(o).or_insert(0.into());
+            if *e < i {
+                *e = i
+            }
+        }
+        Ok((val, locs))
     }
 
     pub fn color_append(
@@ -384,7 +516,7 @@ where V: Storeable {
         inhabits: &mut [order],
         depends_on: &mut [order],
         async: bool,
-    ) -> Uuid {
+    ) -> (Uuid, Result<(), TryWaitRes>) {
         //TODO get rid of gratuitous copies
         assert!(inhabits.len() > 0);
         trace!("color append");
@@ -415,10 +547,12 @@ where V: Storeable {
             trace!("multi  append");
             self.async_multiappend(&*inhabits, data, &[])
         };
-        if !async {
-            self.wait_for_a_specific_append(id);
-        }
-        id
+        let res = if !async {
+            self.wait_for_a_specific_append(id).map(|_| ())
+        } else {
+            Ok(())
+        };
+        (id, res)
     }
 
     pub fn color_no_remote_append(
@@ -427,9 +561,9 @@ where V: Storeable {
         inhabits: &mut [order],
         deps: &mut [OrderIndex],
         async: bool,
-    ) -> (Uuid, Option<OrderIndex>) {
+    ) -> (Uuid, Result<OrderIndex, TryWaitRes>) {
         if inhabits.len() == 0 {
-            return (Uuid::nil(), None)
+            return (Uuid::nil(), Err(TryWaitRes::NothingReady))
         }
 
         inhabits.sort();
@@ -442,7 +576,7 @@ where V: Storeable {
         } else {
             self.async_no_remote_multiappend(inhabits, data, deps)
         };
-        let mut loc = None;
+        let mut loc = Err(TryWaitRes::NothingReady);
         if !async {
             loc = self.wait_for_a_specific_append(id).map(|v| v[0]);
         }
@@ -504,7 +638,7 @@ where V: Storeable {
 
         for o in happens_after {
             let horizon = self.last_seen_entries.get(o).cloned().unwrap_or(0.into());
-            if horizon > entry::from(0) {
+            if horizon > entry::from(0) && inhabits.binary_search(o).is_err() {
                 happens_after_entries.push(OrderIndex(*o, horizon));
             }
         }
@@ -512,77 +646,101 @@ where V: Storeable {
         self.causal_color_append(data, inhabits, &mut [], &mut happens_after_entries)
     }
 
-    pub fn wait_for_all_appends(&mut self) {
+    pub fn wait_for_all_appends(&mut self) -> Result<(), TryWaitRes> {
         trace!("HANDLE waiting for {} appends", self.num_async_writes);
-        for i in 0..self.num_async_writes {
-            //TODO return buffers here and cache them?
-            self.recv_write().unwrap();
-            trace!("HANDLE got {}", i);
+        for _ in 0..self.num_async_writes {
+            self.wait_for_any_append()?;
         }
-        trace!("HANDLE got all appends");
-        self.num_async_writes = 0;
+        Ok(())
     }
 
-    pub fn wait_for_a_specific_append(&mut self, write_id: Uuid) -> Option<Vec<OrderIndex>> {
+    pub fn wait_for_a_specific_append(&mut self, write_id: Uuid)
+    -> Result<Vec<OrderIndex>, TryWaitRes> {
         for _ in 0..self.num_async_writes {
-            //TODO return buffers here and cache them?
-            let (id, locs) = self.recv_write().unwrap();
-            self.num_async_writes -= 1;
+            let (id, locs) = self.wait_for_any_append()?;
             if id == write_id {
-                return Some(locs)
+                return Ok(locs)
             }
         }
-        return None
+        Err(TryWaitRes::NothingReady)
     }
 
-    pub fn wait_for_any_append(&mut self) -> Option<(Uuid, Vec<OrderIndex>)> {
+    pub fn wait_for_any_append(&mut self) -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
+        //FIXME need to know the number of lost writes so we don't freeze?
         if self.num_async_writes > 0 {
-            self.num_async_writes -= 1;
             //TODO return buffers here and cache them?
-            return Some(self.recv_write().unwrap())
+            loop {
+                let res = self.recv_write().unwrap();
+                match res {
+                    Ok(write) => {
+                        self.num_async_writes -= 1;
+                        return Ok(write)
+                    },
+                    Err(err) => if let Some(err) = self.to_wait_error(err) {
+                        return Err(err)
+                    },
+                }
+            }
         }
-        None
+        Err(TryWaitRes::NothingReady)
     }
 
-    pub fn try_wait_for_any_append(&mut self) -> Option<(Uuid, Vec<OrderIndex>)> {
+    pub fn try_wait_for_any_append(&mut self)
+    -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
         if self.num_async_writes > 0 {
-            let ret = self.finished_writes.try_recv().ok();
-            ret.as_ref().map(|&(ref id, ref locs)| {
+            let ret = self.finished_writes.try_recv()
+                .or_else(|_| Err(TryWaitRes::NothingReady))
+                .and_then(|res| res.map_err(|err|
+                    match self.to_wait_error(err) {
+                        Some(err) => err,
+                        None => TryWaitRes::NothingReady,
+                    }
+                ));
+            if let Ok(&(_, ref locs)) = ret.as_ref() {
+                self.num_async_writes -= 1;
                 for &OrderIndex(o, i) in locs {
                     let e = self.last_seen_entries.entry(o).or_insert(0.into());
                     if *e < i {
                         *e = i
                     }
                 }
-                (id, locs)
-            });
-            if ret.is_some() {
-                self.num_async_writes -= 1;
             }
             //TODO return buffers here and cache them?
             ret
         } else {
-            None
+            Err(TryWaitRes::NothingReady)
         }
     }
 
-    pub fn flush_completed_appends(&mut self) {
+    pub fn flush_completed_appends(&mut self) -> Result<(), (io::ErrorKind, usize)> {
         if self.num_async_writes > 0 {
             let last_seen_entries = &mut self.last_seen_entries;
-            self.num_async_writes -= self.finished_writes.try_iter().map(
-            |(id, locs)| {
-                for &OrderIndex(o, i) in &locs {
-                    let e = last_seen_entries.entry(o).or_insert(0.into());
-                    if *e < i {
-                        *e = i
-                    }
+            for res in self.finished_writes.try_iter() {
+                match res {
+                    Ok((_, locs)) => {
+                        self.num_async_writes -= 1;
+                        for &OrderIndex(o, i) in &locs {
+                            let e = last_seen_entries.entry(o).or_insert(0.into());
+                            if *e < i {
+                                *e = i
+                            }
+                        }
+                    },
+                    Err(fuzzy_log::Error{server, error_num, error}) =>
+                        if self.num_errors < error_num {
+                            assert!(self.num_errors + 1 == error_num);
+                            self.num_errors += 1;
+                            return Err((error, server))
+                        },
                 }
-            }).count();
+            }
         }
+        Ok(())
     }
 
-    fn recv_write(&mut self) -> Result<(Uuid, Vec<OrderIndex>), ::std::sync::mpsc::RecvError> {
-        self.finished_writes.recv().map(|(id, locs)| {
+    fn recv_write(&mut self)
+    -> Result<Result<(Uuid, Vec<OrderIndex>), fuzzy_log::Error>, ::std::sync::mpsc::RecvError> {
+        self.finished_writes.recv().map(|res| res.map(|(id, locs)| {
             for &OrderIndex(o, i) in &locs {
                 let e = self.last_seen_entries.entry(o).or_insert(0.into());
                 if *e < i {
@@ -590,7 +748,7 @@ where V: Storeable {
                 }
             }
             (id, locs)
-        })
+        }))
     }
 
     //TODO add wait_and_snapshot(..)
@@ -604,14 +762,15 @@ where V: Storeable {
 
     pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
         //TODO no-alloc?
-        let mut buffer = EntryContents::Data(data, &deps).clone_bytes();
         let id = Uuid::new_v4();
-        {
-            //TODO I should make a better entry builder
-            let e = bytes_as_entry_mut(&mut buffer);
-            e.id = id;
-            e.locs_mut()[0] = OrderIndex(chain, 0.into());
-        }
+        let mut buffer = Vec::new();
+        EntryContents::Single {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            loc: &OrderIndex(chain, 0.into()),
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
@@ -632,12 +791,15 @@ where V: Storeable {
         locs.sort();
         locs.dedup();
         let id = Uuid::new_v4();
-        let buffer = EntryContents::Multiput {
-            data: data,
-            uuid: &id,
-            columns: &locs,
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &locs,
             deps: deps,
-        }.clone_bytes();
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
@@ -653,20 +815,21 @@ where V: Storeable {
 
     pub fn async_no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
     -> Uuid {
-        use packets::EntryKind::NoRemote;
         //TODO no-alloc?
         assert!(chains.len() > 1);
         let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
         locs.sort();
         locs.dedup();
         let id = Uuid::new_v4();
-        let mut buffer = EntryContents::Multiput {
-            data: data,
-            uuid: &id,
-            columns: &locs,
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::NoRemote,
+            lock: &0,
+            locs: &locs,
             deps: deps,
-        }.clone_bytes();
-        Entry::<V>::wrap_bytes_mut(&mut buffer).kind.insert(NoRemote);
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
@@ -710,14 +873,39 @@ where V: Storeable {
         debug_assert!(mchains[(chains.len() + 1)..]
             .iter().all(|&OrderIndex(o, _)| depends_on.contains(&o)));
         let id = Uuid::new_v4();
-        let buffer = EntryContents::Multiput {
-            data: data,
-            uuid: &id,
-            columns: &mchains,
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &mchains,
             deps: deps,
-        }.clone_bytes();
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
         id
+    }
+
+    fn to_wait_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
+    -> Option<TryWaitRes> {
+        if self.num_errors < error_num {
+            assert!(self.num_errors + 1 == error_num);
+            self.num_errors += 1;
+            Some(TryWaitRes::IoErr(error, server))
+        } else {
+            None
+        }
+    }
+
+    fn make_read_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
+    -> Option<GetRes> {
+        if self.num_errors < error_num {
+            assert!(self.num_errors + 1 == error_num);
+            self.num_errors += 1;
+            Some(GetRes::IoErr(error, server))
+        } else {
+            None
+        }
     }
 }
