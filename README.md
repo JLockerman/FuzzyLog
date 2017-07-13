@@ -6,7 +6,7 @@ _This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAwar
 [![Build Status](https://travis-ci.com/ProjectDelos/delos-rust.svg?token=RaEyYb9eyzdWqhSpjYxi&branch=mahesh_look_at_this)](https://travis-ci.com/ProjectDelos/delos-rust)
 
 This repository contains the unified code for the clients and servers for the
-Fuzzy Log project; and experiment in partially ordered SMR.
+FuzzyLog project; and experiment in partially ordered SMR.
 
 ## To Build
 Download and install [rust](https://www.rust-lang.org) (easiest way is `curl https://sh.rustup.rs -sSf | sh`).  
@@ -20,7 +20,7 @@ as it needs to download dependencies.
 
 ## Servers
 
-A CLI binding for starting Fuzzy Log servers can be found in [servers/tcp_server](servers/tcp_server).
+A CLI binding for starting FuzzyLog servers can be found in [servers/tcp_server](servers/tcp_server).
 
 ## C Bindings
 
@@ -29,8 +29,8 @@ in [examples/c_linking](examples/c_linking).
 Examples and build instructions for C applications can be found that directory.
 
 ## Directory Outline
-[src](src) fuzzy log library  
+[src](src) FuzzyLog library  
 [examples](examples) sample code which uses the client library to perform vaious tasks of note is  
-[examples/c_linking](examples/c_linking) shows how to use the C API to interface with the fuzzy log client library  
-[servers/tcp_server](servers/tcp_server) a TCP based fuzzy log sever  
+[examples/c_linking](examples/c_linking) shows how to use the C API to interface with the FuzzyLog client library  
+[servers/tcp_server](servers/tcp_server) a TCP based FuzzyLog sever  
 [clients](clients) varous DPDK based clients for use in testing (obsolescent)  

@@ -1,5 +1,5 @@
 # Map Example
-This example demonstrates using the fuzzy log to create
+This example demonstrates using the FuzzyLog to create
 a simple map.  
 
 It can be run with
