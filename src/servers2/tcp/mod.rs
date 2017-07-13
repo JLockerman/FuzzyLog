@@ -649,7 +649,7 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(False)]
 mod tests {
     extern crate env_logger;
 
