@@ -9,7 +9,7 @@ use std::rc::Rc;
 use packets::*;
 use buffer2::Buffer;
 
-use hash::{HashMap, HashSet};
+use hash::{HashMap, HashSet, UuidHashMap};
 use socket_addr::Ipv4SocketAddr;
 
 use mio;
@@ -31,7 +31,8 @@ pub trait AsyncStoreClient {
 pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     servers: Vec<PerServer<Socket>>,
     awake_io: VecDeque<usize>,
-    sent_writes: HashMap<Uuid, WriteState>,
+    // sent_writes: HashMap<Uuid, WriteState>,
+    sent_writes: UuidHashMap<WriteState>,
     //sent_reads: HashMap<OrderIndex, Vec<u8>>,
     sent_reads: HashMap<OrderIndex, u16>,
     waiting_buffers: VecDeque<Vec<u8>>,
@@ -1128,6 +1129,7 @@ where PerServer<S>: Connected,
             }
         }
         else {
+            // panic!("{:?}", packet.contents());
             trace!("CLIENT no write for {:?}", token);
             return true
         }
@@ -1195,6 +1197,7 @@ where PerServer<S>: Connected,
                 self.finished = true
             }
         }
+        assert!(was_needed || my_write);
         was_needed
     }
 
