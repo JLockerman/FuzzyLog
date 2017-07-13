@@ -25,4 +25,4 @@ to run 3 servers in in a group on ports `8193`, `8194`, and `3333` respectively 
     
 to run a server on port `5432` with only 1 worker thread (the minimum)
 
-    cargo run --release -- 3333 -w 2:3
+    cargo run --release -- 5432 -w 1
