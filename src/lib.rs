@@ -684,9 +684,6 @@ pub mod c_binidings {
     pub extern "C" fn start_servers_from_config(file_name: *const c_char) {
         assert!(file_name != ptr::null());
         let (lock_server_addr, chain_server_addrs, _) = read_config_file(file_name);
-        if chain_server_addrs.len() > 1 && lock_server_addr.is_none() {
-            panic!("Must provide a lock server if there are multiple chain servers")
-        }
         if let Some(addr) = lock_server_addr {
             let addr = CString::new(addr).unwrap();
             start_fuzzy_log_server_thread_from_group(addr.into_raw(), 0, 1);
