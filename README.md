@@ -1,5 +1,7 @@
 # delos-rust
 
+[![Build Status](https://travis-ci.com/ProjectDelos/delos-rust.svg?token=RaEyYb9eyzdWqhSpjYxi&branch=mahesh_look_at_this)](https://travis-ci.com/ProjectDelos/delos-rust)
+
 This repository contains the unified code for the clients and servers for the
 Fuzzy Log project; and experiment in partially ordered SMR.
 
@@ -24,13 +26,11 @@ in [examples/c_linking](examples/c_linking).
 Examples and build instructions for C applications can be found that directory.
 
 ## Directory Outline
-[src](src) fuzzy log client library  
+[src](src) fuzzy log library  
 [example](examples)` sample code which uses the client library to perform vaious tasks of note is  
 [examples/c_linking](examples/c_linking) shows how to use the C API to interface with the fuzzy log client library  
 [servers](servers) various servers which the client library can run against including  
 [servers/tcp_server](servers/tcp_server) a TCP based sever  
 [clients](clients) varous DPDK based clients for use in testing (largely obsolescent)  
 
-[![Build Status](https://travis-ci.com/ProjectDelos/delos-rust.svg?token=RaEyYb9eyzdWqhSpjYxi&branch=mahesh_look_at_this)](https://travis-ci.com/ProjectDelos/delos-rust)
-
-This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAward?AWD_ID=1637385)
+_This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAward?AWD_ID=1637385)_
