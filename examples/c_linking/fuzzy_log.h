@@ -1,11 +1,11 @@
+
+//! This file contains C bindings to the fuzzy log client and server.
+
 #ifndef FUZZY_LOG_HEADER
 #define FUZZY_LOG_HEADER 1
 
 #include <stdint.h>
 
-
-//// Colour API sketch
-//TODO where does the best effort flag go?
 #define DELOS_MAX_DATA_SIZE 8000
 typedef uint32_t ColorID;
 typedef uint32_t LocationInColor;
@@ -18,6 +18,7 @@ struct colors
 	ColorID *mycolors;
 };
 
+//! The fuzzy log client
 typedef struct DAGHandle DAGHandle;
 
 typedef struct write_id {
@@ -42,6 +43,9 @@ typedef struct write_id_and_locs {
 
 static write_id WRITE_ID_NIL = {.p1 = 0, .p2 = 0};
 
+//! @deprecated it is recommended that new_dag_handle_with_skeens()
+//!             or new_dag_handle_with_replication() be used instead
+//!
 //! Creates a new DAGHandle for a server group.
 //!
 //! @param lock_server_ip
@@ -98,7 +102,6 @@ DAGHandle *new_dag_handle_from_config(const char *config_filename,
 //! Creates a new DAGHandle for a replicated server group
 //! which uses the skeens based multiappend protocol.
 //!
-//!
 //! @param num_chain_servers
 //!     The number of chain servers in the server group.
 //!
@@ -131,9 +134,9 @@ write_id do_append(DAGHandle *handle, char *data, size_t data_size,
 	struct colors* inhabits, struct colors* depends_on, uint8_t async);
 
 
-//! Appends a new node to the dag.
+//! Appends a new node to the dag, and waits for it to complete.
 //!
-//! \warning This function will flush some pending async appends.
+//! @warning This function will flush some pending async appends.
 //!          If you wish to wait for a specific write_id call wait_for_append()
 //!          before this function.
 //!
@@ -313,6 +316,10 @@ write_id async_simple_causal_append(
 //! snapshot. If there are no such nodes (i.e. all new nodes have been read)
 //! data_read and inhabits_out->numcolors will be set to 0.
 //!
+//! @warning this function assumes at most DELOS_MAX_DATA_SIZE bytes are returned
+//!          if you might return more than DELOS_MAX_DATA_SIZE bytes use
+//!          get_next2() instead
+//!
 //! @param handle
 //!     The DAGHandle being worked through.
 //!
@@ -333,9 +340,6 @@ write_id async_simple_causal_append(
 //!     inhabits_out->mycolors will be in an undefined state and
 //!     _must not be read_.
 //!
-//NOTE we need either a way to specify data size, or to pass out a pointer
-// this version simple assumes that no data+metadat passed in or out will be
-// greater than DELOS_MAX_DATA_SIZE
 void get_next(DAGHandle *handle, char *data_out, size_t *data_read, struct colors* inhabits_out);
 
 typedef struct get_next_val {
@@ -454,9 +458,6 @@ write_id_and_locs try_wait_for_any_append_and_location(DAGHandle *handle);
 //! If there is no unread updates attempts to take a snapshot of the interesting
 //! colors
 //!
-// NOTE currently a nop if there are buffered nodes waiting to be read,
-//  eventually this will change to start prefetching even if there are still
-//  unread data
 void snapshot(DAGHandle *handle);
 
 //! Take a snapshot of the supplied colors
@@ -530,6 +531,8 @@ void start_servers_from_config(const char *config_filename);
 //    Old fuzzy log C bindings    //
 ////////////////////////////////////
 
+// These are all deprecated and should not be used
+
 struct FuzzyLog;
 
 typedef struct ChainAndEntry {
@@ -539,17 +542,21 @@ typedef struct ChainAndEntry {
 
 typedef uint8_t (*fuzzy_log_callback)(const uint8_t *, uint16_t);
 
+//! @deprecated
 struct FuzzyLog *fuzzy_log_new(const char * server_addr,
 		const uint32_t *relevent_chains, uint16_t num_relevent_chains, fuzzy_log_callback callback);
 
+//! @deprecated
 ChainAndEntry fuzzy_log_append(struct FuzzyLog *log, uint32_t chain,
 		const uint8_t *val, uint16_t len,
 		const ChainAndEntry* deps, uint16_t num_deps);
 
+//! @deprecated
 void fuzzy_log_multiappend(struct FuzzyLog *log, uint32_t *chain, uint16_t num_chains,
 		const uint8_t *val, uint16_t len,
 		const ChainAndEntry* deps, uint16_t num_deps);
 
+//! @deprecated
 ChainAndEntry fuzzy_log_play_forward(struct FuzzyLog *log, uint32_t *chain);
 
 #endif
