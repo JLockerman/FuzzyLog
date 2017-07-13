@@ -9,7 +9,7 @@ To run use
 
     cargo run --release -- <server port> [-ig | --in-group <server num>:<num servers in group>] [--workers <num worker threads>] [-up | --upstream <ip addr>:<port>] [-dwn | --downstream <ip addr>]
 
-it will accept requests for any IP address on port <server port>.  
+it will accept requests for any IP address on port `<server port>`.  
 By default the server will start up a number of worker threads
 such that the server is running 1 thread per core.  
 Fuzzy Log servers use chain replication for reliability. Each server
