@@ -26,7 +26,8 @@ mod range_tree;
 #[cfg(test)]
 mod tests;
 
-const MAX_PREFETCH: u32 = 40;
+// const MAX_PREFETCH: u32 = 40;
+const MAX_PREFETCH: u32 = 1;
 
 type ChainEntry = Rc<Vec<u8>>;
 
@@ -691,6 +692,10 @@ impl ThreadLog {
                 let pc = &self.per_chains[&read_loc.0];
                 //FIXME I'm not sure if this is right
                 if !pc.is_within_snapshot(read_loc.1) {
+                    if bytes_as_entry(&mut msg).locs().iter()
+                        .all(|&OrderIndex(o, i)| o == order::from(0) || i != entry::from(0)) {
+                        return MultiSearch::Finished(msg)
+                    }
                     trace!("FUZZY read multi too early @ {:?}", read_loc);
                     return MultiSearch::BeyondHorizon(msg)
                 }
@@ -712,20 +717,24 @@ impl ThreadLog {
                 }
 
                 trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
-                let early_sentinel = self.fetch_multi_parts(&id, o, *i, is_multi_server);
-                if let Some(loc) = early_sentinel {
-                    trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
-                    assert!(loc != entry::from(0));
-                    *i = loc;
-                } else if *i != entry::from(0) {
-                    trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
-                    //TODO don't mark as skippable once opt version is done
-                    if is_sentinel {
-                        self.per_chains.get_mut(&o)
-                            .map(|pc| pc.mark_as_skippable(*i));
-                    }
+                if self.per_chains.get(&o).is_none() {
+                    continue
                 } else {
-                    finished = false
+                    let early_sentinel = self.fetch_multi_parts(&id, o, *i, is_multi_server);
+                    if let Some(loc) = early_sentinel {
+                        trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
+                        assert!(loc != entry::from(0));
+                        *i = loc;
+                    } else if *i != entry::from(0) {
+                        trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
+                        //TODO don't mark as skippable once opt version is done
+                        if is_sentinel {
+                            self.per_chains.get_mut(&o)
+                                .map(|pc| pc.mark_as_skippable(*i));
+                        }
+                    } else {
+                        finished = false
+                    }
                 }
             }
 
@@ -834,7 +843,8 @@ impl ThreadLog {
         //TODO argh, no-alloc
         let (unblocked, early_sentinel) = {
             let pc = self.per_chains.entry(chain)
-                .or_insert_with(|| PerColor::new(chain)); //FIXME
+                .or_insert_with(|| panic!()); //FIXME
+                //.or_insert_with(|| PerColor::new(chain)); //FIXME
 
             let early_sentinel = pc.take_early_sentinel(&id);
             let potential_new_horizon = match early_sentinel {
@@ -879,7 +889,15 @@ impl ThreadLog {
     fn continue_fetch_if_needed(&mut self, chain: order) -> bool {
         //TODO num_to_fetch
         let (num_to_fetch, unblocked) = {
-            let pc = self.per_chains.entry(chain).or_insert_with(|| PerColor::new(chain));
+            let pc = match self.per_chains.entry(chain) {
+                hash_map::Entry::Occupied(o) => o.into_mut(),
+                hash_map::Entry::Vacant(v) => if false {
+                    //FIXME flag to fetch uninteresting chains
+                    v.insert(PerColor::new(chain))
+                } else {
+                    return true
+                },
+            };
             let to_fetch = pc.next_range_to_fetch();
             //TODO should fetch == number of multis searching for
             match to_fetch {

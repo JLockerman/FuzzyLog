@@ -58,6 +58,7 @@ pub mod socket_addr;
 pub mod buffer;
 pub mod buffer2;
 mod vec_deque_map;
+mod range_tree;
 
 pub mod c_binidings {
 

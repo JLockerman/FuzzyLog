@@ -67,7 +67,7 @@ pub enum NextToFetch {
 }
 
 impl PerColor {
-    pub fn new(chain: order) -> Self {
+    fn __new(chain: order) -> Self {
         PerColor {
             chain: chain,
             last_snapshot: 0.into(),
@@ -81,8 +81,12 @@ impl PerColor {
         }
     }
 
+    pub fn new(chain: order) -> Self {
+        Self::__new(chain)
+    }
+
     pub fn interesting(chain: order) -> Self {
-        let mut s = Self::new(chain);
+        let mut s = Self::__new(chain);
         s.is_interesting = true;
         s
     }
