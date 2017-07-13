@@ -37,9 +37,15 @@ mod map {
     pub struct Map<K, V, F>
     where K: Hash + Eq + Copy, V: Copy,
           F: Fn(&K) -> order {
+
+        // The Map contains a handle for the fuzzy log (to enable the map to perform IO)
         log: LogHandle<MapEntry<K, V>>,
+
+        // a local view to allow the the map materializing the logs' state
         local_view: HashMap<K, V>,
-        key_to_column: F,
+
+        // and a partition function, determining which key goes where.
+        key_to_chain: F,
     }
 
     impl<K: 'static, V: 'static, F>
@@ -48,13 +54,13 @@ mod map {
           V: Copy,
           F: Fn(&K) -> order, {
 
-        pub fn new(addr: SocketAddr, interesting_columns: Range<u32>, key_to_column: F) -> Self {
+        pub fn new(addr: SocketAddr, interesting_columns: Range<u32>, key_to_chain: F) -> Self {
             Map {
                 log: LogHandle::new_tcp_log(
                     iter::once(addr), interesting_columns.map(order::from),
                 ),
                 local_view: Default::default(),
-                key_to_column: key_to_column
+                key_to_chain: key_to_chain
             }
         }
 
@@ -66,20 +72,43 @@ mod map {
           F: Fn(&K) -> order, {
 
         pub fn put(&mut self, key: K, val: V) {
-            self.log.append((self.key_to_column)(&key), &MapEntry(key, val), &[]);
+            // To insert an entry into the map we simply append the mutation to the log
+            // and wait for the append to be completed.
+            self.log.append((self.key_to_chain)(&key), &MapEntry(key, val), &[]);
+            // Since this API doesn't return a value, we don't need to play the log.
         }
 
         pub fn get(&mut self, key: K) -> Option<V> {
-            self.log.snapshot((self.key_to_column)(&key));
+            // To read a value from the map, we first take a snapshot of the relevant chain
+            self.log.snapshot((self.key_to_chain)(&key));
+
+            // then apply all the entries to the local view
             while let Ok((&MapEntry(k, v), _)) = self.log.get_next() {
                 self.local_view.insert(k, v);
             }
+
+            // after which we have a consistent snapshot of a key,
+            // and can return the value
             self.local_view.get(&key).cloned()
+
+            // If we wished to perform more complicated queries,
+            // for example a multi-key read,
+            // we may need to use a stronger snapshot over multiple chains,
+            // or store more edges in the log so that such a snapshot is unnecessary.
+            // This API is simple enough that it's not needed.
         }
 
         pub fn get_cached(&mut self, key: &K) -> Option<V> {
+            // We can also return query results based on our cached copy of the
+            // datatstructure.
+            // This is much faster, but not linearizable.
             self.local_view.get(key).cloned()
         }
+
+        // In a more realistic setting we would most likely wish to perform
+        // multiple queries at a time using the LogHandle's async_* APIs,
+        // and would take more care serializing and deserializing our data
+        // instead of just sending it raw.
     }
 
     impl<K, V, F> Debug for Map<K, V, F>
