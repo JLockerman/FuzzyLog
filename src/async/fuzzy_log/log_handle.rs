@@ -69,7 +69,7 @@ pub enum TryWaitRes {
 impl<V> LogHandle<[V]>
 where V: Storeable {
 
-    //FIXME this should be unnecessary
+    #[deprecated]
     pub fn spawn_tcp_log2<S, C>(
         lock_server: SocketAddr,
         chain_servers: S,
@@ -179,6 +179,7 @@ where V: Storeable {
         LogHandle::new(to_log, ready_reads_r, finished_writes_r)
     }
 
+    #[deprecated]
     pub fn tcp_log_with_replication<S, C>(
         lock_server: Option<SocketAddr>,
         chain_servers: S,
@@ -219,6 +220,8 @@ where V: Storeable {
         LogHandle::with_store(interesting_chains, make_store)
     }
 
+    /// Spawns a `LogHandle` which connects to TCP servers located at `chain_servers`
+    /// which reads chains `interesting_chains`.
     pub fn new_tcp_log<S, C>(
         chain_servers: S,
         interesting_chains: C
@@ -259,6 +262,9 @@ where V: Storeable {
         LogHandle::with_store(interesting_chains, make_store)
     }
 
+    /// Spawns a `LogHandle` which connects to replicated TCP servers
+    /// whose (head, tail) addresses are `chain_servers`
+    /// which reads chains `interesting_chains`.
     pub fn new_tcp_log_with_replication<S, C>(
         chain_servers: S,
         interesting_chains: C,
@@ -300,6 +306,7 @@ where V: Storeable {
         LogHandle::with_store(interesting_chains, make_store)
     }
 
+    #[deprecated]
     pub fn spawn_tcp_log<S, C>(
         lock_server: SocketAddr,
         chain_servers: S,
@@ -394,12 +401,14 @@ where V: Storeable {
         }
     }
 
+    /// Take a snapshot of a supplied interesting color and start prefetching.
     pub fn snapshot(&mut self, chain: order) {
         self.num_snapshots = self.num_snapshots.saturating_add(1);
         self.to_log.send(Message::FromClient(SnapshotAndPrefetch(chain)))
             .unwrap();
     }
 
+    /// Take a snapshot of a set of interesting colors and start prefetching.
     pub fn snapshot_colors(&mut self, colors: &[order]) {
         trace!("HANDLE send snap {:?}.", colors);
         let colors = colors.to_vec();
@@ -407,6 +416,7 @@ where V: Storeable {
         self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
     }
 
+    /// Take a snapshot of all interesting colors and start prefetching.
     pub fn take_snapshot(&mut self) {
         trace!("HANDLE send all snap.");
         self.num_snapshots = self.num_snapshots.saturating_add(1);
@@ -414,7 +424,7 @@ where V: Storeable {
             .unwrap();
     }
 
-    //TODO return two/three slices?
+    /// Wait until an event is ready, then returns the contents.
     pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {
         if self.num_snapshots == 0 {
@@ -462,6 +472,7 @@ where V: Storeable {
         Ok((val, locs))
     }
 
+    /// Returns an event if one is ready.
     pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {
         if self.num_snapshots == 0 {

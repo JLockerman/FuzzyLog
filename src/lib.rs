@@ -1,3 +1,9 @@
+/*!
+
+This crate contains a combined version of the fuzzy log client and server code.
+
+*/
+
 //#![cfg_attr(test, feature(test))]
 #![allow(deprecated)]
 #![allow(unused_imports)]
@@ -43,21 +49,24 @@ extern crate lazycell;
 extern crate env_logger;
 extern crate evmap;
 
-//FIXME only needed until repeated multiput returns is fixed
-extern crate linked_hash_map;
-
-pub use async::fuzzy_log::log_handle::LogHandle;
+/// The fuzzy log client.
 pub use packets::{order, entry, OrderIndex};
+
+/// The fuzzy log client.
+pub use async::fuzzy_log::log_handle::LogHandle;
 
 #[macro_use] mod counter_macro;
 
 #[macro_use]
 mod general_tests;
 
+/// The asynchronous version of the fuzzy log client.
+pub mod async;
 pub mod storeables;
 pub mod packets;
+
+/// Libraries to assist in the creation of fuzzy log servers.
 pub mod servers2;
-pub mod async;
 mod hash;
 mod socket_addr;
 //TODO only for testing, should be private
@@ -65,6 +74,26 @@ mod buffer;
 mod buffer2;
 mod vec_deque_map;
 
+/// Start a fuzzy log TCP server.
+///
+/// This function takes over the current thread and never returns.
+/// It will spawn at least two additional threads, one to perform ordering and
+/// at least one worker.
+///
+/// # Args
+///  * `addr` the address on which the server should accept connection.
+///  * `server_num` the the number which this server is in it's server group
+///                 must be in `0..group_size`.
+///  * `group_size` the number of servers in this servers server-group,
+///                 must be at least 1.
+///  * `prev_server` the server which precedes this one in the replication chain,
+///                  if it exists.
+///  * `next_server` the server which comes after this one in the replication chain,
+///                  if it exists.
+///  * `num_worker_threads` the number of workers that should be spawned,
+///                         must be at least 1.
+///  * `started` an atomic counter which will be incremented once the server starts.
+///
 pub fn run_server(
     addr: std::net::SocketAddr,
     server_num: u32,
