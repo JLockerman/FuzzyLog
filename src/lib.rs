@@ -4,34 +4,13 @@ This crate contains a combined version of the fuzzy log client and server code.
 
 */
 
-//#![cfg_attr(test, feature(test))]
-#![allow(deprecated)]
-#![allow(unused_imports)]
-#![allow(non_camel_case_types)]
-#![allow(unused_variables)]
-#![allow(unused_must_use)]
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(unused_unsafe)]
-#![allow(dead_code)]
-#![allow(non_upper_case_globals)]
-
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate custom_derive;
-// #[cfg(test)] #[macro_use] extern crate grabbag_macros;
 #[macro_use] extern crate log;
 #[macro_use] extern crate newtype_derive;
 #[macro_use] extern crate packet_macro_impl;
 #[macro_use] extern crate packet_macro2;
-
-#[cfg(feature = "dynamodb_tests")]
-extern crate hyper;
-#[cfg(feature = "dynamodb_tests")]
-extern crate rusoto;
-
-//#[cfg(test)]
-//extern crate test;
 
 extern crate bit_set;
 extern crate byteorder;
