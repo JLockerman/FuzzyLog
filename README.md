@@ -27,3 +27,5 @@ Examples and build instructions for C applications can be found there
 [clients](clients) varous DPDK based clients for use in testing (largely obsolescent)  
 
 [![Build Status](https://travis-ci.com/ProjectDelos/delos-rust.svg?token=RaEyYb9eyzdWqhSpjYxi&branch=mahesh_look_at_this)](https://travis-ci.com/ProjectDelos/delos-rust)
+
+This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAward?AWD_ID=1637385)
