@@ -1,3 +1,6 @@
+_This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAward?AWD_ID=1637385). Any opinions, findings, and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the National Science Foundation._
+
+
 # delos-rust
 
 [![Build Status](https://travis-ci.com/ProjectDelos/delos-rust.svg?token=RaEyYb9eyzdWqhSpjYxi&branch=mahesh_look_at_this)](https://travis-ci.com/ProjectDelos/delos-rust)
@@ -31,5 +34,3 @@ Examples and build instructions for C applications can be found that directory.
 [examples/c_linking](examples/c_linking) shows how to use the C API to interface with the fuzzy log client library  
 [servers/tcp_server](servers/tcp_server) a TCP based fuzzy log sever  
 [clients](clients) varous DPDK based clients for use in testing (obsolescent)  
-
-_This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAward?AWD_ID=1637385)_
