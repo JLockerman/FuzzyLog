@@ -83,9 +83,9 @@ pub fn main() {
 
 const USAGE: &'static str =
 "Usage:
-\ttcp_server <port number> [-w | --workers <num worker threads>]
-\ttcp_server (-ls | --lock-server) [-w | --workers <num worker threads>]
-\ttcp_server (-ig | --in-group <server num>:<num servers in group>) [--workers <num worker threads>]
+\ttcp_server <port number> [-w | --workers <num worker threads>] [-up | --upstream <ip addr>:<port>] [-dwn | --downstream <ip addr>]
+\ttcp_server (-ls | --lock-server) [-w | --workers <num worker threads>] [-up | --upstream <ip addr>:<port>] [-dwn | --downstream <ip addr>]
+\ttcp_server (-ig | --in-group <server num>:<num servers in group>) [--workers <num worker threads>] [-up | --upstream <ip addr>:<port>] [-dwn | --downstream <ip addr>]
 
 can also be run with 'cargo run --release -- <args>...'";
 
