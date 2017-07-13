@@ -11,7 +11,7 @@ as it needs to download dependencies.
 
 ## Servers
 
-A CLI interface for starting Fuzzy Log servers can be found in [servers/tcp_server].
+A CLI binding for starting Fuzzy Log servers can be found in [servers/tcp_server].
 
 ## C Bindings
 
