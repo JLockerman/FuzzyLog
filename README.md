@@ -6,7 +6,7 @@ This repository contains the unified code for the clients and servers for the
 Fuzzy Log project; and experiment in partially ordered SMR.
 
 ## To Build
-Download and install [Rust](https://www.rust-lang.org) (easiest way is `curl https://sh.rustup.rs -sSf | sh`).  
+Download and install [rust](https://www.rust-lang.org) (easiest way is `curl https://sh.rustup.rs -sSf | sh`).  
 Clone this repository.  
 To run local tests
 
