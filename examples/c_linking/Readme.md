@@ -37,6 +37,6 @@ If you wish to run your code on mac you must first replace
 `LINK_FLAGS` with `MAC_LINK_FLAGS` in the Makefile.
 
 An example of a project wich was created using this method can be
-found in [examples/c_multi_server](examples/c_multi_server).
+found in [examples/c_multi_server](../c_multi_server).
 
 See [`fuzzy_log.h`](fuzzy_log.h) for the fuzzy log functions currently available.
