@@ -25,10 +25,13 @@ extern crate env_logger;
 extern crate evmap;
 
 pub extern crate fuzzy_log_packets;
+extern crate fuzzy_log_util;
 
 pub use fuzzy_log_packets as packets;
 pub use packets::storeables as storeables;
 use packets::buffer as buffer;
+
+use fuzzy_log_util::hash as hash;
 
 /// The fuzzy log client.
 pub use packets::{order, entry, OrderIndex};
@@ -46,7 +49,6 @@ pub mod async;
 
 /// Libraries to assist in the creation of fuzzy log servers.
 pub mod servers2;
-mod hash;
 mod socket_addr;
 mod buffer2;
 mod vec_deque_map;

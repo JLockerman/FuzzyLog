@@ -1,0 +1,8 @@
+[package]
+name = "fuzzy_log_util"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+byteorder = "1"
+uuid = { version = "0.4", features = ["v4"] }
