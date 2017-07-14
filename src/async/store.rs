@@ -10,7 +10,9 @@ use packets::*;
 use buffer2::Buffer;
 
 use hash::{HashMap, HashSet, UuidHashMap};
+//use servers2::spsc;
 use socket_addr::Ipv4SocketAddr;
+
 
 use mio;
 use mio::tcp::*;
@@ -28,6 +30,18 @@ pub trait AsyncStoreClient {
     //TODO fn should_shutdown(&mut self) -> bool { false }
 }
 
+pub type FromClient =  mio::channel::Receiver<Vec<u8>>;
+pub type ToSelf =  mio::channel::Sender<Vec<u8>>;
+fn channel() -> (ToSelf, FromClient) {
+    mio::channel::channel()
+}
+
+// pub type FromClient =  spsc::Receiver<Vec<u8>>;
+// pub type ToSelf = spsc::Sender<Vec<u8>>;
+// fn channel() -> (ToSelf, FromClient) {
+    // spsc::channel()
+// }
+
 pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     servers: Vec<PerServer<Socket>>,
     awake_io: VecDeque<usize>,
@@ -39,7 +53,7 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     num_chain_servers: usize,
     lock_token: Token,
     //FIXME change to spsc::Receiver<Buffer?>
-    from_client: mio::channel::Receiver<Vec<u8>>,
+    from_client: FromClient,
     client: C,
     is_unreplicated: bool,
     new_multi: bool,
@@ -125,7 +139,7 @@ where C: AsyncStoreClient {
     //TODO should probably move all the poll register stuff too run
     pub fn tcp<I>(lock_server: SocketAddr, chain_servers: I, client: C,
         event_loop: &mut mio::Poll)
-    -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
         let mut servers = try!(chain_servers
@@ -147,7 +161,7 @@ where C: AsyncStoreClient {
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
-        let (to_store, from_client) = mio::channel::channel();
+        let (to_store, from_client) = channel();
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
@@ -175,7 +189,7 @@ where C: AsyncStoreClient {
     pub fn new_tcp<I>(
         chain_servers: I, client: C,
         event_loop: &mut mio::Poll
-    ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
         trace!("Starting Store server addrs:");
@@ -196,7 +210,7 @@ where C: AsyncStoreClient {
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
-        let (to_store, from_client) = mio::channel::channel();
+        let (to_store, from_client) = channel();
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
@@ -224,7 +238,7 @@ where C: AsyncStoreClient {
     pub fn replicated_new_tcp<I>(
         chain_servers: I, client: C,
         event_loop: &mut mio::Poll
-    ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=(SocketAddr, SocketAddr)> {
         //TODO assert no duplicates
         trace!("Starting Store server addrs:");
@@ -262,7 +276,7 @@ where C: AsyncStoreClient {
         );
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
-        let (to_store, from_client) = mio::channel::channel();
+        let (to_store, from_client) = channel();
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
@@ -292,7 +306,7 @@ where C: AsyncStoreClient {
         chain_servers: I,
         client: C,
         event_loop: &mut mio::Poll
-    ) -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=(SocketAddr, SocketAddr)>
     {
         //TODO assert no duplicates
@@ -330,7 +344,7 @@ where C: AsyncStoreClient {
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
-        let (to_store, from_client) = mio::channel::channel();
+        let (to_store, from_client) = channel();
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),
@@ -364,7 +378,7 @@ impl<C> AsyncTcpStore<UdpConnection, C>
 where C: AsyncStoreClient {
     pub fn udp<I>(lock_server: SocketAddr, chain_servers: I, client: C,
         event_loop: &mut mio::Poll)
-    -> Result<(Self, mio::channel::Sender<Vec<u8>>), io::Error>
+    -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
         let mut servers = try!(chain_servers
@@ -386,7 +400,7 @@ where C: AsyncStoreClient {
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
-        let (to_store, from_client) = mio::channel::channel();
+        let (to_store, from_client) = channel();
         event_loop.register(&from_client,
             from_client_token,
             mio::Ready::readable() | mio::Ready::error(),

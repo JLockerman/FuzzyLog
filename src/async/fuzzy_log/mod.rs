@@ -8,8 +8,6 @@ use std::sync::mpsc;
 use std::rc::Rc;
 use std::u32;
 
-use mio;
-
 use packets::*;
 use async::store::AsyncStoreClient;
 use self::FromStore::*;
@@ -18,6 +16,8 @@ use self::FromClient::*;
 use hash::HashMap;
 
 use self::per_color::{PerColor, IsRead, ReadHandle, NextToFetch};
+
+use async::store;
 
 pub mod log_handle;
 mod per_color;
@@ -32,7 +32,7 @@ const MAX_PREFETCH: u32 = 1;
 type ChainEntry = Rc<Vec<u8>>;
 
 pub struct ThreadLog {
-    to_store: mio::channel::Sender<Vec<u8>>, //TODO send WriteState or other enum?
+    to_store: store::ToSelf, //TODO send WriteState or other enum?
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
     blocked_multiappends: HashMap<Uuid, MultiSearchState>,
@@ -123,7 +123,8 @@ enum MultiSearch {
 impl ThreadLog {
 
     //TODO
-    pub fn new<I>(to_store: mio::channel::Sender<Vec<u8>>,
+    pub fn new<I>(
+        to_store: store::ToSelf,
         from_outside: mpsc::Receiver<Message>,
         ready_reads: FinshedReadQueue,
         finished_writes: FinshedWriteQueue,

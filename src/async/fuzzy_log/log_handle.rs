@@ -20,6 +20,7 @@ use async::fuzzy_log::{
     FinshedWriteQueue,
     FinshedWriteRecv,
 };
+use async::store;
 use async::fuzzy_log::FromClient::*;
 use packets::{
     entry,
@@ -115,7 +116,7 @@ where V: Storeable {
             lock_server: SocketAddr,
             chain_servers: Vec<SocketAddr>,
             client: mpsc::Sender<Message>,
-            tsm: Arc<Mutex<Option<mio::channel::Sender<Vec<u8>>>>>
+            tsm: Arc<Mutex<Option<store::ToSelf>>>
         ) {
             let mut event_loop = mio::Poll::new().unwrap();
             let (store, to_store) = ::async::store::AsyncTcpStore::tcp(
@@ -129,7 +130,7 @@ where V: Storeable {
 
         #[inline(never)]
         fn run_log(
-            to_store: mio::channel::Sender<Vec<u8>>,
+            to_store: store::ToSelf,
             from_outside: mpsc::Receiver<Message>,
             ready_reads_s: FinshedReadQueue,
             finished_writes_s: FinshedWriteQueue,
@@ -267,7 +268,7 @@ where V: Storeable {
         store_builder: F,
     ) -> Self
     where C: IntoIterator<Item=order>,
-          F: FnOnce(mpsc::Sender<Message>) -> mio::channel::Sender<Vec<u8>> {
+          F: FnOnce(mpsc::Sender<Message>) -> store::ToSelf {
         let (to_log, from_outside) = mpsc::channel();
         let to_store = store_builder(to_log.clone());
         let (ready_reads_s, ready_reads_r) = mpsc::channel();
@@ -460,7 +461,7 @@ where V: Storeable {
             lock_server: SocketAddr,
             chain_servers: Vec<SocketAddr>,
             client: mpsc::Sender<Message>,
-            tsm: Arc<Mutex<Option<mio::channel::Sender<Vec<u8>>>>>
+            tsm: Arc<Mutex<Option<store::ToSelf>>>
         ) {
             let mut event_loop = mio::Poll::new().unwrap();
             let (store, to_store) = ::async::store::AsyncTcpStore::tcp(
@@ -474,7 +475,7 @@ where V: Storeable {
 
         #[inline(never)]
         fn run_log(
-            to_store: mio::channel::Sender<Vec<u8>>,
+            to_store: store::ToSelf,
             from_outside: mpsc::Receiver<Message>,
             ready_reads_s: FinshedReadQueue,
             finished_writes_s: FinshedWriteQueue,
