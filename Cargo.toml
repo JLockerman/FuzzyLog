@@ -10,6 +10,7 @@ deque = "0.3.1"
 #grabbag_macros = "0.1"
 fuzzy_log_packets = {path = "./fuzzy_log_packets"}
 fuzzy_log_util = {path = "./fuzzy_log_util"}
+fuzzy_log_server = {path = "./fuzzy_log_server"}
 uuid = { version = "0.4", features = ["v4"] }
 lazycell = "0.5.0"
 libc = "0.2"
@@ -39,3 +40,4 @@ codegen-units = 1
 panic = 'abort'
 
 [workspace]
+exclude = ["servers/", "examples", "clients", "benchers"]

@@ -41,6 +41,7 @@ pub use fuzzy_log_server as servers2;
 pub use packets::{order, entry, OrderIndex};
 
 /// The fuzzy log client.
+pub use async as client;
 pub use async::fuzzy_log::log_handle::LogHandle;
 
 #[macro_use]
