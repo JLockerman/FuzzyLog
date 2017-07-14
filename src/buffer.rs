@@ -290,6 +290,7 @@ pub struct NoDropBuffer {
 }
 
 impl NoDropBuffer {
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         NoDropBuffer { inner: Buffer::empty() }
     }

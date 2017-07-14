@@ -742,7 +742,7 @@ fn recv_packet(
             },
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => return RecvRes::NeedsMore(read),
             Err(ref e) if e.kind() == ErrorKind::NotConnected => return RecvRes::NeedsMore(read),
-            Err(e) => {
+            Err(_) => {
                 // error!("recv error {:?}", e);
                 return RecvRes::Error
             },

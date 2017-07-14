@@ -73,11 +73,11 @@ impl<T: Copy> Chain<T> {
                             let (loc, ptr) = trie.prep_append(ValEdge::null());
                             on_finish(Multi(loc, ptr, storage, timestamp, t));
                         },
-                        GotMax::Senti{storage, t, id, timestamp, ..} => unsafe {
+                        GotMax::Senti{storage, t, id, timestamp, ..} => {
                             trace!("flush senti {:?}: {:?}", id, timestamp);
                             let loc = horizon_or_add_blank(trie, chain);
                             on_finish(Multi(
-                                loc, unsafe { ptr::null_mut() }, storage, timestamp, t)
+                                loc, ptr::null_mut(), storage, timestamp, t)
                             );
                         },
 
@@ -936,7 +936,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             to_workers.send_to_worker(
                                 Skeens2MultiReplica {
                                     loc: OrderIndex(o, (index as u32).into()),
-                                    trie_slot: unsafe{ ptr::null_mut() },
+                                    trie_slot: ptr::null_mut(),
                                     storage: storage,
                                     timestamp: max_timestamp,
                                     t: t

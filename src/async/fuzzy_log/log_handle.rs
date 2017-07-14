@@ -161,8 +161,6 @@ pub struct LogBuilder<V: ?Sized> {
 enum Servers {
     Unreplicated(Vec<SocketAddr>),
     Replicated(Vec<(SocketAddr, SocketAddr)>),
-    OldUnreplicated(SocketAddr, Vec<SocketAddr>),
-    OldReplicated(SocketAddr, Vec<(SocketAddr, SocketAddr)>)
 }
 
 impl<V: ?Sized> LogBuilder<V>
@@ -212,7 +210,6 @@ where V: Storeable {
                         store.set_reads_my_writes(reads_my_writes);
                         store.run(event_loop);
                     },
-                    _ => unimplemented!(),
                 }
             });
             let to_store;

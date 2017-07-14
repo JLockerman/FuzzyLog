@@ -196,7 +196,7 @@ fn try_merge_with_prior<V: Mergeable>(
 //XXX this is inconsistent if there are overlapping ranges
 
 #[derive(Eq, Clone, Debug)]
-struct Range(u64, u64);
+pub struct Range(u64, u64);
 
 impl Range {
     fn new(first: u64, last: u64) -> Self {

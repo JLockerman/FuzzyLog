@@ -3,6 +3,8 @@
 This crate contains a combined version of the fuzzy log client and server code.
 
 */
+//TODO we are using an old version of mio, update
+#![allow(deprecated)]
 
 
 #[macro_use] extern crate bitflags;
@@ -52,6 +54,7 @@ mod socket_addr;
 mod buffer;
 mod buffer2;
 mod vec_deque_map;
+#[allow(dead_code)]
 mod range_tree;
 
 /// Start a fuzzy log TCP server.
@@ -83,11 +86,11 @@ pub fn run_server(
     num_worker_threads: usize,
     started: &std::sync::atomic::AtomicUsize,
 ) -> ! {
-    use std::sync::atomic::AtomicUsize;
-
     let acceptor = mio::tcp::TcpListener::bind(&addr)
         .expect("Bind error");
-    servers2::tcp::run(acceptor, server_num, group_size, num_worker_threads, started)
+    servers2::tcp::run_with_replication(
+        acceptor, server_num, group_size, prev_server, next_server, num_worker_threads, started
+    )
 }
 
 pub mod c_binidings {
@@ -457,13 +460,13 @@ pub mod c_binidings {
     #[no_mangle]
     pub unsafe extern "C" fn wait_for_all_appends(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.wait_for_all_appends();
+        dag.wait_for_all_appends().unwrap();
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn wait_for_a_specific_append(dag: *mut DAG, write_id: WriteId) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.wait_for_a_specific_append(write_id.to_uuid());
+        dag.wait_for_a_specific_append(write_id.to_uuid()).unwrap();
     }
 
     #[no_mangle]
@@ -499,7 +502,7 @@ pub mod c_binidings {
                 locs: WriteLocations { num_locs: 0, locs: ptr::null_mut() },
             },
             //TODO what to do with error number?
-            Err(TryWaitRes::IoErr(kind, server)) => WriteIdAndLocs {
+            Err(TryWaitRes::IoErr(_kind, server)) => WriteIdAndLocs {
                 write_id: WriteId::nil(),
                 locs: WriteLocations { num_locs: server, locs: ptr::null_mut() },
             },
@@ -514,7 +517,7 @@ pub mod c_binidings {
     #[no_mangle]
     pub unsafe extern "C" fn flush_completed_appends(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.flush_completed_appends();
+        dag.flush_completed_appends().unwrap();
     }
 
     unsafe fn build_write_locs(locs: Vec<OrderIndex>) -> WriteLocations {

@@ -253,15 +253,15 @@ define_packet!{
 
 impl<'a> Packet::Ref<'a> {
     pub fn read(loc: &'a OrderIndex) -> Self {
-        static NoFlag: &'static EntryFlag::Flag = &EntryFlag::Nothing;
-        static ZeroBytes: &'static u16 = &0;
-        static id: &'static Uuid = &::uuid::NAMESPACE_DNS;
+        static NO_FLAG: &'static EntryFlag::Flag = &EntryFlag::Nothing;
+        static ZERO_BYTES: &'static u16 = &0;
+        static ID: &'static Uuid = &::uuid::NAMESPACE_DNS;
 
         Packet::Ref::Read {
-            id: id,
-            flags: NoFlag,
-            data_bytes: ZeroBytes,
-            dependency_bytes: ZeroBytes,
+            id: ID,
+            flags: NO_FLAG,
+            data_bytes: ZERO_BYTES,
+            dependency_bytes: ZERO_BYTES,
             loc: &loc,
             horizon: &loc,
             min: &loc,

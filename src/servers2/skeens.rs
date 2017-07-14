@@ -799,8 +799,7 @@ impl<T> GotMax<T> {
             (&GotMax::Single{..}, _) => true,
 
             (_, &WaitingForMax::GotMaxMulti{..})
-            | (_, &WaitingForMax::GotMaxSenti{..})
-            | (_, &WaitingForMax::Senti{..}) => unreachable!(),
+            | (_, &WaitingForMax::GotMaxSenti{..}) => unreachable!(),
 
             (_, &WaitingForMax::ReplicatedSingle{..})
             | (_, &WaitingForMax::ReplicatedMulti{..})

@@ -258,15 +258,12 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 {
                     let pointers = &mut **pointers.as_mut().unwrap()
                         as *mut [u8]  as *mut [*mut ValEdge];
-                    let mut is_sentinel = false;
                     let locs = buffer.contents().locs();
                     let pointers = &mut (&mut *pointers)[..locs.len()];
                     for (&oi, &trie_slot) in locs.iter().zip(pointers.iter()) {
                         if oi == OrderIndex(0.into(), 0.into()) {
-                            is_sentinel = true;
                             break
                         }
-                        if is_sentinel { break }
                         if trie_slot == ptr::null_mut() { continue }
 
                         let trie_entry: *mut ValEdge = trie_slot;
