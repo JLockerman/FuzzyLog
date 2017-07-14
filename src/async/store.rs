@@ -1187,7 +1187,7 @@ where PerServer<S>: Connected,
                 }
             }
         }
-        if my_write && !was_needed {
+        if my_write && self.reads_my_writes && !was_needed {
             let oi = packet.contents().locs()[0];
             let mut v = self.waiting_buffers.pop_front()
                 .unwrap_or_else(|| Vec::with_capacity(packet.entry_size()));
