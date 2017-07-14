@@ -4,12 +4,12 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use servers2::{
-    self, spsc, worker_thread, ToReplicate, ToWorker,
+use ::{
+    spsc, worker_thread, ToReplicate, ToWorker,
     DistributeToWorkers, Troption, SkeensMultiStorage,
     ToSend, ChainReader,
 };
-use servers2::shared_slice::RcSlice;
+use shared_slice::RcSlice;
 use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
@@ -434,7 +434,7 @@ impl Worker {
             let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr);
             let continue_replication = next_hop
                 .map(|(_, send_token)| send_token == DOWNSTREAM).unwrap_or(false);
-            let (buffer, send_token) = servers2::handle_to_worker2(log_work, self.inner.worker_num, continue_replication,
+            let (buffer, send_token) = ::handle_to_worker2(log_work, self.inner.worker_num, continue_replication,
                 |to_send, _| {
                     match next_hop {
                         None => {

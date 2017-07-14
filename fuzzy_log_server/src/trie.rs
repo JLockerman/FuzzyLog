@@ -8,8 +8,8 @@ use packets::MutEntry as MutPacket;
 use packets::Entry as Packet;
 use packets::{EntryVar, EntryContents};
 
-use servers2::byte_trie::{self, Trie as Alloc};
-use servers2::shared_slice::RcSlice;
+use byte_trie::{self, Trie as Alloc};
+use shared_slice::RcSlice;
 
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 

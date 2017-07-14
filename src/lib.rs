@@ -24,16 +24,18 @@ extern crate lazycell;
 extern crate env_logger;
 extern crate evmap;
 
-pub extern crate fuzzy_log_packets;
 #[macro_use] extern crate fuzzy_log_util;
+pub extern crate fuzzy_log_packets;
+pub extern crate fuzzy_log_server;
 
 pub use fuzzy_log_packets as packets;
 pub use packets::storeables as storeables;
-use packets::buffer as buffer;
 
 use fuzzy_log_util::hash as hash;
 use fuzzy_log_util::socket_addr as socket_addr;
-use fuzzy_log_util::vec_deque_map;
+
+/// Libraries to assist in the creation of fuzzy log servers.
+pub use fuzzy_log_server as servers2;
 
 /// The fuzzy log client.
 pub use packets::{order, entry, OrderIndex};
@@ -47,8 +49,6 @@ mod general_tests;
 /// The asynchronous version of the fuzzy log client.
 pub mod async;
 
-/// Libraries to assist in the creation of fuzzy log servers.
-pub mod servers2;
 mod buffer2;
 
 /// Start a fuzzy log TCP server.

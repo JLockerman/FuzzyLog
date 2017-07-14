@@ -5,7 +5,7 @@ use super::*;
 use packets::*;
 
 fn new_log() -> ServerLog<(), VecDeque<ToWorker<()>>> {
-    let (store, _reader) = ::servers2::new_chain_store_and_reader();
+    let (store, _reader) = ::new_chain_store_and_reader();
     ServerLog::new(0, 2, Default::default(), store)
 }
 

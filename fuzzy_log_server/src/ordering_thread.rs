@@ -1,7 +1,7 @@
 use super::*;
 use super::shared_slice::RcSlice;
 
-use servers2::skeens::{
+use skeens::{
     SkeensState,
     SkeensAppendRes,
     SkeensSetMaxRes,
@@ -10,7 +10,7 @@ use servers2::skeens::{
     Time,
     QueueIndex,
 };
-use servers2::trie::{ByteLoc, Trie, ValEdge};
+use trie::{ByteLoc, Trie, ValEdge};
 
 
 impl<T: Copy> Chain<T> {

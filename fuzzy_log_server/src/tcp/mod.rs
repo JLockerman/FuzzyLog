@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 // use prelude::*;
-use servers2::{spsc, ServerLog};
+use ::{spsc, ServerLog};
 use hash::{HashMap, FxHasher};
 use socket_addr::Ipv4SocketAddr;
 
@@ -298,7 +298,7 @@ pub fn run_with_replication(
     trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
-    let (log_writer, log_reader) = ::servers2::new_chain_store_and_reader();
+    let (log_writer, log_reader) = ::new_chain_store_and_reader();
     for n in 0..num_workers {
         //let from_dist = recv_from_dist.clone();
         let to_dist   = workers_to_dist.clone();
@@ -1522,7 +1522,7 @@ mod tests {
             if let Ok(acceptor) = acceptor {
                 thread::spawn(move || {
                     trace!("starting server");
-                    ::servers2::tcp::run(acceptor, 0, 1, 1, server_ready)
+                    ::tcp::run(acceptor, 0, 1, 1, server_ready)
                 });
             }
             else {
@@ -1545,7 +1545,7 @@ mod tests {
                 if let Ok(acceptor) = acceptor {
                     thread::spawn(move || {
                         trace!("starting replica server");
-                        ::servers2::tcp::run_with_replication(acceptor, 0, 1,
+                        ::tcp::run_with_replication(acceptor, 0, 1,
                             prev_server, next_server,
                             1, server_ready)
                     });

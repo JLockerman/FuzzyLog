@@ -1,3 +1,22 @@
+#![allow(deprecated)] //TODO we're using an old mio, need to move queues in tree and update
+
+#[macro_use] extern crate log;
+
+extern crate byteorder;
+extern crate deque;
+extern crate evmap;
+extern crate lazycell;
+extern crate mio;
+extern crate uuid;
+
+extern crate fuzzy_log_packets;
+#[macro_use] extern crate fuzzy_log_util;
+
+use fuzzy_log_packets as packets;
+use fuzzy_log_packets::{buffer, storeables};
+
+use fuzzy_log_util::{hash, socket_addr, vec_deque_map};
+
 //use std::collections::HashSet;
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -10,12 +29,12 @@ use std::sync::atomic::Ordering;
 // use prelude::*;
 use buffer::Buffer;
 
-use servers2::skeens::{
+use skeens::{
     SkeensState,
     Time,
     QueueIndex,
 };
-use servers2::trie::{AppendSlot, Trie};
+use trie::{AppendSlot, Trie};
 
 use evmap::{WriteHandle, ReadHandle};
 
