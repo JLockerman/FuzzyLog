@@ -52,8 +52,6 @@ pub mod async;
 pub mod servers2;
 mod buffer2;
 mod vec_deque_map;
-#[allow(dead_code)]
-mod range_tree;
 
 /// Start a fuzzy log TCP server.
 ///
