@@ -6,13 +6,7 @@ This crate contains a combined version of the fuzzy log client and server code.
 //TODO we are using an old version of mio, update
 #![allow(deprecated)]
 
-
-#[macro_use] extern crate bitflags;
-#[macro_use] extern crate custom_derive;
 #[macro_use] extern crate log;
-#[macro_use] extern crate newtype_derive;
-#[macro_use] extern crate packet_macro_impl;
-#[macro_use] extern crate packet_macro2;
 
 extern crate bit_set;
 extern crate byteorder;
@@ -30,6 +24,12 @@ extern crate lazycell;
 extern crate env_logger;
 extern crate evmap;
 
+pub extern crate fuzzy_log_packets;
+
+pub use fuzzy_log_packets as packets;
+pub use packets::storeables as storeables;
+use packets::buffer as buffer;
+
 /// The fuzzy log client.
 pub use packets::{order, entry, OrderIndex};
 
@@ -43,15 +43,11 @@ mod general_tests;
 
 /// The asynchronous version of the fuzzy log client.
 pub mod async;
-pub mod storeables;
-pub mod packets;
 
 /// Libraries to assist in the creation of fuzzy log servers.
 pub mod servers2;
 mod hash;
 mod socket_addr;
-//TODO only for testing, should be private
-mod buffer;
 mod buffer2;
 mod vec_deque_map;
 #[allow(dead_code)]

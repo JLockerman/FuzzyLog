@@ -1,0 +1,13 @@
+[package]
+name = "fuzzy_log_packets"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+bitflags = "0.4"
+custom_derive = "0.1"
+newtype_derive = "0.1"
+packet-macro2 = {path = "../packet-macro2"}
+packet-macro-impl = {path = "../packet-macro2/packet-macro-impl"}
+uuid = { version = "0.4", features = ["v4"] }
+rustc-serialize = "0.3"
