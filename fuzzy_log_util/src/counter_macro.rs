@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! counters {
     (struct $name:ident { $($field:ident: $typ:tt),* $(,)* }) => {
         #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]

@@ -25,7 +25,7 @@ extern crate env_logger;
 extern crate evmap;
 
 pub extern crate fuzzy_log_packets;
-extern crate fuzzy_log_util;
+#[macro_use] extern crate fuzzy_log_util;
 
 pub use fuzzy_log_packets as packets;
 pub use packets::storeables as storeables;
@@ -40,8 +40,6 @@ pub use packets::{order, entry, OrderIndex};
 
 /// The fuzzy log client.
 pub use async::fuzzy_log::log_handle::LogHandle;
-
-#[macro_use] mod counter_macro;
 
 #[macro_use]
 mod general_tests;
