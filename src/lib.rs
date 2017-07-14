@@ -32,6 +32,7 @@ pub use packets::storeables as storeables;
 use packets::buffer as buffer;
 
 use fuzzy_log_util::hash as hash;
+use fuzzy_log_util::socket_addr as socket_addr;
 
 /// The fuzzy log client.
 pub use packets::{order, entry, OrderIndex};
@@ -49,7 +50,6 @@ pub mod async;
 
 /// Libraries to assist in the creation of fuzzy log servers.
 pub mod servers2;
-mod socket_addr;
 mod buffer2;
 mod vec_deque_map;
 #[allow(dead_code)]
