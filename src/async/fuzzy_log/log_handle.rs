@@ -880,10 +880,12 @@ where V: Storeable {
         }
     }
 
-    pub fn flush_completed_appends(&mut self) -> Result<(), (io::ErrorKind, usize)> {
+    pub fn flush_completed_appends(&mut self) -> Result<usize, (io::ErrorKind, usize)> {
+        let mut flushed = 0;
         if self.num_async_writes > 0 {
             let last_seen_entries = &mut self.last_seen_entries;
             for res in self.finished_writes.try_iter() {
+                flushed += 1;
                 match res {
                     Ok((_, locs)) => {
                         self.num_async_writes -= 1;
@@ -903,7 +905,7 @@ where V: Storeable {
                 }
             }
         }
-        Ok(())
+        Ok(flushed)
     }
 
     fn recv_write(&mut self)

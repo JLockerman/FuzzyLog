@@ -75,6 +75,8 @@ fn main() {
                "If set clients will randomly spray their writes across total-clients colors, otherwise each client will write to its own color.")
             (@arg random_seed: -e --radom_seed +takes_value requires[random_colors]
                 "Sets the random seed random color selection uses.")
+            (@arg write_window: -i --write_window +takes_value
+                "Window size for writes.")
         )
 
         (@subcommand rwr =>
@@ -89,6 +91,8 @@ fn main() {
                "If set clients will randomly spray their writes across total-clients colors, otherwise each client will write to its own color.")
             (@arg random_seed: -e --radom_seed +takes_value requires[random_colors]
                 "Sets the random seed random color selection uses.")
+            (@arg write_window: -i --write_window +takes_value
+                "Window size for writes.")
         )
 
         (@subcommand dc =>
@@ -154,6 +158,7 @@ fn main() {
                 };
                 Some(seed)
             } else { None };
+            value_or!(let write_window; args, u32, num_writes);
             drop(help);
             workloads::run_unreplicated_write_read(
                 server_addrs.into_boxed_slice(),
@@ -161,6 +166,7 @@ fn main() {
                 total_clients,
                 jobsize,
                 num_writes,
+                write_window,
                 random_seed,
             )
         },
@@ -197,6 +203,7 @@ fn main() {
                 };
                 Some(seed)
             } else { None };
+            value_or!(let write_window; args, u32, num_writes);
             drop(help);
             workloads::run_replicated_write_read(
                 None,
@@ -205,6 +212,7 @@ fn main() {
                 total_clients,
                 jobsize,
                 num_writes,
+                write_window,
                 random_seed,
             )
         },

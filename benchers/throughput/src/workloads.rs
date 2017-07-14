@@ -20,6 +20,7 @@ pub fn run_unreplicated_write_read(
     total_clients: usize,
     jobsize: usize,
     num_writes: u32,
+    write_window: u32,
     random_seed: Option<[u32; 4]>
 ) {
     println!(
@@ -51,7 +52,7 @@ pub fn run_unreplicated_write_read(
             )
         }
     }).collect();
-    write_read(clients, total_clients, jobsize, num_writes, random_seed)
+    write_read(clients, total_clients, jobsize, num_writes, write_window, random_seed)
 }
 
 pub fn run_replicated_write_read(
@@ -61,6 +62,7 @@ pub fn run_replicated_write_read(
     total_clients: usize,
     jobsize: usize,
     num_writes: u32,
+    write_window: u32,
     random_seed: Option<[u32; 4]>
 ) {
     println!(
@@ -83,7 +85,7 @@ pub fn run_replicated_write_read(
             chains,
         )
     }).collect();
-    write_read(clients, total_clients, jobsize, num_writes, random_seed)
+    write_read(clients, total_clients, jobsize, num_writes, write_window, random_seed)
 }
 
 //TODO pass in data gathering function(s)
@@ -92,6 +94,7 @@ fn write_read(
     total_clients: usize,
     jobsize: usize,
     num_writes: u32,
+    write_window: u32,
     random_seed: Option<[u32; 4]>
 ) {
     let clients_to_run = clients.len();
@@ -137,38 +140,52 @@ fn write_read(
             trace!("client {} starting write.", client_num);
 
             let mut sent = 0;
+            let mut current_writes = 0;
             while sent < num_writes {
-                handle.async_append(
-                    get_write_chain(range),
-                    &*data,
-                    &[]
-                );
-                sent += 1;
-                let _ = handle.flush_completed_appends();
+                if current_writes < write_window {
+                    handle.async_append(
+                        get_write_chain(range),
+                        &*data,
+                        &[]
+                    );
+                    sent += 1;
+                    current_writes += 1;
+                }
+                current_writes -= handle.flush_completed_appends().unwrap() as u32;
             }
             let _ = handle.wait_for_all_appends();
+
             let write_start = Instant::now();
             let mut sent = 0;
+            let mut current_writes = 0;
             while sent < num_writes {
-                handle.async_append(
-                    get_write_chain(range) + num_chains,
-                    &*data,
-                    &[]
-                );
-                sent += 1;
-                let _ = handle.flush_completed_appends();
+                if current_writes < write_window {
+                    handle.async_append(
+                        get_write_chain(range) + num_chains,
+                        &*data,
+                        &[]
+                    );
+                    sent += 1;
+                    current_writes += 1;
+                }
+                current_writes -= handle.flush_completed_appends().unwrap() as u32;
             }
             let _ = handle.wait_for_all_appends();
+
             let write_time = write_start.elapsed();
             let mut sent = 0;
+            let mut current_writes = 0;
             while sent < num_writes {
-                handle.async_append(
-                    get_write_chain(range) + 2 * num_chains,
-                    &*data,
-                    &[]
-                );
-                sent += 1;
-                let _ = handle.flush_completed_appends();
+                if current_writes < write_window {
+                    handle.async_append(
+                        get_write_chain(range),
+                        &*data,
+                        &[]
+                    );
+                    sent += 1;
+                    current_writes += 1;
+                }
+                current_writes -= handle.flush_completed_appends().unwrap() as u32;
             }
             let _ = handle.wait_for_all_appends();
 
