@@ -8,23 +8,13 @@ This crate contains a combined version of the fuzzy log client and server code.
 
 #[macro_use] extern crate log;
 
-extern crate bit_set;
 extern crate byteorder;
-extern crate deque;
-extern crate rustc_serialize;
 extern crate mio;
-extern crate nix;
-extern crate net2;
-extern crate time;
 extern crate toml;
-extern crate rand;
-extern crate uuid;
 extern crate libc;
-extern crate lazycell;
 extern crate env_logger;
-extern crate evmap;
 
-#[macro_use] extern crate fuzzy_log_util;
+extern crate fuzzy_log_util;
 pub extern crate fuzzy_log_packets;
 pub extern crate fuzzy_log_server;
 pub extern crate fuzzy_log_client;
