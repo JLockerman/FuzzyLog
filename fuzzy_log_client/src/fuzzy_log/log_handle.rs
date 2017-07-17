@@ -11,7 +11,7 @@ use mio;
 
 use hash::HashMap;
 
-use async::fuzzy_log::{
+use fuzzy_log::{
     self,
     Message,
     ThreadLog,
@@ -20,8 +20,8 @@ use async::fuzzy_log::{
     FinshedWriteQueue,
     FinshedWriteRecv,
 };
-use async::store;
-use async::fuzzy_log::FromClient::*;
+use store;
+use fuzzy_log::FromClient::*;
 use packets::{
     entry,
     EntryContents,
@@ -119,7 +119,7 @@ where V: Storeable {
             tsm: Arc<Mutex<Option<store::ToSelf>>>
         ) {
             let mut event_loop = mio::Poll::new().unwrap();
-            let (store, to_store) = ::async::store::AsyncTcpStore::tcp(
+            let (store, to_store) = ::store::AsyncTcpStore::tcp(
                 lock_server,
                 chain_servers,
                 client, &mut event_loop
@@ -190,7 +190,7 @@ where V: Storeable {
                 match servers {
                     Servers::Unreplicated(servers) => {
                         let (mut store, to_store) =
-                            ::async::store::AsyncTcpStore::new_tcp(
+                            ::store::AsyncTcpStore::new_tcp(
                                 servers.into_iter(),
                                 client,
                                 &mut event_loop
@@ -201,7 +201,7 @@ where V: Storeable {
                     },
                     Servers::Replicated(servers) => {
                         let (mut store, to_store) =
-                            ::async::store::AsyncTcpStore::replicated_new_tcp(
+                            ::store::AsyncTcpStore::replicated_new_tcp(
                                 servers.into_iter(),
                                 client,
                                 &mut event_loop
@@ -305,7 +305,7 @@ where V: Storeable {
             let tsm = to_store_m.clone();
             thread::spawn(move || {
                 let mut event_loop = mio::Poll::new().unwrap();
-                let (store, to_store) = ::async::store::AsyncTcpStore::replicated_tcp(
+                let (store, to_store) = ::store::AsyncTcpStore::replicated_tcp(
                     lock_server,
                     chain_servers.into_iter(),
                     client,
@@ -347,7 +347,7 @@ where V: Storeable {
             let tsm = to_store_m.clone();
             thread::spawn(move || {
                 let mut event_loop = mio::Poll::new().unwrap();
-                let (store, to_store) = ::async::store::AsyncTcpStore::new_tcp(
+                let (store, to_store) = ::store::AsyncTcpStore::new_tcp(
                     chain_servers.into_iter(),
                     client,
                     &mut event_loop
@@ -391,7 +391,7 @@ where V: Storeable {
             let tsm = to_store_m.clone();
             thread::spawn(move || {
                 let mut event_loop = mio::Poll::new().unwrap();
-                let (store, to_store) = ::async::store::AsyncTcpStore::replicated_new_tcp(
+                let (store, to_store) = ::store::AsyncTcpStore::replicated_new_tcp(
                     chain_servers.into_iter(),
                     client,
                     &mut event_loop
@@ -461,7 +461,7 @@ where V: Storeable {
             tsm: Arc<Mutex<Option<store::ToSelf>>>
         ) {
             let mut event_loop = mio::Poll::new().unwrap();
-            let (store, to_store) = ::async::store::AsyncTcpStore::tcp(
+            let (store, to_store) = ::store::AsyncTcpStore::tcp(
                 lock_server,
                 chain_servers,
                 client, &mut event_loop

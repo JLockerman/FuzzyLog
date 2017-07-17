@@ -5,7 +5,7 @@ use std::rc::Rc;
 use hash::{HashMap, HashSet};
 use packets::{order, entry, OrderIndex, bytes_as_entry};
 
-use uuid::Uuid;
+use fuzzy_log_util::uuid::Uuid;
 
 use super::range_tree::RangeTree;
 

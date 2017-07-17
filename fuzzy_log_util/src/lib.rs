@@ -1,6 +1,6 @@
 
 extern crate byteorder;
-extern crate uuid;
+pub extern crate uuid;
 
 pub mod counter_macro;
 pub mod hash;

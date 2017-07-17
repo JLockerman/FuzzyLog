@@ -27,30 +27,21 @@ extern crate evmap;
 #[macro_use] extern crate fuzzy_log_util;
 pub extern crate fuzzy_log_packets;
 pub extern crate fuzzy_log_server;
+pub extern crate fuzzy_log_client;
 
 pub use fuzzy_log_packets as packets;
 pub use packets::storeables as storeables;
 
-use fuzzy_log_util::hash as hash;
-use fuzzy_log_util::socket_addr as socket_addr;
-
 /// Libraries to assist in the creation of fuzzy log servers.
 pub use fuzzy_log_server as servers2;
 
-/// The fuzzy log client.
 pub use packets::{order, entry, OrderIndex};
 
 /// The fuzzy log client.
-pub use async as client;
+pub use fuzzy_log_client as async;
 pub use async::fuzzy_log::log_handle::LogHandle;
 
-#[macro_use]
-mod general_tests;
-
-/// The asynchronous version of the fuzzy log client.
-pub mod async;
-
-mod buffer2;
+#[cfg(test)] mod tests;
 
 /// Start a fuzzy log TCP server.
 ///

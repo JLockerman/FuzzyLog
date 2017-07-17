@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::u32;
 
 use packets::*;
-use async::store::AsyncStoreClient;
+use store::AsyncStoreClient;
 use self::FromStore::*;
 use self::FromClient::*;
 
@@ -17,14 +17,11 @@ use hash::HashMap;
 
 use self::per_color::{PerColor, IsRead, ReadHandle, NextToFetch};
 
-use async::store;
+use store;
 
 pub mod log_handle;
 mod per_color;
 mod range_tree;
-
-#[cfg(test)]
-mod tests;
 
 // const MAX_PREFETCH: u32 = 40;
 const MAX_PREFETCH: u32 = 1;

@@ -7,11 +7,11 @@ use std::time::Duration;
 use std::rc::Rc;
 
 use packets::*;
-use buffer2::Buffer;
+use packets::buffer2::Buffer;
 
 use hash::{HashMap, HashSet, UuidHashMap};
 //use servers2::spsc;
-use socket_addr::Ipv4SocketAddr;
+use fuzzy_log_util::socket_addr::Ipv4SocketAddr;
 
 
 use mio;
@@ -458,12 +458,12 @@ impl PerServer<TcpStream> {
 impl PerServer<UdpConnection> {
     fn udp(addr: SocketAddr) -> Result<Self, io::Error> {
         use std::os::unix::io::FromRawFd;
-        use nix::sys::socket as nix;
-        let fd: i32 = try!(nix::socket(
+        /*let fd: i32 = try!(nix::socket(
                 nix::AddressFamily::Inet,
                 nix::SockType::Datagram,
                 nix::SOCK_NONBLOCK | nix::SOCK_CLOEXEC,
-                0));
+                0));*/
+        let fd: i32 = unimplemented!();
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
             being_written: DoubleBuffer::new(),

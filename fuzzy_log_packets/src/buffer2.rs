@@ -1,6 +1,6 @@
 //use storeables::Storeable;
-use packets::EntryContents;
-use packets::Packet::WrapErr;
+use super::EntryContents;
+use super::Packet::WrapErr;
 
 #[must_use]
 #[derive(Debug, Clone)]

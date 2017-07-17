@@ -25,6 +25,7 @@ pub use self::EntryKind::EntryLayout;
 use self::EntryFlag::Flag;
 
 pub mod buffer;
+pub mod buffer2;
 pub mod storeables;
 
 custom_derive! {
