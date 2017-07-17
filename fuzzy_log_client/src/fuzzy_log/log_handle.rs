@@ -140,6 +140,7 @@ where V: Storeable {
                 to_store, from_outside,
                 ready_reads_s,
                 finished_writes_s,
+                true,
                 interesting_chains
             );
             log.run()
@@ -154,6 +155,7 @@ pub struct LogBuilder<V: ?Sized> {
     servers: Servers,
     chains: Vec<order>,
     reads_my_writes: bool,
+    fetch_boring_multis: bool,
     _pd: PhantomData<Box<V>>,
 }
 
@@ -177,9 +179,13 @@ where V: Storeable {
         LogBuilder{ reads_my_writes: true, .. self}
     }
 
+    pub fn fetch_boring_multis(self) -> Self {
+        LogBuilder{ fetch_boring_multis: true, .. self}
+    }
+
     pub fn build(self) -> LogHandle<V> {
         let LogBuilder {
-            servers, chains, reads_my_writes, _pd,
+            servers, chains, reads_my_writes, fetch_boring_multis, _pd,
         } = self;
 
         let make_store = |client| {
@@ -223,7 +229,7 @@ where V: Storeable {
             to_store
         };
 
-        LogHandle::with_store(chains, make_store)
+        LogHandle::with_store(chains, fetch_boring_multis, make_store)
     }
 }
 
@@ -243,6 +249,7 @@ where V: Storeable {
             servers: Servers::Unreplicated(servers),
             chains: vec![],
             reads_my_writes: false,
+            fetch_boring_multis: false,
             _pd: PhantomData,
         }
     }
@@ -256,12 +263,14 @@ where V: Storeable {
             servers: Servers::Replicated(servers),
             chains: vec![],
             reads_my_writes: false,
+            fetch_boring_multis: false,
             _pd: PhantomData,
         }
     }
 
     pub fn with_store<C, F>(
         interesting_chains: C,
+        fetch_boring_multis: bool,
         store_builder: F,
     ) -> Self
     where C: IntoIterator<Item=order>,
@@ -279,6 +288,7 @@ where V: Storeable {
                 to_store, from_outside,
                 ready_reads_s,
                 finished_writes_s,
+                fetch_boring_multis,
                 interesting_chains
             ).run()
         });
@@ -324,7 +334,7 @@ where V: Storeable {
             to_store
         };
 
-        LogHandle::with_store(interesting_chains, make_store)
+        LogHandle::with_store(interesting_chains, true, make_store)
     }
 
     /// Spawns a `LogHandle` which connects to TCP servers located at `chain_servers`
@@ -366,7 +376,7 @@ where V: Storeable {
             to_store
         };
 
-        LogHandle::with_store(interesting_chains, make_store)
+        LogHandle::with_store(interesting_chains, true, make_store)
     }
 
     /// Spawns a `LogHandle` which connects to replicated TCP servers
@@ -410,7 +420,7 @@ where V: Storeable {
             to_store
         };
 
-        LogHandle::with_store(interesting_chains, make_store)
+        LogHandle::with_store(interesting_chains, true, make_store)
     }
 
     #[deprecated]
@@ -482,6 +492,7 @@ where V: Storeable {
                 to_store, from_outside,
                 ready_reads_s,
                 finished_writes_s,
+                true,
                 interesting_chains
             );
             log.run()

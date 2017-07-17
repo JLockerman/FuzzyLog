@@ -50,6 +50,8 @@ pub struct ThreadLog {
 
     num_errors: u64,
 
+    fetch_boring_multis: bool,
+
     finished: bool,
 
     print_data: PrintData,
@@ -125,8 +127,9 @@ impl ThreadLog {
         from_outside: mpsc::Receiver<Message>,
         ready_reads: FinshedReadQueue,
         finished_writes: FinshedWriteQueue,
-        interesting_chains: I)
-    -> Self
+        fetch_boring_multis: bool,
+        interesting_chains: I
+    ) -> Self
     where I: IntoIterator<Item=order>{
         ThreadLog {
             to_store: to_store,
@@ -144,6 +147,7 @@ impl ThreadLog {
             num_errors: 0,
             print_data: Default::default(),
             finished: false,
+            fetch_boring_multis,
         }
     }
 
@@ -715,7 +719,7 @@ impl ThreadLog {
                 }
 
                 trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
-                if self.per_chains.get(&o).is_none() {
+                if self.per_chains.get(&o).is_none() && !self.fetch_boring_multis {
                     continue
                 } else {
                     let early_sentinel = self.fetch_multi_parts(&id, o, *i, is_multi_server);
@@ -840,9 +844,9 @@ impl ThreadLog {
     -> Option<entry> {
         //TODO argh, no-alloc
         let (unblocked, early_sentinel) = {
+            let fech_boring = &self.fetch_boring_multis;
             let pc = self.per_chains.entry(chain)
-                .or_insert_with(|| panic!()); //FIXME
-                //.or_insert_with(|| PerColor::new(chain)); //FIXME
+                .or_insert_with(|| {assert!(fech_boring); PerColor::new(chain)});
 
             let early_sentinel = pc.take_early_sentinel(&id);
             let potential_new_horizon = match early_sentinel {
@@ -1007,8 +1011,8 @@ impl ThreadLog {
                         continue
                     }
                     match (self.per_chains.get_mut(&o), no_remote) {
-                        (None, _) => {}
-                        // (None, false) => panic!("trying to return boring chain {:?}", o),
+                        (None, true) => {}
+                        (None, false) => {},
                         (Some(pc), _) => {
                             if pc.has_returned(i) {
                                 if !checking_sentinels {

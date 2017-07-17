@@ -1110,7 +1110,7 @@ macro_rules! async_tests {
             fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
                 start_tcp_servers();
 
-                LogHandle::with_store(interesting_chains.into_iter(), |client| {
+                LogHandle::with_store(interesting_chains.into_iter(), true, |client| {
                     let client: mpsc::Sender<Message> = client;
                     let to_store_m = Arc::new(Mutex::new(None));
                     let tsm = to_store_m.clone();
