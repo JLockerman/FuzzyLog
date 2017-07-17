@@ -1,6 +1,9 @@
 
 macro_rules! async_tests {
     (test $new_thread_log:ident) => (
+        async_tests!(test $new_thread_log, false);
+    );
+    (test $new_thread_log:ident, $single_server:expr) => (
 
         use packets::*;
         use async::fuzzy_log::*;
@@ -313,20 +316,34 @@ macro_rules! async_tests {
                      (11     , vec![OrderIndex(51.into(), 1.into())]),
                      (0xf0000, vec![OrderIndex(49.into(), 1.into())])
                     ];
+
                 let mut potential_vals: HashMap<_, _> = potential_vals.into_iter().cloned().collect();
-                for _ in 0..3 {
+                for i in 0..3 {
+                    assert!(!potential_vals.is_empty());
                     let next_val = &lh.get_next().expect("should find val");
-                    let locs = potential_vals.remove(next_val.0).expect("must be expected");
-                    assert_eq!(next_val.1, &locs[..]);
+                    match potential_vals.remove(next_val.0) {
+                        Some(locs) => assert_eq!(next_val.1, &locs[..]),
+                        None => panic!("unexpected val {:?} @ {:?}", next_val, i),
+                    }
                 }
             }
-            assert_eq!(lh.get_next(),
-                Ok((&0xbaaa,
-                    &[OrderIndex(49.into(), 2.into()),
-                      OrderIndex( 0.into(), 0.into()),
-                      OrderIndex(50.into(), 2.into()),
-                      OrderIndex(51.into(), 2.into())
-                     ][..])));
+            if $single_server {
+                assert_eq!(lh.get_next(),
+                    Ok((&0xbaaa,
+                        &[OrderIndex(49.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(50.into(), 1.into()),
+                          OrderIndex(51.into(), 1.into())
+                         ][..])));
+            } else {
+                assert_eq!(lh.get_next(),
+                    Ok((&0xbaaa,
+                        &[OrderIndex(49.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(50.into(), 2.into()),
+                          OrderIndex(51.into(), 2.into())
+                         ][..])));
+            }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
@@ -363,11 +380,17 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Ok((&101, &[OrderIndex(53.into(), 1.into())][..])));
             assert_eq!(lh.get_next(),
                 Ok((&-7777,
-                    &[OrderIndex(53.into(), 2.into()),
-                      OrderIndex( 0.into(), 0.into()),
-                      OrderIndex(52.into(), 2.into()),
-                      OrderIndex(54.into(), 2.into())
-                     ][..])));
+                    &if $single_server {
+                        [OrderIndex(53.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(52.into(), 1.into()),
+                          OrderIndex(54.into(), 1.into())]
+                    } else {
+                        [OrderIndex(53.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(52.into(), 2.into()),
+                          OrderIndex(54.into(), 2.into())]
+                    }[..])));
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
@@ -388,13 +411,24 @@ macro_rules! async_tests {
             lh.snapshot(55.into());
             assert_eq!(lh.get_next(), Ok((&99999, &[OrderIndex(55.into(), 1.into())][..])));
             assert_eq!(lh.get_next(), Ok((&-99, &[OrderIndex(57.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(),
-                Ok((&-7777,
-                    &[OrderIndex(55.into(), 2.into()),
-                      OrderIndex( 0.into(), 0.into()),
-                      OrderIndex(56.into(), 2.into()),
-                      OrderIndex(57.into(), 2.into())
-                     ][..])));
+            if $single_server {
+                assert_eq!(lh.get_next(),
+                    Ok((&-7777,
+                        &[OrderIndex(55.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(56.into(), 1.into()),
+                          OrderIndex(57.into(), 1.into())
+                         ][..])));
+            } else {
+                assert_eq!(lh.get_next(),
+                    Ok((&-7777,
+                        &[OrderIndex(55.into(), 2.into()),
+                          OrderIndex( 0.into(), 0.into()),
+                          OrderIndex(56.into(), 2.into()),
+                          OrderIndex(57.into(), 2.into())
+                         ][..])));
+            }
+
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
@@ -440,9 +474,15 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(),
                 Ok((&(), &[OrderIndex(61.into(), 2.into()),
                     OrderIndex(62.into(), 1.into())][..])));
-            assert_eq!(lh.get_next(),
-                Ok((&(), &[OrderIndex(61.into(), 3.into()),
-                    OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
+            if $single_server {
+                assert_eq!(lh.get_next(),
+                    Ok((&(), &[OrderIndex(61.into(), 3.into()),
+                        OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 1.into())][..])));
+            } else {
+                assert_eq!(lh.get_next(),
+                    Ok((&(), &[OrderIndex(61.into(), 3.into()),
+                        OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
+            }
             assert_eq!(lh.get_next(),
                 Ok((&(), &[OrderIndex(61.into(), 4.into())][..])));
             assert_eq!(lh.get_next(), Err(GetRes::Done));
@@ -1105,7 +1145,7 @@ macro_rules! async_tests {
 
             use mio;
 
-            async_tests!(test new_thread_log);
+            async_tests!(test new_thread_log, true);
 
             fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
                 start_tcp_servers();

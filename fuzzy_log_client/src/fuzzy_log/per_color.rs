@@ -207,8 +207,7 @@ impl PerColor {
         self.required_no_remotes.insert(*id);
     }
 
-    #[allow(dead_code)]
-    fn can_return(&self, index: entry) -> bool {
+    pub fn can_return(&self, index: entry) -> bool {
         self.next_return_is(index) && self.is_within_snapshot(index)
     }
 

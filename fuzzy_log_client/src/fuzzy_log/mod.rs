@@ -116,6 +116,7 @@ enum MultiSearch {
     BeyondHorizon(Vec<u8>),
     #[allow(dead_code)]
     Repeat,
+    WaitForDeps(Vec<u8>),
     //MultiSearch::FirstPart(),
 }
 
@@ -420,6 +421,18 @@ impl ThreadLog {
                                 .or_insert_with(|| PerColor::new(read_loc.0))
                                 .overread_at(read_loc.1);
                         }
+                        MultiSearch::WaitForDeps(msg) => {
+                            //TODO no-alloc?
+                            let packet = Rc::new(msg);
+                            //TODO it would be nice to fetch the blockers in parallel...
+                            //     we can add a fetch blockers call in update_multi_part_read
+                            //     which updates the horizon but doesn't actually add the block
+                            let mut try_ret = self.wait_for_deps(&packet);
+                            try_ret &= self.add_blockers(&packet);
+                            if try_ret {
+                                self.try_returning(packet);
+                            }
+                        },
                         MultiSearch::Finished(msg) => {
                             //TODO no-alloc?
                             let packet = Rc::new(msg);
@@ -562,6 +575,24 @@ impl ThreadLog {
             }
         }
         try_ret
+    }
+
+    fn wait_for_deps(&mut self, packet: &ChainEntry) -> bool {
+        //FIXME dependencies currently assumes you gave it the correct type
+        //      this is unnecessary and should be changed
+        let entr = bytes_as_entry(packet);
+        let locs = entr.locs();
+        let mut is_blocked = false;
+        for &loc in locs.iter().skip_while(|&&OrderIndex(o, _)| o != order::from(0)).skip(1) {
+            let block = self.per_chains.get(&loc.0).map(|pc| !pc.has_returned(loc.1))
+                .unwrap_or(/*TODO*/ false);
+            is_blocked |= block;
+            if block {
+                let blocked = self.blockers.entry(loc).or_insert_with(Vec::new);
+                blocked.push(packet.clone());
+            }
+        }
+        !is_blocked
     }
 
     // FIXME This is unneeded
@@ -712,35 +743,47 @@ impl ThreadLog {
             trace!("FUZZY first part of multi part read");
             let mut finished = true;
             let mut is_sentinel = false;
-            for &mut OrderIndex(o, ref mut i) in bytes_as_entry_mut(&mut msg).locs_mut() {
-                if o == order::from(0) {
-                    is_sentinel = true;
-                    continue
-                }
+            let mut wait_for_deps = false;
+            {
+                let mut entr = bytes_as_entry_mut(&mut msg);
+                let fastpath = !entr.flag_mut().contains(EntryFlag::TakeLock);
+                for &mut OrderIndex(o, ref mut i) in entr.locs_mut() {
+                    if o == order::from(0) {
+                        is_sentinel = true;
+                        continue
+                    }
 
-                trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
-                if self.per_chains.get(&o).is_none() && !self.fetch_boring_multis {
-                    continue
-                } else {
-                    let early_sentinel = self.fetch_multi_parts(&id, o, *i, is_multi_server);
-                    if let Some(loc) = early_sentinel {
-                        trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
-                        assert!(loc != entry::from(0));
-                        *i = loc;
-                    } else if *i != entry::from(0) {
-                        trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
-                        //TODO don't mark as skippable once opt version is done
-                        if is_sentinel {
-                            self.per_chains.get_mut(&o)
-                                .map(|pc| pc.mark_as_skippable(*i));
-                        }
+                    trace!("FUZZY fetching multi part @ {:?}?", (o, *i));
+                    if self.per_chains.get(&o).is_none() && !self.fetch_boring_multis {
+                        continue
                     } else {
-                        finished = false
+                        let early_sentinel = self.fetch_multi_parts(&id, o, *i, is_multi_server);
+                        if let Some(loc) = early_sentinel {
+                            trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
+                            assert!(loc != entry::from(0));
+                            *i = loc;
+                        } else if *i != entry::from(0) {
+                            trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
+                            if is_sentinel {
+                                if fastpath {
+                                    wait_for_deps |= self.per_chains.get(&o).map(|pc|
+                                        pc.can_return(*i)).unwrap_or(false);
+                                } else {
+                                    self.per_chains.get_mut(&o)
+                                        .map(|pc| pc.mark_as_skippable(*i));
+                                }
+                            }
+                        } else {
+                            finished = false
+                        }
                     }
                 }
             }
 
             if finished {
+                if wait_for_deps {
+                    return MultiSearch::WaitForDeps(msg)
+                }
                 trace!("FUZZY all sentinels had already been found for {:?}", read_loc);
                 return MultiSearch::Finished(msg)
             }
@@ -1021,7 +1064,7 @@ impl ThreadLog {
                                     return None
                                 }
                             } else if checking_sentinels {
-                                 //FIXME this should be unreachable
+                                //FIXME this should be unreachable
                                 panic!("FUZZY must block read on Sentinel {:?}: {:?}",
                                     (o, i), pc);
                             }
