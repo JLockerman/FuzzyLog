@@ -456,6 +456,7 @@ impl PerServer<TcpStream> {
 }
 
 impl PerServer<UdpConnection> {
+    #[allow(unused_variables, unreachable_code)]
     fn udp(addr: SocketAddr) -> Result<Self, io::Error> {
         use std::os::unix::io::FromRawFd;
         /*let fd: i32 = try!(nix::socket(
