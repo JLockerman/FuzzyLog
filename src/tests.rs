@@ -831,6 +831,109 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
+        #[test]
+        #[should_panic]
+        #[inline(never)]
+        pub fn test_weak_snapshot_is_weak() {
+            use std::thread;
+            use std::sync::atomic::{AtomicBool, Ordering, ATOMIC_BOOL_INIT};
+
+            struct TrueOnDrop<'a>(&'a AtomicBool);
+
+            impl<'a> Drop for TrueOnDrop<'a> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed)
+                }
+            }
+
+            static DONE: AtomicBool = ATOMIC_BOOL_INIT;
+
+            let _ = env_logger::init();
+            trace!("TEST weak_snapshot_is_weak");
+
+            let _guard = TrueOnDrop(&DONE);
+            let columns = vec![85.into(), 86.into()];
+            let mut lh = $new_thread_log::<()>(columns.clone());
+            thread::spawn(move || {
+                let _guard = TrueOnDrop(&DONE);
+                while !DONE.load(Ordering::Relaxed) {
+                    lh.append(85.into(), &(), &[]);
+                    thread::yield_now();
+                    lh.append(86.into(), &(), &[]);
+                }
+            });
+            let mut lh = $new_thread_log::<()>(columns);
+            while !DONE.load(Ordering::Relaxed) {
+                lh.snapshot(86.into());
+                // thread::yield_now();
+                lh.snapshot(85.into());
+                let mut max_85 = 0;
+                let mut max_86 = 0;
+                loop {
+                    match lh.get_next() {
+                        Ok((_, locs)) => if locs[0].0 == order::from(85) {
+                            max_85 += 1;
+                        } else if locs[0].0 == order::from(86) {
+                            max_86 += 1;
+                        },
+                        Err(GetRes::Done) => break,
+                        Err(e) => panic!(),
+                    }
+                }
+                assert!(max_85 >= max_86);
+            }
+        }
+
+        #[test]
+        #[inline(never)]
+        pub fn test_strong_snapshot_is_strong() {
+            use std::thread;
+            use std::sync::atomic::{AtomicBool, Ordering, ATOMIC_BOOL_INIT};
+
+            struct TrueOnDrop<'a>(&'a AtomicBool);
+
+            impl<'a> Drop for TrueOnDrop<'a> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed)
+                }
+            }
+
+            static DONE: AtomicBool = ATOMIC_BOOL_INIT;
+
+            let _ = env_logger::init();
+            trace!("TEST strong_snapshot_is_strong");
+
+            let _guard = TrueOnDrop(&DONE);
+            let columns = vec![85.into(), 86.into()];
+            let mut lh = $new_thread_log::<()>(columns.clone());
+            thread::spawn(move || {
+                let _guard = TrueOnDrop(&DONE);
+                while !DONE.load(Ordering::Relaxed) {
+                    lh.append(85.into(), &(), &[]);
+                    thread::yield_now();
+                    lh.append(86.into(), &(), &[]);
+                }
+            });
+            let mut lh = $new_thread_log::<()>(columns);
+            for i in 0..1 {
+                lh.strong_snapshot(&[86.into(), 85.into()]);
+                let mut max_85 = 0;
+                let mut max_86 = 0;
+                loop {
+                    match lh.get_next() {
+                        Ok((_, locs)) => if locs[0].0 == order::from(85) {
+                            max_85 += 1;
+                        } else if locs[0].0 == order::from(86) {
+                            max_86 += 1;
+                        },
+                        Err(GetRes::Done) => break,
+                        Err(e) => panic!(),
+                    }
+                }
+                assert!(max_85 >= max_86, "{:?} <= {:?}", max_85, max_86);
+            }
+        }
+
         //TODO test append after prefetch but before read
     );
     () => {

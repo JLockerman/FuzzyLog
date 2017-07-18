@@ -34,6 +34,19 @@ fn multi_append_buffer(id: &Uuid, locs: &[OrderIndex], multi_server: bool) -> Bu
     buffer
 }
 
+fn snapshot_buffer(locs: &[OrderIndex], multi_server: bool) -> Buffer {
+    let mut buffer = Buffer::empty();
+    buffer.fill_from_entry_contents(EntryContents::Snapshot {
+        id: &Uuid::nil(),
+        flags: &if multi_server { (EntryFlag::TakeLock | EntryFlag::NewMultiPut) }
+            else { EntryFlag::NewMultiPut },
+        data_bytes: &0,
+        num_deps: &0,
+        locs: locs,
+    });
+    buffer
+}
+
 fn make_storage(buffer: &Buffer) -> SkeensMultiStorage {
     SkeensMultiStorage::new(
         buffer.contents().locs().len(),
@@ -138,6 +151,55 @@ fn single_append() {
             },
         }
     });
+}
+
+#[test]
+fn snapshot() {
+    let _ = env_logger::init();
+    let mut server = new_log();
+
+
+    let mut buffer = snapshot_buffer(
+        &[OrderIndex(2.into(), 0.into()), OrderIndex(4.into(), 0.into())],
+        false,
+    );
+
+    buffer = handle_op(&mut server, buffer, Troption::None).unwrap();
+    assert_eq!(
+        buffer.contents().locs(),
+        &[OrderIndex(2.into(), 0.into()), OrderIndex(4.into(), 0.into())]
+    );
+
+    let wid = Uuid::new_v4();
+    buffer.fill_from_entry_contents(EntryContents::Single {
+        id: &wid,
+        flags: &EntryFlag::Nothing,
+        loc: &OrderIndex(2.into(), 0.into()),
+        deps: &[],
+        data: &[],
+    });
+    buffer = handle_op(&mut server, buffer, Troption::None).unwrap();
+
+    let wid = Uuid::new_v4();
+    buffer.fill_from_entry_contents(EntryContents::Single {
+        id: &wid,
+        flags: &EntryFlag::Nothing,
+        loc: &OrderIndex(4.into(), 0.into()),
+        deps: &[],
+        data: &[],
+    });
+    buffer = handle_op(&mut server, buffer, Troption::None).unwrap();
+
+    buffer = snapshot_buffer(
+        &[OrderIndex(2.into(), 0.into()), OrderIndex(4.into(), 0.into())],
+        false,
+    );
+
+    buffer = handle_op(&mut server, buffer, Troption::None).unwrap();
+    assert_eq!(
+        buffer.contents().locs(),
+        &[OrderIndex(2.into(), 1.into()), OrderIndex(4.into(), 1.into())]
+    );
 }
 
 #[test]

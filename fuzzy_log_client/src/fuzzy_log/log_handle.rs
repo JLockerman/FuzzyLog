@@ -534,6 +534,15 @@ where V: Storeable {
         self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
     }
 
+    /// Take a linearizable snapshot of a set of interesting colors and start prefetching.
+    pub fn strong_snapshot(&mut self, colors: &[order]) {
+        trace!("HANDLE send snap {:?}.", colors);
+        let mut c = Vec::with_capacity(colors.len());
+        c.extend(colors.into_iter().map(|&o| OrderIndex(o, entry::from(0))));
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.to_log.send(Message::FromClient(StrongSnapshotAndPrefetch(c))).unwrap();
+    }
+
     /// Take a snapshot of all interesting colors and start prefetching.
     pub fn take_snapshot(&mut self) {
         trace!("HANDLE send all snap.");

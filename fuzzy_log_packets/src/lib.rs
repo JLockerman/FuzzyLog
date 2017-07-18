@@ -104,6 +104,7 @@ pub mod EntryKind {
             const CheckSkeens1 = 0x40,
             const GC = 0x50,
 
+            const Snapshot = 0x60,
         }
     }
 
@@ -115,6 +116,7 @@ pub mod EntryKind {
         Sentinel,
         Read,
         GC,
+        Snapshot,
     }
 
     impl EntryLayout {
@@ -126,6 +128,7 @@ pub mod EntryKind {
                 &EntryLayout::Sentinel => Sentinel,
                 &EntryLayout::Read => Read,
                 &EntryLayout::GC => GC,
+                &EntryLayout::Snapshot => Snapshot,
             }
         }
 
@@ -146,6 +149,7 @@ pub mod EntryKind {
                 Lock => EntryLayout::Lock,
                 Read => EntryLayout::Read,
                 GC => EntryLayout::GC,
+                Snapshot => EntryLayout::Snapshot,
                 Invalid => panic!("Empty Layout"),
                 _ => unreachable!("no layout {:x}", self.bits()),
             }
@@ -299,6 +303,15 @@ define_packet!{
             dependency_bytes: u16,
             loc: OrderIndex,
         },
+
+        Snapshot: EntryKind::Snapshot => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            locs: [OrderIndex | cols],
+        },
     }
 }
 
@@ -327,7 +340,8 @@ impl<'a> Packet::Ref<'a> {
             | Multi{flags, ..} | MultiToReplica{flags, ..}
             | Senti{flags, ..} | SentiToReplica{flags, ..}
             | GC{flags, ..}
-            | UpdateRecovery{flags, ..} | CheckSkeens1{flags, ..} =>
+            | UpdateRecovery{flags, ..} | CheckSkeens1{flags, ..}
+            | Snapshot{flags, ..} =>
                 flags,
 
             FenceClient{..} => {
@@ -354,6 +368,7 @@ impl<'a> Packet::Ref<'a> {
             UpdateRecovery{..} => EntryKind::UpdateRecovery,
             FenceClient{..} => EntryKind::FenceClient,
             CheckSkeens1{..} => EntryKind::CheckSkeens1,
+            Snapshot{..} => EntryKind::Snapshot,
         }
     }
 
@@ -373,6 +388,8 @@ impl<'a> Packet::Ref<'a> {
 
             UpdateRecovery{write_id, ..} => write_id,
             FenceClient{fencing_write, ..} => fencing_write,
+
+            Snapshot{id, ..} => id
         }
     }
 
@@ -387,7 +404,8 @@ impl<'a> Packet::Ref<'a> {
             Multi{locs, ..} | Senti{locs, ..}
             | MultiToReplica{locs, ..} | SentiToReplica{locs, ..}
             | GC{locs, ..}
-            | UpdateRecovery{locs, ..} => locs,
+            | UpdateRecovery{locs, ..}
+            | Snapshot{locs, ..}=> locs,
 
             FenceClient{..} => unreachable!(),
         }
@@ -409,7 +427,8 @@ impl<'a> Packet::Ref<'a> {
 
             Read{..} | Single{..} | Multi{..} | Senti{..} | Skeens2ToReplica{..}
             | GC{..}
-            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..} => unreachable!(),
+            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..}
+            | Snapshot{..} => unreachable!(),
         }
     }
 
@@ -422,7 +441,8 @@ impl<'a> Packet::Ref<'a> {
             Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
             | GC{..}
             | UpdateRecovery{..} | FenceClient{..}
-            | CheckSkeens1{..} => unreachable!(),
+            | CheckSkeens1{..}
+            | Snapshot{..} => unreachable!(),
         }
     }
 
@@ -448,7 +468,8 @@ impl<'a> Packet::Ref<'a> {
 
             Read{..} | Single{..} | SingleToReplica{..} | Skeens2ToReplica{..}
             | GC{..}
-            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..} => unreachable!(),
+            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..}
+            | Snapshot{..} => unreachable!(),
         }
     }
 
@@ -463,7 +484,8 @@ impl<'a> Packet::Ref<'a> {
 
             Read{..} | Single{..} | SingleToReplica{..}
             | GC{..}
-            | FenceClient{..} | CheckSkeens1{..} => unreachable!(),
+            | FenceClient{..} | CheckSkeens1{..}
+            | Snapshot{..} => unreachable!(),
         }
     }
 
@@ -473,7 +495,8 @@ impl<'a> Packet::Ref<'a> {
         match self {
             Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
             | GC{..}
-            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..} => unreachable!(),
+            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..}
+            | Snapshot{..} => unreachable!(),
 
             SingleToReplica{deps, data, ..}
             | MultiToReplica{deps, data, ..}
@@ -493,7 +516,8 @@ impl<'a> Packet::Ref<'a> {
                 deps,
 
             Read{..} | Skeens2ToReplica{..}| GC{..} | UpdateRecovery{..} | FenceClient{..}
-            |CheckSkeens1{..} =>
+            |CheckSkeens1{..}
+            | Snapshot{..} =>
                 unreachable!(),
         }
     }
@@ -505,7 +529,8 @@ impl<'a> Packet::Ref<'a> {
             | SingleToReplica{..} | MultiToReplica{..} | SentiToReplica{..}
             | Skeens2ToReplica{..} | GC{..}
             | UpdateRecovery{..} | FenceClient{..}
-            | CheckSkeens1{..} =>
+            | CheckSkeens1{..}
+            | Snapshot{..} =>
                 unreachable!(),
             Read{horizon, ..} => *horizon,
         }
@@ -515,7 +540,8 @@ impl<'a> Packet::Ref<'a> {
         use self::Packet::Ref::*;
         match self {
             c @ Read {..} | c @ Single {..} | c @ Multi{..} | c @Senti{..} | c @ GC{..}
-            | c @ UpdateRecovery{..} | c @ CheckSkeens1{..} => c.len(),
+            | c @ UpdateRecovery{..} | c @ CheckSkeens1{..}
+            | c @ Snapshot{..} => c.len(),
 
             SingleToReplica{ id, flags, loc, deps, data, ..} =>
                 Single{id: id, flags: flags, loc: loc, deps: deps, data: data}.len(),
@@ -625,7 +651,8 @@ impl<'a> Packet::Mut<'a> {
             | &mut SentiToReplica{ref mut flags, ..}
             | &mut GC{ref mut flags, ..}
             | &mut UpdateRecovery{ref mut flags, ..}
-            | &mut CheckSkeens1{ref mut flags, ..} =>
+            | &mut CheckSkeens1{ref mut flags, ..}
+            | &mut Snapshot{ref mut flags, ..} =>
                 &mut **flags,
 
             &mut Skeens2ToReplica{..} | &mut FenceClient{..} => unreachable!(),
@@ -644,7 +671,8 @@ impl<'a> Packet::Mut<'a> {
             | &mut SentiToReplica{ref mut flags, ..}
             | &mut GC{ref mut flags, ..}
             | &mut UpdateRecovery{ref mut flags, ..}
-            | &mut CheckSkeens1{ref mut flags, ..} =>
+            | &mut CheckSkeens1{ref mut flags, ..}
+            | &mut Snapshot{ref mut flags, ..} =>
                 &mut **flags,
 
             &mut Skeens2ToReplica{..} | &mut FenceClient{..} => unreachable!(),
@@ -667,7 +695,8 @@ impl<'a> Packet::Mut<'a> {
             | &mut MultiToReplica{ref mut locs, ..}
             | &mut SentiToReplica{ref mut locs, ..}
             | &mut GC{ref mut locs, ..}
-            | &mut UpdateRecovery{ref mut locs, ..} => &mut *locs,
+            | &mut UpdateRecovery{ref mut locs, ..}
+            | &mut Snapshot{ref mut locs, ..} => &mut *locs,
 
             &mut FenceClient{..} => unreachable!(),
         }
@@ -685,7 +714,8 @@ impl<'a> Packet::Mut<'a> {
             &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..}
             | &mut GC{..}
             | &mut FenceClient{..}
-            | &mut CheckSkeens1{..} => unreachable!(),
+            | &mut CheckSkeens1{..}
+            | &mut Snapshot{..} => unreachable!(),
         }
     }
 
@@ -904,7 +934,8 @@ pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
     match bytes_as_entry(bytes) {
         Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
         | GC{..}
-        | FenceClient{..} | UpdateRecovery{..} | CheckSkeens1{..} => unreachable!(),
+        | FenceClient{..} | UpdateRecovery{..} | CheckSkeens1{..}
+        | Snapshot{..} => unreachable!(),
 
         Single{data, ..} | Multi{data, ..}
         | SingleToReplica{data, ..} | MultiToReplica{data, ..} => data,

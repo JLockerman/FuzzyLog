@@ -680,6 +680,18 @@ where PerServer<S>: Connected,
                     self.add_get_lock_nums(msg)
                 }
             }
+
+            EntryLayout::Snapshot => {
+                trace!("CLIENT will multi snapshot");
+                if self.is_single_node_append(&msg) {
+                    let chain = bytes_as_entry(&msg).locs()[0].0;
+                    let s = self.read_server_for_chain(chain);
+                    self.add_single_server_send(s, msg)
+                } else {
+                    unimplemented!()
+                }
+            }
+
             EntryLayout::GC => {
                 //TODO be less lazy
                 self.add_gc(msg)
@@ -705,6 +717,11 @@ where PerServer<S>: Connected,
                 let read_loc = sent.read_loc();
                 *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
+            }
+            else if layout == EntryLayout::Snapshot {
+                //unimplemented!()
+                //NOP?
+                {}
             }
             else if !sent.is_unlock() {
                 let id = sent.id();
@@ -1170,11 +1187,27 @@ where PerServer<S>: Connected,
 
         // trace!("CLIENT handle completed read?");
         if !self.new_multi && token == self.lock_token() { return false }
+        let (is_sentinel, is_snapshot) = {
+            let layout = packet.contents().layout();
+            (layout == EntryLayout::Sentinel,
+                layout == EntryLayout::Snapshot)
+        };
+        if is_snapshot {
+            for &oi in packet.contents().locs() {
+                let mut v = self.waiting_buffers.pop_front()
+                    .unwrap_or_else(|| Vec::with_capacity(packet.entry_size()));
+                v.clear();
+                v.extend_from_slice(packet.entry_slice());
+                if self.client.on_finished_read(oi, v).is_err() {
+                    self.finished = true
+                }
+            }
+            return true
+        }
         //FIXME remove extra index?
         self.servers[token.0].print_data.finished_read(1);
         //FIXME remove
         let mut was_needed = false;
-        let is_sentinel = packet.contents().layout() == EntryLayout::Sentinel;
         let mut is_sentinel_loc = false;
         for &oi in packet.contents().locs() {
             if oi == OrderIndex(0.into(), 0.into()) {
@@ -1255,6 +1288,9 @@ where PerServer<S>: Connected,
                     //FIXME better read packet handling
                     Some(WriteState::SingleServer(b))
                 } else { None }
+            }
+            EntryLayout::Snapshot => {
+                unimplemented!()
             }
             EntryLayout::Lock => {
                 // The only kind of send we do with a Lock layout is unlock

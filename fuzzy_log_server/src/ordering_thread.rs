@@ -190,6 +190,12 @@ where ToWorkers: DistributeToWorkers<T> {
 
             /////////////////////////////////////////////////
 
+            EntryLayout::Snapshot => {
+                self.handle_snapshot(flag, buffer, storage, t)
+            }
+
+            /////////////////////////////////////////////////
+
             EntryLayout::Read => {
                 trace!("SERVER {:?} Read", self.this_server_num);
                 let OrderIndex(chain, index) = buffer.contents().locs()[0];
@@ -299,6 +305,50 @@ where ToWorkers: DistributeToWorkers<T> {
                 self.handle_gc(buffer, t)
             },
         }
+    }
+
+    /////////////////////////////////////////////////
+
+    fn handle_snapshot(
+        &mut self,
+        kind: EntryFlag::Flag,
+        buffer: BufferSlice,
+        storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
+        t: T
+    ) {
+        if !kind.contains(EntryFlag::TakeLock) {
+            self.handle_single_server_snapshot(buffer, t)
+        } else {
+            assert!(kind.contains(EntryFlag::NewMultiPut));
+            unimplemented!()
+        }
+    }
+
+    //////////////////////
+
+    fn handle_single_server_snapshot(
+        &mut self,
+        mut buffer: BufferSlice,
+        t: T
+    ) {
+
+    {
+        let mut contents = buffer.contents_mut();
+        contents.flag_mut().insert(EntryFlag::ReadSuccess);
+        let locs = contents.locs_mut();
+        for &mut OrderIndex(o, ref mut i) in locs.into_iter() {
+            if o == order::from(0) || !self.stores_chain(o) {
+                *i = entry::from(0);
+                continue
+            }
+
+            let horizon = get_chain(&self.log, o).map(|c| c.trie.horizon()).unwrap_or(0);
+            *i = entry::from(horizon as u32);
+        }
+    }
+
+        self.print_data.msgs_sent(1);
+        self.to_workers.send_to_worker(Reply(buffer, t))
     }
 
     /////////////////////////////////////////////////

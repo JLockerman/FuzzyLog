@@ -102,6 +102,7 @@ pub enum FromClient {
     //TODO
     SnapshotAndPrefetch(order),
     MultiSnapshotAndPrefetch(Vec<order>),
+    StrongSnapshotAndPrefetch(Vec<OrderIndex>),
     PerformAppend(Vec<u8>),
     ReturnBuffer(Vec<u8>),
     ReadUntil(OrderIndex),
@@ -213,6 +214,16 @@ impl ThreadLog {
                 }
                 true
             },
+            StrongSnapshotAndPrefetch(chains) => {
+                self.print_data.snap(1);
+                self.num_snapshots = self.num_snapshots.saturating_add(1);
+                trace!("FUZZY strong snapshot {:?}: {:?}", chains, self.num_snapshots);
+                self.fetch_strong_snapshot(&chains[..]);
+                for chain in chains {
+                    self.prefetch(chain.0);
+                }
+                true
+            },
             PerformAppend(msg) => {
                 self.print_data.append(1);
                 {
@@ -294,6 +305,22 @@ impl ThreadLog {
         self.to_store.send(packet).expect("store hung up")
     }
 
+    fn fetch_strong_snapshot(&mut self, chains: &[OrderIndex]) {
+        //XXX outstanding_snapshots is incremented in prefetch
+        let packet = {
+            let mut buffer = self.cache.alloc();
+            EntryContents::Snapshot {
+                id: &Uuid::nil(),
+                flags: &EntryFlag::NewMultiPut,
+                data_bytes: &0,
+                num_deps: &0,
+                locs: chains,
+            }.fill_vec(&mut buffer);
+            buffer
+        };
+        self.to_store.send(packet).expect("store hung up")
+    }
+
     fn prefetch(&mut self, chain: order) {
         //TODO allow new chains?
         //TODO how much to fetch
@@ -343,6 +370,23 @@ impl ThreadLog {
         trace!("FUZZY handle read @ {:?}", read_loc);
 
         match kind.layout() {
+            EntryLayout::Snapshot => {
+                debug_assert!(flag.contains(EntryFlag::ReadSuccess));
+                let locs = bytes_as_entry(&msg).locs();
+                trace!("FUZZY got strong snapshot {:?}", locs);
+                // for loc in locs {
+                let loc = read_loc;
+                debug_assert!(bytes_as_entry(&msg).flag().contains(EntryFlag::ReadSuccess));
+                let unblocked = self.per_chains.get_mut(&loc.0).and_then(|s| {
+                    trace!("FUZZY try update horizon to {:?}", loc);
+                    s.give_new_snapshot(loc.1)
+                });
+                if let Some(val) = unblocked {
+                    let locs = self.return_entry(val);
+                    if let Some(locs) = locs { self.stop_blocking_on(locs) }
+                }
+                // }
+            }
             EntryLayout::Read => {
                 trace!("FUZZY read has no data");
                 debug_assert!(!flag.contains(EntryFlag::ReadSuccess));
