@@ -16,6 +16,8 @@ use mio::tcp::*;
 
 use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
 
+use packets::EntryContents;
+
 mod worker;
 mod per_socket;
 
@@ -346,6 +348,7 @@ pub fn run_with_replication(
             match to_log {
                 ToLog::New(buffer, storage, st) => log.handle_op(buffer, storage, st),
                 ToLog::Replication(tr, st) => log.handle_replication(tr, st),
+                ToLog::Recovery(r, st) => log.handle_recovery(r, st),
             }
         }
         #[cfg(feature = "print_stats")]
@@ -355,6 +358,7 @@ pub fn run_with_replication(
             match msg {
                 Ok(ToLog::New(buffer, storage, st)) => log.handle_op(buffer, storage, st),
                 Ok(ToLog::Replication(tr, st)) => log.handle_replication(tr, st),
+                ToLog::Recovery(r, st) => log.handle_recovery(r, st),
                 Err(RecvTimeoutError::Timeout) => log.print_stats(),
                 Err(RecvTimeoutError::Disconnected) => panic!("log disconnected"),
             }
@@ -372,11 +376,14 @@ pub fn run_with_replication(
     let mut worker_for_client: HashMap<_, _> = Default::default();
     let mut next_token = FIRST_CLIENT_TOKEN;
     //let mut buffer_cache = VecDeque::new();
-    let mut next_worker = 0usize;
+    // let mut next_worker = 0usize;
 
-    for (socket, addr) in other_sockets {
+    for (mut socket, addr) in other_sockets {
+        let mut id = [0u8; 16];
+        blocking_read(&mut socket, &mut id).unwrap();
+        let id = Ipv4SocketAddr::from_bytes(id);
         let tok = get_next_token(&mut next_token);
-        let worker = if is_unreplicated {
+        /*let worker = if is_unreplicated {
             let worker = next_worker;
             next_worker = next_worker.wrapping_add(1);
             if next_worker >= dist_to_workers.len() {
@@ -384,11 +391,18 @@ pub fn run_with_replication(
             }
             worker
         } else {
-            worker_for_ip(addr, num_workers as u64)
+            let worker = worker_for_ip(id, num_workers as u64);
+            worker_for_client.insert(id, (worker, tok));
+            worker
+        };*/
+        let worker = {
+            let worker = worker_for_ip(id, num_workers as u64);
+            worker_for_client.insert(id, (worker, tok));
+            worker
         };
-        dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
-        worker_for_client.insert(
-            Ipv4SocketAddr::from_socket_addr(addr), (worker, tok));
+        trace!("SERVER new client @ {:?} => {:?}", (addr, id), (worker, tok));
+        dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
+
     }
 
     trace!("SERVER start server loop");
@@ -399,11 +413,14 @@ pub fn run_with_replication(
                 ACCEPT => {
                     match acceptor.accept() {
                         Err(e) => trace!("error {}", e),
-                        Ok((socket, addr)) => {
+                        Ok((mut socket, addr)) => {
                             let _ = socket.set_keepalive_ms(Some(1000));
                             let _ = socket.set_nodelay(true);
                             //TODO oveflow
                             let tok = get_next_token(&mut next_token);
+                            let mut id = [0u8; 16];
+                            blocking_read(&mut socket, &mut id).unwrap();
+                            let id = Ipv4SocketAddr::from_bytes(id);
                             /*poll.register(
                                 &socket,
                                 tok,
@@ -411,7 +428,7 @@ pub fn run_with_replication(
                                 mio::PollOpt::edge() | mio::PollOpt::oneshot(),
                             );
                             receivers.insert(tok, Some(socket));*/
-                            let worker = if is_unreplicated {
+                            /*let worker = if is_unreplicated {
                                 let worker = next_worker;
                                 next_worker = next_worker.wrapping_add(1);
                                 if next_worker >= dist_to_workers.len() {
@@ -419,13 +436,13 @@ pub fn run_with_replication(
                                 }
                                 worker
                             } else {
-                                worker_for_ip(addr, num_workers as u64)
-                            };
+                                worker_for_ip(id, num_workers as u64)
+                            };*/
+                            let worker = worker_for_ip(id, num_workers as u64);
+                            worker_for_client.insert(id, (worker, tok));
                             trace!("SERVER accepting client @ {:?} => {:?}",
-                                addr, (worker, tok));
-                            dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket));
-                            worker_for_client.insert(
-                                Ipv4SocketAddr::from_socket_addr(addr), (worker, tok));
+                                (addr, id), (worker, tok));
+                            dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
                             //FIXME tell other workers
                         }
                     }
@@ -479,6 +496,49 @@ pub fn run_with_replication(
 
                                 dist_to_workers[worker].send(
                                     DistToWorker::ToClientB(token, buffer, addr, 0)
+                                );
+                                continue
+                            }
+
+                            WorkerToDist::FenceClient(buffer) => {
+                                let (client_to_fence, fencing_client) = match buffer.contents() {
+                                    EntryContents::FenceClient{
+                                        client_to_fence, fencing_client, ..
+                                    } => (*client_to_fence, *fencing_client),
+                                    _ => unreachable!(),
+                                };
+                                if let Some(&(worker, token)) = worker_for_client
+                                    .get(&client_to_fence.into()) {
+                                    dist_to_workers[worker].send(
+                                        DistToWorker::FenceOff(token, buffer)
+                                    );
+                                    continue
+                                };
+                                worker_for_client.get(&fencing_client.into())
+                                .map(|&(worker, token)|
+                                    dist_to_workers[worker].send(
+                                        DistToWorker::FinishedFence(token, buffer)
+                                    )
+                                );
+                                continue
+                            },
+
+                            WorkerToDist::ClientFenced(buffer) => {
+                                let fencing_client = match buffer.contents() {
+                                    EntryContents::FenceClient{fencing_client, ..} =>
+                                        *fencing_client,
+                                    _ => unreachable!(),
+                                };
+                                //TODO we should probably store the worker on the outbound hop
+                                //     to ensure it can get the buffer back if it's client
+                                //     gets fenced in the interim
+
+                                //TODO we should probably GC the worker_for_client entry here
+                                worker_for_client.get(&fencing_client.into())
+                                .map(|&(worker, token)|
+                                    dist_to_workers[worker].send(
+                                        DistToWorker::FinishedFence(token, buffer)
+                                    )
                                 );
                                 continue
                             }
@@ -647,6 +707,7 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     }
 }
 
+#[cfg(TODO)]
 #[cfg(test)]
 mod tests {
     extern crate env_logger;
@@ -1565,7 +1626,7 @@ fn get_next_token(token: &mut mio::Token) -> mio::Token {
     *token
 }
 
-fn worker_for_ip(ip: SocketAddr, num_workers: u64) -> usize {
+fn worker_for_ip(ip: Ipv4SocketAddr, num_workers: u64) -> usize {
     use std::hash::{Hash, Hasher};
     let mut hasher: FxHasher = Default::default();
     ip.hash(&mut hasher);

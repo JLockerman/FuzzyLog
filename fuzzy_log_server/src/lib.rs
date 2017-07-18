@@ -204,6 +204,12 @@ pub enum ToWorker<T: Send + Sync> {
     EmptyRead(entry, BufferSlice, T),
     Reply(BufferSlice, T),
     ReturnBuffer(BufferSlice, T),
+
+    GotRecovery(BufferSlice, T),
+    DidntGetRecovery(BufferSlice, Uuid, T),
+
+    ContinueRecovery(Buffer, T),
+    EndRecovery(Buffer, T),
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +292,11 @@ where T: Send + Sync {
             | &mut Skeens2SingleReplica {ref mut t,..}
             | &mut Skeens1SingleReplica {ref mut t,..}=> f(t),
 
+            &mut GotRecovery(_, ref mut t)
+            | &mut DidntGetRecovery(_, _, ref mut t)
+            | &mut ContinueRecovery(_, ref mut t)
+            | &mut EndRecovery(_, ref mut t) => f(t),
+
             &mut SingleServerSkeens1(_, ref mut t) => f(t),
 
             &mut ReturnBuffer(_, ref mut t) | &mut MultiFastPath(_, _, ref mut t) => f(t),
@@ -311,6 +322,11 @@ where T: Copy + Send + Sync {
             &Skeens1Replica {t, ..}
             | &Skeens2MultiReplica {t,..}
             | &Skeens2SingleReplica {t,..} => t,
+
+            &GotRecovery(_, t)
+            | &DidntGetRecovery(_, _, t)
+            | &ContinueRecovery(_, t)
+            | &EndRecovery(_, t) => t,
         }
     }
 }
@@ -332,6 +348,13 @@ pub enum ToReplicate {
     UnLock(BufferSlice),
 
     GC(BufferSlice),
+
+    TasRecoverer(BufferSlice, Box<(Uuid, Box<[OrderIndex]>)>),
+}
+
+pub enum Recovery {
+    TasRecoverer(BufferSlice, Box<(Uuid, Box<[OrderIndex]>)>),
+    CheckSkeens1(BufferSlice),
 }
 
 #[derive(Debug, PartialEq, Eq)]

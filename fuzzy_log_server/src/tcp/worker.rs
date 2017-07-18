@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ::{
     spsc, worker_thread, ToReplicate, ToWorker,
-    DistributeToWorkers, Troption, SkeensMultiStorage,
+    DistributeToWorkers, Troption, Recovery, SkeensMultiStorage,
     ToSend, ChainReader,
 };
 use shared_slice::RcSlice;
@@ -33,23 +33,32 @@ pub enum WorkerToDist {
     DownstreamB(WorkerNum, Ipv4SocketAddr, Box<[u8]>, u64),
     ToClient(Ipv4SocketAddr, &'static [u8]),
     ToClientB(Ipv4SocketAddr, Box<[u8]>),
+
+    #[allow(dead_code)]
+    FenceClient(Buffer),
+    ClientFenced(Buffer),
 }
 
 #[allow(dead_code)]
 pub enum DistToWorker {
-    NewClient(mio::Token, TcpStream),
+    NewClient(mio::Token, TcpStream, Ipv4SocketAddr),
     //ToClient(ToWorker<(usize, mio::Token, Ipv4SocketAddr)>),
     ToClient(mio::Token, &'static [u8], Ipv4SocketAddr, u64),
     ToClientB(mio::Token, Box<[u8]>, Ipv4SocketAddr, u64),
     ToClientC(mio::Token, Box<[u8]>, Ipv4SocketAddr),
     //ToReplicate(mio::Token, Box<[u8]>, Ipv4SocketAddr, u64),
     //ToClientC(mio::Token, Box<EntryContents<'static>>, Ipv4SocketAddr, u64),
+    FenceOff(mio::Token, Buffer),
+    FinishedFence(mio::Token, Buffer),
 }
 
 pub enum ToLog<T> {
     //TODO test different layouts.
     New(Buffer, Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>, T),
-    Replication(ToReplicate, T)
+    Replication(ToReplicate, T),
+
+    #[allow(dead_code)]
+    Recovery(Recovery, T),
 }
 
 pub struct Worker {
@@ -318,7 +327,7 @@ impl Worker {
         loop {
             match self.inner.from_dist.try_recv() {
                 None => return,
-                Some(DistToWorker::NewClient(tok, stream)) => {
+                Some(DistToWorker::NewClient(tok, stream, client_addr)) => {
                     debug_assert!(tok.0 >= FIRST_CLIENT_TOKEN.0);
                     self.inner.print_data.from_dist_N(1);
                     self.inner.poll.register(
@@ -329,8 +338,8 @@ impl Worker {
                     ).unwrap();
                     //self.clients.insert(tok, PerSocket::new(buffer, stream));
                     //TODO assert unique?
-                    trace!("WORKER {} recv from dist.", self.inner.worker_num);
-                    let client_addr = Ipv4SocketAddr::from_socket_addr(stream.peer_addr().unwrap());
+                    trace!("WORKER {} recv from dist {:?}.",
+                        self.inner.worker_num, (tok, client_addr));
                     self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
                     let _state =
                         self.clients.entry(tok).or_insert(PerSocket::client(stream));
@@ -359,12 +368,6 @@ impl Worker {
                 }
                 Some(DistToWorker::ToClient(tok, buffer, src_addr, storage_loc)) => {
                     self.inner.print_data.from_dist_T(1);
-                    debug_assert_eq!(
-                        Ipv4SocketAddr::from_socket_addr(
-                                self.clients[&tok].stream().peer_addr().unwrap()
-                        ),
-                        src_addr
-                    );
                     debug_assert_eq!(storage_loc, 0);
                     trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
                     assert!(tok >= FIRST_CLIENT_TOKEN);
@@ -399,12 +402,6 @@ impl Worker {
 
                 Some(DistToWorker::ToClientB(tok, buffer, src_addr, storage_loc)) => {
                     self.inner.print_data.from_dist_T(1);
-                    debug_assert_eq!(
-                        Ipv4SocketAddr::from_socket_addr(
-                                self.clients[&tok].stream().peer_addr().unwrap()
-                        ),
-                        src_addr
-                    );
                     debug_assert_eq!(storage_loc, 0);
                     trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
                     assert!(tok >= FIRST_CLIENT_TOKEN);
@@ -418,6 +415,23 @@ impl Worker {
 
                 Some(DistToWorker::ToClientC(..)) => {
                     unimplemented!()
+                }
+
+                Some(DistToWorker::FenceOff(_token, buffer)) => {
+                    //TODO we're not actually going to fence off clients in this branch
+                    //     but here's where we'd do it
+                    self.inner.to_dist.send(WorkerToDist::ClientFenced(buffer)).unwrap();
+                }
+
+                Some(DistToWorker::FinishedFence(token, buffer)) => {
+                    self.clients.get_mut(&token).unwrap().add_downstream_send(
+                        buffer.entry_slice());
+                    self.clients.get_mut(&token).unwrap().return_buffer(buffer);
+                    //TODO replace with wake function
+                    if self.clients[&token].needs_to_stay_awake() {
+                        self.inner.awake_io.push_back(token);
+                        self.clients.get_mut(&token).map(|p| p.is_staying_awake());
+                    }
                 }
             }
         }
@@ -438,7 +452,8 @@ impl Worker {
                 |to_send, _| {
                     match next_hop {
                         None => {
-                            trace!("WORKER {:?} re dist", self.inner.worker_num);
+                            trace!("WORKER {:?} re dist {:?}",
+                                self.inner.worker_num, src_addr);
                             self.redist_to_client(src_addr, to_send);
                             None
                         },
@@ -713,7 +728,7 @@ impl WorkerInner {
             return Some((self.worker_num, token))
         }
         else if self.downstream_workers == 0 { //if self.is_end_of_chain
-            // trace!("WORKER {} is end of chain.", self.worker_num);
+            trace!("WORKER {} is end of chain {:#?}.", self.worker_num, self.ip_to_worker);
             return match self.worker_and_token_for_addr(src_addr) {
                 Some(worker_and_token) => {
                     // trace!("WORKER {} send to_client to {:?}",

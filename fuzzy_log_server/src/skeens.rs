@@ -14,12 +14,14 @@ use vec_deque_map::VecDequeMap;
 use super::SkeensMultiStorage;
 
 use super::trie::ValEdge;
+use packets::OrderIndex;
 
 pub struct SkeensState<T: Copy> {
     next_timestamp: u64,
     phase1_queue: VecDequeMap<WaitingForMax<T>>,
     got_max_timestamp: BinaryHeap<GotMax<T>>,
     append_status: HashMap<Uuid, AppendStatus>,
+    recovering: HashMap<Uuid, (u64, Box<(Uuid, Box<[OrderIndex]>)>)>,
     //waiting_for_max_timestamp: LinkedHashMap<Uuid, WaitingForMax<T>>,
     //in_progress: HashMap<Uuid, AppendStatus>, //subsumes waiting_for_max_timestamp and phase2_ids
     //phase2_ids: HashMap<Uuid, u64>,
@@ -82,6 +84,7 @@ impl<T: Copy> SkeensState<T> {
             phase1_queue: Default::default(),
             got_max_timestamp: Default::default(),
             next_timestamp: 1,
+            recovering: Default::default(),
         }
     }
 
@@ -433,6 +436,68 @@ impl<T: Copy> SkeensState<T> {
     pub fn is_empty(&self) -> bool {
         self.phase1_queue.is_empty()
         && self.got_max_timestamp.is_empty()
+    }
+
+    pub fn tas_recoverer(
+        &mut self,
+        write_id: Uuid,
+        recoverer: Box<(Uuid, Box<[OrderIndex]>)>,
+        old_recoverer: Option<Uuid>,
+    ) -> Result<u64, Option<Uuid>> {
+        use std::collections::hash_map;
+
+        match (self.recovering.entry(write_id), old_recoverer) {
+            (hash_map::Entry::Vacant(..), Some(..)) => Err(None),
+
+            (hash_map::Entry::Vacant(v), None) => {
+                v.insert((1, recoverer));
+                Ok(1)
+            },
+
+            (hash_map::Entry::Occupied(ref mut o), Some(ref mut old)) if (o.get().1).0 == *old
+            => {
+                let old = o.get().0;
+                o.insert((old+1, recoverer));
+                Ok(old+1)
+            },
+
+            (hash_map::Entry::Occupied(o), _) => Err(Some((o.get().1).0)),
+        }
+    }
+
+    pub fn replicate_recoverer(
+        &mut self,
+        write_id: Uuid,
+        recoverer: Box<(Uuid, Box<[OrderIndex]>)>,
+        recoverer_index: u64,
+    ) -> Result<(), Option<Uuid>> {
+        use std::collections::hash_map;
+
+        match self.recovering.entry(write_id) {
+            hash_map::Entry::Vacant(v) => {
+                v.insert((recoverer_index, recoverer));
+                Ok(())
+            },
+
+            hash_map::Entry::Occupied(ref mut o) if o.get().0 < recoverer_index => {
+                o.insert((recoverer_index, recoverer));
+                Ok(())
+            },
+
+            hash_map::Entry::Occupied(o) => Err(Some((o.get().1).0)),
+        }
+    }
+
+    pub fn check_skeens1(&self, write_id: Uuid, timestamp: Time) -> bool {
+        let status = self.append_status.get(&write_id);
+        if let Some(status) = status {
+            if let &AppendStatus::Phase1(i) = status {
+                if let Timestamp::Phase1(t) = self.phase1_queue[i].multi_timestamp() {
+                    return t == timestamp
+                }
+            }
+        }
+        false
     }
 }
 

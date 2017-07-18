@@ -467,6 +467,56 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             };
             (Some(buffer), u)
         },
+
+        //FIXME these may not be right
+        GotRecovery(mut buffer, t) => {
+            {
+                let mut e = buffer.contents_mut();
+                e.flag_mut().insert(EntryFlag::ReadSuccess);
+            }
+            let u = if continue_replication {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+        },
+
+        DidntGetRecovery(mut buffer, id, t) => {
+            {
+                let mut e = buffer.contents_mut();
+                e.flag_mut().remove(EntryFlag::ReadSuccess);
+                e.recoverer_is(id);
+            }
+            let u = if continue_replication {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+        },
+
+        ToWorker::ContinueRecovery(mut buffer, t) => {
+            {
+                let mut e = buffer.contents_mut();
+                e.flag_mut().insert(EntryFlag::ReadSuccess);
+            }
+            let u = if continue_replication {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+        },
+
+        ToWorker::EndRecovery(buffer, t) => {
+            let u = if continue_replication {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+        },
     }
 }
 

@@ -142,6 +142,8 @@ where C: AsyncStoreClient {
     -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
+        let id = Uuid::new_v4();
+        trace!("Starting Store {}", id);
         let mut servers = try!(chain_servers
             .into_iter()
             .map(PerServer::tcp)
@@ -154,10 +156,15 @@ where C: AsyncStoreClient {
         servers.push(lock_server);
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
+            server.receiver = Ipv4SocketAddr::from_uuid(&id);
             event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
+        }
+        for server in servers.iter_mut().rev() {
+            //TODO we should probably wait for an ack
+            blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
@@ -192,7 +199,8 @@ where C: AsyncStoreClient {
     ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
-        trace!("Starting Store server addrs:");
+        let id = Uuid::new_v4();
+        trace!("Starting Store {} server addrs:", id);
         let mut servers = try!(chain_servers
             .into_iter()
             .inspect(|addr| trace!("{:?}", addr))
@@ -203,10 +211,15 @@ where C: AsyncStoreClient {
         trace!("Client {:?} servers", num_chain_servers);
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
+            server.receiver = Ipv4SocketAddr::from_uuid(&id);
             event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
+        }
+        for server in servers.iter_mut().rev() {
+            //TODO we should probably wait for an ack
+            blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
@@ -241,8 +254,8 @@ where C: AsyncStoreClient {
     ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=(SocketAddr, SocketAddr)> {
         //TODO assert no duplicates
-        trace!("Starting Store server addrs:");
-
+        let id = Uuid::new_v4();
+        trace!("Starting Store {:?} server addrs:", id);
         let (write_servers, read_servers): (Vec<_>, Vec<_>) =
             chain_servers.into_iter().inspect(|addrs| trace!("{:?}", addrs)).unzip();
 
@@ -262,14 +275,15 @@ where C: AsyncStoreClient {
         trace!("Client {:?} servers", num_chain_servers);
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
+            server.receiver = Ipv4SocketAddr::from_uuid(&id);
             event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
         }
-        for i in 0..num_chain_servers {
-            let receiver = servers[i+num_chain_servers].receiver;
-            servers[i].receiver = receiver;
+        for server in servers.iter_mut().rev() {
+            //TODO we should probably wait for an ack
+            blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         trace!("Client servers {:?}",
             servers.iter().map(|s| s.connection().local_addr()).collect::<Vec<_>>()
@@ -309,6 +323,7 @@ where C: AsyncStoreClient {
     ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=(SocketAddr, SocketAddr)>
     {
+        let id = Uuid::new_v4();
         //TODO assert no duplicates
         let (write_servers, read_servers): (Vec<_>, Vec<_>) =
             chain_servers.into_iter().unzip();
@@ -333,14 +348,15 @@ where C: AsyncStoreClient {
         //TODO if let Some(lock_server) = lock_server...
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
+            server.receiver = Ipv4SocketAddr::from_uuid(&id);
             event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
                 .expect("could not reregister client socket")
         }
-        for i in 0..num_chain_servers {
-            let receiver = servers[i+num_chain_servers].receiver;
-            servers[i].receiver = receiver;
+        for server in servers.iter_mut().rev() {
+            //TODO we should probably wait for an ack
+            blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
@@ -430,7 +446,6 @@ impl PerServer<TcpStream> {
     fn tcp(addr: SocketAddr) -> Result<Self, io::Error> {
         let stream = try!(TcpStream::connect(&addr));
         let _ = stream.set_nodelay(true);
-        let local_addr = try!(stream.local_addr());
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
             being_written: DoubleBuffer::with_first_buffer_capacity(1024),
@@ -442,7 +457,7 @@ impl PerServer<TcpStream> {
             bytes_sent: 0,
             token: Token(::std::usize::MAX),
             got_new_message: false,
-            receiver: Ipv4SocketAddr::from_socket_addr(local_addr),
+            receiver: Ipv4SocketAddr::from_uuid(&Uuid::nil()),
             stay_awake: true,
             dead: false,
 
@@ -475,7 +490,7 @@ impl PerServer<UdpConnection> {
             bytes_sent: 0,
             token: Token(::std::usize::MAX),
             got_new_message: false,
-            receiver: Ipv4SocketAddr::nil(),
+            receiver: Ipv4SocketAddr::from_uuid(&Uuid::nil()),
             stay_awake: true,
             dead: false,
 
@@ -2255,4 +2270,30 @@ fn read_server_for_chain(chain: order, num_servers: usize, unreplicated: bool) -
 
 fn is_write_server_for(chain: order, tok: Token, num_servers: usize) -> bool {
     write_server_for_chain(chain, num_servers) == tok.0
+}
+
+fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
+    use std::thread;
+    //like Write::write_all but doesn't die on WouldBlock
+    'recv: while !buffer.is_empty() {
+        match w.write(buffer) {
+            Ok(i) => { let tmp = buffer; buffer = &tmp[i..]; }
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock
+                | io::ErrorKind::Interrupted
+                | io::ErrorKind::NotConnected => {
+                    thread::yield_now();
+                    continue 'recv
+                },
+                _ => { return Err(e) }
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::WriteZero,
+            "failed to fill whole buffer"))
+    }
+    else {
+        return Ok(())
+    }
 }

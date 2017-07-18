@@ -1072,6 +1072,20 @@ where ToWorkers: DistributeToWorkers<T> {
             ToReplicate::GC(buffer) => {
                 self.handle_gc(buffer, t)
             },
+
+            ToReplicate::TasRecoverer(buffer, recoverer) => {
+                let (&write_id, _) = buffer.contents().write_id_and_old_recoverer();
+                let index = buffer.contents().lock_num();
+                let chain = recoverer.1[0].0;
+                let res = self.ensure_chain(chain).skeens.replicate_recoverer(
+                    write_id, recoverer, index
+                );
+                self.print_data.msgs_sent(1);
+                self.to_workers.send_to_worker(match res {
+                    Ok(_) => ToWorker::GotRecovery(buffer, t),
+                    Err(id) => ToWorker::DidntGetRecovery(buffer, id.unwrap_or_else(Uuid::nil), t),
+                })
+            },
         }
     }
 
@@ -1091,5 +1105,45 @@ where ToWorkers: DistributeToWorkers<T> {
         }
         //TODO send down before sending to ordering thread...
         self.to_workers.send_to_worker(Reply(buffer, t));
+    }
+
+    pub fn handle_recovery(&mut self, recovery: Recovery, t: T) {
+        match recovery {
+            Recovery::TasRecoverer(mut buffer, recoverer) => {
+                let (&write_id, &old_recoverer) = buffer.contents().write_id_and_old_recoverer();
+                let old_recoverer = if old_recoverer == Uuid::nil() {
+                    None
+                } else {
+                    Some(old_recoverer)
+                };
+                let chain = recoverer.1[0].0;
+                let res = self.ensure_chain(chain).skeens
+                    .tas_recoverer(write_id, recoverer, old_recoverer);
+                self.print_data.msgs_sent(1);
+                self.to_workers.send_to_worker(match res {
+                    Ok(i) => {
+                        *buffer.contents_mut().lock_mut() = i;
+                        ToWorker::GotRecovery(buffer, t)
+                    },
+                    Err(id) => ToWorker::DidntGetRecovery(buffer, id.unwrap_or_else(Uuid::nil), t),
+                })
+            },
+
+            Recovery::CheckSkeens1(buffer) => {
+                let (id, OrderIndex(chain, time)) = {
+                    let c = buffer.contents();
+                    (*c.id(), c.locs()[0])
+                };
+                let time = u32::from(time) as u64;
+                let still_there = get_chain(&self.log, chain)
+                    .map(|c| c.skeens.check_skeens1(id, time))
+                    .unwrap_or(false);
+                self.to_workers.send_to_worker(if still_there {
+                    ToWorker::ContinueRecovery(buffer, t)
+                } else {
+                    ToWorker::EndRecovery(buffer, t)
+                });
+            },
+        }
     }
 }
