@@ -151,6 +151,19 @@ pub enum ToWorker<T: Send + Sync> {
         t: T,
     },
 
+    SnapSkeensFinished {
+        loc: OrderIndex,
+        storage: SkeensMultiStorage,
+        timestamp: u64,
+        t: T,
+    },
+
+    SnapshotSkeens1 {
+        buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
     SingleServerSkeens1(SkeensMultiStorage, T),
 
     //FIXME this is getting too big...
@@ -180,6 +193,13 @@ pub enum ToWorker<T: Send + Sync> {
     Skeens2MultiReplica {
         loc: OrderIndex,
         trie_slot: *mut ValEdge,
+        timestamp: u64,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
+    Skeens2SnapReplica {
+        loc: OrderIndex,
         timestamp: u64,
         storage: SkeensMultiStorage,
         t: T,
@@ -266,12 +286,12 @@ impl SkeensMultiStorage {
         //let num_ts = ts.len();
         st0.copy_from_slice(&buffer[..len]);
         //TODO just copy from sentinel Ref
-        let was_multi = buffer.to_sentinel();
         if let Some(st1) = st1.as_mut() {
+            let was_multi = buffer.to_sentinel();
             let len = buffer.contents().len();
             st1.copy_from_slice(&buffer[..len]);
+            buffer.from_sentinel(was_multi);
         }
-        buffer.from_sentinel(was_multi);
     }
 }
 
@@ -290,7 +310,10 @@ where T: Send + Sync {
             | &mut Skeens1Replica {ref mut t, ..}
             | &mut Skeens2MultiReplica {ref mut t,..}
             | &mut Skeens2SingleReplica {ref mut t,..}
-            | &mut Skeens1SingleReplica {ref mut t,..}=> f(t),
+            | &mut Skeens1SingleReplica {ref mut t,..}
+            | &mut SnapshotSkeens1{ref mut t, ..}
+            | &mut SnapSkeensFinished{ref mut t, ..}
+            | &mut Skeens2SnapReplica{ref mut t, ..} => f(t),
 
             &mut GotRecovery(_, ref mut t)
             | &mut DidntGetRecovery(_, _, ref mut t)
@@ -318,9 +341,11 @@ where T: Copy + Send + Sync {
             &Skeens1SingleReplica {t, ..} => t,
             &ReturnBuffer(_, t) => t,
             &SingleServerSkeens1(_, t) => t,
+            &SnapshotSkeens1{t, ..} | &SnapSkeensFinished{t, ..} => t,
 
             &Skeens1Replica {t, ..}
             | &Skeens2MultiReplica {t,..}
+            | &Skeens2SnapReplica{t, ..}
             | &Skeens2SingleReplica {t,..} => t,
 
             &GotRecovery(_, t)

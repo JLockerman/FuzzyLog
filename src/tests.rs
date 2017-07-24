@@ -916,6 +916,7 @@ macro_rules! async_tests {
             });
             let mut lh = $new_thread_log::<()>(columns);
             for i in 0..1 {
+                thread::yield_now();
                 lh.strong_snapshot(&[86.into(), 85.into()]);
                 let mut max_85 = 0;
                 let mut max_86 = 0;

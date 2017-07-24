@@ -46,6 +46,16 @@ impl<T: Copy> Chain<T> {
         }
     }
 
+    fn timestamp_for_snap(&mut self, id: Uuid, storage: SkeensMultiStorage, t: T)
+    -> Result<(Time, QueueIndex), Time> {
+        match self.skeens.add_snapshot(id, storage, t) {
+            SkeensAppendRes::NewAppend(ts, num) => Ok((ts, num)),
+            //TODO
+            SkeensAppendRes::OldPhase1(ts) => Err(ts),
+            SkeensAppendRes::Phase2(ts) => Err(ts),
+        }
+    }
+
     fn finish_multi<F>(
         &mut self, id: Uuid, max_timestamp: u64, chain: order, mut on_finish: F)
     where F: FnMut(FinishSkeens<T>) { //Ret val?
@@ -80,7 +90,13 @@ impl<T: Copy> Chain<T> {
                                 loc, ptr::null_mut(), storage, timestamp, t)
                             );
                         },
-
+                        GotMax::Snap{storage, t, id, timestamp, ..} => {
+                            trace!("flush snap {:?}: {:?}", id, timestamp);
+                            let loc = trie.horizon();
+                            on_finish(Snap(
+                                loc, storage, timestamp, t)
+                            );
+                        },
                     }
                 })
             }
@@ -137,6 +153,7 @@ fn get_chain<T: Copy>(log: &ChainStore<T>, chain: order) -> Option<&Chain<T>> {
 enum FinishSkeens<T> {
     Single(u64, *mut ValEdge, ValEdge, T),
     Multi(u64, *mut ValEdge, SkeensMultiStorage, u64, T),
+    Snap(u64, SkeensMultiStorage, u64, T),
 }
 
 impl<T: Send + Sync + Copy, ToWorkers> ServerLog<T, ToWorkers>
@@ -316,11 +333,12 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
+        trace!("SERVER {:?} strong snap", self.this_server_num);
         if !kind.contains(EntryFlag::TakeLock) {
             self.handle_single_server_snapshot(buffer, t)
         } else {
             assert!(kind.contains(EntryFlag::NewMultiPut));
-            unimplemented!()
+            self.handle_skeens_snapshot(kind, buffer, storage, t)
         }
     }
 
@@ -331,24 +349,78 @@ where ToWorkers: DistributeToWorkers<T> {
         mut buffer: BufferSlice,
         t: T
     ) {
+        trace!("SERVER {:?} snap fastpath", self.this_server_num);
+        {
+            let mut contents = buffer.contents_mut();
+            contents.flag_mut().insert(EntryFlag::ReadSuccess);
+            let locs = contents.locs_mut();
+            for &mut OrderIndex(o, ref mut i) in locs.into_iter() {
+                if o == order::from(0) || !self.stores_chain(o) {
+                    *i = entry::from(0);
+                    continue
+                }
 
-    {
-        let mut contents = buffer.contents_mut();
-        contents.flag_mut().insert(EntryFlag::ReadSuccess);
-        let locs = contents.locs_mut();
-        for &mut OrderIndex(o, ref mut i) in locs.into_iter() {
-            if o == order::from(0) || !self.stores_chain(o) {
-                *i = entry::from(0);
-                continue
+                let horizon = get_chain(&self.log, o).map(|c| c.trie.horizon()).unwrap_or(0);
+                *i = entry::from(horizon as u32);
             }
-
-            let horizon = get_chain(&self.log, o).map(|c| c.trie.horizon()).unwrap_or(0);
-            *i = entry::from(horizon as u32);
         }
-    }
 
         self.print_data.msgs_sent(1);
         self.to_workers.send_to_worker(Reply(buffer, t))
+    }
+
+    //////////////////////
+
+    fn handle_skeens_snapshot(
+        &mut self,
+        kind: EntryFlag::Flag,
+        mut buffer: BufferSlice,
+        storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
+        t: T,
+    ) {
+        assert!(kind.contains(EntryFlag::TakeLock));
+        trace!("SERVER {:?} new-style multisnap {:?}", self.this_server_num, kind);
+        if kind.contains(EntryFlag::Unlock) {
+            self.new_multiappend_round2(kind, &mut buffer);
+            self.print_data.msgs_sent(1);
+            self.to_workers.send_to_worker(ReturnBuffer(buffer, t))
+        } else {
+            let storage = storage.unwrap_left();
+            self.skeens_snapshot_round1(kind, &mut buffer, &storage, t);
+            self.print_data.msgs_sent(1);
+            self.to_workers.send_to_worker(
+                SnapshotSkeens1 { buffer: buffer, storage: storage, t: t }
+            );
+        }
+    }
+
+    fn skeens_snapshot_round1(
+        &mut self,
+        kind: EntryFlag::Flag,
+        buffer: &mut BufferSlice,
+        storage: &SkeensMultiStorage,
+        t: T,
+    ) {
+        assert!(!kind.contains(EntryFlag::Unlock));
+        trace!("SERVER {:?} new-style multisnap Round 1 {:?}", self.this_server_num, kind);
+        let val = buffer.contents();
+        let locs = val.locs();
+        let timestamps = &mut unsafe { storage.get_mut().0 }[..locs.len()];
+        let queue_indicies = &mut unsafe { storage.get_mut().1 }[..locs.len()];
+        let id = val.id().clone();
+        for i in 0..locs.len() {
+            let chain = locs[i].0;
+            if !self.stores_chain(chain) { continue }
+            //TODO can we do without this?
+            let chain = self.ensure_chain(chain);
+            //FIXME handle repeat skeens-1
+            let (local_timestamp, num) =
+                chain.timestamp_for_snap(id, storage.clone(), t).unwrap();
+            timestamps[i] = local_timestamp;
+            queue_indicies[i] = num;
+        }
+        trace!("SERVER {:?} new-style multisnap Round 1 timestamps {:?}",
+            self.this_server_num, timestamps);
     }
 
     /////////////////////////////////////////////////
@@ -558,6 +630,7 @@ where ToWorkers: DistributeToWorkers<T> {
         kind: EntryFlag::Flag,
         buffer: &mut BufferSlice,
     ) {
+        assert!(kind.contains(EntryFlag::Unlock));
         // In round two we flush some the queues... an possibly a partial entry...
         let mut val = buffer.contents_mut();
         let id = val.as_ref().id().clone();
@@ -598,6 +671,20 @@ where ToWorkers: DistributeToWorkers<T> {
                             }
                         )
                     },
+
+                    FinishSkeens::Snap(index, storage, timestamp, t) => {
+                        trace!("server finish sk snap");
+                        print_data.msgs_sent(1);
+                        to_workers.send_to_worker(
+                            SnapSkeensFinished {
+                                loc: OrderIndex(chain_num, (index as u32).into()),
+                                storage,
+                                timestamp,
+                                t,
+                            }
+                        )
+                    },
+
                     FinishSkeens::Single(index, trie_slot, storage, t) => {
                         trace!("server finish sk single");
                         print_data.msgs_sent(1);
@@ -990,6 +1077,18 @@ where ToWorkers: DistributeToWorkers<T> {
                                     storage: storage,
                                     timestamp: max_timestamp,
                                     t: t
+                                }
+                            )
+                        },
+                        Snap{index, storage, max_timestamp, t} => {
+                            trace!("SERVER finish sk multi snap ({:?}, {:?})", o, index);
+                            print_data.msgs_sent(1);
+                            to_workers.send_to_worker(
+                                Skeens2SnapReplica {
+                                    loc: OrderIndex(o, (index as u32).into()),
+                                    storage,
+                                    timestamp: max_timestamp,
+                                    t,
                                 }
                             )
                         },

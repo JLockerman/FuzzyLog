@@ -310,10 +310,11 @@ impl ThreadLog {
         let packet = {
             let mut buffer = self.cache.alloc();
             EntryContents::Snapshot {
-                id: &Uuid::nil(),
-                flags: &EntryFlag::NewMultiPut,
+                id: &Uuid::new_v4(),
+                flags: &EntryFlag::Nothing,
                 data_bytes: &0,
                 num_deps: &0,
+                lock: &0,
                 locs: chains,
             }.fill_vec(&mut buffer);
             buffer

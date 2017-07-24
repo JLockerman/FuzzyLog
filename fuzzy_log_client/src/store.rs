@@ -123,6 +123,16 @@ pub enum WriteState {
         Rc<RefCell<HashSet<usize>>>,
         u64,
     ),
+    SnapshotSkeens1(
+        Rc<RefCell<Vec<u8>>>,
+        Rc<RefCell<HashSet<usize>>>,
+        Rc<RefCell<Box<[u64]>>>,
+    ),
+    SnapshotSkeens2(
+        Rc<RefCell<Vec<u8>>>,
+        Rc<RefCell<HashSet<usize>>>,
+        u64,
+    ),
     UnlockServer(Rc<RefCell<Vec<u8>>>),
     GC(Vec<u8>),
 }
@@ -688,7 +698,12 @@ where PerServer<S>: Connected,
                     let s = self.read_server_for_chain(chain);
                     self.add_single_server_send(s, msg)
                 } else {
-                    unimplemented!()
+                    let mut msg = msg;
+                    assert!(self.new_multi);
+                    bytes_as_entry_mut(&mut msg)
+                        .flag_mut().insert(EntryFlag::TakeLock | EntryFlag::NewMultiPut);
+                    self.add_snapshot_skeens1(msg);
+                    true
                 }
             }
 
@@ -719,9 +734,10 @@ where PerServer<S>: Connected,
                 self.waiting_buffers.push_back(sent.take())
             }
             else if layout == EntryLayout::Snapshot {
-                //unimplemented!()
-                //NOP?
-                {}
+                if sent.is_multi() {
+                    let id = sent.id();
+                    self.sent_writes.insert(id, sent);
+                }
             }
             else if !sent.is_unlock() {
                 let id = sent.id();
@@ -754,19 +770,8 @@ where PerServer<S>: Connected,
 
     fn add_skeens1(&mut self, msg: Vec<u8>) {
         debug_assert_eq!(bytes_as_entry(&msg).len(), msg.len());
-        let timestamps = Rc::new(RefCell::new(
-            (0..bytes_as_entry(&msg).locs().len())
-                .map(|_| 0u64).collect::<Vec<_>>().into_boxed_slice()
-        ));
-        let servers = self.get_servers_for_multi(&msg);
-        let mut remaining_servers: HashSet<usize> = Default::default();
-        remaining_servers.reserve(servers.len());
-        for &writer in servers.iter() {
-            remaining_servers.insert(self.read_server_for_write_server(writer));
-        }
+        let (msg, servers, remaining_servers, timestamps) = self.prep_skeens1(msg);
         trace!("CLIENT multi to {:?}", remaining_servers);
-        let remaining_servers = Rc::new(RefCell::new(remaining_servers));
-        let msg = Rc::new(RefCell::new(msg));
         for s in servers {
             let per_server = &mut self.servers[s];
             per_server.add_skeens1(
@@ -819,6 +824,78 @@ where PerServer<S>: Connected,
                 self.awake_io.push_back(s)
             }
         }
+    }
+
+    fn add_snapshot_skeens1(&mut self, msg: Vec<u8>) {
+        let (msg, servers, remaining_servers, timestamps) = self.prep_skeens1(msg);
+        for s in servers {
+            let per_server = &mut self.servers[s];
+            per_server.add_snapshot_skeens1(
+                msg.clone(),
+                remaining_servers.clone(),
+                timestamps.clone(),
+            );
+            if !per_server.got_new_message {
+                per_server.got_new_message = true;
+                self.awake_io.push_back(s)
+            }
+        }
+    }
+
+    fn add_snapshot_skeens2(&mut self, mut buf: Rc<RefCell<Vec<u8>>>, max_ts: u64) {
+        let servers = match Rc::get_mut(&mut buf) {
+            None => unreachable!(),
+            Some(mut buf) => {
+                let buf = buf.get_mut();
+                let server = self.get_servers_for_multi(&buf);
+                let size = {
+                    let mut e = bytes_as_entry_mut(buf);
+                    e.flag_mut().insert(EntryFlag::Unlock | EntryFlag::NewMultiPut);
+                    e.locs_mut().iter_mut()
+                        .fold((), |_, &mut OrderIndex(_, ref mut i)| *i = entry::from(0));
+                    *e.lock_mut() = max_ts;
+                    e.as_ref().len()
+                };
+                unsafe { buf.set_len(size) };
+                server
+            }
+        };
+        let mut remaining_servers: HashSet<usize> = Default::default();
+        remaining_servers.reserve(servers.len());
+        for &writer in servers.iter() {
+            remaining_servers.insert(self.read_server_for_write_server(writer));
+        }
+        let remaining_servers = Rc::new(RefCell::new(remaining_servers));
+        for s in servers {
+            let per_server = &mut self.servers[s];
+            per_server.add_snapshot_skeens2(
+                buf.clone(),
+                remaining_servers.clone(),
+                max_ts,
+            );
+            if !per_server.got_new_message {
+                per_server.got_new_message = true;
+                self.awake_io.push_back(s)
+            }
+        }
+    }
+
+    fn prep_skeens1(&mut self, msg: Vec<u8>)
+    -> (Rc<RefCell<Vec<u8>>>, Vec<usize>, Rc<RefCell<HashSet<usize>>>, Rc<RefCell<Box<[u64]>>>) {
+        let timestamps = Rc::new(RefCell::new(
+            (0..bytes_as_entry(&msg).locs().len())
+                .map(|_| 0u64).collect::<Vec<_>>().into_boxed_slice()
+        ));
+        let servers = self.get_servers_for_multi(&msg);
+        let mut remaining_servers: HashSet<usize> = Default::default();
+        remaining_servers.reserve(servers.len());
+        for &writer in servers.iter() {
+            remaining_servers.insert(self.read_server_for_write_server(writer));
+        }
+        trace!("CLIENT multi to {:?}", remaining_servers);
+        let remaining_servers = Rc::new(RefCell::new(remaining_servers));
+        let msg = Rc::new(RefCell::new(msg));
+        (msg, servers, remaining_servers, timestamps)
     }
 
     fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
@@ -914,8 +991,7 @@ where PerServer<S>: Connected,
                 let read_loc = sent.read_loc();
                 *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
-            }
-            else if !sent.is_unlock() {
+            } else if !sent.is_unlock() {
                 let id = sent.id();
                 self.sent_writes.insert(id, sent);
             }
@@ -1041,41 +1117,15 @@ where PerServer<S>: Connected,
                     assert!(kind.contains(EntryKind::Multiput));
                     assert!(self.new_multi);
                     trace!("CLIENT finished sk1 section");
-                    let ready_for_skeens2 = {
-                        let mut r = remaining_servers.borrow_mut();
-                        if !r.remove(&token.0) {
-                            error!("CLIENT repeat sk1 section");
-                            return false
-                        }
-                        let finished_writes = r.is_empty();
-                        mem::drop(r);
-
-                        let mut ts = timestamps.borrow_mut();
-                        //alt just do ts[i] = max(oi.1, ts[i])
-                        let e = packet.contents();
-                        debug_assert_eq!(id, *e.id());
-                        for (i, oi) in e.locs().iter().enumerate() {
-                            if oi.0 != order::from(0)
-                                && read_server_for_chain(oi.0, self.num_chain_servers, unreplicated) == token.0 {
-                                assert!(ts[i] == 0,
-                                    "repeat timestamp {:?} in {:#?}", oi, e);
-                                let t: entry = oi.1;
-                                ts[i] = u32::from(t) as u64;
-                                assert!(ts[i] > 0,
-                                    "bad timestamp {:?} in {:#?}", oi, e);
-                            }
-                        }
-
-                        if finished_writes {
-                            //TODO assert!(Rc::get_mut(&mut buf).is_some());
-                            //let locs = buf.locs().to_vec();
-                            let max_ts = ts.iter().cloned().max().unwrap();
-                            for t in ts.iter() { assert!(&max_ts >= t); }
-                            trace!("CLIENT finished skeens1 {:?}: {:?} max {:?}",
-                                e.id(), ts, max_ts);
-                            Some(max_ts)
-                        } else { None }
-                    };
+                    let ready_for_skeens2 = skeens_finished(
+                        token,
+                        packet,
+                        &id,
+                        num_chain_servers,
+                        &remaining_servers,
+                        &timestamps,
+                        unreplicated
+                    );
                     match ready_for_skeens2 {
                         Some(max_ts) => {
                             self.add_skeens2(buf, max_ts);
@@ -1092,7 +1142,7 @@ where PerServer<S>: Connected,
 
                 WriteState::Skeens2(buf, remaining_servers, max_ts) => {
                     assert!(self.new_multi);
-                    trace!("CLIENT finished sk2 section");
+                    trace!("CLIENT finished multi sk2 section");
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
                         let mut finished_writes = true;
@@ -1142,6 +1192,80 @@ where PerServer<S>: Connected,
                     }
                 }
 
+                WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps) => {
+                    if !flag.contains(EntryFlag::Skeens1Queued) {
+                        error!("CLIENT bad skeens1 ack @ {:?}", token);
+                        return false
+                    }
+                    assert!(kind.contains(EntryKind::Snapshot));
+                    assert!(self.new_multi);
+                    trace!("CLIENT finished snap sk1 section");
+                    let ready_for_skeens2 = skeens_finished(
+                        token,
+                        packet,
+                        &id,
+                        num_chain_servers,
+                        &remaining_servers,
+                        &timestamps,
+                        unreplicated
+                    );
+                    match ready_for_skeens2 {
+                        Some(max_ts) => {
+                            self.add_snapshot_skeens2(buf, max_ts);
+                            return false
+                        }
+                        None => {
+                            self.sent_writes.insert(id,
+                                WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps));
+                            return false
+                        }
+                    }
+                }
+
+                WriteState::SnapshotSkeens2(buf, remaining_servers, max_ts) => {
+                    assert!(self.new_multi);
+                    trace!("CLIENT finished snap sk2 section");
+                    {
+                        let mut b = buf.borrow_mut();
+                        let finished_writes = {
+                            let mut r = remaining_servers.borrow_mut();
+                            r.remove(&token.0);
+                            r.is_empty()
+                        };
+                        {
+                            let mut me = bytes_as_entry_mut(&mut *b);
+                            if finished_writes {
+                                me.flag_mut().insert(EntryFlag::ReadSuccess);
+                            }
+                            let locs = me.locs_mut();
+                            let fill_from = packet.contents().locs();
+                            //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
+                            for (i, &loc) in fill_from.into_iter().enumerate() {
+                                if locs[i].0 != order::from(0) {
+                                    if read_server_for_chain(loc.0, self.num_chain_servers, unreplicated) == token.0 {
+                                        locs[i] = loc;
+                                    }
+                                }
+                            }
+                        }
+                        if finished_writes {
+                            trace!("CLIENT finished snap sk2");
+                            for &l in bytes_as_entry(&*b).locs() {
+                                let e = self.client.on_finished_read(l, Vec::clone(&*b));
+                                if e.is_err() {
+                                    self.finished = true;
+                                    return false
+                                }
+                            }
+                            return false
+                        }
+                    };
+                    trace!("CLIENT waiting snap sk2 pieces");
+                    self.sent_writes.insert(id,
+                        WriteState::SnapshotSkeens2(buf, remaining_servers, max_ts));
+                    return false
+                }
+
                 WriteState::SingleServer(mut buf) => {
                     //assert!(token != self.lock_token());
                     trace!("CLIENT finished single server");
@@ -1156,6 +1280,47 @@ where PerServer<S>: Connected,
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
                 WriteState::GC(..) => return false,
             };
+
+            fn skeens_finished(
+                token: Token,
+                packet: &Buffer,
+                id: &Uuid,
+                num_chain_servers: usize,
+                remaining_servers: &Rc<RefCell<HashSet<usize>>>,
+                timestamps: &Rc<RefCell<Box<[u64]>>>,
+                unreplicated: bool,
+            ) -> Option<u64> {
+                let mut r = remaining_servers.borrow_mut();
+                if !r.remove(&token.0) {
+                    error!("CLIENT repeat sk1 section");
+                    return None
+                }
+                let finished_writes = r.is_empty();
+                mem::drop(r);
+
+                let mut ts = timestamps.borrow_mut();
+                let e = packet.contents();
+                debug_assert_eq!(id, e.id());
+                for (i, oi) in e.locs().iter().enumerate() {
+                    if oi.0 != order::from(0)
+                        && read_server_for_chain(oi.0, num_chain_servers, unreplicated) == token.0 {
+                        assert!(ts[i] == 0,
+                            "repeat timestamp {:?} in {:#?}", oi, e);
+                        let t: entry = oi.1;
+                        ts[i] = u32::from(t) as u64;
+                        assert!(ts[i] > 0,
+                            "bad timestamp {:?} in {:#?}", oi, e);
+                    }
+                }
+
+                if finished_writes {
+                    let max_ts = ts.iter().cloned().max().unwrap();
+                    for t in ts.iter() { assert!(&max_ts >= t); }
+                    trace!("CLIENT finished snap skeens1 {:?}: {:?} max {:?}",
+                        e.id(), ts, max_ts);
+                    Some(max_ts)
+                } else { None }
+            }
 
             fn fill_locs(buf: &mut [u8], e: EntryContents,
                 server: Token, num_chain_servers: usize, unreplicated: bool) -> usize {
@@ -1175,10 +1340,16 @@ where PerServer<S>: Connected,
                 filled
             }
         }
-        else {
+        else if kind.layout() == EntryLayout::Data
+        || kind.layout() == EntryLayout::Multiput
+        || kind.layout() == EntryLayout::Sentinel
+        || kind.layout() == EntryLayout::Read
+        || (kind.layout() == EntryLayout::Snapshot && !flag.contains(EntryFlag::TakeLock)) {
             // panic!("{:?}", packet.contents());
             trace!("CLIENT no write for {:?}", token);
             return true
+        } else {
+            return false
         }
     }// end handle_completed_write
 
@@ -1388,6 +1559,7 @@ where PerServer<S>: Connected,
             bytes_as_entry(msg).layout() == EntryLayout::Multiput
             || bytes_as_entry(msg).layout() == EntryLayout::Sentinel
             || bytes_as_entry(msg).layout() == EntryLayout::GC
+            || bytes_as_entry(msg).layout() == EntryLayout::Snapshot
         );
         bytes_as_entry(msg).locs()
             .iter()
@@ -1493,6 +1665,20 @@ pub trait Connected {
     );
 
     fn add_skeens2(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        max_timestamp: u64,
+    );
+
+    fn add_snapshot_skeens1(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        timestamps: Rc<RefCell<Box<[u64]>>>,
+    );
+
+    fn add_snapshot_skeens2(
         &mut self,
         msg: Rc<RefCell<Vec<u8>>>,
         remaining_servers: Rc<RefCell<HashSet<usize>>>,
@@ -1778,6 +1964,62 @@ impl Connected for PerServer<TcpStream> {
         } else {
             self.awaiting_send.push_front(
                 WriteState::Skeens2(msg, remaining_servers, max_timestamp)
+            );
+        }
+    }
+
+    fn add_snapshot_skeens1(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        timestamps: Rc<RefCell<Box<[u64]>>>,
+    ) {
+        self.stay_awake = true;
+        let len = msg.borrow().len();
+        if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {
+            self.print_data.packets_sending(1);
+            {
+                let ts = msg.borrow();
+                let len = bytes_as_entry(&*ts).len();
+                assert_eq!(len, ts.len());
+                trace!("{:?}", bytes_as_entry(&*ts));
+                let sent = self.being_written.try_fill(&ts[..len], self.receiver);
+                debug_assert!(sent);
+            }
+            self.being_sent.push_back(WriteState::SnapshotSkeens1(
+                msg, remaining_servers, timestamps
+            ))
+        } else {
+            self.awaiting_send.push_back(
+                WriteState::SnapshotSkeens1(msg, remaining_servers, timestamps)
+            );
+        }
+    }
+
+    fn add_snapshot_skeens2(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        max_timestamp: u64,
+    ) {
+        trace!("Add snap Skeens2");
+        self.stay_awake = true;
+        let len = msg.borrow().len();
+        if self.being_written.can_hold_bytes(len + mem::size_of::<Ipv4SocketAddr>()) {
+            self.print_data.packets_sending(1);
+            {
+                let ts = msg.borrow();
+                debug_assert_eq!(bytes_as_entry(&*ts).lock_num(), max_timestamp);
+                let send_end = bytes_as_entry(&*ts).len();
+                let sent = self.being_written.try_fill(&ts[..send_end], self.receiver);
+                debug_assert!(sent);
+            }
+            self.being_sent.push_back(WriteState::SnapshotSkeens2(
+                msg, remaining_servers, max_timestamp
+            ))
+        } else {
+            self.awaiting_send.push_front(
+                WriteState::SnapshotSkeens2(msg, remaining_servers, max_timestamp)
             );
         }
     }
@@ -2094,6 +2336,26 @@ impl Connected for PerServer<UdpConnection> {
     }
 
     #[allow(unused_variables)]
+    fn add_snapshot_skeens1(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        timestamps: Rc<RefCell<Box<[u64]>>>,
+    ) {
+        unimplemented!()
+    }
+
+    #[allow(unused_variables)]
+    fn add_snapshot_skeens2(
+        &mut self,
+        msg: Rc<RefCell<Vec<u8>>>,
+        remaining_servers: Rc<RefCell<HashSet<usize>>>,
+        max_timestamp: u64,
+    ) {
+        unimplemented!()
+    }
+
+    #[allow(unused_variables)]
     fn add_multi(&mut self,
         msg: Rc<RefCell<Vec<u8>>>,
         remaining_servers: Rc<RefCell<HashSet<usize>>>,
@@ -2225,8 +2487,10 @@ impl WriteState {
                 f(&*b)
             },
 
-            &UnlockServer(ref buf) | &Skeens2(ref buf, ..) => {
-                let b = buf.borrow_mut();
+            &UnlockServer(ref buf)
+            | &Skeens2(ref buf, ..)
+            | &SnapshotSkeens1(ref buf, _, _) | &SnapshotSkeens2(ref buf, _, _) => {
+                let b = buf.borrow();
                 f(&*b)
             },
         }
@@ -2237,7 +2501,8 @@ impl WriteState {
         match self {
             SingleServer(buf) | ToLockServer(buf) | GC(buf) => buf,
             MultiServer(buf, ..) | UnlockServer(buf)
-            | Skeens1(buf, ..) | Skeens2(buf, ..) =>
+            | Skeens1(buf, ..) | Skeens2(buf, ..)
+            | SnapshotSkeens1(buf, _, _) | SnapshotSkeens2(buf, _, _) =>
                 Rc::try_unwrap(buf).expect("taking from non unique WriteState")
                     .into_inner()
         }
@@ -2253,6 +2518,8 @@ impl WriteState {
     fn is_multi(&self) -> bool {
         match self {
             &WriteState::MultiServer(..) => true,
+            &WriteState::Skeens1(..) | &WriteState::Skeens2(..) => true,
+            &WriteState::SnapshotSkeens1(..) | &WriteState::SnapshotSkeens2(..) => true,
             _ => false,
         }
     }

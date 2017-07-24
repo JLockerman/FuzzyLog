@@ -188,6 +188,58 @@ impl<T: Copy> SkeensState<T> {
         ret
     }
 
+    pub fn add_snapshot(
+        &mut self, id: Uuid, storage: SkeensMultiStorage, t: T,
+    ) -> SkeensAppendRes {
+        debug_assert!({
+            // debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len(),
+            //     "{:?} != {:?}", self.phase2_ids, self.got_max_timestamp);
+            if self.phase1_queue.is_empty() {
+                debug_assert!(self.got_max_timestamp.is_empty())
+            }
+            true
+        });
+
+        let ret = match self.append_status.entry(id) {
+            Occupied(o) => {
+                match *o.into_mut() {
+                    AppendStatus::Phase2(t) => SkeensAppendRes::Phase2(t),
+                    AppendStatus::Phase1(i) | AppendStatus::Singleton(i) =>
+                        match self.phase1_queue[i].multi_timestamp() {
+                            Timestamp::Phase1(t) => SkeensAppendRes::OldPhase1(t),
+                            Timestamp::Phase2(t) => SkeensAppendRes::Phase2(t),
+                        },
+                }
+            },
+            Vacant(v) => {
+                let timestamp = self.next_timestamp;
+                let node_num = self.phase1_queue.push_index();
+                self.next_timestamp += 1;
+                self.phase1_queue.push_back(
+                    WaitingForMax::Snap {
+                        timestamp: timestamp,
+                        storage: storage,
+                        node_num,
+                        t: t,
+                        id: id,
+                    }
+                );
+                v.insert(AppendStatus::Phase1(node_num));
+                SkeensAppendRes::NewAppend(timestamp, node_num)
+            },
+        };
+        debug_assert!({
+            // debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len(),
+            //     "{:?} != {:?}", self.phase2_ids, self.got_max_timestamp);
+            if self.phase1_queue.is_empty() {
+                debug_assert!(self.got_max_timestamp.is_empty())
+            }
+            true
+        });
+
+        ret
+    }
+
     //AKA skeens2
     pub fn set_max_timestamp(&mut self, sk2_id: Uuid, max_timestamp: u64)
     -> SkeensSetMaxRes {
@@ -277,6 +329,12 @@ impl<T: Copy> SkeensState<T> {
             //     self.phase2_ids, self.got_max_timestamp, id);
         }
 
+    }
+
+
+    pub fn set_snapshot_max_timestamp(&mut self, sk2_id: Uuid, max_timestamp: u64)
+    -> SkeensSetMaxRes {
+        unimplemented!()
     }
 
     ////////////////////////////////////////
@@ -504,6 +562,7 @@ impl<T: Copy> SkeensState<T> {
 pub enum ReplicatedSkeens<T> {
     Multi{index: TrieIndex, storage: SkeensMultiStorage, max_timestamp: Time, t: T},
     Senti{index: TrieIndex, storage: SkeensMultiStorage, max_timestamp: Time, t: T},
+    Snap{index: TrieIndex, storage: SkeensMultiStorage, max_timestamp: Time, t: T},
     Single{index: TrieIndex, storage: ValEdge, t: T},
 }
 
@@ -511,14 +570,17 @@ pub enum ReplicatedSkeens<T> {
 enum WaitingForMax<T> {
     GotMaxMulti{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
     GotMaxSenti{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
+    GotMaxSnap{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
 
     SimpleSingle{timestamp: u64, node_num: u64, storage: ValEdge, t: T, id: Uuid},
     Single{timestamp: u64, node_num: u64, storage: ValEdge, t: T, id: Uuid},
     Multi{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
     Senti{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
+    Snap{timestamp: u64, node_num: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
 
     ReplicatedMulti{max_timestamp: u64, index: TrieIndex, storage: SkeensMultiStorage, t: T, id: Uuid},
     ReplicatedSenti{max_timestamp: u64, index: TrieIndex, storage: SkeensMultiStorage, t: T, id: Uuid},
+    ReplicatedSnap{max_timestamp: u64, index: TrieIndex, storage: SkeensMultiStorage, t: T, id: Uuid},
 
     ReplicatedSingle{max_timestamp: u64, index: TrieIndex, storage: ValEdge, t: T, id: Uuid},
 }
@@ -535,11 +597,13 @@ impl<T: Copy> WaitingForMax<T> {
         *self = match self {
             &mut GotMaxMulti{timestamp, ..}
             | &mut GotMaxSenti{timestamp, ..}
+            | &mut GotMaxSnap{timestamp, ..}
             | &mut SimpleSingle{timestamp, ..} =>
                 return Err(timestamp),
 
             &mut ReplicatedMulti{max_timestamp, ..}
             | &mut ReplicatedSenti{max_timestamp, ..}
+            | &mut ReplicatedSnap{max_timestamp, ..}
             | &mut ReplicatedSingle{max_timestamp, ..} =>
                 return Err(max_timestamp),
 
@@ -565,6 +629,20 @@ impl<T: Copy> WaitingForMax<T> {
                     max_timestamp, timestamp,
                 );
                 GotMaxSenti {
+                    timestamp: max_timestamp,
+                    node_num: node_num,
+                    storage: storage.clone(),
+                    t: t,
+                    id: id,
+                }
+            },
+
+            &mut Snap{timestamp, node_num, ref storage, t, id, ..} => {
+                debug_assert!(max_timestamp >= timestamp,
+                    "max_timestamp >= timestamp {:?} >= {:?},",
+                    max_timestamp, timestamp,
+                );
+                GotMaxSnap {
                     timestamp: max_timestamp,
                     node_num: node_num,
                     storage: storage.clone(),
@@ -599,6 +677,10 @@ impl<T: Copy> WaitingForMax<T> {
                 GotMax::Senti{timestamp: timestamp, storage: storage, t: t, id: id}
             },
 
+            GotMaxSnap{timestamp, storage, t, id, node_num: _} => {
+                GotMax::Snap{timestamp: timestamp, storage: storage, t: t, id: id}
+            },
+
             _ => unreachable!(),
         }
     }
@@ -608,13 +690,15 @@ impl<T: Copy> WaitingForMax<T> {
         match self {
             &GotMaxMulti{..}
             | &GotMaxSenti{..}
+            | &GotMaxSnap{..}
             | &SimpleSingle{..}
             | &Single{..}
             | &ReplicatedMulti{..}
             | &ReplicatedSenti{..}
+            | &ReplicatedSnap{..}
             | &ReplicatedSingle{..} => true,
 
-            &Multi{..} | &Senti{..} => false,
+            &Multi{..} | &Senti{..} | &Snap{..} => false,
         }
     }
 
@@ -623,8 +707,10 @@ impl<T: Copy> WaitingForMax<T> {
         *self = match self {
             &mut GotMaxMulti{..}
             | &mut GotMaxSenti{..}
+            | &mut GotMaxSnap{..}
             | &mut ReplicatedMulti{..}
             | &mut ReplicatedSenti{..}
+            | &mut ReplicatedSnap{..}
             | &mut ReplicatedSingle{..} =>
                 unreachable!(),
 
@@ -675,6 +761,20 @@ impl<T: Copy> WaitingForMax<T> {
                     id: id,
                 }
             },
+
+            &mut Snap{timestamp, ref storage, t, id, ..} => {
+                assert!(max_timestamp >= timestamp,
+                    "max_timestamp >= timestamp {:?} >= {:?},",
+                    max_timestamp, timestamp,
+                );
+                ReplicatedSnap {
+                    max_timestamp,
+                    index,
+                    storage: storage.clone(),
+                    t,
+                    id,
+                }
+            },
         };
     }
 
@@ -713,14 +813,17 @@ impl<T: Copy> WaitingForMax<T> {
         match self {
             &Multi{timestamp, ..} => Timestamp::Phase1(timestamp),
             &Senti{timestamp, ..} => Timestamp::Phase1(timestamp),
+            &Snap{timestamp, ..} => Timestamp::Phase1(timestamp),
             &Single{timestamp, ..}  => Timestamp::Phase2(timestamp),
 
             &GotMaxMulti{timestamp, ..}
             | &GotMaxSenti{timestamp, ..}
+            | &GotMaxSnap{timestamp, ..}
             | &SimpleSingle{timestamp, ..} => Timestamp::Phase2(timestamp),
 
             &ReplicatedMulti{max_timestamp, ..}
             | &ReplicatedSenti{max_timestamp, ..}
+            | &ReplicatedSnap{max_timestamp, ..}
             | &ReplicatedSingle{max_timestamp, ..} => Timestamp::Phase2(max_timestamp),
         }
     }
@@ -747,6 +850,15 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
                     .field("storage", &unsafe{ storage.get() })
                     .finish()
             },
+            &WaitingForMax::GotMaxSnap{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
+                let _ = t;
+                fmt.debug_struct("WaitingForSnap::GotMaxSenti")
+                    .field("id", id)
+                    .field("timestamp", timestamp)
+                    .field("node_num", node_num)
+                    .field("storage", &unsafe{ storage.get() })
+                    .finish()
+            },
             &WaitingForMax::Multi{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::Multi")
@@ -759,6 +871,15 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
             &WaitingForMax::Senti{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
                 let _ = t;
                 fmt.debug_struct("WaitingForMax::Senti")
+                    .field("id", id)
+                    .field("timestamp", timestamp)
+                    .field("node_num", node_num)
+                    .field("storage", &unsafe{ storage.get() })
+                    .finish()
+            },
+            &WaitingForMax::Snap{ref timestamp, ref node_num, ref storage, ref t, ref id} => {
+                let _ = t;
+                fmt.debug_struct("WaitingForMax::Snap")
                     .field("id", id)
                     .field("timestamp", timestamp)
                     .field("node_num", node_num)
@@ -806,6 +927,17 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
                     .field("storage", &unsafe{ storage.get() })
                     .finish()
             },
+            &WaitingForMax::ReplicatedSnap{
+                ref max_timestamp, ref index, ref storage, ref t, ref id
+            } => {
+                let _ = t;
+                fmt.debug_struct("WaitingForMax::ReplicatedSnap")
+                    .field("id", id)
+                    .field("max_timestamp", max_timestamp)
+                    .field("index", index)
+                    .field("storage", &unsafe{ storage.get() })
+                    .finish()
+            },
             &WaitingForMax::ReplicatedSingle{
                 ref max_timestamp, ref index, ref storage, ref t, ref id
             } => {
@@ -824,6 +956,7 @@ impl<T> ::std::fmt::Debug for WaitingForMax<T> {
 pub enum GotMax<T> {
     Multi{timestamp: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
     Senti{timestamp: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
+    Snap{timestamp: u64, storage: SkeensMultiStorage, t: T, id: Uuid},
     SimpleSingle{timestamp: u64, storage: ValEdge, t: T, id: Uuid},
     Single{timestamp: u64, node_num: u64, storage: ValEdge, t: T, id: Uuid},
 }
@@ -836,27 +969,61 @@ impl<T> GotMax<T> {
             (&GotMax::Multi{timestamp: my_ts, ..},
                 &WaitingForMax::Multi{timestamp: other_ts, ..})
             | (&GotMax::Senti{timestamp: my_ts, ..},
+                &WaitingForMax::Senti{timestamp: other_ts, ..})
+            | (&GotMax::Snap{timestamp: my_ts, ..},
+                &WaitingForMax::Snap{timestamp: other_ts, ..})
+
+            | (&GotMax::Senti{timestamp: my_ts, ..},
                 &WaitingForMax::Multi{timestamp: other_ts, ..})
             | (&GotMax::Multi{timestamp: my_ts, ..},
                 &WaitingForMax::Senti{timestamp: other_ts, ..})
+
+
+            | (&GotMax::Snap{timestamp: my_ts, ..},
+                &WaitingForMax::Multi{timestamp: other_ts, ..})
+            | (&GotMax::Multi{timestamp: my_ts, ..},
+                &WaitingForMax::Snap{timestamp: other_ts, ..})
+
             | (&GotMax::Senti{timestamp: my_ts, ..},
+                &WaitingForMax::Snap{timestamp: other_ts, ..})
+            | (&GotMax::Snap{timestamp: my_ts, ..},
                 &WaitingForMax::Senti{timestamp: other_ts, ..})
-            if my_ts < other_ts => true,
+
+                if my_ts < other_ts => true,
 
             (&GotMax::Multi{timestamp: my_ts, id: ref my_id, ..},
                 &WaitingForMax::Multi{timestamp: other_ts, id: ref other_id, ..})
             | (&GotMax::Senti{timestamp: my_ts, id: ref my_id, ..},
+                &WaitingForMax::Senti{timestamp: other_ts, id: ref other_id, ..})
+            | (&GotMax::Snap{timestamp: my_ts, id: ref my_id, ..},
+                &WaitingForMax::Snap{timestamp: other_ts, id: ref other_id, ..})
+
+            | (&GotMax::Senti{timestamp: my_ts, id: ref my_id, ..},
                 &WaitingForMax::Multi{timestamp: other_ts, id: ref other_id, ..})
             | (&GotMax::Multi{timestamp: my_ts, id: ref my_id, ..},
                 &WaitingForMax::Senti{timestamp: other_ts, id: ref other_id, ..})
+
+            | (&GotMax::Snap{timestamp: my_ts, id: ref my_id, ..},
+                &WaitingForMax::Multi{timestamp: other_ts, id: ref other_id, ..})
+            | (&GotMax::Multi{timestamp: my_ts, id: ref my_id, ..},
+                &WaitingForMax::Snap{timestamp: other_ts, id: ref other_id, ..})
+
             | (&GotMax::Senti{timestamp: my_ts, id: ref my_id, ..},
+                &WaitingForMax::Snap{timestamp: other_ts, id: ref other_id, ..})
+            | (&GotMax::Snap{timestamp: my_ts, id: ref my_id, ..},
                 &WaitingForMax::Senti{timestamp: other_ts, id: ref other_id, ..})
-            if my_ts == other_ts && my_id < other_id => true,
+
+                if my_ts == other_ts && my_id < other_id => true,
 
             (&GotMax::Multi{..}, &WaitingForMax::Multi{..})
+            | (&GotMax::Senti{..}, &WaitingForMax::Senti{..})
+            | (&GotMax::Snap{..}, &WaitingForMax::Snap{..})
             | (&GotMax::Senti{..}, &WaitingForMax::Multi{..})
             | (&GotMax::Multi{..}, &WaitingForMax::Senti{..})
-            | (&GotMax::Senti{..}, &WaitingForMax::Senti{..}) => false,
+            | (&GotMax::Snap{..}, &WaitingForMax::Multi{..})
+            | (&GotMax::Multi{..}, &WaitingForMax::Snap{..})
+            | (&GotMax::Senti{..}, &WaitingForMax::Snap{..})
+            | (&GotMax::Snap{..}, &WaitingForMax::Senti{..}) => false,
 
             (_, &WaitingForMax::SimpleSingle{..}) => true,
             (_, &WaitingForMax::Single{..}) => true,
@@ -864,11 +1031,13 @@ impl<T> GotMax<T> {
             (&GotMax::Single{..}, _) => true,
 
             (_, &WaitingForMax::GotMaxMulti{..})
-            | (_, &WaitingForMax::GotMaxSenti{..}) => unreachable!(),
+            | (_, &WaitingForMax::GotMaxSenti{..})
+            | (_, &WaitingForMax::GotMaxSnap{..}) => unreachable!(),
 
             (_, &WaitingForMax::ReplicatedSingle{..})
             | (_, &WaitingForMax::ReplicatedMulti{..})
-            | (_, &WaitingForMax::ReplicatedSenti{..})=>
+            | (_, &WaitingForMax::ReplicatedSenti{..})
+            | (_, &WaitingForMax::ReplicatedSnap{..}) =>
                 unimplemented!()
         }
     }
@@ -877,7 +1046,7 @@ impl<T> GotMax<T> {
     fn timestamp(&self) -> u64 {
         use self::GotMax::*;
         match self {
-            &Multi{timestamp, ..} | &Senti{timestamp, ..} => timestamp,
+            &Multi{timestamp, ..} | &Senti{timestamp, ..} | &Snap{timestamp, ..} => timestamp,
             &SimpleSingle{timestamp, ..} => timestamp,
             &Single{timestamp, ..} => timestamp,
         }
@@ -887,7 +1056,7 @@ impl<T> GotMax<T> {
     fn is_multi(&self) -> bool {
         use self::GotMax::*;
         match self {
-            &Multi{..} | &Senti{..} => true,
+            &Multi{..} | &Senti{..} | &Snap{..} => true,
             &Single{..} | &SimpleSingle{..} => false,
         }
     }
@@ -895,7 +1064,8 @@ impl<T> GotMax<T> {
     fn get_id(&self) -> Uuid {
         use self::GotMax::*;
         match self {
-            &Multi{id, ..} | &Senti{id, ..} | &Single{id, ..} | &SimpleSingle{id, ..} => id,
+            &Multi{id, ..} | &Senti{id, ..} | &Snap{id, ..}
+            | &Single{id, ..} | &SimpleSingle{id, ..} => id,
         }
     }
 }
@@ -914,6 +1084,14 @@ impl<T> ::std::fmt::Debug for GotMax<T> {
             &GotMax::Senti{ref timestamp, ref storage, ref t, ref id} => {
                 let _ = t;
                 fmt.debug_struct("GotMax::Senti")
+                    .field("timestamp", timestamp)
+                    .field("storage", &unsafe{ storage.get() })
+                    .field("id", id)
+                    .finish()
+            },
+            &GotMax::Snap{ref timestamp, ref storage, ref t, ref id} => {
+                let _ = t;
+                fmt.debug_struct("GotMax::Snap")
                     .field("timestamp", timestamp)
                     .field("storage", &unsafe{ storage.get() })
                     .field("id", id)
@@ -951,10 +1129,23 @@ impl<T> Ord for GotMax<T> {
             (&Multi{timestamp: my_timestamp, id: ref my_id, ..},
                 &Multi{timestamp: other_timestamp, id: ref other_id, ..})
             | (&Senti{timestamp: my_timestamp, id: ref my_id, ..},
+                &Senti{timestamp: other_timestamp, id: ref other_id, ..})
+            | (&Snap{timestamp: my_timestamp, id: ref my_id, ..},
+                &Snap{timestamp: other_timestamp, id: ref other_id, ..})
+
+            | (&Senti{timestamp: my_timestamp, id: ref my_id, ..},
                 &Multi{timestamp: other_timestamp, id: ref other_id, ..})
             | (&Multi{timestamp: my_timestamp, id: ref my_id, ..},
                 &Senti{timestamp: other_timestamp, id: ref other_id, ..})
+
+            | (&Snap{timestamp: my_timestamp, id: ref my_id, ..},
+                &Multi{timestamp: other_timestamp, id: ref other_id, ..})
+            | (&Multi{timestamp: my_timestamp, id: ref my_id, ..},
+                &Snap{timestamp: other_timestamp, id: ref other_id, ..})
+
             | (&Senti{timestamp: my_timestamp, id: ref my_id, ..},
+                &Snap{timestamp: other_timestamp, id: ref other_id, ..})
+            | (&Snap{timestamp: my_timestamp, id: ref my_id, ..},
                 &Senti{timestamp: other_timestamp, id: ref other_id, ..}) =>
                 match my_timestamp.cmp(&other_timestamp) {
                     Equal => my_id.cmp(other_id).reverse(),
@@ -964,6 +1155,8 @@ impl<T> Ord for GotMax<T> {
             (&Multi{timestamp: my_timestamp, ..},
                 &SimpleSingle{timestamp: other_timestamp, ..})
             |(&Senti{timestamp: my_timestamp, ..},
+                &SimpleSingle{timestamp: other_timestamp, ..})
+            |(&Snap{timestamp: my_timestamp, ..},
                 &SimpleSingle{timestamp: other_timestamp, ..}) =>
                 match my_timestamp.cmp(&other_timestamp) {
                     Equal => Greater,
@@ -990,21 +1183,25 @@ impl<T> Ord for GotMax<T> {
             (&SimpleSingle{timestamp: my_timestamp, ..},
                 &Multi{timestamp: other_timestamp, ..})
             | (&SimpleSingle{timestamp: my_timestamp, ..},
-                &Senti{timestamp: other_timestamp, ..}) =>
+                &Senti{timestamp: other_timestamp, ..})
+            | (&SimpleSingle{timestamp: my_timestamp, ..},
+                &Snap{timestamp: other_timestamp, ..}) =>
                 match my_timestamp.cmp(&other_timestamp) {
                     Equal => Less,
                     o => o.reverse(),
                 },
 
             (&Multi{timestamp: my_ts, ..}, &Single{timestamp: other_ts, ..})
-            | (&Senti{timestamp: my_ts, ..}, &Single{timestamp: other_ts, ..}) =>
+            | (&Senti{timestamp: my_ts, ..}, &Single{timestamp: other_ts, ..})
+            | (&Snap{timestamp: my_ts, ..}, &Single{timestamp: other_ts, ..}) =>
                 match my_ts.cmp(&other_ts) {
                     Equal => Greater,
                     o => o.reverse(),
                 },
 
             (&Single{timestamp: my_ts, ..}, &Multi{timestamp: other_ts, ..})
-            | (&Single{timestamp: my_ts, ..}, &Senti{timestamp: other_ts, ..}) =>
+            | (&Single{timestamp: my_ts, ..}, &Senti{timestamp: other_ts, ..})
+            | (&Single{timestamp: my_ts, ..}, &Snap{timestamp: other_ts, ..}) =>
                 match my_ts.cmp(&other_ts) {
                     Equal => Less,
                     o => o.reverse(),

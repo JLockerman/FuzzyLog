@@ -468,6 +468,73 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             (Some(buffer), u)
         },
 
+        SnapshotSkeens1{mut buffer, storage, t} => unsafe {
+            let (ts, indicies, st0, _) = storage.get_mut();
+            trace!("WORKER {} finish snap skeens1 {:?}", worker_num, ts);
+            let len = {
+                let mut e = buffer.contents_mut();
+                e.flag_mut().insert(EntryFlag::ReadSuccess);
+                e.as_ref().len()
+            };
+            //let num_ts = ts.len();
+            st0.copy_from_slice(&buffer[..len]);
+            {
+                let mut c = buffer.contents_mut();
+                c.flag_mut().insert(EntryFlag::Skeens1Queued);
+                let locs = c.locs_mut();
+                for i in 0..locs.len() {
+                    locs[i].1 = entry::from(ts[i] as u32)
+                }
+            }
+            trace!("WORKER {} snap skeens1 @ {:?}", worker_num, ts);
+            let u =  if continue_replication {
+                send(ToSend::Contents(
+                    buffer.contents().multi_skeens_to_replication(indicies))
+                , t)
+            } else {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            };
+            (Some(buffer), u)
+        },
+
+        SnapSkeensFinished{loc, storage, timestamp, t, }
+        | Skeens2SnapReplica{loc, storage, timestamp, t, } => unsafe {
+            trace!("WORKER {} finish snap2 @ {:?}", worker_num, loc);
+            let chain = loc.0;
+            let id;
+            {
+                let (_ts, _indicies, st0, _) = storage.get_mut();
+                let mut st0 = bytes_as_entry_mut(st0);
+                id = *st0.as_ref().id();
+                let st0_l = st0.locs_mut();
+                let i = st0_l.iter().position(|oi| oi.0 == chain).expect("no val");
+                st0_l[i].1 = loc.1;
+            }
+
+            let u = if continue_replication {
+                trace!("WORKER {} continue snap replication @ {:?}", worker_num, loc);
+                send(ToSend::Contents(EntryContents::Skeens2ToReplica{
+                    id: &id,
+                    lock: &timestamp,
+                    loc: &loc,
+                }), t)
+            } else {
+                match SkeensMultiStorage::try_unwrap(storage) {
+                    Ok(storage) => {
+                        trace!("WORKER {} snap to client @ {:?}", worker_num, loc);
+                        let &(_, _, ref st0, _) = &*storage.get();
+                        send(ToSend::Slice(&*st0), t)
+                    }
+                    Err(..) => {
+                        trace!("WORKER {} incomplete snap @ {:?}", worker_num, loc);
+                        send(ToSend::Nothing, t)
+                    }
+                }
+            };
+
+            (None, u)
+        },
+
         //FIXME these may not be right
         GotRecovery(mut buffer, t) => {
             {

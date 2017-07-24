@@ -806,6 +806,22 @@ impl WorkerInner {
                 }
             },
 
+            EntryLayout::Snapshot => {
+                let (size, num_locs, is_unlock) = {
+                    let e = buffer.contents();
+                    let locs = e.locs();
+                    (e.len(), locs.len(), e.flag().contains(EntryFlag::Unlock))
+                };
+                if is_unlock {
+                    Troption::None
+                } else {
+                    let mut storage = SkeensMultiStorage::new(num_locs, size, None);
+                    storage.fill_from(&mut buffer);
+                    Troption::Left(storage)
+                }
+
+            }
+
             EntryLayout::GC => {
                 //TODO send downstream first?
                 Troption::None
