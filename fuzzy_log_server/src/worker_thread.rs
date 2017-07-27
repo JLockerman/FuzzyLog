@@ -497,6 +497,23 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             (Some(buffer), u)
         },
 
+        SnapshotSkeens1Replica{buffer, storage, t} => unsafe {
+            let (mut ts, mut indicies, _, _) = storage.get_mut();
+            {
+                let c = buffer.contents();
+                ts.iter_mut().zip(c.locs().iter()).fold((),
+                    |(), (l, loc)| *l = u32::from(loc.1) as u64);
+                indicies.iter_mut().zip(c.queue_nums().iter()).fold((),
+                    |(), (q, num)| *q = *num);
+            }
+            let u = if continue_replication {
+                send(ToSend::Slice(buffer.entry_slice()), t)
+            } else {
+                send(ToSend::Contents(buffer.contents().to_unreplica()), t)
+            };
+            (Some(buffer), u)
+        },
+
         SnapSkeensFinished{loc, storage, timestamp, t, }
         | Skeens2SnapReplica{loc, storage, timestamp, t, } => unsafe {
             trace!("WORKER {} finish snap2 @ {:?}", worker_num, loc);
@@ -512,7 +529,8 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
             }
 
             let u = if continue_replication {
-                trace!("WORKER {} continue snap replication @ {:?}", worker_num, loc);
+                trace!("WORKER {} continue snap replication: {:?} @ {:?}",
+                    worker_num, timestamp, loc);
                 send(ToSend::Contents(EntryContents::Skeens2ToReplica{
                     id: &id,
                     lock: &timestamp,

@@ -1039,11 +1039,38 @@ where ToWorkers: DistributeToWorkers<T> {
                 );
             }
 
+            ToReplicate::SnapshotSkeens1(buffer, storage) => {
+                trace!("SERVER {:?} replicate snap skeens", self.this_server_num);
+                let id = *buffer.contents().id();
+                for (&OrderIndex(o, i), &node_num) in buffer.contents().locs_and_node_nums() {
+                    if o == order::from(0) || !self.stores_chain(o) {
+                        continue
+                    }
+                    let c = self.ensure_chain(o);
+                    c.skeens.replicate_snapshot_round1(
+                        u32::from(i) as u64,
+                        node_num,
+                        id,
+                        storage.clone(),
+                        t,
+                    );
+                }
+                self.print_data.msgs_sent(1);
+                self.to_workers.send_to_worker(
+                    SnapshotSkeens1Replica {
+                        buffer: buffer,
+                        storage: storage,
+                        t: t,
+                    }
+                );
+            }
+
             ToReplicate::Skeens2(buffer) => {
                 use self::ReplicatedSkeens::*;
-                trace!("SERVER {:?} replicate skeens2 max", self.this_server_num);
                 let id = *buffer.contents().id();
                 let max_timestamp = buffer.contents().lock_num();
+                trace!("SERVER {:?} replicate skeens2 max {:?}, {:?}",
+                    self.this_server_num, max_timestamp, id);
                 'sk2_rep: for &OrderIndex(o, i) in buffer.contents().locs() {
                     if o == order::from(0) || !self.stores_chain(o) { continue 'sk2_rep }
                     //let c = self.ensure_chain(chain);

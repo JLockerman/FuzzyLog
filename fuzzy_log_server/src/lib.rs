@@ -164,6 +164,12 @@ pub enum ToWorker<T: Send + Sync> {
         t: T,
     },
 
+    SnapshotSkeens1Replica {
+        buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
     SingleServerSkeens1(SkeensMultiStorage, T),
 
     //FIXME this is getting too big...
@@ -313,6 +319,7 @@ where T: Send + Sync {
             | &mut Skeens1SingleReplica {ref mut t,..}
             | &mut SnapshotSkeens1{ref mut t, ..}
             | &mut SnapSkeensFinished{ref mut t, ..}
+            | &mut SnapshotSkeens1Replica{ref mut t, ..}
             | &mut Skeens2SnapReplica{ref mut t, ..} => f(t),
 
             &mut GotRecovery(_, ref mut t)
@@ -346,7 +353,8 @@ where T: Copy + Send + Sync {
             &Skeens1Replica {t, ..}
             | &Skeens2MultiReplica {t,..}
             | &Skeens2SnapReplica{t, ..}
-            | &Skeens2SingleReplica {t,..} => t,
+            | &Skeens2SingleReplica {t,..}
+            | &SnapshotSkeens1Replica{t, ..} => t,
 
             &GotRecovery(_, t)
             | &DidntGetRecovery(_, _, t)
@@ -367,6 +375,8 @@ pub enum ToReplicate {
     Multi(BufferSlice, Box<(RcSlice, RcSlice)>),
     Skeens1(BufferSlice, SkeensMultiStorage),
     SingleSkeens1(BufferSlice, StorageLoc),
+
+    SnapshotSkeens1(BufferSlice, SkeensMultiStorage),
 
     Skeens2(BufferSlice),
 

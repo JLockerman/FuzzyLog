@@ -728,7 +728,7 @@ impl WorkerInner {
             return Some((self.worker_num, token))
         }
         else if self.downstream_workers == 0 { //if self.is_end_of_chain
-            trace!("WORKER {} is end of chain {:#?}.", self.worker_num, self.ip_to_worker);
+            trace!("WORKER {} is end of chain {:?}.", self.worker_num, self.ip_to_worker);
             return match self.worker_and_token_for_addr(src_addr) {
                 Some(worker_and_token) => {
                     // trace!("WORKER {} send to_client to {:?}",
@@ -905,11 +905,22 @@ impl WorkerInner {
                 trace!("WORKER {} replicate skeens 2", self.worker_num);
                 ToReplicate::Skeens2(buffer)
             }
+            EntryKind::SnapshotToReplica => {
+                let (size, num_locs) = {
+                    let e = buffer.contents();
+                    let locs = e.locs();
+                    (e.len(), locs.len())
+                };
+                let mut storage = SkeensMultiStorage::new(num_locs, size, None);
+                let mut buffer = buffer;
+                storage.fill_from(&mut buffer);
+                ToReplicate::SnapshotSkeens1(buffer, storage)
+            }
             EntryKind::GC => {
                 //TODO send downstream first?
                 ToReplicate::GC(buffer)
             },
-            _ => unreachable!(),
+            e => unreachable!("{:?}", e),
         };
         self.print_data.rep_to_log(1);
         self.print_data.to_log(1);

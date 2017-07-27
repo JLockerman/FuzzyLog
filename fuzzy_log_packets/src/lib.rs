@@ -634,6 +634,29 @@ impl<'a> Packet::Ref<'a> {
                 }
             }
 
+            o => panic!("tried to turn {:?} into a skeens replica.", o),
+        }
+    }
+
+    pub fn to_unreplica(self) -> Self {
+        use self::Packet::Ref::*;
+        match self {
+            MultiToReplica{id, flags, lock, locs, deps, data, ..} => {
+                Multi{ id, flags, lock, locs, deps, data }
+            }
+
+            SentiToReplica{ id, flags, data_bytes, lock, locs, deps, ..} => {
+                Senti{ id, flags, data_bytes, lock, locs, deps }
+            }
+
+            SnapshotToReplica{id, flags, data_bytes, num_deps, lock, locs, ..} => {
+                Snapshot{ id, flags, data_bytes, num_deps, lock, locs }
+            }
+
+            SingleToReplica{id, flags, loc, deps, data, ..} => {
+                Single{id, flags, loc, deps, data }
+            },
+
             o => panic!("tried to turn {:?} into a singleton skeens replica.", o),
         }
     }
@@ -641,7 +664,9 @@ impl<'a> Packet::Ref<'a> {
     pub fn queue_nums(self) -> &'a [u64] {
         use self::Packet::Ref::*;
         match self {
-            MultiToReplica{queue_nums, ..} | SentiToReplica{queue_nums, ..} =>
+            MultiToReplica{queue_nums, ..}
+            | SentiToReplica{queue_nums, ..}
+            | SnapshotToReplica{queue_nums, ..} =>
                 queue_nums,
 
             o => panic!("tried to get queue_nums from {:?}.", o),

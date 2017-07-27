@@ -915,11 +915,11 @@ macro_rules! async_tests {
                 }
             });
             let mut lh = $new_thread_log::<()>(columns);
-            for i in 0..1 {
+            let mut max_85 = 0;
+            let mut max_86 = 0;
+            for _ in 0..10 {
                 thread::yield_now();
                 lh.strong_snapshot(&[86.into(), 85.into()]);
-                let mut max_85 = 0;
-                let mut max_86 = 0;
                 loop {
                     match lh.get_next() {
                         Ok((_, locs)) => if locs[0].0 == order::from(85) {

@@ -454,6 +454,38 @@ impl<T: Copy> SkeensState<T> {
         }
     }
 
+    pub fn replicate_snapshot_round1(
+        &mut self,
+        timestamp: Time,
+        node_num: QueueIndex,
+        id: Uuid,
+        storage: SkeensMultiStorage,
+        t: T,
+    ) -> bool {
+        let start_index = self.phase1_queue.start_index();
+        if start_index > node_num { return false }
+
+        match self.append_status.entry(id) {
+            Occupied(..) => false,
+            Vacant(v) => {
+                v.insert(AppendStatus::Phase1(node_num));
+                let m = WaitingForMax::Snap {
+                    timestamp: timestamp,
+                    storage: storage,
+                    node_num: node_num,
+                    t: t,
+                    id: id,
+                };
+                let old = self.phase1_queue.insert(node_num, m);
+                assert!(old.is_none(),
+                    "replace skeens snap? {:?} {:?}",
+                    self.phase1_queue.get(node_num), old
+                );
+                true
+            },
+        }
+    }
+
     pub fn replicate_round2<F>(&mut self, id: &Uuid, max_timestamp: u64, index: TrieIndex, mut f: F)
     where F: FnMut(ReplicatedSkeens<T>) {
         let offset = match self.append_status.get(&id) {
@@ -470,6 +502,7 @@ impl<T: Copy> SkeensState<T> {
             trace!("SKEENS not ready to flush replica {:?}", self);
             return
         }
+        trace!("{:#?}", self);
         while self.phase1_queue.front().map(|w| w.has_replication()).unwrap_or(false) {
             let replica = self.phase1_queue.pop_front().unwrap();
             let (id, replica) = replica.to_replica();
@@ -781,7 +814,8 @@ impl<T: Copy> WaitingForMax<T> {
     fn has_replication(&self) -> bool {
         use self::WaitingForMax::*;
         match self {
-            &ReplicatedMulti{..} | &ReplicatedSenti{..} | &ReplicatedSingle{..} => true,
+            &ReplicatedMulti{..} | &ReplicatedSenti{..} | &ReplicatedSingle{..}
+            | &ReplicatedSnap{..} => true,
             _ => false,
         }
     }
@@ -800,6 +834,12 @@ impl<T: Copy> WaitingForMax<T> {
 
             ReplicatedSenti{index, storage, t, id, max_timestamp, ..} => {
                 (id, ReplicatedSkeens::Senti{
+                    index: index, storage: storage, t: t, max_timestamp: max_timestamp,
+                })
+            },
+
+            ReplicatedSnap{index, storage, t, id, max_timestamp, ..} => {
+                (id, ReplicatedSkeens::Snap{
                     index: index, storage: storage, t: t, max_timestamp: max_timestamp,
                 })
             },
