@@ -32,6 +32,7 @@ def export(dir):
 @parallel
 def mirror(cmd=''):
     sync()
+    cmd = str.replace(cmd, '#server_num', str(index_of_host()))
     fuzzy_log_dir = os.path.basename(os.getcwd())
     with cd(fuzzy_log_dir):
         run(cmd, pty=False)
@@ -50,30 +51,45 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
     cmd = ""
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
-    cmd += "RUST_BACKTRACE=1 cargo run "
+    #cmd += "RUST_BACKTRACE=short RUSTFLAGS='-Z sanitizer=memory' cargo run --target x86_64-unknown-linux-gnu "
+    cmd += "cargo run "
+    #cmd += "cargo run "
     if debug == "":
         cmd += "--release "
     if stats != "":
         cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
     if nt != "":
-        cmd += "--features \"fuzzy_log/no_trace\" "
+        cmd += "--features \"no_trace\" "
     cmd += "-- " + port
 
-    if chain_hosts == "":
-        chain_hosts = env.all_hosts
-    else:
-        chain_hosts = chain_hosts.split("^")
-    if host_index > 0:
-        #prev_host = network.normalize(env.all_hosts[host_index-1])[1]
-        prev_host = chain_hosts[host_index-1]
+    my_chain = []
+    index_in_chain = 0
+    my_chain_num = 0
+    num_chains = 0
+    if chain_hosts != "":
+        chains = chain_hosts.split("^")
+        num_chains = len(chains)
+        chain_len = len(chains[0].split("#"))
+        my_chain_num = host_index / chain_len
+        index_in_chain = host_index % chain_len
+        i = 0
+        for chain in chains:
+            servers = chain.split("#")
+            assert(len(servers) == chain_len)
+            if i == my_chain_num:
+                my_chain = servers
+            i += 1
+
+    if index_in_chain > 0:
+        prev_host = my_chain[index_in_chain-1]
         cmd += " -up " + prev_host + ":" + port
-        #cmd = "RUST_LOG=fuzzy_log " + cmd
-    if host_index + 1 < len(env.all_hosts):
-        #next_host = network.normalize(env.all_hosts[host_index+1])[1]
-        next_host = chain_hosts[host_index+1]
+    if index_in_chain + 1 < len(my_chain):
+        next_host = my_chain[index_in_chain+1]
         cmd += " -dwn " + next_host
     if workers != "":
         cmd += " -w " + workers
+    if num_chains > 1:
+        cmd += " -ig " + str(my_chain_num) + ":" + str(num_chains)
     cmd = "cd servers/tcp_server && " + cmd
     mirror(cmd)
 
