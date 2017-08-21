@@ -469,7 +469,8 @@ impl Worker {
 
                         Some((worker_num, send_token)) => {
                             if worker_num != self.inner.worker_num {
-                                self.redist_to_client(src_addr, to_send);
+                                unreachable!();
+                                //self.redist_to_client(src_addr, to_send);
                                 return None
                             }
 
@@ -880,7 +881,8 @@ impl WorkerInner {
                     let locs = e.locs();
                     let num_locs = locs.len();
                     //FIXME
-                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
+                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()))
+                        || !e.flag().contains(EntryFlag::TakeLock);
                     (e.non_replicated_len(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
                 let senti_size = if has_senti { Some(senti_size) } else { None };
@@ -894,7 +896,8 @@ impl WorkerInner {
                     let locs = e.locs();
                     let num_locs = locs.len();
                     //FIXME
-                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()));
+                    let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()))
+                        || !e.flag().contains(EntryFlag::TakeLock);
                     (e.non_replicated_len(), e.sentinel_entry_size(), num_locs, has_senti)
                 };
                 let senti_size = if has_senti { Some(senti_size) } else { None };

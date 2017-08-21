@@ -145,6 +145,22 @@ const NUMBER_READ_BUFFERS: usize = 15;
 
 type WorkerNum = usize;
 
+pub fn run_server(
+    addr: SocketAddr,
+    server_num: u32,
+    group_size: u32,
+    prev_server: Option<SocketAddr>,
+    next_server: Option<IpAddr>,
+    num_worker_threads: usize,
+    started: &AtomicUsize,
+) -> ! {
+    let acceptor = mio::tcp::TcpListener::bind(&addr)
+        .expect("Bind error");
+    run_with_replication(
+        acceptor, server_num, group_size, prev_server, next_server, num_worker_threads, started
+    )
+}
+
 pub fn run(
     acceptor: TcpListener,
     this_server_num: u32,
@@ -236,6 +252,7 @@ pub fn run_with_replication(
         }
     }
 
+    let is_replica = prev_server_ip.is_some();
     if let Some(ref ip) = prev_server_ip {
         trace!("SERVER {} waiting for upstream {:?}.", this_server_num, prev_server_ip);
         while upstream_admin_socket.is_none() {
@@ -346,8 +363,14 @@ pub fn run_with_replication(
         #[cfg(not(feature = "print_stats"))]
         for to_log in recv_from_workers.iter() {
             match to_log {
-                ToLog::New(buffer, storage, st) => log.handle_op(buffer, storage, st),
-                ToLog::Replication(tr, st) => log.handle_replication(tr, st),
+                ToLog::New(buffer, storage, st) => {
+                    assert!(!is_replica);
+                    log.handle_op(buffer, storage, st)
+                },
+                ToLog::Replication(tr, st) => {
+                    assert!(is_replica);
+                    log.handle_replication(tr, st)
+                },
                 ToLog::Recovery(r, st) => log.handle_recovery(r, st),
             }
         }

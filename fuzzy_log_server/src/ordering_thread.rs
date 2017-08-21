@@ -517,7 +517,7 @@ where ToWorkers: DistributeToWorkers<T> {
 
     fn single_server_local_skeens(
         &mut self,
-        kind: EntryFlag::Flag,
+        mut kind: EntryFlag::Flag,
         mut buffer: BufferSlice,
         storage: SkeensMultiStorage,
         t: T
@@ -529,7 +529,14 @@ where ToWorkers: DistributeToWorkers<T> {
         self.print_data.msgs_sent(1);
         self.to_workers.send_to_worker(SingleServerSkeens1(storage, t));
 
-        *buffer.contents_mut().lock_mut() = max_timestamp.unwrap();
+        {
+            let mut contents = buffer.contents_mut();
+            *contents.lock_mut() = max_timestamp.unwrap();
+            contents.flag_mut().insert(EntryFlag::Unlock);
+            kind.insert(EntryFlag::Unlock);
+        };
+        //FIXME this has a bug with no-remote
+        //      might have a bug with replication
         self.new_multiappend_round2(kind, &mut buffer);
 
         self.print_data.msgs_sent(1);
@@ -605,6 +612,7 @@ where ToWorkers: DistributeToWorkers<T> {
             let chain = locs[i].0;
             if chain == order::from(0) || !self.stores_chain(chain) {
                 timestamps[i] = 0;
+                queue_indicies[i] = 0;
                 if chain == order::from(0) { is_sentinel = true }
                 continue
             }
@@ -630,7 +638,7 @@ where ToWorkers: DistributeToWorkers<T> {
         kind: EntryFlag::Flag,
         buffer: &mut BufferSlice,
     ) {
-        assert!(kind.contains(EntryFlag::Unlock));
+        assert!(kind.contains(EntryFlag::Unlock), "Bad skeens 2 {:?}", buffer.contents());
         // In round two we flush some the queues... an possibly a partial entry...
         let mut val = buffer.contents_mut();
         let id = val.as_ref().id().clone();
@@ -982,7 +990,8 @@ where ToWorkers: DistributeToWorkers<T> {
                 trace!("SERVER {:?} replicate skeens single", self.this_server_num);
                 let (id, (OrderIndex(c, ts), node_num), size) = {
                     let e = buffer.contents();
-                    (*e.id(), e.locs_and_node_nums().map(|(&o, &n)| (o, n)).next().unwrap(),
+                    (*e.id(),
+                        e.locs_and_node_nums().map(|(&o, &n)| (o, n)).next().expect("must have nodes & loc_nums"),
                         e.non_replicated_len())
                 };
                 let storage;

@@ -8,18 +8,18 @@ env_logger = "0.3"
 log = "0.3.2"
 num_cpus = "1"
 mio = "0.6.6"
-fuzzy_log = {path = "../.."}
+fuzzy_log_server = {path = "../../fuzzy_log_server"}
 
 [profile.release]
 opt-level = 3
-debug = true
+#debug = true
+debug = false
 rpath = false
-#lto = true
 lto = false
 debug-assertions = false
-#debug-assertions = true
 codegen-units = 1
 panic = 'abort'
 
 [features]
-print_stats = ["fuzzy_log/print_stats"]
+print_stats = ["fuzzy_log_server/print_stats"]
+no_trace = ["log/max_level_info", "fuzzy_log_server/no_trace"]

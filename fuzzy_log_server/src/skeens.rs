@@ -116,13 +116,14 @@ impl<T: Copy> SkeensState<T> {
                 let timestamp = self.next_timestamp;
                 self.next_timestamp += 1;
                 let node_num = self.phase1_queue.push_index();
-                self.phase1_queue.push_back(WaitingForMax::SimpleSingle{
+                let n = self.phase1_queue.push_back(WaitingForMax::SimpleSingle{
                     timestamp: timestamp,
                     storage: storage,
                     node_num: node_num,
                     t: t,
                     id: id,
                 });
+                assert_eq!(node_num, n);
                 v.insert(AppendStatus::Singleton(node_num));
                 SkeensAppendRes::NewAppend(timestamp, node_num)
             },
@@ -157,7 +158,7 @@ impl<T: Copy> SkeensState<T> {
                 let timestamp = self.next_timestamp;
                 let node_num = self.phase1_queue.push_index();
                 self.next_timestamp += 1;
-                self.phase1_queue.push_back(if sentinel {
+                let n = self.phase1_queue.push_back(if sentinel {
                     WaitingForMax::Senti{
                     timestamp: timestamp,
                     node_num: node_num,
@@ -172,6 +173,7 @@ impl<T: Copy> SkeensState<T> {
                     t: t,
                     id: id,
                 }});
+                assert_eq!(node_num, n);
                 v.insert(AppendStatus::Phase1(node_num));
                 SkeensAppendRes::NewAppend(timestamp, node_num)
             },
@@ -215,7 +217,7 @@ impl<T: Copy> SkeensState<T> {
                 let timestamp = self.next_timestamp;
                 let node_num = self.phase1_queue.push_index();
                 self.next_timestamp += 1;
-                self.phase1_queue.push_back(
+                let n = self.phase1_queue.push_back(
                     WaitingForMax::Snap {
                         timestamp: timestamp,
                         storage: storage,
@@ -224,6 +226,7 @@ impl<T: Copy> SkeensState<T> {
                         id: id,
                     }
                 );
+                assert_eq!(node_num, n);
                 v.insert(AppendStatus::Phase1(node_num));
                 SkeensAppendRes::NewAppend(timestamp, node_num)
             },
@@ -286,7 +289,7 @@ impl<T: Copy> SkeensState<T> {
 
         if let SkeensSetMaxRes::Ok = ret {
             while self.phase1_queue.front().map(|v| v.has_max()).unwrap_or(false) {
-                let s = self.phase1_queue.pop_front().unwrap();
+                let s = self.phase1_queue.pop_front().expect("must have front of queue");
                 let s = s.into_got_max();
                 self.got_max_timestamp.push(s);
             }
@@ -316,7 +319,7 @@ impl<T: Copy> SkeensState<T> {
             // debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len(),
             //     "{:?} != {:?}",
             //     self.phase2_ids, self.got_max_timestamp);
-            let g = self.got_max_timestamp.pop().unwrap();
+            let g = self.got_max_timestamp.pop().expect("if can flush, must have to flush");
             let id = g.get_id();
             //FIXME this should get delayed until the multi is fully complete
             //      due to the failing path,
@@ -446,8 +449,9 @@ impl<T: Copy> SkeensState<T> {
                 };
                 let old = self.phase1_queue.insert(node_num, m);
                 assert!(old.is_none(),
-                    "replace skeens? {:?} {:?}",
-                    self.phase1_queue.get(node_num), old
+                    "replace skeens? {:?} {:?} @ {:?}, {}",
+                    self.phase1_queue.get(node_num), old, node_num, self.phase1_queue.start_index(),
+                    //unsafe {Entry::wrap_bytes(old.as_ref().unwrap().bytes())},
                 );
                 true
             },
@@ -497,14 +501,16 @@ impl<T: Copy> SkeensState<T> {
             },
         };
         self.phase1_queue.get_mut(offset).map(|w|
-            w.replicate_max_timetamp(max_timestamp, index));
+            w.replicate_max_timetamp(max_timestamp, index, id));
         if offset != self.phase1_queue.start_index() {
             trace!("SKEENS not ready to flush replica {:?}", self);
             return
         }
         trace!("{:#?}", self);
         while self.phase1_queue.front().map(|w| w.has_replication()).unwrap_or(false) {
-            let replica = self.phase1_queue.pop_front().unwrap();
+            let replica = self.phase1_queue.pop_front().expect("flushing nothing");
+            //let old_start = self.phase1_queue.start_index() - 1;
+            //assert!(replica.contains_node_num(old_start));
             let (id, replica) = replica.to_replica();
             //FIXME for non-single-server appends
             //      this should get delayed until the multi is fully complete
@@ -624,6 +630,48 @@ enum Timestamp {
 }
 
 impl<T: Copy> WaitingForMax<T> {
+    #[allow(dead_code)]
+    fn contains_node_num(&self, node_num: u64) -> bool {
+        use self::WaitingForMax::*;
+        match self {
+            &Multi{ref storage, ..}
+            | &Senti{ref storage, ..}
+            | &Snap{ref storage, ..}
+            | &GotMaxMulti{ref storage, ..}
+            | &GotMaxSenti{ref storage, ..}
+            | &GotMaxSnap{ref storage, ..}
+            | &ReplicatedMulti{ref storage, ..}
+            | &ReplicatedSenti{ref storage, ..}
+            | &ReplicatedSnap{ref storage, ..} => unsafe {
+                let node_nums = storage.get().1;
+                assert!(
+                    node_nums.contains(&node_num),
+                    "missing node num {} @ {:?}",
+                    node_num, node_nums,
+                );
+                node_nums.contains(&node_num)
+            },
+
+            &SimpleSingle{..} | &Single{..} | &ReplicatedSingle{..} => true,
+        }
+    }
+
+    fn bytes(&self) -> *const u8 {
+        use self::WaitingForMax::*;
+        match self {
+            &Multi{ref storage, ..}
+            | &Senti{ref storage, ..}
+            | &Snap{ref storage, ..}
+            | &GotMaxMulti{ref storage, ..}
+            | &GotMaxSenti{ref storage, ..}
+            | &GotMaxSnap{ref storage, ..}
+            | &ReplicatedMulti{ref storage, ..}
+            | &ReplicatedSenti{ref storage, ..}
+            | &ReplicatedSnap{ref storage, ..} => unsafe {&**storage.get().2}.as_ptr(),
+
+            &SimpleSingle{ref storage,..} | &Single{ref storage,..} | &ReplicatedSingle{ref storage,..} => storage.ptr(),
+        }
+    }
 
     fn set_max_timestamp(&mut self, max_timestamp: u64) -> Result<(), u64> {
         use self::WaitingForMax::*;
@@ -735,7 +783,7 @@ impl<T: Copy> WaitingForMax<T> {
         }
     }
 
-    fn replicate_max_timetamp(&mut self, max_timestamp: Time, index: TrieIndex) {
+    fn replicate_max_timetamp(&mut self, max_timestamp: Time, index: TrieIndex, rid: &Uuid) {
         use self::WaitingForMax::*;
         *self = match self {
             &mut GotMaxMulti{..}
@@ -749,6 +797,7 @@ impl<T: Copy> WaitingForMax<T> {
 
             &mut Single{timestamp, storage, t, id, ..}
             | &mut SimpleSingle{timestamp, storage, t, id, ..} => {
+                debug_assert_eq!(&id, rid);
                 //assert_eq!(max_timestamp, timestamp);
                 ReplicatedSingle{
                     max_timestamp: timestamp,
@@ -768,6 +817,7 @@ impl<T: Copy> WaitingForMax<T> {
                         (e.id, e.locs())
                     }*/
                 );
+                debug_assert_eq!(&id, rid);
                 ReplicatedMulti {
                     max_timestamp: max_timestamp,
                     index: index,
@@ -786,6 +836,7 @@ impl<T: Copy> WaitingForMax<T> {
                         (e.id, e.locs())
                     }*/
                 );
+                debug_assert_eq!(&id, rid);
                 ReplicatedSenti {
                     max_timestamp: max_timestamp,
                     index: index,
@@ -800,6 +851,7 @@ impl<T: Copy> WaitingForMax<T> {
                     "max_timestamp >= timestamp {:?} >= {:?},",
                     max_timestamp, timestamp,
                 );
+                debug_assert_eq!(&id, rid);
                 ReplicatedSnap {
                     max_timestamp,
                     index,
