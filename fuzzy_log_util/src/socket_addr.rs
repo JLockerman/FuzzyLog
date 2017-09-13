@@ -1,5 +1,3 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
 use std::fmt;
 
 use uuid::Uuid;
@@ -11,6 +9,10 @@ pub struct Ipv4SocketAddr {
 }
 
 impl Ipv4SocketAddr {
+
+    pub fn random() -> Self {
+        Self::from_uuid(&Uuid::new_v4())
+    }
 
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Ipv4SocketAddr { bytes: bytes }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 // use prelude::*;
 use ::{spsc, ServerLog};
-use hash::{HashMap, FxHasher};
+use hash::HashMap;
 use socket_addr::Ipv4SocketAddr;
 
 use mio;
@@ -462,7 +462,8 @@ pub fn run_with_replication(
                                 worker_for_ip(id, num_workers as u64)
                             };*/
                             let worker = worker_for_ip(id, num_workers as u64);
-                            worker_for_client.insert(id, (worker, tok));
+                            let old = worker_for_client.insert(id, (worker, tok));
+                            assert!(old.is_none(), "Duplicate id {:?}", id);
                             trace!("SERVER accepting client @ {:?} => {:?}",
                                 (addr, id), (worker, tok));
                             dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
@@ -1650,8 +1651,9 @@ fn get_next_token(token: &mut mio::Token) -> mio::Token {
 }
 
 fn worker_for_ip(ip: Ipv4SocketAddr, num_workers: u64) -> usize {
+    use hash::UuidHasher as HashFunction;
     use std::hash::{Hash, Hasher};
-    let mut hasher: FxHasher = Default::default();
+    let mut hasher: HashFunction = Default::default();
     ip.hash(&mut hasher);
     (hasher.finish() % num_workers) as usize
 }

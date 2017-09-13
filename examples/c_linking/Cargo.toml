@@ -7,7 +7,7 @@ authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
 fuzzy_log = {path = "../.."}
 
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "dylib"]
 
 [profile.release]
 opt-level = 3

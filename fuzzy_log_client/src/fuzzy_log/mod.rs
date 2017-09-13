@@ -13,7 +13,7 @@ use store::AsyncStoreClient;
 use self::FromStore::*;
 use self::FromClient::*;
 
-use hash::HashMap;
+use hash::{HashMap, UuidHashMap};
 
 use self::per_color::{PerColor, IsRead, ReadHandle, NextToFetch};
 
@@ -32,7 +32,7 @@ pub struct ThreadLog {
     to_store: store::ToSelf, //TODO send WriteState or other enum?
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
-    blocked_multiappends: HashMap<Uuid, MultiSearchState>,
+    blocked_multiappends: UuidHashMap<MultiSearchState>,
     per_chains: HashMap<order, PerColor>,
     //TODO replace with queue from deque to allow multiple consumers
     ready_reads: FinshedReadQueue,
@@ -107,6 +107,7 @@ pub enum FromClient {
     ReturnBuffer(Vec<u8>),
     ReadUntil(OrderIndex),
     Fastforward(OrderIndex),
+    Rewind(OrderIndex),
     Shutdown,
 }
 
@@ -258,6 +259,13 @@ impl ThreadLog {
                     .or_insert_with(|| PerColor::new(loc.0));
                 //FIXME drain irrelevant entries
                 pc.give_new_snapshot(loc.1);
+                true
+            }
+            Rewind(loc) => {
+                let pc = self.per_chains.entry(loc.0)
+                    .or_insert_with(|| PerColor::new(loc.0));
+                //FIXME drain irrelevant entries
+                pc.rewind_to(loc.1);
                 true
             }
             Shutdown => {

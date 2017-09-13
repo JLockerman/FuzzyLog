@@ -2,7 +2,7 @@
 use std::mem;
 use std::rc::Rc;
 
-use hash::{HashMap, HashSet};
+use hash::{HashMap, HashSet, UuidHashMap, UuidHashSet};
 use packets::{order, entry, OrderIndex, bytes_as_entry};
 
 use fuzzy_log_util::uuid::Uuid;
@@ -24,8 +24,8 @@ pub struct PerColor {
     read_status: RangeTree,
     blocked_on_new_snapshot: Option<Vec<u8>>,
     //TODO this is where is might be nice to have a more structured id format
-    found_but_unused_multiappends: HashMap<Uuid, entry>,
-    required_no_remotes: HashSet<Uuid>,
+    found_but_unused_multiappends: UuidHashMap<entry>,
+    required_no_remotes: UuidHashSet,
     is_being_read: Option<ReadState>,
     pub is_interesting: bool,
 }
@@ -244,6 +244,10 @@ impl PerColor {
     pub fn increment_horizon(&mut self) -> Option<Vec<u8>> {
         let new_horizon = self.last_snapshot + 1;
         self.update_horizon(new_horizon)
+    }
+
+    pub fn rewind_to(&mut self, index: entry) {
+        self.read_status.set_above_as_none(index)
     }
 
     pub fn give_new_snapshot(&mut self, new_horizon: entry) -> Option<Vec<u8>> {

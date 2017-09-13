@@ -14,8 +14,12 @@ pub type HashMap<K, V> = DefaultHashMap<K, V, BuildHasherDefault<FxHasher>>;
 pub type HashSet<K> = DefaultHashSet<K, BuildHasherDefault<FxHasher>>;
 
 pub type UuidHashMap<V> = DefaultHashMap<Uuid, V, BuildHasherDefault<UuidHasher>>;
-#[allow(dead_code)]
 pub type UuidHashSet = DefaultHashSet<Uuid, BuildHasherDefault<UuidHasher>>;
+
+pub type ClientIdHashMap<V> =
+    DefaultHashMap<::socket_addr::Ipv4SocketAddr, V, BuildHasherDefault<UuidHasher>>;
+pub type ClientIdSet =
+    DefaultHashSet<::socket_addr::Ipv4SocketAddr, BuildHasherDefault<UuidHasher>>;
 
 pub struct FxHasher {
     hash: usize
@@ -96,9 +100,10 @@ impl Hasher for UuidHasher {
             //TODO only take the random half
             let data0 = NativeEndian::read_u64(&bytes[..8]);
             let data1 = NativeEndian::read_u64(&bytes[8..16]);
-            //currently rust xor's the len pf a slice into the hash
-            //since all our slices are the same len there is no need
-            self.0 = data0 ^ data1 ^ 16;
+            // currently rust xor's the len pf a slice into the hash
+            // since all our slices are the same len there is no need
+            // should we add ^ 16?
+            self.0 = data0 ^ data1;
             return
         }
 

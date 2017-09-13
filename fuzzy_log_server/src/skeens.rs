@@ -7,7 +7,7 @@ use std::cmp::Ordering::*;
 
 use uuid::Uuid;
 
-use hash::HashMap;
+use hash::{HashMap, UuidHashMap};
 
 use vec_deque_map::VecDequeMap;
 
@@ -20,11 +20,8 @@ pub struct SkeensState<T: Copy> {
     next_timestamp: u64,
     phase1_queue: VecDequeMap<WaitingForMax<T>>,
     got_max_timestamp: BinaryHeap<GotMax<T>>,
-    append_status: HashMap<Uuid, AppendStatus>,
-    recovering: HashMap<Uuid, (u64, Box<(Uuid, Box<[OrderIndex]>)>)>,
-    //waiting_for_max_timestamp: LinkedHashMap<Uuid, WaitingForMax<T>>,
-    //in_progress: HashMap<Uuid, AppendStatus>, //subsumes waiting_for_max_timestamp and phase2_ids
-    //phase2_ids: HashMap<Uuid, u64>,
+    append_status: UuidHashMap<AppendStatus>,
+    recovering: UuidHashMap<(u64, Box<(Uuid, Box<[OrderIndex]>)>)>,
 }
 
 impl<T: Copy> ::std::fmt::Debug for SkeensState<T> {

@@ -45,7 +45,6 @@ fn channel() -> (ToSelf, FromClient) {
 pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     servers: Vec<PerServer<Socket>>,
     awake_io: VecDeque<usize>,
-    // sent_writes: HashMap<Uuid, WriteState>,
     sent_writes: UuidHashMap<WriteState>,
     //sent_reads: HashMap<OrderIndex, Vec<u8>>,
     sent_reads: HashMap<OrderIndex, u16>,
@@ -204,12 +203,13 @@ where C: AsyncStoreClient {
     }
 
     pub fn new_tcp<I>(
-        chain_servers: I, client: C,
+        id: Ipv4SocketAddr,
+        chain_servers: I,
+        client: C,
         event_loop: &mut mio::Poll
     ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
         //TODO assert no duplicates
-        let id = Uuid::new_v4();
         trace!("Starting Store {} server addrs:", id);
         let mut servers = try!(chain_servers
             .into_iter()
@@ -221,7 +221,7 @@ where C: AsyncStoreClient {
         trace!("Client {:?} servers", num_chain_servers);
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
-            server.receiver = Ipv4SocketAddr::from_uuid(&id);
+            server.receiver = id;
             event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
@@ -259,12 +259,13 @@ where C: AsyncStoreClient {
     }
 
     pub fn replicated_new_tcp<I>(
-        chain_servers: I, client: C,
+        id: Ipv4SocketAddr,
+        chain_servers: I,
+        client: C,
         event_loop: &mut mio::Poll
     ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=(SocketAddr, SocketAddr)> {
         //TODO assert no duplicates
-        let id = Uuid::new_v4();
         trace!("Starting Store {:?} server addrs:", id);
         let (write_servers, read_servers): (Vec<_>, Vec<_>) =
             chain_servers.into_iter().inspect(|addrs| trace!("{:?}", addrs)).unzip();
@@ -285,7 +286,7 @@ where C: AsyncStoreClient {
         trace!("Client {:?} servers", num_chain_servers);
         for (i, server) in servers.iter_mut().enumerate() {
             server.token = Token(i);
-            server.receiver = Ipv4SocketAddr::from_uuid(&id);
+            server.receiver = id;
             event_loop.register(server.connection(), server.token,
                 mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                 mio::PollOpt::edge())
@@ -1332,7 +1333,7 @@ where PerServer<S>: Connected,
                 for (i, &loc) in fill_from.into_iter().enumerate() {
                     if locs[i].0 != order::from(0)
                         && read_server_for_chain(loc.0, num_chain_servers, unreplicated) == server.0 {//should be read_server_for_chain
-                        assert!(loc.1 != 0.into(), "zero index for {:?}", loc.0);
+                        assert!(loc.1 != 0.into(), "zero index for {:?} @ {:?} => {:?}, nc: {:?} r: {:?}", loc.0, fill_from, locs, num_chain_servers, unreplicated);
                         locs[i] = loc;
                         filled += 1;
                     }

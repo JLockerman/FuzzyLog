@@ -20,16 +20,19 @@ use fuzzy_log::{
     FinshedWriteQueue,
     FinshedWriteRecv,
 };
+use fuzzy_log_util::socket_addr::Ipv4SocketAddr;
 use store;
 use fuzzy_log::FromClient::*;
-use packets::{
+pub use packets::{
+    order,
     entry,
-    EntryContents,
     OrderIndex,
     Uuid,
+};
+use packets::{
+    EntryContents,
     Storeable,
     UnStoreable,
-    order,
     bytes_as_entry,
     data_to_slice,
     slice_to_data,
@@ -53,6 +56,23 @@ impl<V: ?Sized> Drop for LogHandle<V> {
     fn drop(&mut self) {
         let _ = self.to_log.send(Message::FromClient(Shutdown));
     }
+}
+
+pub struct ReadHandle<V: ?Sized> {
+    _pd: PhantomData<Box<V>>,
+    num_snapshots: usize,
+    to_log: mpsc::Sender<Message>,
+    ready_reads: FinshedReadRecv,
+    curr_entry: Vec<u8>,
+    num_errors: u64,
+}
+
+pub struct WriteHandle<V: ?Sized> {
+    _pd: PhantomData<Box<V>>,
+    num_async_writes: usize,
+    to_log: mpsc::Sender<Message>,
+    finished_writes: FinshedWriteRecv,
+    num_errors: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -156,6 +176,7 @@ pub struct LogBuilder<V: ?Sized> {
     chains: Vec<order>,
     reads_my_writes: bool,
     fetch_boring_multis: bool,
+    id: Option<Ipv4SocketAddr>,
     _pd: PhantomData<Box<V>>,
 }
 
@@ -167,6 +188,18 @@ enum Servers {
 
 impl<V: ?Sized> LogBuilder<V>
 where V: Storeable {
+
+    fn from_servers(servers: Servers) -> Self {
+        LogBuilder {
+            servers: servers,
+            chains: vec![],
+            reads_my_writes: false,
+            fetch_boring_multis: false,
+            id: None,
+            _pd: PhantomData,
+        }
+    }
+
     pub fn chains<C, O>(self, chains: C) -> Self
     where
         C: IntoIterator<Item=O>,
@@ -183,9 +216,13 @@ where V: Storeable {
         LogBuilder{ fetch_boring_multis: true, .. self}
     }
 
+    pub fn id(self, bytes: [u8; 16]) -> Self {
+        LogBuilder{ id: Some(Ipv4SocketAddr::from_bytes(bytes)), .. self }
+    }
+
     pub fn build(self) -> LogHandle<V> {
         let LogBuilder {
-            servers, chains, reads_my_writes, fetch_boring_multis, _pd,
+            servers, chains, reads_my_writes, fetch_boring_multis, id, _pd,
         } = self;
 
         let make_store = |client| {
@@ -197,6 +234,7 @@ where V: Storeable {
                     Servers::Unreplicated(servers) => {
                         let (mut store, to_store) =
                             ::store::AsyncTcpStore::new_tcp(
+                                id.unwrap_or_else(Ipv4SocketAddr::random),
                                 servers.into_iter(),
                                 client,
                                 &mut event_loop
@@ -208,6 +246,7 @@ where V: Storeable {
                     Servers::Replicated(servers) => {
                         let (mut store, to_store) =
                             ::store::AsyncTcpStore::replicated_new_tcp(
+                                id.unwrap_or_else(Ipv4SocketAddr::random),
                                 servers.into_iter(),
                                 client,
                                 &mut event_loop
@@ -240,18 +279,48 @@ where V: Storeable {
 impl<V: ?Sized> LogHandle<V>
 where V: Storeable {
 
+    pub fn split(mut self) -> (ReadHandle<V>, WriteHandle<V>) {
+        macro_rules! move_fields {
+            ($($field:ident),* $(,)*; $_self:ident) => (
+                $(
+                    let $field = mem::replace(&mut $_self.$field, mem::uninitialized());
+                )*
+                mem::forget(self);
+            );
+        }
+        /*let LogHandle {
+            _pd,
+            num_snapshots,
+            num_async_writes,
+            to_log,
+            ready_reads,
+            finished_writes,
+            curr_entry,
+            last_seen_entries,
+            num_errors,
+        } = self;*/
+        unsafe {
+            move_fields!(
+                _pd, num_snapshots, num_async_writes, to_log, ready_reads, finished_writes, curr_entry, last_seen_entries, num_errors;
+                self);
+
+            let reader = ReadHandle {
+                _pd, num_snapshots, ready_reads, curr_entry, num_errors, to_log: to_log.clone(),
+            };
+            let writer = WriteHandle {
+                _pd, num_async_writes, to_log, finished_writes, num_errors,
+            };
+            drop(last_seen_entries);
+            (reader, writer)
+        }
+    }
+
     pub fn unreplicated_with_servers<S, A>(servers: S) -> LogBuilder<V>
     where
         S: IntoIterator<Item=A>,
         A: Borrow<SocketAddr>, {
         let servers = servers.into_iter().map(|s| s.borrow().clone()).collect();
-        LogBuilder {
-            servers: Servers::Unreplicated(servers),
-            chains: vec![],
-            reads_my_writes: false,
-            fetch_boring_multis: false,
-            _pd: PhantomData,
-        }
+        LogBuilder::from_servers(Servers::Unreplicated(servers))
     }
 
     pub fn replicated_with_servers<S, A>(servers: S) -> LogBuilder<V>
@@ -259,13 +328,7 @@ where V: Storeable {
         S: IntoIterator<Item=A>,
         A: Borrow<(SocketAddr, SocketAddr)>, {
         let servers = servers.into_iter().map(|s| s.borrow().clone()).collect();
-        LogBuilder {
-            servers: Servers::Replicated(servers),
-            chains: vec![],
-            reads_my_writes: false,
-            fetch_boring_multis: false,
-            _pd: PhantomData,
-        }
+        LogBuilder::from_servers(Servers::Replicated(servers))
     }
 
     pub fn with_store<C, F>(
@@ -358,6 +421,7 @@ where V: Storeable {
             thread::spawn(move || {
                 let mut event_loop = mio::Poll::new().unwrap();
                 let (store, to_store) = ::store::AsyncTcpStore::new_tcp(
+                    Ipv4SocketAddr::random(),
                     chain_servers.into_iter(),
                     client,
                     &mut event_loop
@@ -375,7 +439,6 @@ where V: Storeable {
             }
             to_store
         };
-
         LogHandle::with_store(interesting_chains, true, make_store)
     }
 
@@ -402,6 +465,7 @@ where V: Storeable {
             thread::spawn(move || {
                 let mut event_loop = mio::Poll::new().unwrap();
                 let (store, to_store) = ::store::AsyncTcpStore::replicated_new_tcp(
+                    Ipv4SocketAddr::random(),
                     chain_servers.into_iter(),
                     client,
                     &mut event_loop
@@ -832,113 +896,6 @@ where V: Storeable {
         self.causal_color_append(data, inhabits, &mut [], &mut happens_after_entries)
     }
 
-    pub fn wait_for_all_appends(&mut self) -> Result<(), TryWaitRes> {
-        trace!("HANDLE waiting for {} appends", self.num_async_writes);
-        for _ in 0..self.num_async_writes {
-            self.wait_for_any_append()?;
-        }
-        Ok(())
-    }
-
-    pub fn wait_for_a_specific_append(&mut self, write_id: Uuid)
-    -> Result<Vec<OrderIndex>, TryWaitRes> {
-        for _ in 0..self.num_async_writes {
-            let (id, locs) = self.wait_for_any_append()?;
-            if id == write_id {
-                return Ok(locs)
-            }
-        }
-        Err(TryWaitRes::NothingReady)
-    }
-
-    pub fn wait_for_any_append(&mut self) -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
-        //FIXME need to know the number of lost writes so we don't freeze?
-        if self.num_async_writes > 0 {
-            //TODO return buffers here and cache them?
-            loop {
-                let res = self.recv_write().unwrap();
-                match res {
-                    Ok(write) => {
-                        self.num_async_writes -= 1;
-                        return Ok(write)
-                    },
-                    Err(err) => if let Some(err) = self.to_wait_error(err) {
-                        return Err(err)
-                    },
-                }
-            }
-        }
-        Err(TryWaitRes::NothingReady)
-    }
-
-    pub fn try_wait_for_any_append(&mut self)
-    -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
-        if self.num_async_writes > 0 {
-            let ret = self.finished_writes.try_recv()
-                .or_else(|_| Err(TryWaitRes::NothingReady))
-                .and_then(|res| res.map_err(|err|
-                    match self.to_wait_error(err) {
-                        Some(err) => err,
-                        None => TryWaitRes::NothingReady,
-                    }
-                ));
-            if let Ok(&(_, ref locs)) = ret.as_ref() {
-                self.num_async_writes -= 1;
-                for &OrderIndex(o, i) in locs {
-                    let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                    if *e < i {
-                        *e = i
-                    }
-                }
-            }
-            //TODO return buffers here and cache them?
-            ret
-        } else {
-            Err(TryWaitRes::NothingReady)
-        }
-    }
-
-    pub fn flush_completed_appends(&mut self) -> Result<usize, (io::ErrorKind, usize)> {
-        let mut flushed = 0;
-        if self.num_async_writes > 0 {
-            let last_seen_entries = &mut self.last_seen_entries;
-            for res in self.finished_writes.try_iter() {
-                flushed += 1;
-                match res {
-                    Ok((_, locs)) => {
-                        self.num_async_writes -= 1;
-                        for &OrderIndex(o, i) in &locs {
-                            let e = last_seen_entries.entry(o).or_insert(0.into());
-                            if *e < i {
-                                *e = i
-                            }
-                        }
-                    },
-                    Err(fuzzy_log::Error{server, error_num, error}) =>
-                        if self.num_errors < error_num {
-                            assert!(self.num_errors + 1 == error_num);
-                            self.num_errors += 1;
-                            return Err((error, server))
-                        },
-                }
-            }
-        }
-        Ok(flushed)
-    }
-
-    fn recv_write(&mut self)
-    -> Result<Result<(Uuid, Vec<OrderIndex>), fuzzy_log::Error>, ::std::sync::mpsc::RecvError> {
-        self.finished_writes.recv().map(|res| res.map(|(id, locs)| {
-            for &OrderIndex(o, i) in &locs {
-                let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                if *e < i {
-                    *e = i
-                }
-            }
-            (id, locs)
-        }))
-    }
-
     //TODO add wait_and_snapshot(..)
     //TODO add append_and_wait(..) ?
 
@@ -1075,17 +1032,6 @@ where V: Storeable {
         id
     }
 
-    fn to_wait_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
-    -> Option<TryWaitRes> {
-        if self.num_errors < error_num {
-            assert!(self.num_errors + 1 == error_num);
-            self.num_errors += 1;
-            Some(TryWaitRes::IoErr(error, server))
-        } else {
-            None
-        }
-    }
-
     fn make_read_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
     -> Option<GetRes> {
         if self.num_errors < error_num {
@@ -1099,6 +1045,125 @@ where V: Storeable {
 }
 
 impl<V: ?Sized> LogHandle<V> {
+
+    pub fn wait_for_all_appends(&mut self) -> Result<(), TryWaitRes> {
+        trace!("HANDLE waiting for {} appends", self.num_async_writes);
+        for _ in 0..self.num_async_writes {
+            self.wait_for_any_append()?;
+        }
+        Ok(())
+    }
+
+    pub fn wait_for_a_specific_append(&mut self, write_id: Uuid)
+    -> Result<Vec<OrderIndex>, TryWaitRes> {
+        for _ in 0..self.num_async_writes {
+            let (id, locs) = self.wait_for_any_append()?;
+            if id == write_id {
+                return Ok(locs)
+            }
+        }
+        Err(TryWaitRes::NothingReady)
+    }
+
+    pub fn wait_for_any_append(&mut self) -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
+        //FIXME need to know the number of lost writes so we don't freeze?
+        if self.num_async_writes > 0 {
+            //TODO return buffers here and cache them?
+            loop {
+                let res = self.recv_write().unwrap();
+                match res {
+                    Ok(write) => {
+                        self.num_async_writes -= 1;
+                        return Ok(write)
+                    },
+                    Err(err) => if let Some(err) = self.to_wait_error(err) {
+                        return Err(err)
+                    },
+                }
+            }
+        }
+        Err(TryWaitRes::NothingReady)
+    }
+
+    pub fn try_wait_for_any_append(&mut self)
+    -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
+        if self.num_async_writes > 0 {
+            let ret = self.finished_writes.try_recv()
+                .or_else(|_| Err(TryWaitRes::NothingReady))
+                .and_then(|res| res.map_err(|err|
+                    match self.to_wait_error(err) {
+                        Some(err) => err,
+                        None => TryWaitRes::NothingReady,
+                    }
+                ));
+            if let Ok(&(_, ref locs)) = ret.as_ref() {
+                self.num_async_writes -= 1;
+                for &OrderIndex(o, i) in locs {
+                    let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                    if *e < i {
+                        *e = i
+                    }
+                }
+            }
+            //TODO return buffers here and cache them?
+            ret
+        } else {
+            Err(TryWaitRes::NothingReady)
+        }
+    }
+
+    pub fn flush_completed_appends(&mut self) -> Result<usize, (io::ErrorKind, usize)> {
+        let mut flushed = 0;
+        if self.num_async_writes > 0 {
+            let last_seen_entries = &mut self.last_seen_entries;
+            for res in self.finished_writes.try_iter() {
+                flushed += 1;
+                match res {
+                    Ok((_, locs)) => {
+                        self.num_async_writes -= 1;
+                        for &OrderIndex(o, i) in &locs {
+                            let e = last_seen_entries.entry(o).or_insert(0.into());
+                            if *e < i {
+                                *e = i
+                            }
+                        }
+                    },
+                    Err(fuzzy_log::Error{server, error_num, error}) =>
+                        if self.num_errors < error_num {
+                            assert!(self.num_errors + 1 == error_num);
+                            self.num_errors += 1;
+                            return Err((error, server))
+                        },
+                }
+            }
+        }
+        Ok(flushed)
+    }
+
+    fn to_wait_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
+    -> Option<TryWaitRes> {
+        if self.num_errors < error_num {
+            assert!(self.num_errors + 1 == error_num);
+            self.num_errors += 1;
+            Some(TryWaitRes::IoErr(error, server))
+        } else {
+            None
+        }
+    }
+
+    fn recv_write(&mut self)
+    -> Result<Result<(Uuid, Vec<OrderIndex>), fuzzy_log::Error>, ::std::sync::mpsc::RecvError> {
+        self.finished_writes.recv().map(|res| res.map(|(id, locs)| {
+            for &OrderIndex(o, i) in &locs {
+                let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                if *e < i {
+                    *e = i
+                }
+            }
+            (id, locs)
+        }))
+    }
+
     pub fn read_until(&mut self, loc: OrderIndex) {
         self.to_log.send(Message::FromClient(ReadUntil(loc))).unwrap();
         self.num_snapshots = self.num_snapshots.saturating_add(1);
@@ -1106,5 +1171,9 @@ impl<V: ?Sized> LogHandle<V> {
 
     pub fn fastforward(&mut self, loc: OrderIndex) {
         self.to_log.send(Message::FromClient(Fastforward(loc))).unwrap();
+    }
+
+    pub fn rewind(&mut self, loc: OrderIndex) {
+        self.to_log.send(Message::FromClient(Rewind(loc))).unwrap();
     }
 }

@@ -182,6 +182,22 @@ impl RangeTree {
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
     }
 
+    pub fn set_above_as_none(&mut self, low: entry) {
+        debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
+        let new_range = Range::new(low, u32::MAX.into());
+        let (old_range, old_kind) = remove_from_map(&mut self.inner, Range::point(low));
+        let mut lowish = old_range.1;
+        while lowish < u32::MAX.into() {
+            lowish = (remove_from_map(&mut self.inner, Range::point(lowish + 1)).0).1;
+        }
+        let (old, _) = old_range.split_at(low);
+        if let Some(range) = old {
+            self.inner.insert(range, old_kind);
+        }
+        self.inner.insert(new_range, Kind::None);
+        debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
+    }
+
     pub fn is_returned(&self, point: entry) -> bool {
         match self.inner.get(&Range::point(point)) {
             Some(&Kind::ReturnedToClient) => true,
