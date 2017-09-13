@@ -10,6 +10,14 @@
 typedef uint32_t ColorID;
 typedef uint32_t LocationInColor;
 
+typedef struct ReadHandle;
+typedef struct WriteHandle;
+
+typedef struct ReaderAndWriter {
+	ReadHandle reader;
+	WriteHandle writer;
+}
+
 struct colors
 {
 	//! number of entries in mycolors

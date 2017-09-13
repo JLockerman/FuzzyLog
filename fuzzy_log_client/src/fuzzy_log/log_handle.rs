@@ -65,6 +65,7 @@ pub struct ReadHandle<V: ?Sized> {
     ready_reads: FinshedReadRecv,
     curr_entry: Vec<u8>,
     num_errors: u64,
+    last_dropped: Arc<()>,
 }
 
 pub struct WriteHandle<V: ?Sized> {
@@ -73,6 +74,23 @@ pub struct WriteHandle<V: ?Sized> {
     to_log: mpsc::Sender<Message>,
     finished_writes: FinshedWriteRecv,
     num_errors: u64,
+    last_dropped: Arc<()>,
+}
+
+impl<V: ?Sized> Drop for ReadHandle<V> {
+    fn drop(&mut self) {
+        if let Some(..) = Arc::get_mut(&mut self.last_dropped) {
+            let _ = self.to_log.send(Message::FromClient(Shutdown));
+        }
+    }
+}
+
+impl<V: ?Sized> Drop for WriteHandle<V> {
+    fn drop(&mut self) {
+        if let Some(..) = Arc::get_mut(&mut self.last_dropped) {
+            let _ = self.to_log.send(Message::FromClient(Shutdown));
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -288,27 +306,26 @@ where V: Storeable {
                 mem::forget(self);
             );
         }
-        /*let LogHandle {
-            _pd,
-            num_snapshots,
-            num_async_writes,
-            to_log,
-            ready_reads,
-            finished_writes,
-            curr_entry,
-            last_seen_entries,
-            num_errors,
-        } = self;*/
         unsafe {
             move_fields!(
-                _pd, num_snapshots, num_async_writes, to_log, ready_reads, finished_writes, curr_entry, last_seen_entries, num_errors;
-                self);
-
+                _pd,
+                num_snapshots,
+                num_async_writes,
+                to_log,
+                ready_reads,
+                finished_writes,
+                curr_entry,
+                last_seen_entries,
+                num_errors;
+                self
+            );
+            let last_dropped = Arc::new(());
             let reader = ReadHandle {
-                _pd, num_snapshots, ready_reads, curr_entry, num_errors, to_log: to_log.clone(),
+                _pd, num_snapshots, ready_reads, curr_entry, num_errors,
+                to_log: to_log.clone(), last_dropped: last_dropped.clone(),
             };
             let writer = WriteHandle {
-                _pd, num_async_writes, to_log, finished_writes, num_errors,
+                _pd, num_async_writes, to_log, finished_writes, num_errors, last_dropped,
             };
             drop(last_seen_entries);
             (reader, writer)
@@ -1175,5 +1192,253 @@ impl<V: ?Sized> LogHandle<V> {
 
     pub fn rewind(&mut self, loc: OrderIndex) {
         self.to_log.send(Message::FromClient(Rewind(loc))).unwrap();
+    }
+}
+
+impl<V: ?Sized> ReadHandle<V> {
+    /// Take a snapshot of a supplied interesting color and start prefetching.
+    pub fn snapshot(&mut self, chain: order) {
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.to_log.send(Message::FromClient(SnapshotAndPrefetch(chain)))
+            .unwrap();
+    }
+
+    /// Take a snapshot of a set of interesting colors and start prefetching.
+    pub fn snapshot_colors(&mut self, colors: &[order]) {
+        trace!("HANDLE send snap {:?}.", colors);
+        let colors = colors.to_vec();
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
+    }
+
+    /// Take a linearizable snapshot of a set of interesting colors and start prefetching.
+    pub fn strong_snapshot(&mut self, colors: &[order]) {
+        trace!("HANDLE send snap {:?}.", colors);
+        let mut c = Vec::with_capacity(colors.len());
+        c.extend(colors.into_iter().map(|&o| OrderIndex(o, entry::from(0))));
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.to_log.send(Message::FromClient(StrongSnapshotAndPrefetch(c))).unwrap();
+    }
+
+    /// Take a snapshot of all interesting colors and start prefetching.
+    pub fn take_snapshot(&mut self) {
+        trace!("HANDLE send all snap.");
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.to_log.send(Message::FromClient(SnapshotAndPrefetch(0.into())))
+            .unwrap();
+    }
+
+    /// Wait until an event is ready, then returns the contents.
+    pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
+    where V: UnStoreable {
+        if self.num_snapshots == 0 {
+            trace!("HANDLE read with no snap.");
+            return Err(GetRes::Done)
+        }
+
+        'recv: loop {
+            //TODO use recv_timeout in real version
+            let read = self.ready_reads.recv().expect("log hung up");
+            let read = match read.map_err(|e| self.make_read_error(e)) {
+                Ok(v) => v,
+                //TODO Gc err
+                Err(Some(e)) => return Err(e),
+                Err(None) => continue 'recv,
+            };
+            let old = mem::replace(&mut self.curr_entry, read);
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
+            }
+            if self.curr_entry.len() != 0 {
+                break 'recv
+            }
+
+            trace!("HANDLE finished snap.");
+            assert!(self.num_snapshots > 0);
+            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+            if self.num_snapshots == 0 {
+                trace!("HANDLE finished all snaps.");
+                return Err(GetRes::Done)
+            }
+        }
+
+        trace!("HANDLE got val.");
+        let (val, locs) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs())
+        };
+        Ok((val, locs))
+    }
+
+    fn make_read_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
+    -> Option<GetRes> {
+        if self.num_errors < error_num {
+            assert!(self.num_errors + 1 == error_num);
+            self.num_errors += 1;
+            Some(GetRes::IoErr(error, server))
+        } else {
+            None
+        }
+    }
+}
+
+impl<V: ?Sized> WriteHandle<V>
+where V: Storeable {
+
+    pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
+        //TODO no-alloc?
+        let id = Uuid::new_v4();
+        let mut buffer = Vec::new();
+        EntryContents::Single {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            loc: &OrderIndex(chain, 0.into()),
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        self.num_async_writes += 1;
+        id
+    }
+
+    pub fn async_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Uuid {
+        //TODO no-alloc?
+        assert!(chains.len() > 1);
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
+        locs.sort();
+        locs.dedup();
+        let id = Uuid::new_v4();
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &locs,
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        self.num_async_writes += 1;
+        id
+    }
+
+    pub fn async_no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Uuid {
+        //TODO no-alloc?
+        assert!(chains.len() > 1);
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
+        locs.sort();
+        locs.dedup();
+        let id = Uuid::new_v4();
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::NoRemote,
+            lock: &0,
+            locs: &locs,
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        self.num_async_writes += 1;
+        id
+    }
+
+    pub fn wait_for_all_appends(&mut self) -> Result<(), TryWaitRes> {
+        trace!("HANDLE waiting for {} appends", self.num_async_writes);
+        for _ in 0..self.num_async_writes {
+            self.wait_for_any_append()?;
+        }
+        Ok(())
+    }
+
+    pub fn wait_for_a_specific_append(&mut self, write_id: Uuid)
+    -> Result<Vec<OrderIndex>, TryWaitRes> {
+        for _ in 0..self.num_async_writes {
+            let (id, locs) = self.wait_for_any_append()?;
+            if id == write_id {
+                return Ok(locs)
+            }
+        }
+        Err(TryWaitRes::NothingReady)
+    }
+
+    pub fn wait_for_any_append(&mut self) -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
+        //FIXME need to know the number of lost writes so we don't freeze?
+        if self.num_async_writes > 0 {
+            //TODO return buffers here and cache them?
+            loop {
+                let res = self.recv_write().unwrap();
+                match res {
+                    Ok(write) => {
+                        self.num_async_writes -= 1;
+                        return Ok(write)
+                    },
+                    Err(err) => if let Some(err) = self.to_wait_error(err) {
+                        return Err(err)
+                    },
+                }
+            }
+        }
+        Err(TryWaitRes::NothingReady)
+    }
+
+    pub fn try_wait_for_any_append(&mut self)
+    -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
+        if self.num_async_writes > 0 {
+            let ret = self.finished_writes.try_recv()
+                .or_else(|_| Err(TryWaitRes::NothingReady))
+                .and_then(|res| res.map_err(|err|
+                    match self.to_wait_error(err) {
+                        Some(err) => err,
+                        None => TryWaitRes::NothingReady,
+                    }
+                ));
+            if let Ok(..) = ret.as_ref() {
+                self.num_async_writes -= 1;
+            }
+            //TODO return buffers here and cache them?
+            ret
+        } else {
+            Err(TryWaitRes::NothingReady)
+        }
+    }
+
+    pub fn flush_completed_appends(&mut self) -> Result<usize, (io::ErrorKind, usize)> {
+        let mut flushed = 0;
+        if self.num_async_writes > 0 {
+            for res in self.finished_writes.try_iter() {
+                flushed += 1;
+                match res {
+                    Ok((_, _)) => {
+                        self.num_async_writes -= 1;
+                    },
+                    Err(fuzzy_log::Error{server, error_num, error}) =>
+                        if self.num_errors < error_num {
+                            assert!(self.num_errors + 1 == error_num);
+                            self.num_errors += 1;
+                            return Err((error, server))
+                        },
+                }
+            }
+        }
+        Ok(flushed)
+    }
+
+    fn recv_write(&mut self)
+    -> Result<Result<(Uuid, Vec<OrderIndex>), fuzzy_log::Error>, ::std::sync::mpsc::RecvError> {
+        self.finished_writes.recv()
+    }
+
+    fn to_wait_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
+    -> Option<TryWaitRes> {
+        if self.num_errors < error_num {
+            assert!(self.num_errors + 1 == error_num);
+            self.num_errors += 1;
+            Some(TryWaitRes::IoErr(error, server))
+        } else {
+            None
+        }
     }
 }

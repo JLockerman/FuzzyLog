@@ -75,7 +75,7 @@ pub mod c_binidings {
     use packets::*;
     //use tcp_store::TcpStore;
     // use multitcp_store::TcpStore;
-    use async::fuzzy_log::log_handle::{LogHandle, GetRes, TryWaitRes};
+    use async::fuzzy_log::log_handle::{LogHandle, ReadHandle, WriteHandle, GetRes, TryWaitRes};
 
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
@@ -92,6 +92,12 @@ pub mod c_binidings {
 
     pub type DAG = LogHandle<[u8]>;
     pub type ColorID = u32;
+
+    #[repr(C)]
+    pub struct ReaderAndWriter {
+        reader: Box<ReadHandle<[u8]>>,
+        writer: Box<WriteHandle<[u8]>>,
+    }
 
     #[repr(C)]
     pub struct colors {
@@ -193,8 +199,13 @@ pub mod c_binidings {
                     .parse().expect("invalid IP addr")
             ).collect::<Vec<SocketAddr>>();
         let colors = slice::from_raw_parts((*color).mycolors, (*color).numcolors);
-        Box::new(LogHandle::new_tcp_log(server_addrs.into_iter(),
-            colors.into_iter().cloned().map(order::from)))
+        let colors: Vec<_> = colors.into_iter().cloned().map(order::from).collect();
+        //Box::new(LogHandle::new_tcp_log(server_addrs.into_iter(), colors))
+        let handle = LogHandle::unreplicated_with_servers(server_addrs)
+            .chains(colors)
+            .reads_my_writes()
+            .build();
+        Box::new(handle)
     }
 
     #[no_mangle]
@@ -267,6 +278,17 @@ pub mod c_binidings {
             ))
         }
     }
+
+    #[no_mangle]
+    pub extern "C" fn split_dag_handle(dag: *mut DAG) -> ReaderAndWriter {
+        assert!(dag != ptr::null_mut());
+        let dag = unsafe { Box::from_raw(dag) };
+        let (reader, writer) = dag.split();
+        let reader = Box::new(reader);
+        let writer = Box::new(writer);
+        ReaderAndWriter { reader, writer }
+    }
+
 
     //NOTE currently can only use 31bits of return value
     #[no_mangle]
@@ -621,6 +643,145 @@ pub mod c_binidings {
     pub unsafe extern "C" fn close_dag_handle(dag: *mut DAG) {
         assert!(dag != ptr::null_mut());
         Box::from_raw(dag);
+    }
+
+
+    ///////////////////////////////////////////////////
+    //         Read and Write Handle bindings        //
+    ///////////////////////////////////////////////////
+
+    #[no_mangle]
+    pub extern "C" fn wh_async_append(
+        dag: *mut WriteHandle<[u8]>,
+        data: *const u8,
+        data_size: usize,
+        inhabits: ColorID,
+        // deps: *mut OrderIndex,
+        // num_deps: usize,
+    ) -> WriteId {
+        assert!(data_size == 0 || data != ptr::null());
+        assert!(data != ptr::null());
+        let (dag, data, deps) = unsafe {
+            // let d = slice::from_raw_parts_mut(deps, num_deps);
+            (dag.as_mut().expect("need to provide a valid DAGHandle"),
+                slice::from_raw_parts(data, data_size),
+                &mut [])
+        };
+        let id = dag.async_append(inhabits.into(), data, deps);
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn wh_async_multiappend(
+        dag: *mut WriteHandle<[u8]>,
+        data: *const u8,
+        data_size: usize,
+        inhabits: *mut colors,
+        // deps: *mut OrderIndex,
+        // num_deps: usize,
+    ) -> WriteId {
+        assert!(data_size == 0 || data != ptr::null());
+        assert!(inhabits != ptr::null_mut());
+        assert!(colors_valid(inhabits));
+        assert!(data_size <= 8000);
+
+        let (dag, data, inhabits, deps) = unsafe {
+            let colors: *mut order = (*inhabits).mycolors as *mut _;
+            let s = slice::from_raw_parts_mut(colors, (*inhabits).numcolors);
+            // let d = slice::from_raw_parts_mut(deps, num_deps);
+            (dag.as_mut().expect("need to provide a valid DAGHandle"),
+                slice::from_raw_parts(data, data_size),
+                s,
+                &mut [])
+        };
+        inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
+        let id = dag.async_multiappend(inhabits, data, deps);
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn wh_async_no_remote_multiappend(
+        dag: *mut WriteHandle<[u8]>,
+        data: *const u8,
+        data_size: usize,
+        inhabits: *mut colors,
+        // deps: *mut OrderIndex,
+        // num_deps: usize,
+    ) -> WriteId {
+        assert!(data_size == 0 || data != ptr::null());
+        assert!(inhabits != ptr::null_mut());
+        assert!(colors_valid(inhabits));
+        assert!(data_size <= 8000);
+
+        let (dag, data, inhabits, deps) = unsafe {
+            let colors: *mut order = (*inhabits).mycolors as *mut _;
+            let s = slice::from_raw_parts_mut(colors, (*inhabits).numcolors);
+            // let d = slice::from_raw_parts_mut(deps, num_deps);
+            (dag.as_mut().expect("need to provide a valid DAGHandle"),
+                slice::from_raw_parts(data, data_size),
+                s,
+                &mut [])
+        };
+        inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
+        let id = dag.async_no_remote_multiappend(inhabits, data, deps);
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wh_flush_completed_appends(dag: *mut WriteHandle<[u8]>) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        dag.flush_completed_appends().unwrap();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wh_wait_for_any_append(dag: *mut WriteHandle<[u8]>) -> WriteId {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        let id = dag.wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
+        WriteId::from_uuid(id)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn rh_snapshot(dag: *mut ReadHandle<[u8]>) {
+        let dag = unsafe {dag.as_mut().expect("need to provide a valid DAGHandle")};
+        dag.take_snapshot();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rh_snapshot_colors(dag: *mut ReadHandle<[u8]>, colors: *mut colors) {
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        assert!(colors != ptr::null_mut());
+        assert!(colors_valid(colors));
+        let colors = {
+            let num_colors = (*colors).numcolors;
+            let colors: *mut order = (*colors).mycolors as *mut _;
+            slice::from_raw_parts_mut(colors, num_colors)
+        };
+        dag.snapshot_colors(colors);
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rh_get_next2(
+        dag: *mut ReadHandle<[u8]>,
+        data_read: *mut usize,
+        num_locs: *mut usize,
+    ) -> Vals {
+        assert!(data_read != ptr::null_mut());
+        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+        let val = dag.get_next();
+        let (data, locs) = val.unwrap_or((&[], &[]));
+
+        ptr::write(data_read, data.len());
+        ptr::write(num_locs, locs.len());
+
+        Vals { data: data.as_ptr(), locs: locs.as_ptr() }
     }
 
     ////////////////////////////////////
