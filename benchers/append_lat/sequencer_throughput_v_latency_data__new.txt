@@ -1,0 +1,168 @@
+
+#Args { servers: ServerAddrs([(V4(172.31.5.104:13289), V4(172.31.14.200:13289)), (V4(172.31.3.204:13289), V4(172.31.9.12:13289))]), sequencer: V4(172.31.3.165:13289), round_ms: 2000 }
+cc10events: 418012ns     23081Hz
+rr10events: 242836ns     37767Hz
+cm10events: 433771ns     22323Hz
+rd10events: 526730ns     18576Hz
+rl10events: 258380ns     36128Hz
+cc20events: 434086ns     43600Hz
+rr20events: 245512ns     71803Hz
+cm20events: 435737ns     43453Hz
+rd20events: 592312ns     32771Hz
+rl20events: 262885ns     68475Hz
+cc40events: 423660ns     86215Hz
+rr40events: 243277ns     136428Hz
+cm40events: 446504ns     81860Hz
+rd40events: 641691ns     59465Hz
+rl40events: 289261ns     119106Hz
+cc80events: 454377ns     153938Hz
+rr80events: 273264ns     230500Hz
+cm80events: 481872ns     145302Hz
+rd80events: 774959ns     97267Hz
+rl80events: 340587ns     195469Hz
+cc160events: 528041ns    255022Hz
+rr160events: 360870ns    358640Hz
+cm160events: 526105ns    256885Hz
+rd160events: 1144473ns   131950Hz
+rl160events: 399109ns    328627Hz
+cc320events: 624625ns    422716Hz
+rr320events: 488781ns    540727Hz
+cm320events: 672827ns    395536Hz
+rd320events: 2470956ns   126217Hz
+rl320events: 1030016ns   286387Hz
+cc640events: 889220ns    582382Hz
+rr640events: 988124ns    575918Hz
+cm640events: 1274723ns   443936Hz
+rd640events: 3060093ns   202073Hz
+rl640events: 1298697ns   452197Hz
+cc1280events: 1847395ns  610663Hz
+rr1280events: 2010826ns  593051Hz
+cm1280events: 3363013ns  360672Hz
+rd1280events: 6867534ns  183458Hz
+rl1280events: 6358757ns  197594Hz
+#elapsed Duration { secs: 80, nanos: 40007923 }
+windows = [10, 20, 40, 80, 160, 320, 640, 1280]
+avg_corfu_latencies  = [418012, 434086, 423660, 454377, 528041, 624625, 889220, 1847395]
+avg_corfu_throughput = [23081, 43600, 86215, 153938, 255022, 422716, 582382, 610663]
+avg_corfu_multi_latencies  = [433771, 435737, 446504, 481872, 526105, 672827, 1274723, 3363013]
+avg_corfu_multi_throughput = [22323, 43453, 81860, 145302, 256885, 395536, 443936, 360672]
+avg_regular_latencies  = [242836, 245512, 243277, 273264, 360870, 488781, 988124, 2010826]
+avg_regular_throughput = [37767, 71803, 136428, 230500, 358640, 540727, 575918, 593051]
+avg_regular_dist_latencies  = [526730, 592312, 641691, 774959, 1144473, 2470956, 3060093, 6867534]
+avg_regular_dist_throughput = [18576, 32771, 59465, 97267, 131950, 126217, 202073, 183458]
+avg_regular_local_latencies  = [258380, 262885, 289261, 340587, 399109, 1030016, 1298697, 6358757]
+avg_regular_local_throughput = [36128, 68475, 119106, 195469, 328627, 286387, 452197, 197594]
+
+=======================================
+=======================================
+=======================================
+=======================================
+
+#Args { servers: ServerAddrs([(V4(172.31.5.104:13289), V4(172.31.14.200:13289)), (V4(172.31.6.234:13289), V4(172.31.3.204:13289))]), sequencer: V4(172.31.9.12:13289), round_ms: 2000 }
+cc10events: 418201ns   23059Hz
+rr10events: 219103ns   41460Hz
+cm10events: 416856ns   23137Hz
+rd10events: 509240ns   19160Hz
+rl10events: 243652ns   38033Hz
+cc20events: 382152ns   48802Hz
+rr20events: 208814ns   82529Hz
+cm20events: 384680ns   48560Hz
+rd20events: 571254ns   33893Hz
+rl20events: 259649ns   69020Hz
+cc40events: 406378ns   88479Hz
+rr40events: 230188ns   144430Hz
+cm40events: 431095ns   84095Hz
+rd40events: 630082ns   60326Hz
+rl40events: 282582ns   120031Hz
+cc80events: 461109ns   150571Hz
+rr80events: 273163ns   234675Hz
+cm80events: 474035ns   146613Hz
+rd80events: 923832ns   82713Hz
+rl80events: 328481ns   201172Hz
+cc160events: 504341ns  263931Hz
+rr160events: 343507ns  371107Hz
+cm160events: 556991ns  242549Hz
+rd160events: 1108043ns     135718Hz
+rl160events: 407821ns  320971Hz
+cc320events: 728514ns  366586Hz
+rr320events: 469653ns  556244Hz
+cm320events: 785385ns  345877Hz
+rd320events: 1637722ns     184346Hz
+rl320events: 612044ns  443964Hz
+cc640events: 937327ns  535381Hz
+rr640events: 1006011ns     566180Hz
+cm640events: 1169070ns     465508Hz
+rd640events: 3005411ns     205337Hz
+rl640events: 1307741ns     440158Hz
+cc1280events: 1677506ns    601911Hz
+rr1280events: 4045851ns    303730Hz
+cm1280events: 2585088ns    458380Hz
+rd1280events: 6634049ns    189754Hz
+rl1280events: 2703601ns    442962Hz
+#elapsed Duration { secs: 80, nanos: 36962457 }
+windows = [10, 20, 40, 80, 160, 320, 640, 1280]
+avg_corfu_latencies  = [418201, 382152, 406378, 461109, 504341, 728514, 937327, 1677506]
+avg_corfu_throughput = [23059, 48802, 88479, 150571, 263931, 366586, 535381, 601911]
+avg_corfu_multi_latencies  = [416856, 384680, 431095, 474035, 556991, 785385, 1169070, 2585088]
+avg_corfu_multi_throughput = [23137, 48560, 84095, 146613, 242549, 345877, 465508, 458380]
+avg_regular_latencies  = [219103, 208814, 230188, 273163, 343507, 469653, 1006011, 4045851]
+avg_regular_throughput = [41460, 82529, 144430, 234675, 371107, 556244, 566180, 303730]
+avg_regular_dist_latencies  = [509240, 571254, 630082, 923832, 1108043, 1637722, 3005411, 6634049]
+avg_regular_dist_throughput = [19160, 33893, 60326, 82713, 135718, 184346, 205337, 189754]
+avg_regular_local_latencies  = [243652, 259649, 282582, 328481, 407821, 612044, 1307741, 2703601]
+avg_regular_local_throughput = [38033, 69020, 120031, 201172, 320971, 443964, 440158, 442962]
+
+=======================================
+=======================================
+=======================================
+=======================================
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+avg_corfu_latencies  = [418201, 382152, 406378, 461109, 504341, 728514, 937327, 1677506]
+avg_corfu_throughput = [23059, 48802, 88479, 150571, 263931, 366586, 535381, 601911]
+avg_corfu_multi_latencies  = [416856, 384680, 431095, 474035, 556991, 785385, 1169070, 2585088]
+avg_corfu_multi_throughput = [23137, 48560, 84095, 146613, 242549, 345877, 465508, 458380]
+avg_regular_latencies  = [219103, 208814, 230188, 273163, 343507, 469653, 1006011, 4045851]
+avg_regular_throughput = [41460, 82529, 144430, 234675, 371107, 556244, 566180, 303730]
+avg_regular_dist_latencies  = [509240, 571254, 630082, 923832, 1108043, 1637722, 3005411, 6634049]
+avg_regular_dist_throughput = [19160, 33893, 60326, 82713, 135718, 184346, 205337, 189754]
+avg_regular_local_latencies  = [243652, 259649, 282582, 328481, 407821, 612044, 1307741, 2703601]
+avg_regular_local_throughput = [38033, 69020, 120031, 201172, 320971, 443964, 440158, 442962]
+
+avg_corfu_latencies = map(lambda x: x/1000, avg_corfu_latencies)
+avg_corfu_throughput = map(lambda x: x/1000, avg_corfu_throughput)
+avg_corfu_multi_latencies = map(lambda x: x/1000, avg_corfu_multi_latencies)
+avg_corfu_multi_throughput = map(lambda x: x/1000, avg_corfu_multi_throughput)
+avg_regular_latencies  = map(lambda x: x/1000, avg_regular_latencies)
+avg_regular_throughput = map(lambda x: x/1000, avg_regular_throughput)
+avg_regular_dist_latencies = map(lambda x: x/1000, avg_regular_dist_latencies)
+avg_regular_dist_throughput = map(lambda x: x/1000, avg_regular_dist_throughput)
+avg_regular_local_latencies = map(lambda x: x/1000, avg_regular_local_latencies)
+avg_regular_local_throughput = map(lambda x: x/1000, avg_regular_local_throughput)
+
+
+x_tics = [1, 10, 20, 40, 80, 160, 320, 640, 1280]
+
+plt.figure(num=None, figsize=(6, 3), dpi=80, facecolor='w', edgecolor='k')
+
+plt.plot(avg_corfu_throughput, avg_corfu_latencies, marker="o", linestyle="-", color='darkblue')
+
+plt.plot(avg_regular_throughput, avg_regular_latencies, marker="x", linestyle="--", color='darkred')
+
+plt.plot(avg_corfu_multi_throughput, avg_corfu_multi_latencies, marker="h", linestyle="-", color='blue')
+
+plt.plot(avg_regular_dist_throughput, avg_regular_dist_latencies, marker="x", linestyle="..", color='darkorange')
+
+plt.plot(avg_regular_local_throughput, avg_regular_local_latencies, marker="x", linestyle="-.", color='goldenrod')
+
+#plt.yscale('log')
+#plt.xticks([0, 1, 2, 3, 4, 5, 6, 7], x_tics)
+plt.ylabel("Latency (microseconds)")
+plt.xlabel("Thoroughput kHz")
+plt.legend(["separate sequencer", "unified", "separate sequencer (multi)", "unified (multi)", "unified (multi, co-located)"], loc=2)
+pp = PdfPages('a.pdf')
+pp.savefig(bbox_inches='tight')
+pp.close()
+plt.show()

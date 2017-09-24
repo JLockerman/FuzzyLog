@@ -1,0 +1,38 @@
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+t1 = [274777, 653553, 1398009, 2591003, 5067497, 10088297, 19902211]
+t1_thorughput = map(lambda x: 1000000000/x, t1)
+
+t4 = [272015, 301615, 505195, 739090, 1245306, 2465846, 4924758]
+t4_thorughput = map(lambda x: 1000000000/x, t4)
+
+t10 = [271750, 297641, 294681, 417361, 751101, 1251402, 2319455]
+t10_thorughput = map(lambda x: 1000000000/x, t10)
+
+avg_regular_latencies = [155251, 146127, 186132, 223363, 259871, 348993, 462078]
+avg_regular_thorughput = map(lambda x: 1000000000/x, avg_regular_latencies)
+
+x_tics = [1, 10, 20, 40, 80, 160]
+
+print(t1_thorughput)
+print(t4_thorughput)
+print(t10_thorughput)
+print(avg_regular_thorughput)
+
+plt.figure(num=None, figsize=(6, 3), dpi=80, facecolor='w', edgecolor='k')
+#plt.plot(t1_thorughput, marker="h", linestyle="-", color='lightblue')
+plt.plot(t4_thorughput, marker="o", linestyle="-", color='darkblue')
+plt.plot(t10_thorughput, marker="D", linestyle="-", color='blue')
+plt.plot(avg_regular_thorughput, avg_regular_latencies, marker="x", linestyle="--", color='darkred')
+plt.xticks([0, 1, 2, 3, 4, 5], x_tics)
+#plt.yscale('log')
+#plt.ylabel("Latency (microseconds)")
+plt.ylabel("Hz")
+#plt.legend(["1 backpointer", "4 backpointers", "10 backpointer", "direct"], loc=2)
+plt.legend(["4 backpointers", "10 backpointer", "direct"], loc=2)
+#pp = PdfPages('a.pdf')
+#pp.savefig(bbox_inches='tight')
+#pp.close()
+plt.show()
+

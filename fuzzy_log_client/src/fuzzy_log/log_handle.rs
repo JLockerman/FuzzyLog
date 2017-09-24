@@ -1270,6 +1270,48 @@ impl<V: ?Sized> ReadHandle<V> {
         Ok((val, locs))
     }
 
+    pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
+    where V: UnStoreable {
+        if self.num_snapshots == 0 {
+            trace!("HANDLE read with no snap.");
+            return Err(GetRes::Done)
+        }
+
+        'recv: loop {
+            //TODO use recv_timeout in real version
+            let read = self.ready_reads.try_recv()
+                .or_else(|_| Err(GetRes::NothingReady))?;
+            let read = match read.map_err(|e| self.make_read_error(e)) {
+                Ok(v) => v,
+                //TODO Gc err
+                Err(Some(e)) => return Err(e),
+                Err(None) => continue 'recv,
+            };
+            let old = mem::replace(&mut self.curr_entry, read);
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
+            }
+            if self.curr_entry.len() != 0 {
+                break 'recv
+            }
+
+            trace!("HANDLE finished snap.");
+            assert!(self.num_snapshots > 0);
+            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+            if self.num_snapshots == 0 {
+                trace!("HANDLE finished all snaps.");
+                return Err(GetRes::Done)
+            }
+        }
+
+        trace!("HANDLE got val.");
+        let (val, locs) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs())
+        };
+        Ok((val, locs))
+    }
+
     fn make_read_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
     -> Option<GetRes> {
         if self.num_errors < error_num {

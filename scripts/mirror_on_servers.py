@@ -26,7 +26,7 @@ def sync():
     rsync_project(remote_dir="~/", exclude=[".*",".*/"], extra_opts="--filter=':- .gitignore'")
 
 def export(dir):
-    run("echo DELOS_RUST_LOC=" + dir + " >> ~/.bashrc")
+    run("echo 'export DELOS_RUST_LOC=" + dir + "' >> ~/.bashrc")
 
 
 @parallel
@@ -52,7 +52,7 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
     #cmd += "RUST_BACKTRACE=short RUSTFLAGS='-Z sanitizer=memory' cargo run --target x86_64-unknown-linux-gnu "
-    cmd += "cargo run "
+    cmd += "RUSTFLAGS=\"-C target-cpu=native\" cargo run "
     #cmd += "cargo run "
     if debug == "":
         cmd += "--release "
@@ -111,9 +111,9 @@ def run_clients(num_clients, servers, jobsize="1000", num_writes="100000", trace
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
     if debug == "":
-        cmd += "RUST_BACKTRACE=1 cargo run --release "
+        cmd += "RUST_BACKTRACE=1 RUSTFLAGS=\"-C target-cpu=native\" cargo run --release "
     else:
-        cmd += "cargo run "
+        cmd += "RUSTFLAGS=\"-C target-cpu=native\" cargo run "
     if trace != "":
         cmd += "--no-default-features "
     if stats != "":

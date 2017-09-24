@@ -1,0 +1,10 @@
+[package]
+name = "san"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+fuzzy_log = {path = "../.."}
+log = "0.3"
+env_logger = "0.3"
+mio = "0.6"

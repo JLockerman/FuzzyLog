@@ -154,18 +154,23 @@ fn write(
     mutations: &Vec<AtomicUsize>, done: &AtomicBool, args: &Args, worker_num: usize,
 ) -> u64 {
     //let num_chains = ::std::cmp::max(args.servers.0.len(), args.total_handles);
-    let num_chains = args.servers.0.len();
-    let mut chains: Vec<_> = (0..num_chains)
+    let mut num_chains = args.servers.0.len();
+    while num_chains % args.colors_per_append != 0 { num_chains += 1 }
+    let global_client_number = worker_num + args.client_num * args.handles;
+    // println!("#gcn {:?}", global_client_number);
+    let chains: Vec<_> = (0..num_chains)
         .map(|c| order::from((c+1) as u32)).collect();
+    let handels_per_server = args.total_handles / args.servers.0.len();
+    println!("#hps {:?}", handels_per_server);
+    let home_chain = (global_client_number / handels_per_server) + 1;
+    // the server doesn't like an id of all 0's, it thinks it's UUid::nil()
+    let id = (global_client_number + 1) * 5;
+    println!("id: {:?}, home: {:?}", id, home_chain);
     let mut log = LogHandle::replicated_with_servers(&args.servers.0)
+        // .id([global_client_number as u8; 16])
+        // .id([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, id as u8])
         .chains(chains.iter().cloned().chain(iter::once(order::from(WAIT_CHAIN))))
         .build();
-
-    // let global_client_number = worker_num + args.client_num * args.handles;
-    // println!("#gcn {:?}", global_client_number);
-    // let handels_per_server = args.total_handles / args.servers.0.len();
-    // println!("#hps {:?}", handels_per_server);
-    // let home_chain = (global_client_number / handels_per_server) + 1;
     // println!("#home_chain {:?}", home_chain);
     // chains.swap(0, home_chain);
     /*let full_shards = num_chains / args.colors_per_append;
@@ -187,25 +192,27 @@ fn write(
 
     //println!("#chains [{:?}..{:?}], end_chain", home_chain, end_chain);
 
-    /*let mut my_chains = None;
+    let mut my_chains = None;
     for chain in chains.chunks(args.colors_per_append) {
         if chain.contains(&order::from(home_chain as u32)) {
             my_chains = Some(chain);
+            break
         }
-    }*/
+    }
+    let chains = my_chains.unwrap();
     // println!("#my_chains {:?}", my_chains);
     // let my_chains = my_chains.unwrap_or_else(||
     //     panic!("could not find {:?} in {:?}", home_chain, chains));
     //println!("#chains {:?} @ {:?}", my_chains, home_chain);
-    let chains: Vec<_> = chains.chunks(args.colors_per_append).collect();
-    println!("{:?}", chains);
+    /*let chains: Vec<_> = chains.chunks(args.colors_per_append).collect();*/
+    //println!("{:?}", chains);
 
     wait_for_clients_start(&mut log, args);
 
     let mut outstanding_writes = 0;
     let mut total_writes = 0u64;
 
-    let mut gen = rand::thread_rng();
+    /*let mut gen = rand::thread_rng();*/
     // gen.shuffle(&mut chains[..]);
     while !done.load(Ordering::Relaxed) {
         let mut num_appends = 0;
@@ -235,8 +242,8 @@ fn write(
                     &total_writes,
                     &[]);
             }*/
-            //let selection = chains[gen.gen_range(0, chains.len())];
-            let selection = gen.choose(&chains[..]).unwrap();
+            // let selection = gen.choose(&chains[..]).unwrap();
+            let selection = chains;
             if selection.len() > 1 {
                log.async_multiappend(selection, &total_writes, &[]);
             } else {
