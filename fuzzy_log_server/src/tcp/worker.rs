@@ -270,7 +270,7 @@ impl Worker {
             'work: loop {
                 let ops_before_poll = self.inner.awake_io.len();
                 for _ in 0..ops_before_poll {
-                    let token = self.inner.awake_io.pop_front().unwrap();
+                    let token = self.inner.awake_io.pop_front().expect("no awake");
                     if let HashEntry::Occupied(mut o) = self.clients.entry(token) {
                         let e = self.inner.handle_burst(token, o.get_mut());
                         if e.is_err() {
@@ -335,7 +335,7 @@ impl Worker {
                         tok,
                         mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
                         mio::PollOpt::edge()
-                    ).unwrap();
+                    ).expect("no poll 2");
                     //self.clients.insert(tok, PerSocket::new(buffer, stream));
                     //TODO assert unique?
                     trace!("WORKER {} recv from dist {:?}.",
@@ -351,14 +351,16 @@ impl Worker {
                     trace!("WORKER {} recv downstream from dist for {}.",
                         self.inner.worker_num, src_addr);
                     {
-                        let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
-                        //client.add_downstream_send(buffer);
-                        //client.add_downstream_send(src_addr.bytes());
-                        let mut storage_log_bytes: [u8; 8] = [0; 8];
-                        LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                        //client.add_downstream_send(&storage_log_bytes)
-                        client.add_downstream_send3(
-                            buffer, &storage_log_bytes, src_addr.bytes());
+                        self.clients.get_mut(&DOWNSTREAM).map(|client| {
+                            //client.add_downstream_send(buffer);
+                            //client.add_downstream_send(src_addr.bytes());
+                            let mut storage_log_bytes: [u8; 8] = [0; 8];
+                            LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
+                            //client.add_downstream_send(&storage_log_bytes)
+                            client.add_downstream_send3(
+                                buffer, &storage_log_bytes, src_addr.bytes());
+                        });
+
                     }
                     //TODO replace with wake function
                     if self.clients[&DOWNSTREAM].needs_to_stay_awake() {
@@ -371,9 +373,12 @@ impl Worker {
                     debug_assert_eq!(storage_loc, 0);
                     trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
                     assert!(tok >= FIRST_CLIENT_TOKEN);
-                    self.clients.get_mut(&tok).unwrap().add_downstream_send(buffer);
+                    let stay_up = self.clients.get_mut(&tok).map(|c| {
+                        c.add_downstream_send(buffer);
+                        c.needs_to_stay_awake()
+                    }).unwrap_or(false);
                     //TODO replace with wake function
-                    if self.clients[&tok].needs_to_stay_awake() {
+                    if stay_up {
                         self.inner.awake_io.push_back(tok);
                         self.clients.get_mut(&tok).map(|p| p.is_staying_awake());
                     }
@@ -383,8 +388,7 @@ impl Worker {
                     self.inner.print_data.from_dist_D(1);
                     trace!("WORKER {} recv downstream from dist for {}.",
                         self.inner.worker_num, src_addr);
-                    {
-                        let client = self.clients.get_mut(&DOWNSTREAM).unwrap();
+                    let stay_up = self.clients.get_mut(&DOWNSTREAM).map(|client| {
                         //client.add_downstream_send(buffer);
                         //client.add_downstream_send(src_addr.bytes());
                         let mut storage_log_bytes: [u8; 8] = [0; 8];
@@ -392,9 +396,11 @@ impl Worker {
                         //client.add_downstream_send(&storage_log_bytes)
                         client.add_downstream_send3(
                             &buffer, &storage_log_bytes, src_addr.bytes());
-                    }
+                        client.needs_to_stay_awake()
+                    }).unwrap_or(false);
+
                     //TODO replace with wake function
-                    if self.clients[&DOWNSTREAM].needs_to_stay_awake() {
+                    if stay_up {
                         self.inner.awake_io.push_back(DOWNSTREAM);
                         self.clients.get_mut(&DOWNSTREAM).map(|p| p.is_staying_awake());
                     }
@@ -405,9 +411,12 @@ impl Worker {
                     debug_assert_eq!(storage_loc, 0);
                     trace!("WORKER {} recv to_client from dist for {}.", self.inner.worker_num, src_addr);
                     assert!(tok >= FIRST_CLIENT_TOKEN);
-                    self.clients.get_mut(&tok).unwrap().add_downstream_send(&buffer);
+                    let stay_up = self.clients.get_mut(&tok).map(|c| {
+                        c.add_downstream_send(&buffer);
+                        c.needs_to_stay_awake()
+                    }).unwrap_or(false);
                     //TODO replace with wake function
-                    if self.clients[&tok].needs_to_stay_awake() {
+                    if stay_up {
                         self.inner.awake_io.push_back(tok);
                         self.clients.get_mut(&tok).map(|p| p.is_staying_awake());
                     }
@@ -469,7 +478,7 @@ impl Worker {
 
                         Some((worker_num, send_token)) => {
                             if worker_num != self.inner.worker_num {
-                                unreachable!();
+                                panic!("should sent {} to wrong worker {}", worker_num, self.inner.worker_num);
                                 //self.redist_to_client(src_addr, to_send);
                                 return None
                             }
@@ -503,32 +512,32 @@ impl Worker {
             ToSend::OldReplication(to_replicate, storage_loc) => {
                 let mut storage_log_bytes: [u8; 8] = [0; 8];
                 LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                self.clients.get_mut(&DOWNSTREAM).unwrap()
+                self.clients.get_mut(&DOWNSTREAM).expect("downstream dead 1")
                     .add_downstream_send3(to_replicate, &storage_log_bytes, src_addr.bytes())
             },
 
             ToSend::Contents(to_send) => {
                 let storage_log_bytes: [u8; 8] = [0; 8];
-                self.clients.get_mut(&DOWNSTREAM).unwrap()
+                self.clients.get_mut(&DOWNSTREAM).expect("downstream dead 2")
                     .add_downstream_contents3(to_send, &storage_log_bytes, src_addr.bytes())
             },
 
             ToSend::OldContents(to_send, storage_loc) => {
                 let mut storage_log_bytes: [u8; 8] = [0; 8];
                 LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                self.clients.get_mut(&DOWNSTREAM).unwrap().
-                    add_downstream_contents3(to_send, &storage_log_bytes, src_addr.bytes())
+                self.clients.get_mut(&DOWNSTREAM).expect("downstream dead 3")
+                    .add_downstream_contents3(to_send, &storage_log_bytes, src_addr.bytes())
             }
 
             ToSend::Slice(to_send) => {
                 let storage_loc_bytes: [u8; 8] = [0; 8];
-                self.clients.get_mut(&DOWNSTREAM).unwrap()
+                self.clients.get_mut(&DOWNSTREAM).expect("downstream dead 4")
                     .add_downstream_send3(to_send, &storage_loc_bytes, src_addr.bytes())
             }
 
             ToSend::StaticSlice(to_send) => {
                 let storage_loc_bytes: [u8; 8] = [0; 8];
-                self.clients.get_mut(&DOWNSTREAM).unwrap()
+                self.clients.get_mut(&DOWNSTREAM).expect("downstream dead 5")
                     .add_downstream_send3(to_send, &storage_loc_bytes, src_addr.bytes())
             }
 
@@ -565,19 +574,19 @@ impl Worker {
                     WorkerToDist::DownstreamB(
                         worker, src_addr, to_send.to_vec().into_boxed_slice(), 0
                     )
-                ).ok().unwrap(),
+                ).ok().expect("redist d failed 1"),
 
             ToSend::StaticSlice(to_send) =>
                 self.inner.to_dist.send(
                     WorkerToDist::Downstream(
                         worker, src_addr, to_send, 0
                     )
-                ).ok().unwrap(),
+                ).ok().expect("redist d failed 2"),
 
             ToSend::OldReplication(to_replicate, storage_loc) =>
                 self.inner.to_dist.send(
                     WorkerToDist::Downstream(worker, src_addr, to_replicate, storage_loc)
-                ).ok().unwrap(),
+                ).ok().expect("redist d failed 3"),
 
             ToSend::Contents(to_replicate) => {
                 let mut vec = Vec::with_capacity(to_replicate.len());
@@ -585,7 +594,7 @@ impl Worker {
                 let to_replicate = vec.into_boxed_slice();
                 self.inner.to_dist.send(
                     WorkerToDist::DownstreamB(worker, src_addr, to_replicate, 0)
-                ).ok().unwrap()
+                ).ok().expect("redist d failed 4")
             },
 
             ToSend::OldContents(to_replicate, storage_loc) => {
@@ -594,7 +603,7 @@ impl Worker {
                 let to_replicate = vec.into_boxed_slice();
                 self.inner.to_dist.send(
                     WorkerToDist::DownstreamB(worker, src_addr, to_replicate, storage_loc)
-                ).ok().unwrap()
+                ).ok().expect("redist d failed 5")
             },
         }
     }
@@ -606,17 +615,17 @@ impl Worker {
 
             ToSend::Read(to_send) =>
                 self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, to_send))
-                    .ok().unwrap(),
+                    .ok().expect("redist c failed 1"),
 
             ToSend::Slice(to_send) =>
                 self.inner.to_dist.send(
                     WorkerToDist::ToClientB(src_addr, to_send.to_vec().into_boxed_slice())
-                ).ok().unwrap(),
+                ).ok().expect("redist c failed 2"),
 
             ToSend::StaticSlice(to_send) =>
                 self.inner.to_dist.send(
                     WorkerToDist::ToClient(src_addr, to_send)
-                ).ok().unwrap(),
+                ).ok().expect("redist c failed 3"),
 
             ToSend::Contents(to_send) | ToSend::OldContents(to_send, _) => {
                 let mut vec = Vec::with_capacity(to_send.len());
@@ -624,7 +633,7 @@ impl Worker {
                 let to_send = vec.into_boxed_slice();
                 self.inner.to_dist.send(
                     WorkerToDist::ToClientB(src_addr, to_send)
-                ).ok().unwrap()
+                ).ok().expect("redist c failed 4")
             },
         }
     }
@@ -833,7 +842,7 @@ impl WorkerInner {
         self.print_data.to_log(1);
         //self.waiting_for_log += 1;
         let to_send = ToLog::New(buffer, storage, (worker_num, token, src_addr));
-        self.to_log.send(to_send).unwrap();
+        self.to_log.send(to_send).expect("log gone")
     }
 
     fn send_replication_to_log(
@@ -929,7 +938,7 @@ impl WorkerInner {
         self.print_data.to_log(1);
         //self.waiting_for_log += 1;
         let to_send = ToLog::Replication(to_send, (worker_num, token, src_addr));
-        self.to_log.send(to_send).unwrap();
+        self.to_log.send(to_send).expect("log gone 2");
     }
 
 }
