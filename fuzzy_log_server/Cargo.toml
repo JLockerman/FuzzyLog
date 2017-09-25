@@ -1,0 +1,21 @@
+[package]
+name = "fuzzy_log_server"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+byteorder = "1"
+deque = "0.3.1"
+evmap = "0.6.4"
+fuzzy_log_packets = {path = "../fuzzy_log_packets"}
+fuzzy_log_util = {path = "../fuzzy_log_util"}
+lazycell = "0.5.0"
+log = "0.3"
+mio = "0.6.6"
+uuid = { version = "0.4", features = ["v4"] }
+
+[dev-dependencies]
+env_logger = "0.3"
+
+[features]
+no_trace = ["log/max_level_info"]

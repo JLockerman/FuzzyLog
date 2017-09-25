@@ -3,76 +3,35 @@
 This crate contains a combined version of the fuzzy log client and server code.
 
 */
-
-//#![cfg_attr(test, feature(test))]
+//TODO we are using an old version of mio, update
 #![allow(deprecated)]
-#![allow(unused_imports)]
-#![allow(non_camel_case_types)]
-#![allow(unused_variables)]
-#![allow(unused_must_use)]
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(unused_unsafe)]
-#![allow(dead_code)]
-#![allow(non_upper_case_globals)]
 
-
-#[macro_use] extern crate bitflags;
-#[macro_use] extern crate custom_derive;
-// #[cfg(test)] #[macro_use] extern crate grabbag_macros;
 #[macro_use] extern crate log;
-#[macro_use] extern crate newtype_derive;
-#[macro_use] extern crate packet_macro_impl;
-#[macro_use] extern crate packet_macro2;
 
-#[cfg(feature = "dynamodb_tests")]
-extern crate hyper;
-#[cfg(feature = "dynamodb_tests")]
-extern crate rusoto;
-
-//#[cfg(test)]
-//extern crate test;
-
-extern crate bit_set;
 extern crate byteorder;
-extern crate deque;
-extern crate rustc_serialize;
 extern crate mio;
-extern crate nix;
-extern crate net2;
-extern crate time;
 extern crate toml;
-extern crate rand;
-extern crate uuid;
 extern crate libc;
-extern crate lazycell;
 extern crate env_logger;
-extern crate evmap;
 
-/// The fuzzy log client.
+extern crate fuzzy_log_util;
+pub extern crate fuzzy_log_packets;
+pub extern crate fuzzy_log_server;
+pub extern crate fuzzy_log_client;
+
+pub use fuzzy_log_packets as packets;
+pub use packets::storeables as storeables;
+
+/// Libraries to assist in the creation of fuzzy log servers.
+pub use fuzzy_log_server as servers2;
+
 pub use packets::{order, entry, OrderIndex};
 
 /// The fuzzy log client.
+pub use fuzzy_log_client as async;
 pub use async::fuzzy_log::log_handle::LogHandle;
 
-#[macro_use] mod counter_macro;
-
-#[macro_use]
-mod general_tests;
-
-/// The asynchronous version of the fuzzy log client.
-pub mod async;
-pub mod storeables;
-pub mod packets;
-
-/// Libraries to assist in the creation of fuzzy log servers.
-pub mod servers2;
-mod hash;
-mod socket_addr;
-//TODO only for testing, should be private
-mod buffer;
-mod buffer2;
-mod vec_deque_map;
+#[cfg(test)] mod tests;
 
 /// Start a fuzzy log TCP server.
 ///
@@ -103,11 +62,11 @@ pub fn run_server(
     num_worker_threads: usize,
     started: &std::sync::atomic::AtomicUsize,
 ) -> ! {
-    use std::sync::atomic::AtomicUsize;
-
     let acceptor = mio::tcp::TcpListener::bind(&addr)
         .expect("Bind error");
-    servers2::tcp::run(acceptor, server_num, group_size, num_worker_threads, started)
+    servers2::tcp::run_with_replication(
+        acceptor, server_num, group_size, prev_server, next_server, num_worker_threads, started
+    )
 }
 
 pub mod c_binidings {
@@ -477,13 +436,13 @@ pub mod c_binidings {
     #[no_mangle]
     pub unsafe extern "C" fn wait_for_all_appends(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.wait_for_all_appends();
+        dag.wait_for_all_appends().unwrap();
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn wait_for_a_specific_append(dag: *mut DAG, write_id: WriteId) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.wait_for_a_specific_append(write_id.to_uuid());
+        dag.wait_for_a_specific_append(write_id.to_uuid()).unwrap();
     }
 
     #[no_mangle]
@@ -519,7 +478,7 @@ pub mod c_binidings {
                 locs: WriteLocations { num_locs: 0, locs: ptr::null_mut() },
             },
             //TODO what to do with error number?
-            Err(TryWaitRes::IoErr(kind, server)) => WriteIdAndLocs {
+            Err(TryWaitRes::IoErr(_kind, server)) => WriteIdAndLocs {
                 write_id: WriteId::nil(),
                 locs: WriteLocations { num_locs: server, locs: ptr::null_mut() },
             },
@@ -534,7 +493,7 @@ pub mod c_binidings {
     #[no_mangle]
     pub unsafe extern "C" fn flush_completed_appends(dag: *mut DAG) {
         let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.flush_completed_appends();
+        dag.flush_completed_appends().unwrap();
     }
 
     unsafe fn build_write_locs(locs: Vec<OrderIndex>) -> WriteLocations {

@@ -1,0 +1,13 @@
+[package]
+name = "echo_client"
+version = "0.1.0"
+authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
+
+[dependencies]
+env_logger = "0.3"
+log = "0.3.2"
+libc = "0.2"
+fuzzy_log = {path = "../.."}
+
+[lib]
+crate-type = ["staticlib"]

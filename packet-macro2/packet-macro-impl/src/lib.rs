@@ -55,6 +55,7 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
         PacketBody::Struct(fields) => {
             let try_wrap = struct_try_wrap(&fields);
             let fill_vec = struct_fill_vec(&fields);
+            let write_to = struct_write_to(&fields);
             let get_len = struct_get_len(&fields);
 
             let try_mut = struct_try_mut(&fields);
@@ -83,6 +84,8 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
                     #try_wrap
 
                     #fill_vec
+
+                    #write_to
 
                     #get_len
                 }
@@ -131,6 +134,7 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
 
             let try_wrap = enum_try_wrap(&tag_ident, &tag_ty, &variants);
             let fill_vec = enum_fill_vec(&tag_ident, &tag_ty, &variants);
+            let write_to = enum_write_to(&tag_ident, &tag_ty, &variants);
             let get_len = enum_get_len(&tag_ty, &variants);
 
             let try_mut = enum_try_mut(&tag_ident, &tag_ty, &variants);
@@ -160,6 +164,8 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
 
                     #fill_vec
 
+                    #write_to
+
                     #get_len
                 }
 
@@ -171,6 +177,18 @@ fn impl_ref(body: PacketBody) -> quote::Tokens {
 
                 impl Var {
                     #try_var
+                }
+
+                struct __SliceVec<'s> {
+                    data: &'s mut [u8],
+                    len: usize,
+                }
+
+                impl<'s> __SliceVec<'s> {
+                    fn extend_from_slice(&mut self, slice: &[u8]) {
+                        self.data[self.len..self.len+slice.len()].copy_from_slice(slice);
+                        self.len += slice.len();
+                    }
                 }
 
                 #min_len
@@ -505,6 +523,45 @@ fn enum_fill_vec(tag_ident: &Ident, tag_ty: &Ty, variants: &[Variant]) -> quote:
         #[allow(unused_assignments)]
         pub fn fill_vec(&self, mut __packet_macro_bytes: &mut Vec<u8>) {
             __packet_macro_bytes.reserve_exact(self.len());
+            match self {
+                #(#bodies),*
+            }
+        }
+    }
+}
+
+fn struct_write_to(fields: &[Field]) -> quote::Tokens {
+    let (fields, counters, fill_vec_with) = fill_vec_body(fields);
+    quote!{
+        #[allow(unused_assignments)]
+        pub fn write_to(&self, mut __packet_macro_bytes: &mut [u8]) {
+            let mut __packet_macro_bytes = __SliceVec{len: 0, data: __packet_macro_bytes};
+            let &Ref { #fields } = self;
+            #counters
+            #fill_vec_with
+        }
+    }
+}
+
+fn enum_write_to(tag_ident: &Ident, tag_ty: &Ty, variants: &[Variant]) -> quote::Tokens {
+    let bodies = variants.iter().map(|v| {
+        let &Variant{ident: ref variant, flag: ref tag_val, ref body} = v;
+        let fill_vec_tag = fill_vec_with_field(
+            &Field{ident: tag_ident.clone(), ty: tag_ty.clone()});
+        let (fields, counters, fill_vec_with) = fill_vec_body(body);
+        quote!{
+            &Ref::#variant { #fields } => {
+                let #tag_ident: &#tag_ty = &#tag_val;
+                #counters
+                #fill_vec_tag
+                #fill_vec_with
+            }
+        }
+    });
+    quote!{
+        #[allow(unused_assignments)]
+        pub fn write_to(&self, mut __packet_macro_bytes: &mut [u8]) {
+            let mut __packet_macro_bytes = __SliceVec{len: 0, data: __packet_macro_bytes};
             match self {
                 #(#bodies),*
             }

@@ -4,28 +4,16 @@ version = "0.1.0"
 authors = ["J <joshua.lockerman@yale.edu>"]
 
 [dependencies]
-bitflags = "0.4"
-bit-set = "0.4.0"
 byteorder = "1"
-custom_derive = "0.1"
-deque = "0.3.1"
-#grabbag_macros = "0.1"
-newtype_derive = "0.1"
-packet-macro2 = {path = "./packet-macro2"}
-packet-macro-impl = {path = "./packet-macro2/packet-macro-impl"}
-uuid = { version = "0.4", features = ["v4"] }
-lazycell = "0.5.0"
+fuzzy_log_packets = {path = "./fuzzy_log_packets"}
+fuzzy_log_util = {path = "./fuzzy_log_util"}
+fuzzy_log_client = {path = "./fuzzy_log_client"}
+fuzzy_log_server = {path = "./fuzzy_log_server"}
 libc = "0.2"
 log = "0.3"
-rand = "0.3"
-rustc-serialize = "0.3"
-time = "0.1"
 toml = "0.2"
 mio = "0.6.6"
-nix = "*"
-net2 = "0.2"
 env_logger = "0.3"
-evmap = "0.6.4"
 
 [features]
 no_trace = ["log/max_level_info"]
@@ -40,3 +28,6 @@ lto = true
 debug-assertions = false
 codegen-units = 1
 panic = 'abort'
+
+[workspace]
+exclude = ["servers/", "examples", "clients", "benchers"]

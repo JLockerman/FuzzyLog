@@ -29,8 +29,10 @@ in [examples/c_linking](examples/c_linking).
 Examples and build instructions for C applications can be found that directory.
 
 ## Directory Outline
-[src](src) FuzzyLog library  
-[examples](examples) sample code which uses the client library to perform vaious tasks of note is  
-[examples/c_linking](examples/c_linking) shows how to use the C API to interface with the FuzzyLog client library  
-[servers/tcp_server](servers/tcp_server) a TCP based FuzzyLog sever  
-[clients](clients) varous DPDK based clients for use in testing (obsolescent)  
+[src](src) fuzzy log library.  
+[examples](examples) sample code which uses the client library to perform vaious tasks of note is.  
+[examples/c_linking](examples/c_linking) shows how to use the C API to interface with the fuzzy log client library.  
+[servers/tcp_server](servers/tcp_server) a TCP based fuzzy log sever.  
+[clients](clients) various DPDK based clients for use in testing (obsolescent).  
+[fuzzy_log_server](fuzzy_log_server) the fuzzy log server implementation library.  
+[fuzzy_log_client](fuzzy_log_client) the fuzzy log client implementation library.  
