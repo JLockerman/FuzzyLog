@@ -360,9 +360,11 @@ impl PerSocket {
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
                     let _added = being_written.try_fill(to_write0);
-                    let _added = being_written.try_fill(to_write1) && _added;
-                    let _added = being_written.try_fill(to_write2) && _added;
-                    debug_assert!(_added)
+                    assert!(_added);
+                    let _added = being_written.try_fill(to_write1);
+                    assert!(_added);
+                    let _added = being_written.try_fill(to_write2);
+                    assert!(_added);
                 } else {
                     let mut pend = Vec::with_capacity(write_len);
                     pend.extend_from_slice(to_write0);
@@ -391,7 +393,7 @@ impl PerSocket {
                 print_data.bytes_to_send(write_len as u64);
                 if being_written.can_hold_bytes(write_len) {
                     let _added = being_written.try_fill_from_contents(to_write);
-                    debug_assert!(_added)
+                    assert!(_added)
                 } else {
                     let mut pend = Vec::with_capacity(write_len);
                     to_write.fill_vec(&mut pend);
@@ -422,7 +424,7 @@ impl PerSocket {
                 if being_written.can_hold_bytes(write_len) {
                     let _added = being_written.try_fill_from_contents(to_write);
                     let _added = being_written.try_fill(addr) && _added;
-                    debug_assert!(_added)
+                    assert!(_added)
                 } else {
                     let mut pend = Vec::with_capacity(write_len);
                     to_write.fill_vec(&mut pend);
@@ -454,7 +456,7 @@ impl PerSocket {
                     let _added = being_written.try_fill_from_contents(to_write);
                     let _added = being_written.try_fill(to_write1) && _added;
                     let _added = being_written.try_fill(to_write2) && _added;
-                    debug_assert!(_added)
+                    assert!(_added)
                 } else {
                     let mut pend = Vec::with_capacity(write_len);
                     to_write.fill_vec(&mut pend);
@@ -789,7 +791,7 @@ impl DoubleBuffer {
     }
 
     fn can_hold_bytes(&self, bytes: usize) -> bool {
-        buffer_can_hold_bytes(&self.first, bytes)
+        (self.is_filling_first() && buffer_can_hold_bytes(&self.first, bytes))
         || buffer_can_hold_bytes(&self.second, bytes)
     }
 
@@ -818,7 +820,7 @@ impl DoubleBuffer {
             || self.first.is_empty() {
                 let _old_len = self.first.len();
                 contents.fill_vec(&mut self.first);
-                debug_assert!(
+                assert!(
                     self.first.len() > _old_len,
                     "{:?} > {:?}, {:?}",
                     _old_len, self.first.len(), contents_len
