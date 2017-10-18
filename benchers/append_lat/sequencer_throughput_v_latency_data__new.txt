@@ -151,17 +151,18 @@ plt.plot(avg_corfu_throughput, avg_corfu_latencies, marker="o", linestyle="-", c
 
 plt.plot(avg_regular_throughput, avg_regular_latencies, marker="x", linestyle="--", color='darkred')
 
-plt.plot(avg_corfu_multi_throughput, avg_corfu_multi_latencies, marker="h", linestyle="-", color='blue')
+#plt.plot(avg_corfu_multi_throughput, avg_corfu_multi_latencies, marker="h", linestyle="-", color='blue')
 
-plt.plot(avg_regular_dist_throughput, avg_regular_dist_latencies, marker="x", linestyle="..", color='darkorange')
+plt.plot(avg_regular_dist_throughput, avg_regular_dist_latencies, marker="x", linestyle="-.", color='darkorange')
 
-plt.plot(avg_regular_local_throughput, avg_regular_local_latencies, marker="x", linestyle="-.", color='goldenrod')
+#plt.plot(avg_regular_local_throughput, avg_regular_local_latencies, marker="x", linestyle="-.", color='goldenrod')
 
 #plt.yscale('log')
 #plt.xticks([0, 1, 2, 3, 4, 5, 6, 7], x_tics)
 plt.ylabel("Latency (microseconds)")
 plt.xlabel("Thoroughput kHz")
-plt.legend(["separate sequencer", "unified", "separate sequencer (multi)", "unified (multi)", "unified (multi, co-located)"], loc=2)
+#plt.legend(["separate sequencer", "unified", "separate sequencer (multi)", "unified (multi)", "unified (multi, co-located)"], loc=2)
+plt.legend(["separate sequencer", "unified", "unified, multi-server"], loc=1)
 pp = PdfPages('a.pdf')
 pp.savefig(bbox_inches='tight')
 pp.close()

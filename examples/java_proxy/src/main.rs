@@ -9,6 +9,7 @@ extern crate structopt_derive;
 
 use std::io::{Read, Write, BufReader, BufWriter};
 use std::net::{SocketAddr, TcpListener};
+use std::str::FromStr;
 
 use byteorder::*;
 
@@ -23,7 +24,7 @@ use structopt::StructOpt;
 #[structopt(name = "proxy", about = "")]
 struct Args {
     #[structopt(help = "FuzzyLog servers to run against.")]
-    servers: Vec<SocketAddr>,
+    servers: ServerAddrs,
 
     #[structopt(short="p", long="port", help = "port to listen on.", default_value="13336")]
     append_port: u16,
@@ -32,14 +33,40 @@ struct Args {
     sync_clients: Option<usize>,
 }
 
+#[derive(Debug)]
+struct ServerAddrs(Vec<(SocketAddr, SocketAddr)>);
+
+impl FromStr for ServerAddrs {
+    type Err = std::string::ParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        println!("{}", s);
+        Ok(ServerAddrs(
+            s.split('^').map(|t|{
+                let mut addrs = t.split('#').map(|s| {
+                    match SocketAddr::from_str(s) {
+                        Ok(addr) => addr,
+                        Err(e) => panic!("head parse err {} @ {}", e, s),
+                    }
+                });
+                let head = addrs.next().expect("no head");
+                let tail = addrs.next().expect("no tail");
+                (head, tail)
+            }).collect()
+        ))
+    }
+}
+
 fn main() {
     let _ = env_logger::init();
     let args @ Args{..} = StructOpt::from_args();
 
     let addr = SocketAddr::from(([127, 0, 0, 1], args.append_port));
     let listener = TcpListener::bind(addr).expect("could not listen");
-    let mut append = BufReader::new(listener.accept().expect("cannot accept append").0);
+    let accept = listener.accept().expect("cannot accept append").0;
+    // let _ = accept.set_nodelay(true);
+    let mut append = BufReader::new(accept);
     let recv = listener.accept().expect("cannot accept recv").0;
+    // let _ = recv.set_nodelay(true);
     //let mut read_recv = BufReader::with_capacity(512, &recv);
     let mut read_recv = &recv;
     let mut write_recv = BufWriter::new(&recv);
@@ -58,7 +85,7 @@ fn main() {
 
     //FIXME
     let snap_chain = chains[0];
-    let handle = LogHandle::<[u8]>::unreplicated_with_servers(&args.servers[..])
+    let handle = LogHandle::<[u8]>::replicated_with_servers(&args.servers.0[..])
         .chains(&chains[..])
         .reads_my_writes()
         .build();
@@ -66,6 +93,7 @@ fn main() {
     let (mut reader, mut writer) = handle.split();
 
     if let Some(num_sync_clients) = args.sync_clients {
+        ::std::thread::sleep(::std::time::Duration::from_millis(10));
         writer.async_append(10_001.into(), &[], &[]);
         let mut clients_started = 0;
         while clients_started < num_sync_clients {
@@ -126,6 +154,7 @@ fn main() {
                         panic!("{:?}", e),
                 }
             }
+            let mut count = 0;
             'poll: loop {
                 let data2 = reader.try_get_next();
                 match data2 {
@@ -140,8 +169,11 @@ fn main() {
                     e @ Err(GetRes::IoErr(..)) | e @ Err(GetRes::AlreadyGCd(..)) =>
                         panic!("{:?}", e),
                 }
+                count += 1;
+                // if count % 5 == 0 { let _ = write_recv.get_mut().flush(); }
             }
-            let _ = write_recv.get_mut().flush();
+            if count % 5 != 0 { let _ = write_recv.get_mut().flush(); }
+            // let _ = write_recv.get_mut().flush();
         }
         write_recv.get_mut().write_i32::<BigEndian>(0).expect("cannot write get done");
         let _ = write_recv.get_mut().flush();

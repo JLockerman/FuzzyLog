@@ -26,7 +26,7 @@ struct PerSocket {
 
 type ShouldContinue = bool;
 
-const WRITE_BUFFER_SIZE: usize = 40000;
+const WRITE_BUFFER_SIZE: usize = 4096;
 
 #[derive(Debug)]
 pub enum PerSocket {
@@ -479,7 +479,7 @@ impl PerSocket {
                 print_data.read_buffers_returned(1);
                 being_read.push_back(buffer);
                 // trace!("returned buffer now @ {}", being_read.len());
-                debug_assert!(being_read.len() <= NUMBER_READ_BUFFERS);
+                assert!(being_read.len() <= NUMBER_READ_BUFFERS);
 
             },
             _ => unreachable!(),
@@ -713,7 +713,7 @@ fn recv_packet(
         let size = match to_read {
             Err(WrapErr::NotEnoughBytes(needs)) =>
                 needs + mem::size_of::<Ipv4SocketAddr>() + extra,
-            Err(err) => panic!("{:?}", err),
+            Err(err) => panic!("{:?}, {:?}", err, extra),
             Ok(size) if read < size + extra + mem::size_of::<Ipv4SocketAddr>() =>
                 size + extra + mem::size_of::<Ipv4SocketAddr>(),
             Ok(..) => {
@@ -775,7 +775,7 @@ impl DoubleBuffer {
     fn with_first_buffer_capacity(cap: usize) -> Self {
         DoubleBuffer {
             first: Vec::with_capacity(cap),
-            second: Vec::new(),
+            second: Vec::with_capacity(cap),
         }
     }
 
@@ -833,7 +833,7 @@ impl DoubleBuffer {
         || self.second.capacity() < MAX_WRITE_BUFFER_SIZE {
             let _old_len = self.second.len();
             contents.fill_vec(&mut self.second);
-            debug_assert!(self.second.len() > _old_len);
+            assert!(self.second.len() > _old_len);
             return true
         }
 

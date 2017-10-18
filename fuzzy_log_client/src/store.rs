@@ -459,7 +459,7 @@ impl PerServer<TcpStream> {
         let _ = stream.set_nodelay(true);
         Ok(PerServer {
             awaiting_send: VecDeque::new(),
-            being_written: DoubleBuffer::with_first_buffer_capacity(1024),
+            being_written: DoubleBuffer::with_first_buffer_capacity(4096),
             being_sent: Default::default(),
             read_buffer: Buffer::new(), //TODO cap
             //read_buffer: Buffer::no_drop(), //TODO cap
@@ -948,8 +948,7 @@ where PerServer<S>: Connected,
                     let c = packet.contents();
                     (c.kind(), *c.flag())
                 };
-                trace!("CLIENT got a {:?} from {:?}: {:?}",
-                    kind, token, packet.contents());
+                trace!("CLIENT got a {:?} from {:?}", kind, token);
                 if flag.contains(EntryFlag::ReadSuccess) {
                     if !flag.contains(EntryFlag::Unlock)
                         || flag.contains(EntryFlag::NewMultiPut) {
@@ -1409,7 +1408,7 @@ where PerServer<S>: Connected,
                 _ => false,
             };
             if needed {
-                was_needed |= true;
+                was_needed = true;
                 trace!("CLIENT read needed completion @ {:?}", oi);
                 //TODO validate correct id for failing read
                 //TODO num copies?
@@ -2407,7 +2406,7 @@ impl DoubleBuffer {
     fn with_first_buffer_capacity(cap: usize) -> Self {
         DoubleBuffer {
             first: Vec::with_capacity(cap),
-            second: Vec::new(),
+            second: Vec::with_capacity(cap),
         }
     }
 
@@ -2423,7 +2422,7 @@ impl DoubleBuffer {
     }
 
     fn can_hold_bytes(&self, bytes: usize) -> bool {
-        buffer_can_hold_bytes(&self.first, bytes)
+        (self.is_filling_first() && buffer_can_hold_bytes(&self.first, bytes))
         || buffer_can_hold_bytes(&self.second, bytes)
     }
 
