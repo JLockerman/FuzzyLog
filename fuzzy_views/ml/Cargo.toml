@@ -1,0 +1,14 @@
+[package]
+name = "ml"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+aho-corasick = "0.6.3"
+crossbeam = "0.2.10"
+env_logger = "0.3"
+fuzzy_log = {path = "../.."}
+memmap = "0.5.2"
+mio = "0.6.6"
+structopt = "0.0.5"
+structopt-derive = "0.0.5"

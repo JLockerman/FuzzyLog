@@ -1,0 +1,13 @@
+[package]
+name = "lat_v_even"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+crossbeam = "0.2.10"
+env_logger = "0.3"
+fuzzy_log = {path = "../.."}
+log = "0.3"
+mio = "0.6.6"
+structopt = "0.0.5"
+structopt-derive = "0.0.5"

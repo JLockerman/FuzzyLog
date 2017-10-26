@@ -30,4 +30,4 @@ codegen-units = 1
 panic = 'abort'
 
 [workspace]
-exclude = ["servers/", "examples", "clients", "benchers"]
+exclude = ["servers/", "examples", "clients", "benchers", "fuzzy_views"]
