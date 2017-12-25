@@ -10,5 +10,12 @@ env_logger = "0.3"
 fuzzy_log = {path = "../.."}
 memmap = "0.5.2"
 mio = "0.6.6"
+rand = "0.3"
 structopt = "0.0.5"
 structopt-derive = "0.0.5"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
