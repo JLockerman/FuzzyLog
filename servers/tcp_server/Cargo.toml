@@ -18,7 +18,7 @@ rpath = false
 lto = false
 debug-assertions = false
 codegen-units = 1
-panic = 'abort'
+panic = "abort"
 
 [features]
 print_stats = ["fuzzy_log_server/print_stats"]
