@@ -61,6 +61,18 @@ pub fn u64_to_order_index(u: u64) -> OrderIndex {
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone, Hash, Default)]
 pub struct OrderIndex(pub order, pub entry);
 
+impl From<(u32, u32)> for OrderIndex {
+    fn from((o, e): (u32, u32)) -> Self {
+        OrderIndex(o.into(), e.into())
+    }
+}
+
+impl From<(order, entry)> for OrderIndex {
+    fn from((o, e): (order, entry)) -> Self {
+        OrderIndex(o, e)
+    }
+}
+
 ///////////////////////////////////////
 ///////////////////////////////////////
 ///////////////////////////////////////

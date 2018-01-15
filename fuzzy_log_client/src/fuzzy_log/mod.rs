@@ -778,10 +778,11 @@ impl ThreadLog {
                 let pc = &self.per_chains[&read_loc.0];
                 //FIXME I'm not sure if this is right
                 if !pc.is_within_snapshot(read_loc.1) {
-                    if bytes_as_entry(&mut msg).locs().iter()
-                        .all(|&OrderIndex(o, i)| o == order::from(0) || i != entry::from(0)) {
-                        return MultiSearch::Finished(msg)
-                    }
+                    //FIXME this occasionally breaks things
+                    // if bytes_as_entry(&mut msg).locs().iter()
+                    //     .all(|&OrderIndex(o, i)| o == order::from(0) || i != entry::from(0)) {
+                    //     return MultiSearch::Finished(msg)
+                    // }
                     trace!("FUZZY read multi too early @ {:?}", read_loc);
                     return MultiSearch::BeyondHorizon(msg)
                 }

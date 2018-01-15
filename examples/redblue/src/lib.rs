@@ -1,41 +1,42 @@
-
 extern crate bincode;
 extern crate fuzzy_log_client;
 pub extern crate serde;
 
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate serde_derive;
 
-#[cfg(test)] extern crate fuzzy_log_server;
-#[cfg(test)] #[macro_use] extern crate matches;
+#[cfg(test)]
+extern crate env_logger;
 
+#[cfg(test)]
+extern crate fuzzy_log_server;
+#[cfg(test)]
+#[macro_use]
+extern crate matches;
+
+use std::collections::{HashMap, VecDeque};
 pub use std::io;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::mem::swap;
+use std::marker::PhantomData;
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 
-pub use fuzzy_log_client::fuzzy_log::log_handle::{
-    entry,
-    order,
-    GetRes,
-    LogHandle,
-    OrderIndex,
-    TryWaitRes,
-    Uuid,
-};
+pub use fuzzy_log_client::fuzzy_log::log_handle::{entry, order, GetRes, LogHandle, OrderIndex,
+                                                  ReadHandle, TryWaitRes, Uuid, WriteHandle};
 
-use bincode::{serialize, deserialize, Infinite};
+use bincode::{deserialize, serialize, Infinite};
 
-use serde::{Serialize, Deserialize};
-
+pub use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-enum Message<RedMessage, BlueMessage> {
+enum Message<Red, Blue> {
     Red(Red),
     Blue(Blue),
-    NewClient(order),
+    NewClient(u64),
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
-pub enum RedBlue<RedMessage, BlueMessage> {
+pub enum RedBlue<Red, Blue> {
     Red(Red),
     Blue(Blue),
 }
@@ -46,50 +47,177 @@ pub enum ToSync<T> {
     EndOfSnapshot,
 }
 
-impl<RedMessage, BlueMessage> RedBlueClient<RedMessage, BlueMessage> {
-    pub fn do_red(&mut self, msg: RedMessage) -> Result<(), bincode::Error> {
-        let data = serialize(Message::Red(msg), Infinite)?;
-        let id = self.handle.async_multiappend(&self.colors[..], &data[..], &[]);
-        self.to_sync.send(ToSync::Mutation(id));
+pub struct RedBlueClient<RedMessage, BlueMessage, Observation> {
+    handle: WriteHandle<[u8]>,
+    colors: Vec<order>, //TODO
+    causes: Arc<Mutex<HashMap<order, entry>>>,
+    to_sync: Sender<ToSync<Observation>>,
+
+    happens_after: Vec<OrderIndex>,
+    cached_map: HashMap<order, entry>,
+    _pd: PhantomData<(RedMessage, BlueMessage)>,
+}
+
+impl<RedMessage, BlueMessage, Observation> RedBlueClient<RedMessage, BlueMessage, Observation>
+where
+    RedMessage: Serialize + for<'a> Deserialize<'a>,
+    BlueMessage: Serialize + for<'a> Deserialize<'a>,
+    Observation: Send + 'static,
+{
+    pub fn new<I, ObservationResult, Data, Ack>(
+        handle: LogHandle<[u8]>,
+        my_color: order,
+        other_colors: I,
+        data: Data,
+        ack: Ack,
+        to_client: Sender<ObservationResult>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = order>,
+        ObservationResult: Send + 'static,
+        Data: RBStruct<RedMessage, BlueMessage, Observation, ObservationResult> + Send + 'static,
+        Ack: MutationAck + Send + 'static,
+    {
+        use std::thread::{spawn, yield_now};
+        let mut colors = vec![my_color];
+        colors.extend(other_colors);
+        let (reader, handle) = handle.split();
+        let (to_sync, from_client) = channel();
+        let loopback = to_sync.clone();
+        let causes = Arc::new(Mutex::new(HashMap::new()));
+        let ack = Box::new(ack);
+        let colors2 = colors.clone();
+        let causes2 = causes.clone();
+        spawn(move || {
+            let mut m = Materializer {
+                ack,
+                to_client,
+                colors: colors2,
+                causes: causes2,
+                data: data,
+                early_mutations: Default::default(),
+                waiting_observations: Default::default(),
+                waiting_mutations: Default::default(),
+                from_client,
+                handle: reader,
+                loopback,
+                idle: false,
+                mutation_index: 0,
+                observation_index: 0,
+                _pd: PhantomData,
+            };
+            loop {
+                m.sync().unwrap();
+                yield_now();
+            }
+        });
+        RedBlueClient {
+            handle,
+            colors,
+            causes,
+            to_sync,
+            happens_after: vec![],
+            cached_map: HashMap::new(),
+            _pd: PhantomData,
+        }
+    }
+
+    pub fn do_red(&mut self, msg: RedMessage) -> Result<Uuid, bincode::Error> {
+        self.fill_happens_after();
+        let message: Message<_, BlueMessage> = Message::Red(msg);
+        let data = serialize(&message, Infinite)?;
+        let id = self.handle
+            .async_multiappend(&self.colors[..], &data[..], &[]);
+        self.to_sync
+            .send(ToSync::Mutation(id))
+            .expect("materializer dead");
         Ok(id)
     }
 
     pub fn do_blue(&mut self, msg: BlueMessage) -> Result<Uuid, bincode::Error> {
-        let data = serialize(Message::Blue(msg), Infinite)?;
-        let id = self.data.async_append(self.my_color, &data[..], &self.happens_after[..]);
-        self.to_sync.send(ToSync::Mutation(id));
+        self.fill_happens_after();
+        let message: Message<RedMessage, _> = Message::Blue(msg);
+        let data = serialize(&message, Infinite)?;
+        let id = self.handle
+            .async_append(self.colors[0], &data[..], &self.happens_after[..]);
+        self.to_sync
+            .send(ToSync::Mutation(id))
+            .expect("materializer dead");
         Ok(id)
+    }
+
+    pub fn do_observation(&mut self, observation: Observation) {
+        self.to_sync
+            .send(ToSync::Observation(observation))
+            .expect("materializer dead");
+    }
+
+    fn fill_happens_after(&mut self) {
+        self.happens_after.clear();
+        {
+            let mut causes = self.causes.lock().unwrap();
+            swap(&mut *causes, &mut self.cached_map);
+        }
+        for loc in self.cached_map.drain() {
+            self.happens_after.push(loc.into())
+        }
     }
 }
 
-trait RBStruct<RedMessage, BlueMessage, Observation, ObservationResult> {
-    fn update_red(&mut self, msg: RedMessage);
-    fn update_blue(&mut self, msg: BlueMessage);
+pub trait RBStruct<RedMessage, BlueMessage, Observation, ObservationResult> {
+    fn update_red(&mut self, msg: RedMessage) -> Option<ObservationResult>; //TODO should be mutation result?
+    fn update_blue(&mut self, msg: BlueMessage) -> Option<ObservationResult>; //TODO should be mutation result?
     fn observe(&mut self, _: Observation) -> ObservationResult;
 }
 
-struct Materializer<Observation, ObservationResult, Structure> {
+pub struct Materializer<RedMessage, BlueMessage, Observation, ObservationResult, Structure>
+where
+    Structure: RBStruct<RedMessage, BlueMessage, Observation, ObservationResult>,
+{
     data: Structure,
     from_client: Receiver<ToSync<Observation>>,
+    loopback: Sender<ToSync<Observation>>,
     to_client: Sender<ObservationResult>,
+
     handle: ReadHandle<[u8]>,
     colors: Vec<order>,
-    causes: HasMap<order, entry>,
+    causes: Arc<Mutex<HashMap<order, entry>>>,
+    idle: bool,
+
+    early_mutations: VecDeque<(Uuid, Option<ObservationResult>)>,
+    waiting_mutations: VecDeque<(u64, Uuid)>,
+    waiting_observations: VecDeque<(u64, Observation)>,
+
+    observation_index: u64,
+    mutation_index: u64,
+
+    ack: Box<MutationAck>,
+
+    _pd: PhantomData<(RedMessage, BlueMessage)>,
 }
 
 impl<RedMessage, BlueMessage, Observation, ObservationResult, Structure>
-Materializer<Observation, ObservationResult, Structure>
-where Structure: RBStruct<RedMessage, BlueMessage, Observation, ObservationResult> {
-    fn sync(&mut self) -> Result<(), TryRecvError> {
-        self.loopback.send(ToSync::EndOfSnapshot);
+    Materializer<RedMessage, BlueMessage, Observation, ObservationResult, Structure>
+where
+    Structure: RBStruct<RedMessage, BlueMessage, Observation, ObservationResult>,
+    RedMessage: for<'a> Deserialize<'a>,
+    BlueMessage: for<'a> Deserialize<'a>,
+{
+    pub fn sync(&mut self) -> Result<(), TryRecvError> {
+        let _ = self.loopback.send(ToSync::EndOfSnapshot);
         self.snapshot();
         self.drain_pending_ops();
         self.play_log();
-        self.handle_observations_until(None);
+        self.handle_observations();
+        Ok(())
     }
 
     fn snapshot(&mut self) {
-        if idle { snapshot(&self.colors[..]) } else { snapshot(self.colors[0])};
+        if self.idle {
+            self.handle.snapshot_colors(&self.colors[..])
+        } else {
+            self.handle.snapshot(self.colors[0])
+        };
     }
 
     /*
@@ -113,77 +241,311 @@ where Structure: RBStruct<RedMessage, BlueMessage, Observation, ObservationResul
     */
 
     fn drain_pending_ops(&mut self) {
-        for msg in self.from_client().try_iter() {
+        for msg in self.from_client.try_iter() {
             match msg {
                 ToSync::EndOfSnapshot => break,
                 ToSync::Observation(msg) => {
                     if self.observation_index <= self.mutation_index {
                         self.observation_index = self.mutation_index + 1
                     }
-                    self.waiting_observations.push_back((self.observation_index, msg))
-                },
-                ToSync::Mutation(id) =>
-                    if Some(&id) == self.early_mutations.front() {
-                        self.early_mutations.pop_front();
-                        ack(id);
-                    } else {
-                        if self.mutation_index <= self.observation_index {
-                            self.mutation_index = self.observation_index + 1
+                    self.waiting_observations
+                        .push_back((self.observation_index, msg))
+                }
+                ToSync::Mutation(id) => {
+                    while !self.early_mutations.is_empty() {
+                        let (eid, result) = self.early_mutations.pop_front().unwrap();
+                        if id == eid {
+                            if let Some(result) = result {
+                                self.to_client.send(result).expect("client gone");
+                            }
+                            self.ack.ack(id);
+                            return;
                         }
-                        self.waiting_mutations.push_back((self.mutation_index, msg));
-                    },
+                    }
+
+                    if self.mutation_index <= self.observation_index {
+                        self.mutation_index = self.observation_index + 1
+                    }
+                    self.waiting_mutations.push_back((self.mutation_index, id));
+                }
             }
         }
     }
 
     fn play_log(&mut self) {
-        loop { match self.handle.get_next2() {
-            Err(GetRes::Done) => break,
-            Err(e) => panic!("{}", e), //TODO return Err(UpdateErr::Log(e)),
-            Ok((bytes, locs, id)) => {
-                if Some(&(count, id)) == self.waiting_mutations.front() {
-                    self.waiting_mutations.pop_front();
-                    self.handle_observations_until(Some(count));
-                    ack(id);
-                } else if my_mutation {
-                    self.early_mutations.push_back(id);
+        let my_color = self.colors[0];
+        loop {
+            match self.handle.get_next2() {
+                Err(GetRes::Done) => break,
+                Err(..) => panic!(""), //TODO return Err(UpdateErr::Log(e)),
+                Ok((bytes, locs, &id)) => {
+                    let (my_message, ready) = match self.waiting_mutations.front() {
+                        Some(&(count, idm)) if idm == id => {
+                            let (_, _) = self.waiting_mutations.pop_front().unwrap();
+                            handle_observations_until(
+                                count,
+                                &mut self.data,
+                                &mut self.waiting_observations,
+                                &mut self.to_client,
+                            );
+                            (true, true)
+                        }
+                        //FIXME doesn't work for red
+                        _ => (locs.iter().any(|l| l.0 == my_color), false),
+                    };
+                    let msg = deserialize(bytes).expect("bad msg");
+                    let result = match msg {
+                        Message::Red(msg) => {
+                            // self.clear_causes();
+                            clear_causes(&mut self.causes);
+
+                            let result = self.data.update_red(msg);
+                            result
+                        }
+                        Message::Blue(msg) => {
+                            // self.update_causes(locs);
+                            update_causes(my_color, &mut self.causes, locs);
+                            let result = self.data.update_blue(msg);
+                            result
+                        }
+                        Message::NewClient(..) => unimplemented!(), //TODO no ack
+                    };
+                    if my_message {
+                        if ready {
+                            if let Some(result) = result {
+                                self.to_client.send(result).expect("client gone");
+                            }
+                            self.ack.ack(id);
+                        } else {
+                            self.early_mutations.push_back((id, result))
+                        }
+                    }
                 }
-                let msg = self.deserialize().expect("bad msg");
-                match msg {
-                    Message::Red(msg) => self.data.update_red(msg),
-                    Message::Blue(msg) => {
-                        self.update_causes(locs);
-                        self.data.update_blue(msg)
-                    },
-                    Message::NewClient(..) => unimplemented!(),
+            }
+        }
+
+        fn update_causes(
+            color: order,
+            causes: &mut Arc<Mutex<HashMap<order, entry>>>,
+            locs: &[OrderIndex],
+        ) {
+            let mut causes = causes.lock().unwrap();
+            for &OrderIndex(o, i) in locs {
+                if o != color {
+                    causes.insert(o, i);
                 }
-            },
-        } }
+            }
+        }
+
+        fn clear_causes(causes: &mut Arc<Mutex<HashMap<order, entry>>>) {
+            let mut causes = causes.lock().unwrap();
+            causes.clear();
+        }
+
+        fn handle_observations_until<R, B, O, OR, S: RBStruct<R, B, O, OR>>(
+            index: u64,
+            data: &mut S,
+            waiting_observations: &mut VecDeque<(u64, O)>,
+            to_client: &mut Sender<OR>,
+        ) {
+            while waiting_observations
+                .front()
+                .map(|&(count, _)| count < index)
+                .unwrap_or(false)
+            {
+                let (_, observation) = waiting_observations.pop_front().unwrap();
+                let result = data.observe(observation);
+                let _ = to_client.send(result);
+            }
+        }
     }
 
-    fn handle_observations_until(&mut self, mutation_time: Option<u64>) {
-        match mutation_time {
-            Some(index) =>
-                while self.waiting_observations.front()
-                    .map(|&(count, _)| count < index).unwrap_or(false) {
-                    let result = self.data.observe(observation);
-                    let _ = self.to_client.send(result);
-                },
-
-            None =>
-                for observations in self.waiting_observations.drain(..) {
-                    let result = self.data.observe(observation);
-                    let _ = self.to_client.send(result);
-                },
+    fn handle_observations(&mut self) {
+        for (_, observation) in self.waiting_observations.drain(..) {
+            let result = self.data.observe(observation);
+            let _ = self.to_client.send(result);
         }
     }
 }
 
+pub trait MutationAck {
+    fn ack(&mut self, id: Uuid);
+}
+
+impl MutationAck for () {
+    fn ack(&mut self, _: Uuid) {}
+}
+
+impl<F> MutationAck for F
+where
+    F: FnMut(Uuid),
+{
+    fn ack(&mut self, id: Uuid) {
+        self(id)
+    }
+}
+
+impl MutationAck for Sender<Uuid> {
+    fn ack(&mut self, id: Uuid) {
+        let _ = self.send(id);
+    }
+}
 
 #[cfg(test)]
 mod tests {
+
+    use super::*;
+    use fuzzy_log_server::tcp::run_server;
+    use std::sync::mpsc::{channel, Receiver};
+
+    struct Bank {
+        balance: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct Withdraw(u64);
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct Deposit(u64);
+
+    #[derive(Debug)]
+    struct Balance;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ObservationResult {
+        Empty,
+        Balance(u64),
+        Withdrew(bool),
+    }
+
+    impl RBStruct<Withdraw, Deposit, Balance, ObservationResult> for Bank {
+        fn update_red(&mut self, Withdraw(amount): Withdraw) -> Option<ObservationResult> {
+            if self.balance >= amount {
+                self.balance -= amount;
+                Some(ObservationResult::Withdrew(true))
+            } else {
+                Some(ObservationResult::Withdrew(false))
+            }
+        }
+
+        fn update_blue(&mut self, Deposit(amount): Deposit) -> Option<ObservationResult> {
+            self.balance += amount;
+            Some(ObservationResult::Empty)
+        }
+
+        fn observe(&mut self, _: Balance) -> ObservationResult {
+            ObservationResult::Balance(self.balance)
+        }
+    }
+
+    struct Client(
+        RedBlueClient<Withdraw, Deposit, Balance>,
+        Receiver<ObservationResult>,
+    );
+
+    impl Client {
+        fn new(handle: LogHandle<[u8]>, my_color: order, other_colors: &[order]) -> Self {
+            let (to_client, resp) = channel();
+            let client = RedBlueClient::new(
+                handle,
+                my_color,
+                other_colors.iter().cloned(),
+                Bank { balance: 0 },
+                (),
+                to_client,
+            );
+            Client(client, resp)
+        }
+
+        fn deposit(&mut self, amount: u64) {
+            self.0.do_blue(Deposit(amount)).unwrap();
+            let ack = self.1.recv().unwrap();
+            assert_eq!(ack, ObservationResult::Empty);
+        }
+
+        fn accrue_interest(&mut self, interest: f64) {
+            self.0.do_observation(Balance);
+            match self.1.recv().unwrap() {
+                ObservationResult::Balance(balance) => {
+                    self.deposit((balance as f64 * interest) as u64)
+                }
+                //self.0.do_blue(Deposit()).unwrap();
+                r => unreachable!("{:?}", r),
+            }
+        }
+
+        fn withdraw(&mut self, amount: u64) -> bool {
+            self.0.do_red(Withdraw(amount)).unwrap();
+            match self.1.recv().unwrap() {
+                ObservationResult::Withdrew(b) => b,
+                r => unreachable!("{:?}", r),
+            }
+        }
+
+        fn balance(&mut self) -> u64 {
+            self.0.do_observation(Balance);
+            match self.1.recv().unwrap() {
+                ObservationResult::Balance(balance) => balance,
+                r => unreachable!("{:?}", r),
+            }
+        }
+    }
+
     #[test]
     fn it_works() {
-        assert_eq!(2 + 2, 4);
+        use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+        static STARTED: AtomicUsize = ATOMIC_USIZE_INIT;
+
+        let _ = env_logger::init();
+
+        ::std::thread::spawn(|| {
+            run_server(
+                "0.0.0.0:14005".parse().unwrap(),
+                0,
+                1,
+                None,
+                None,
+                2,
+                &STARTED,
+            )
+        });
+        while STARTED.load(Ordering::Relaxed) == 0 {
+            ::std::thread::yield_now()
+        }
+        let mut client: Vec<_> = (1..3)
+            .map(|i| {
+                let handle = LogHandle::unreplicated_with_servers(&[
+                    "127.0.0.1:14005".parse().unwrap(),
+                ]).reads_my_writes()
+                    .chains(&[1.into(), 2.into()])
+                    .build();
+                Client::new(
+                    handle,
+                    i.into(),
+                    &if i == 1 { [2.into()] } else { [1.into()] },
+                )
+            })
+            .collect();
+
+        assert_eq!(client[0].balance(), 0);
+        assert_eq!(client[1].balance(), 0);
+        assert_eq!(client[0].withdraw(0), true);
+        assert_eq!(client[0].withdraw(1), false);
+        assert_eq!(client[0].withdraw(100), false);
+
+        client[0].deposit(1_100);
+        assert_eq!(client[0].balance(), 1_100);
+        assert_eq!(client[1].balance(), 0);
+        assert_eq!(client[0].withdraw(100), true);
+        assert_eq!(client[0].balance(), 1_000);
+        assert_eq!(client[1].balance(), 1_000);
+
+        client[1].accrue_interest(0.01);
+
+        assert_eq!(client[0].balance(), 1_000);
+        assert_eq!(client[1].balance(), 1_010);
+        assert_eq!(client[0].withdraw(0), true);
+        assert_eq!(client[0].balance(), 1_010);
+        assert_eq!(client[1].balance(), 1_010);
     }
 }

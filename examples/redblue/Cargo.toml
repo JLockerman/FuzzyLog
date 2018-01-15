@@ -12,3 +12,4 @@ serde_derive = "1"
 [dev-dependencies]
 fuzzy_log_server = {path = "../../fuzzy_log_server"}
 matches = "0.1.6"
+env_logger = "0.3"

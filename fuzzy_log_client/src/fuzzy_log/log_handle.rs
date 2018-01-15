@@ -1228,6 +1228,47 @@ impl<V: ?Sized> ReadHandle<V> {
             .unwrap();
     }
 
+    pub fn get_next2(&mut self) -> Result<(&V, &[OrderIndex], &Uuid), GetRes>
+    where V: UnStoreable {
+        if self.num_snapshots == 0 {
+            trace!("HANDLE read with no snap.");
+            return Err(GetRes::Done)
+        }
+
+        'recv: loop {
+            //TODO use recv_timeout in real version
+            let read = self.ready_reads.recv().expect("no log");
+            let read = match read.map_err(|e| self.make_read_error(e)) {
+                Ok(v) => v,
+                //TODO Gc err
+                Err(Some(e)) => return Err(e),
+                Err(None) => continue 'recv,
+            };
+            let old = mem::replace(&mut self.curr_entry, read);
+            if old.capacity() > 0 {
+                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
+            }
+            if self.curr_entry.len() != 0 {
+                break 'recv
+            }
+
+            trace!("HANDLE finished snap.");
+            assert!(self.num_snapshots > 0);
+            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+            if self.num_snapshots == 0 {
+                trace!("HANDLE finished all snaps.");
+                return Err(GetRes::Done)
+            }
+        }
+
+        trace!("HANDLE got val.");
+        let (val, locs, id) = {
+            let e = bytes_as_entry(&self.curr_entry);
+            (slice_to_data(e.data()), e.locs(), e.id())
+        };
+        Ok((val, locs, id))
+    }
+
     /// Wait until an event is ready, then returns the contents.
     pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {

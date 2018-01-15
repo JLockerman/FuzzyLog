@@ -428,8 +428,10 @@ impl PerColor {
             "reads {:?}, last_snapshot {:?}",
             self.read_status, self.last_snapshot,
         );*/
-        self.finished_until_snapshot()
-            && !(self.is_searching_for_multi() || self.has_outstanding_snapshots())
+        let fus = self.finished_until_snapshot();
+        let ism = self.is_searching_for_multi();
+        let hos = self.has_outstanding_snapshots();
+        fus && !(ism || hos)
     }
 
     pub fn trace_unfinished(&self) {
