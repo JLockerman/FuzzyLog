@@ -182,7 +182,7 @@ where ToWorkers: DistributeToWorkers<T> {
     }
 
     #[cfg(feature = "print_stats")]
-    fn print_stats(&self) {
+    pub fn print_stats(&self) {
         println!("{:?}, {:?}", self.print_data, self.this_server_num);
     }
 
@@ -960,6 +960,7 @@ where ToWorkers: DistributeToWorkers<T> {
         to_replicate: ToReplicate,
         t: T
     ) {
+        self.print_data.msgs_recvd(1);
         match to_replicate {
             ToReplicate::Data(buffer, storage_loc) => {
                 trace!("SERVER {:?} Append", self.this_server_num);
@@ -1002,6 +1003,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         u32::from(ts) as u64, node_num, id, storage, t
                     );
                 }
+                self.print_data.msgs_sent(1);
                 self.to_workers.send_to_worker(
                     Skeens1SingleReplica {
                         buffer: buffer,
@@ -1289,6 +1291,7 @@ where ToWorkers: DistributeToWorkers<T> {
             }
         }
         //TODO send down before sending to ordering thread...
+        self.print_data.msgs_sent(1);
         self.to_workers.send_to_worker(Reply(buffer, t));
     }
 

@@ -8,3 +8,6 @@ fuzzy_log_packets = {path = "../fuzzy_log_packets"}
 fuzzy_log_util = {path = "../fuzzy_log_util"}
 log = "0.3"
 mio = "0.6.6"
+
+[features]
+print_stats = []

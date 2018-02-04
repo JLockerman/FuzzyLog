@@ -1,5 +1,5 @@
 //use storeables::Storeable;
-use super::EntryContents;
+use super::{EntryContents, EntryContentsMut};
 use super::Packet::WrapErr;
 
 #[must_use]
@@ -105,8 +105,17 @@ impl Buffer {
         unsafe { EntryContents::try_ref(&self.inner[self.start..len]) }
     }
 
+    pub fn try_contents_mut_until(&mut self, len: usize) -> Result<(EntryContentsMut, &mut [u8]), WrapErr> {
+        unsafe { EntryContentsMut::try_mut(&mut self.inner[self.start..len]) }
+    }
+
     pub fn try_contents(&self) -> Result<(EntryContents, &[u8]), WrapErr> {
         self.try_contents_until(self.inner.len())
+    }
+
+    pub fn try_contents_mut(&mut self) -> Result<(EntryContentsMut, &mut [u8]), WrapErr> {
+        let len = self.inner.len();
+        self.try_contents_mut_until(len)
     }
 
     pub fn entry_slice(&self) -> &[u8] {
@@ -117,6 +126,10 @@ impl Buffer {
 
     pub fn contents(&self) -> EntryContents {
         self.try_contents().unwrap().0
+    }
+
+    pub fn contents_mut(&mut self) -> EntryContentsMut {
+        self.try_contents_mut().unwrap().0
     }
 
     pub fn entry_size(&self) -> usize {

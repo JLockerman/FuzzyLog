@@ -49,7 +49,13 @@ impl FromStr for ServerAddrs {
                     }
                 });
                 let head = addrs.next().expect("no head");
-                let tail = addrs.next().expect("no tail");
+                let tail = if let Some(addr) = addrs.next() {
+                    addr
+                } else {
+                    head
+                };
+                assert!(addrs.next().is_none());
+                // .expect("no tail");
                 (head, tail)
             }).collect()
         ))
@@ -85,8 +91,14 @@ fn main() {
 
     //FIXME
     let snap_chain = chains[0];
-    let handle = LogHandle::<[u8]>::replicated_with_servers(&args.servers.0[..])
-        .chains(&chains[..])
+
+    let handle = if args.servers.0[0].0 != args.servers.0[0].1 {
+        println!("replicated {:?}", &args.servers.0);
+        LogHandle::<[u8]>::replicated_with_servers(&args.servers.0[..])
+    } else {
+        println!("unreplicated {:?}", &args.servers.0);
+        LogHandle::<[u8]>::unreplicated_with_servers(args.servers.0.iter().map(|&(a, _)| a))
+    }.chains(&chains[..])
         .reads_my_writes()
         .build();
 

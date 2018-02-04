@@ -379,9 +379,15 @@ pub fn run_with_replication(
             use std::sync::mpsc::RecvTimeoutError;
             let msg = recv_from_workers.recv_timeout(Duration::from_secs(10));
             match msg {
-                Ok(ToLog::New(buffer, storage, st)) => log.handle_op(buffer, storage, st),
-                Ok(ToLog::Replication(tr, st)) => log.handle_replication(tr, st),
-                ToLog::Recovery(r, st) => log.handle_recovery(r, st),
+                Ok(ToLog::New(buffer, storage, st)) => {
+                    assert!(!is_replica);
+                    log.handle_op(buffer, storage, st)
+                },
+                Ok(ToLog::Replication(tr, st)) => {
+                    assert!(is_replica);
+                    log.handle_replication(tr, st)
+                },
+                Ok(ToLog::Recovery(r, st)) => log.handle_recovery(r, st),
                 Err(RecvTimeoutError::Timeout) => log.print_stats(),
                 Err(RecvTimeoutError::Disconnected) => panic!("log disconnected"),
             }
@@ -502,7 +508,15 @@ pub fn run_with_replication(
                                 trace!("DIST {} looking for worker for {}.",
                                     this_server_num, addr);
                                 //FIXME this is racey, if we don't know who gets the message it fails
-                                let (worker, token) = worker_for_client[&addr].clone();
+                                let (worker, token) = worker_for_client
+                                    .get(&addr)
+                                    .unwrap_or_else(||
+                                        panic!(
+                                            "A No worker found for {:?} in {:?}",
+                                            addr, worker_for_client,
+                                        )
+                                    )
+                                    .clone();
                                 (worker, token, buffer, addr, 0)
                             }
 
@@ -513,7 +527,7 @@ pub fn run_with_replication(
                                 let (worker, token) = worker_for_client.get(&addr)
                                     .cloned().unwrap_or_else(||
                                         panic!(
-                                            "No worker found for {:?} in {:?}",
+                                            "B No worker found for {:?} in {:?}",
                                             addr, worker_for_client,
                                         )
                                 );

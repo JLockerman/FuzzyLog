@@ -17,7 +17,7 @@ env_logger = "0.3"
 
 [features]
 no_trace = ["log/max_level_info"]
-print_stats = []
+print_stats = ["fuzzy_log_client/print_stats", "fuzzy_log_server/print_stats"]
 debug_no_drop = []
 
 [profile.release]

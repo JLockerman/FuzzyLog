@@ -161,7 +161,7 @@ impl ThreadLog {
         //let mut num_msgs = 0;
         'recv: while !self.finished {
             //let msg = self.from_outside.recv().expect("outside is gone");
-            if let Ok(msg) = self.from_outside.recv_timeout(Duration::from_secs(10)) {
+            if let Ok(msg) = self.from_outside.recv_timeout(Duration::from_secs(3)) {
             //if let Ok(msg) = self.from_outside.recv() {
                 if !self.handle_message(msg) { break 'recv }
                 // num_msgs += 1;
@@ -445,13 +445,21 @@ impl ThreadLog {
             }
             EntryLayout::Multiput if flag.contains(EntryFlag::NoRemote) => {
                 trace!("FUZZY read is atom");
+                // println!("FUZZY read is atom {:?} {:?}", read_loc, bytes_as_entry(&*msg).id());
+                //FIXME handle all locs
                 let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
-                    s.got_read(read_loc.1)).unwrap_or(false);
+                    if read_loc.1 == entry::from(0) {
+                        // panic!("{:?}", bytes_as_entry(&*msg))
+                        false //TODO
+                    } else {
+                        s.got_read(read_loc.1)
+                    }).unwrap_or(false);
                     //s.decrement_outstanding_reads());
                 if needed {
                     //FIXME ensure other pieces get fetched if reading those chains
                     let packet = Rc::new(msg);
-                    self.ensure_read(read_loc, &packet);
+                    //TODO checks to ensure multiple parts of hte append are returned atomically
+                    // self.ensure_read(read_loc, &packet);
                     self.add_blockers_at(read_loc, &packet);
                     self.try_returning_at(read_loc, packet);
                 }
@@ -779,10 +787,10 @@ impl ThreadLog {
                 //FIXME I'm not sure if this is right
                 if !pc.is_within_snapshot(read_loc.1) {
                     //FIXME this occasionally breaks things
-                    // if bytes_as_entry(&mut msg).locs().iter()
-                    //     .all(|&OrderIndex(o, i)| o == order::from(0) || i != entry::from(0)) {
-                    //     return MultiSearch::Finished(msg)
-                    // }
+                    if bytes_as_entry(&mut msg).locs().iter()
+                        .all(|&OrderIndex(o, i)| o == order::from(0) || i != entry::from(0)) {
+                        return MultiSearch::Finished(msg)
+                    }
                     trace!("FUZZY read multi too early @ {:?}", read_loc);
                     return MultiSearch::BeyondHorizon(msg)
                 }
@@ -1309,6 +1317,9 @@ impl BufferCache {
 impl AsyncStoreClient for mpsc::Sender<Message> {
     fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>)
     -> Result<(), ()> {
+        if bytes_as_entry(&*read_packet).locs().len() > 1 {
+            assert!(read_loc.1 != entry::from(0), "read {:?}", bytes_as_entry(&*read_packet));
+        }
         self.send(Message::FromStore(ReadComplete(read_loc, read_packet)))
             .map(|_| ()).map_err(|_| ())
     }

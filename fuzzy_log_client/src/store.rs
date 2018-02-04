@@ -953,7 +953,7 @@ where PerServer<S>: Connected,
                     if !flag.contains(EntryFlag::Unlock)
                         || flag.contains(EntryFlag::NewMultiPut) {
                         let num_chain_servers = self.num_chain_servers;
-                        self.handle_completion(token, num_chain_servers, &packet)
+                        self.handle_completion(token, num_chain_servers, &mut packet)
                     }
                 }
                 //TODO distinguish between locks and empties
@@ -1004,12 +1004,12 @@ where PerServer<S>: Connected,
         Ok(())
     } // end fn handle_server_event
 
-    fn handle_completion(&mut self, token: Token, num_chain_servers: usize, packet: &Buffer) {
+    fn handle_completion(&mut self, token: Token, num_chain_servers: usize, packet: &mut Buffer) {
         //FIXME remove
         //let mut was_needed = self.sent_writes.contains_key(&packet.entry().id);
         let write_completed = self.handle_completed_write(token, num_chain_servers, packet);
-        if write_completed {
-            self.handle_completed_read(token, packet, write_completed);
+        if let Ok(my_write) = write_completed {
+            self.handle_completed_read(token, &*packet, my_write);
         }
         //FIXME remove
         //if !was_needed {
@@ -1019,7 +1019,7 @@ where PerServer<S>: Connected,
 
     //TODO I should probably return the buffer on recv_packet, and pass it into here
     fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize,
-        packet: &Buffer) -> bool {
+        packet: &mut Buffer) -> Result<bool, ()> {
         let (id, kind, flag) = {
             let e = packet.contents();
             (*e.id(), e.kind(), *e.flag())
@@ -1036,6 +1036,7 @@ where PerServer<S>: Connected,
                 //    for server in v.servers()
                 //         server.send_lock+data
                 WriteState::ToLockServer(mut msg) => {
+                    unreachable!();
                     trace!("CLIENT finished lock");
                     assert!(!self.new_multi);
                     assert_eq!(token, self.lock_token());
@@ -1062,9 +1063,10 @@ where PerServer<S>: Connected,
                         }
                     }
                     self.add_multis(msg, num_chain_servers);
-                    return false
+                    return Err(())
                 }
                 WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel) => {
+                    unreachable!();
                     assert!(!self.new_multi);
                     assert!(token != self.lock_token());
                     assert!(!self.new_multi);
@@ -1099,12 +1101,12 @@ where PerServer<S>: Connected,
                             if e.is_err() {
                                 self.finished = true;
                             }
-                            return true
+                            return Ok(true)
                         }
                         None => {
                             self.sent_writes.insert(id,
                                 WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel));
-                            return false
+                            return Err(())
                         }
                     }
                 }
@@ -1112,7 +1114,7 @@ where PerServer<S>: Connected,
                 WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel) => {
                     if !flag.contains(EntryFlag::Skeens1Queued) {
                         error!("CLIENT bad skeens1 ack @ {:?}", token);
-                        return false
+                        return Err(())
                     }
                     assert!(kind.contains(EntryKind::Multiput));
                     assert!(self.new_multi);
@@ -1130,12 +1132,12 @@ where PerServer<S>: Connected,
                         Some(max_ts) => {
                             self.add_skeens2(buf, max_ts);
                             //TODO
-                            return false
+                            return Err(())
                         }
                         None => {
                             self.sent_writes.insert(id,
                                 WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel));
-                            return false
+                            return Err(())
                         }
                     }
                 }
@@ -1149,15 +1151,36 @@ where PerServer<S>: Connected,
                         {
                             let mut me = bytes_as_entry_mut(&mut *b);
                             let locs = me.locs_mut();
-                            let fill_from = packet.contents().locs();
+                            let mut contents = packet.contents_mut();
+                            let fill_from = contents.locs_mut();
                             //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
-                            for (i, &loc) in fill_from.into_iter().enumerate() {
+                            for (i, loc) in fill_from.into_iter().enumerate() {
                                 if locs[i].0 != order::from(0) {
                                     if read_server_for_chain(loc.0, self.num_chain_servers, unreplicated) == token.0
                                         && loc.1 != entry::from(0) {
-                                        locs[i] = loc;
+                                        locs[i] = *loc;
                                     } else if locs[i].1 == entry::from(0) {
                                         finished_writes = false
+                                    } else {
+                                        *loc = locs[i]
+                                    }
+                                }
+                            }
+                            if finished_writes {
+                                let locs = &*locs;
+                                let from = &*fill_from;
+                                for &OrderIndex(o, i) in locs {
+                                    if o != order::from(0) {
+                                        assert!(
+                                            i != entry::from(0),
+                                            "mywrite0 {:?} {:?}", locs, from);
+                                    }
+                                }
+                                for &OrderIndex(o, i) in from {
+                                    if o != order::from(0) {
+                                        assert!(
+                                            i != entry::from(0),
+                                            "mywrite1 {:?} {:?}", locs, from);
                                     }
                                 }
                             }
@@ -1177,17 +1200,20 @@ where PerServer<S>: Connected,
                                     .copy_from_slice(&locks)
                             }*/
                             trace!("CLIENT finished sk multi at {:?}", locs);
+                            for &OrderIndex(_, i) in &locs {
+                                assert!(i != entry::from(0))
+                            }
                             //TODO
                             let e = self.client.on_finished_write(id, locs);
                             if e.is_err() {
                                 self.finished = true
                             }
-                            return true
+                            return Ok(true)
                         }
                         None => {
                             self.sent_writes.insert(id,
                                 WriteState::Skeens2(buf, remaining_servers, max_ts));
-                            return false
+                            return Err(())
                         }
                     }
                 }
@@ -1195,7 +1221,7 @@ where PerServer<S>: Connected,
                 WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps) => {
                     if !flag.contains(EntryFlag::Skeens1Queued) {
                         error!("CLIENT bad skeens1 ack @ {:?}", token);
-                        return false
+                        return Err(())
                     }
                     assert!(kind.contains(EntryKind::Snapshot));
                     assert!(self.new_multi);
@@ -1212,12 +1238,12 @@ where PerServer<S>: Connected,
                     match ready_for_skeens2 {
                         Some(max_ts) => {
                             self.add_snapshot_skeens2(buf, max_ts);
-                            return false
+                            return Err(())
                         }
                         None => {
                             self.sent_writes.insert(id,
                                 WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps));
-                            return false
+                            return Err(())
                         }
                     }
                 }
@@ -1254,31 +1280,38 @@ where PerServer<S>: Connected,
                                 let e = self.client.on_finished_read(l, Vec::clone(&*b));
                                 if e.is_err() {
                                     self.finished = true;
-                                    return false
+                                    return Err(())
                                 }
                             }
-                            return false
+                            return Err(())
                         }
                     };
                     trace!("CLIENT waiting snap sk2 pieces");
                     self.sent_writes.insert(id,
                         WriteState::SnapshotSkeens2(buf, remaining_servers, max_ts));
-                    return false
+                    return Err(())
                 }
 
                 WriteState::SingleServer(mut buf) => {
                     //assert!(token != self.lock_token());
                     trace!("CLIENT finished single server");
-                    fill_locs(&mut buf, packet.contents(), token, self.num_chain_servers, unreplicated);
+                    {
+                        let contents = packet.contents();
+                        //Multi appends go to a single server in the fastpath
+                        let filled = fill_locs(&mut buf, contents, token, self.num_chain_servers, unreplicated);
+                        if filled < contents.locs().len() {
+                            return Err(())
+                        }
+                    }
                     let locs = packet.contents().locs().to_vec();
                     let e = self.client.on_finished_write(id, locs);
-                    if e .is_err() {
+                    if e.is_err() {
                         self.finished = true
                     }
-                    return true
+                    return Ok(true)
                 }
                 WriteState::UnlockServer(..) => panic!("invalid wait state"),
-                WriteState::GC(..) => return false,
+                WriteState::GC(..) => return Err(()),
             };
 
             fn skeens_finished(
@@ -1330,10 +1363,16 @@ where PerServer<S>: Connected,
                 let fill_from = e.locs();
                 //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
                 for (i, &loc) in fill_from.into_iter().enumerate() {
-                    if locs[i].0 != order::from(0)
-                        && read_server_for_chain(loc.0, num_chain_servers, unreplicated) == server.0 {//should be read_server_for_chain
-                        assert!(loc.1 != 0.into(), "zero index for {:?} @ {:?} => {:?}, nc: {:?} r: {:?}", loc.0, fill_from, locs, num_chain_servers, unreplicated);
+                    if locs[i].0 == order::from(0) {
+                        filled += 1;
+                        continue
+                    }
+                    if read_server_for_chain(loc.0, num_chain_servers, unreplicated) == server.0
+                        && loc.1 != entry::from(0) {//should be read_server_for_chain
+                        // assert!(loc.1 != 0.into(), "zero index for {:?} @ {:?} => {:?}, nc: {:?} r: {:?}", loc.0, fill_from, locs, num_chain_servers, unreplicated);
                         locs[i] = loc;
+                        filled += 1;
+                    } else if locs[i].1 != entry::from(0) {
                         filled += 1;
                     }
                 }
@@ -1346,10 +1385,9 @@ where PerServer<S>: Connected,
         || kind.layout() == EntryLayout::Read
         || (kind.layout() == EntryLayout::Snapshot && !flag.contains(EntryFlag::TakeLock)) {
             // panic!("{:?}", packet.contents());
-            trace!("CLIENT no write for {:?}", token);
-            return true
+            return Ok(false)
         } else {
-            return false
+            return Err(())
         }
     }// end handle_completed_write
 
@@ -1385,6 +1423,9 @@ where PerServer<S>: Connected,
                 is_sentinel_loc = true;
                 continue
             }
+            if my_write {
+                assert!(oi.1 != entry::from(0), "mywrite {:?}", packet.contents());
+            }
             if is_sentinel && !is_sentinel_loc  {
                 // we don't want to return a sentinel for an actual multi;
                 // we need the data
@@ -1394,6 +1435,7 @@ where PerServer<S>: Connected,
             //trace!("CLIENT completed read @ {:?}", oi);
             let needed = match self.sent_reads.entry(oi) {
                 Occupied(mut oe) => {
+                    assert!(oi.1 != 0.into(), "needed {:?}", packet.contents());
                     let needed = if oe.get() > &0 {
                         *oe.get_mut() -= 1;
                         true
@@ -1407,7 +1449,8 @@ where PerServer<S>: Connected,
                 }
                 _ => false,
             };
-            if needed {
+            if needed || (my_write && self.reads_my_writes) {
+                assert!(oi.1 != 0.into(), "needed {:?}", packet.contents());
                 was_needed = true;
                 trace!("CLIENT read needed completion @ {:?}", oi);
                 //TODO validate correct id for failing read
@@ -1421,17 +1464,26 @@ where PerServer<S>: Connected,
                 }
             }
         }
-        if my_write && self.reads_my_writes && !was_needed {
-            let oi = packet.contents().locs()[0];
-            let mut v = self.waiting_buffers.pop_front()
-                .unwrap_or_else(|| Vec::with_capacity(packet.entry_size()));
-            v.clear();
-            v.extend_from_slice(packet.entry_slice());
-            if self.client.on_finished_read(oi, v).is_err() {
-                self.finished = true
-            }
-        }
-        assert!(was_needed || my_write);
+        // if my_write && self.reads_my_writes && !was_needed {
+        //     let oi = packet.contents().locs()[0];
+        //     assert!(oi.1 != 0.into(), "mywrite {:?}", packet.contents());
+        //     let mut v = self.waiting_buffers.pop_front()
+        //         .unwrap_or_else(|| Vec::with_capacity(packet.entry_size()));
+        //     v.clear();
+        //     v.extend_from_slice(packet.entry_slice());
+        //     if self.client.on_finished_read(oi, v).is_err() {
+        //         self.finished = true
+        //     }
+        // }
+
+        // TODO is this assert right?
+        // assert!(
+        //     was_needed || my_write,
+        //     "!(wn {} || mw {}) {:?}\n{:#?}",
+        //     was_needed, my_write,
+        //     packet.contents(),
+        //     self.sent_reads,
+        // );
         was_needed
     }
 
