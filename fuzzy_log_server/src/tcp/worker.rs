@@ -147,7 +147,10 @@ impl Worker {
         ).expect("cannot pol from log on worker");
         let mut awake_io: VecDeque<_> = Default::default();
         let mut clients: HashMap<_, _> = Default::default();
-        if let Some(up) = upstream {
+        if let Some(mut up) = upstream {
+            let mut up_worker_buf = [0u8; 8];
+            blocking_read(&mut up, &mut up_worker_buf);
+            assert_eq!(LittleEndian::read_u64(&up_worker_buf), worker_num as u64);
             assert!(!is_unreplicated);
             poll.register(
                 &up,
@@ -158,10 +161,14 @@ impl Worker {
             let ps = PerSocket::upstream(up);
             awake_io.push_back(UPSTREAM);
             clients.insert(UPSTREAM, ps);
+
         }
         let mut has_downstream = false;
-        if let Some(down) = downstream {
+        if let Some(mut down) = downstream {
             assert!(!is_unreplicated);
+            let mut dwn_worker_buf = [0u8; 8];
+            LittleEndian::write_u64(&mut dwn_worker_buf, worker_num as u64);
+            blocking_write(&mut down, &dwn_worker_buf);
             poll.register(
                 &down,
                 DOWNSTREAM,
@@ -341,9 +348,10 @@ impl Worker {
                     trace!("WORKER {} recv from dist {:?}.",
                         self.inner.worker_num, (tok, client_addr));
                     self.inner.ip_to_worker.insert(client_addr, (self.inner.worker_num, tok));
-                    let _state =
+                    let state =
                         self.clients.entry(tok).or_insert(PerSocket::client(stream));
                     //self.inner.recv_packet(tok, _state);
+                    state.add_downstream_send(client_addr.bytes());
                     self.inner.awake_io.push_back(tok);
                 },
                 Some(DistToWorker::ToClient(DOWNSTREAM, buffer, src_addr, storage_loc)) => {

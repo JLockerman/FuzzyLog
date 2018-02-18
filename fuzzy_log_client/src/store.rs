@@ -172,8 +172,12 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
-            //TODO we should probably wait for an ack
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
+        }
+        let mut ack = [0; 16];
+        for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut ack[..]).unwrap();
+            assert_eq!(Ipv4SocketAddr::from_bytes(ack), server.receiver);
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
@@ -228,8 +232,12 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
-            //TODO we should probably wait for an ack
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
+        }
+        let mut ack = [0; 16];
+        for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut ack[..]).unwrap();
+            assert_eq!(Ipv4SocketAddr::from_bytes(ack), server.receiver);
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
@@ -293,8 +301,12 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
-            //TODO we should probably wait for an ack
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
+        }
+        let mut ack = [0; 16];
+        for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut ack[..]).unwrap();
+            assert_eq!(Ipv4SocketAddr::from_bytes(ack), server.receiver);
         }
         trace!("Client servers {:?}",
             servers.iter().map(|s| s.connection().local_addr()).collect::<Vec<_>>()
@@ -366,8 +378,12 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
-            //TODO we should probably wait for an ack
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
+        }
+        let mut ack = [0; 16];
+        for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut ack[..]).unwrap();
+            assert_eq!(Ipv4SocketAddr::from_bytes(ack), server.receiver);
         }
         let awake_io = servers.iter().map(|s| s.token.0).collect();
         let from_client_token = Token(servers.len());
@@ -2646,6 +2662,30 @@ fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     }
     if !buffer.is_empty() {
         return Err(io::Error::new(io::ErrorKind::WriteZero,
+            "failed to fill whole buffer"))
+    }
+    else {
+        return Ok(())
+    }
+}
+
+fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
+    use std::thread;
+    //like Read::read_exact but doesn't die on WouldBlock
+    'recv: while !buffer.is_empty() {
+        match r.read(buffer) {
+            Ok(i) => { let tmp = buffer; buffer = &mut tmp[i..]; }
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                    thread::yield_now();
+                    continue 'recv
+                },
+                _ => { return Err(e) }
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
             "failed to fill whole buffer"))
     }
     else {

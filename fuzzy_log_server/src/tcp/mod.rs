@@ -280,10 +280,12 @@ pub fn run_with_replication(
                 ACCEPT => {
                     match acceptor.accept() {
                         Err(e) => trace!("error {}", e),
-                        Ok((socket, addr)) => if Some(addr.ip()) == next_server_ip {
+                        Ok((mut socket, addr)) => if Some(addr.ip()) == next_server_ip {
                             trace!("SERVER {} add downstream.", this_server_num);
                             let _ = socket.set_keepalive_ms(Some(1000));
                             let _ = socket.set_nodelay(true);
+                            let socket_num = [downstream.len() as u8 + 1];
+                            blocking_write(&mut socket, &socket_num);
                             downstream.push(socket)
                         } else {
                             trace!("SERVER got other connection {:?}", addr);
@@ -299,10 +301,13 @@ pub fn run_with_replication(
     }
 
     if let Some(ref ip) = prev_server_ip {
-        for _ in 1..num_upstream {
-            let up = TcpStream::connect(ip).expect("cannot connect upstream");
+        for i in 1..num_upstream {
+            let mut up = TcpStream::connect(ip).expect("cannot connect upstream");
             let _ = up.set_keepalive_ms(Some(1000));
             let _ = up.set_nodelay(true);
+            let mut socket_num = [255u8];
+            blocking_read(&mut up, &mut socket_num);
+            assert_eq!(socket_num[0], i as u8);
             upstream.push(up)
         }
     }
