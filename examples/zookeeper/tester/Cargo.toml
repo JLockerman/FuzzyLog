@@ -1,0 +1,13 @@
+[package]
+name = "zk_test"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+rand = "0.4"
+structopt = "0.0.5"
+structopt-derive = "0.0.5"
+zookeeper = {path = ".."}
+
+[features]
+print_stats = ["zookeeper/print_stats"]
