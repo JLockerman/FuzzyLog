@@ -92,7 +92,7 @@ fn main() {
     //FIXME
     let snap_chain = chains[0];
 
-    let handle = if args.servers.0[0].0 != args.servers.0[0].1 {
+    let (mut reader, writer) = if args.servers.0[0].0 != args.servers.0[0].1 {
         println!("replicated {:?}", &args.servers.0);
         LogHandle::<[u8]>::replicated_with_servers(&args.servers.0[..])
     } else {
@@ -100,9 +100,7 @@ fn main() {
         LogHandle::<[u8]>::unreplicated_with_servers(args.servers.0.iter().map(|&(a, _)| a))
     }.chains(&chains[..])
         .reads_my_writes()
-        .build();
-
-    let (mut reader, mut writer) = handle.split();
+        .build_handles();
 
     if let Some(num_sync_clients) = args.sync_clients {
         ::std::thread::sleep(::std::time::Duration::from_millis(10));
@@ -116,7 +114,6 @@ fn main() {
         }
         write_recv.get_mut().write_u8(0).expect("cannot write sync signal");
         let _ = write_recv.get_mut().flush();
-        let _ = writer.flush_completed_appends();
     }
 
     let mut read_buffer = vec![0u8; 1024];
@@ -144,7 +141,6 @@ fn main() {
             }
             append_chains.clear();
         }
-        let _ = writer.flush_completed_appends();
     });
 
     loop {

@@ -77,6 +77,12 @@ pub struct WriteHandle<V: ?Sized> {
     last_dropped: Arc<()>,
 }
 
+pub struct AtomicWriteHandle<V: ?Sized> {
+    _pd: PhantomData<Box<V>>,
+    to_log: mpsc::Sender<Message>,
+    last_dropped: Arc<()>,
+}
+
 impl<V: ?Sized> Drop for ReadHandle<V> {
     fn drop(&mut self) {
         if let Some(..) = Arc::get_mut(&mut self.last_dropped) {
@@ -89,6 +95,25 @@ impl<V: ?Sized> Drop for WriteHandle<V> {
     fn drop(&mut self) {
         if let Some(..) = Arc::get_mut(&mut self.last_dropped) {
             let _ = self.to_log.send(Message::FromClient(Shutdown));
+        }
+    }
+}
+
+impl<V: ?Sized> Drop for AtomicWriteHandle<V> {
+    fn drop(&mut self) {
+        if let Some(..) = Arc::get_mut(&mut self.last_dropped) {
+            let _ = self.to_log.send(Message::FromClient(Shutdown));
+        }
+    }
+}
+
+impl<V: ?Sized> Clone for AtomicWriteHandle<V> {
+    fn clone(&self) -> Self {
+        let &AtomicWriteHandle{ref _pd, ref to_log, ref last_dropped} = self;
+        AtomicWriteHandle {
+            _pd: _pd.clone(),
+            to_log: to_log.clone(),
+            last_dropped:last_dropped.clone()
         }
     }
 }
@@ -179,6 +204,7 @@ where V: Storeable {
                 ready_reads_s,
                 finished_writes_s,
                 true,
+                true,
                 interesting_chains
             );
             log.run()
@@ -195,6 +221,7 @@ pub struct LogBuilder<V: ?Sized> {
     reads_my_writes: bool,
     fetch_boring_multis: bool,
     id: Option<Ipv4SocketAddr>,
+    ack_writes: bool,
     _pd: PhantomData<Box<V>>,
 }
 
@@ -214,6 +241,7 @@ where V: Storeable {
             reads_my_writes: false,
             fetch_boring_multis: false,
             id: None,
+            ack_writes: true,
             _pd: PhantomData,
         }
     }
@@ -240,7 +268,7 @@ where V: Storeable {
 
     pub fn build(self) -> LogHandle<V> {
         let LogBuilder {
-            servers, chains, reads_my_writes, fetch_boring_multis, id, _pd,
+            servers, chains, reads_my_writes, fetch_boring_multis, ack_writes, id, _pd,
         } = self;
 
         let make_store = |client| {
@@ -286,7 +314,13 @@ where V: Storeable {
             to_store
         };
 
-        LogHandle::with_store(chains, fetch_boring_multis, make_store)
+        LogHandle::build_with_store(chains, fetch_boring_multis, ack_writes, make_store)
+    }
+
+    pub fn build_handles(mut self) -> (ReadHandle<V>, AtomicWriteHandle<V>) {
+        self.ack_writes = false;
+        let handle = self.build();
+        handle.split_atomic()
     }
 }
 
@@ -332,6 +366,42 @@ where V: Storeable {
         }
     }
 
+    fn split_atomic(mut self) -> (ReadHandle<V>, AtomicWriteHandle<V>) {
+        macro_rules! move_fields {
+            ($($field:ident),* $(,)*; $_self:ident) => (
+                $(
+                    let $field = mem::replace(&mut $_self.$field, mem::uninitialized());
+                )*
+                mem::forget(self);
+            );
+        }
+        unsafe {
+            move_fields!(
+                _pd,
+                num_snapshots,
+                num_async_writes,
+                to_log,
+                ready_reads,
+                finished_writes,
+                curr_entry,
+                last_seen_entries,
+                num_errors;
+                self
+            );
+            drop(finished_writes);
+            let last_dropped = Arc::new(());
+            let reader = ReadHandle {
+                _pd, num_snapshots, ready_reads, curr_entry, num_errors,
+                to_log: to_log.clone(), last_dropped: last_dropped.clone(),
+            };
+            let writer = AtomicWriteHandle {
+                _pd, to_log, last_dropped,
+            };
+            drop(last_seen_entries);
+            (reader, writer)
+        }
+    }
+
     pub fn unreplicated_with_servers<S, A>(servers: S) -> LogBuilder<V>
     where
         S: IntoIterator<Item=A>,
@@ -346,6 +416,36 @@ where V: Storeable {
         A: Borrow<(SocketAddr, SocketAddr)>, {
         let servers = servers.into_iter().map(|s| s.borrow().clone()).collect();
         LogBuilder::from_servers(Servers::Replicated(servers))
+    }
+
+    pub fn build_with_store<C, F>(
+        interesting_chains: C,
+        fetch_boring_multis: bool,
+        ack_writes: bool,
+        store_builder: F,
+    ) -> Self
+    where C: IntoIterator<Item=order>,
+          F: FnOnce(mpsc::Sender<Message>) -> store::ToSelf {
+        let (to_log, from_outside) = mpsc::channel();
+        let to_store = store_builder(to_log.clone());
+        let (ready_reads_s, ready_reads_r) = mpsc::channel();
+        let interesting_chains: Vec<_> = interesting_chains
+            .into_iter()
+            .inspect(|c| assert!(c != &0.into(), "Don't register interest in color 0."))
+            .collect();
+        let (finished_writes_s, finished_writes_r) = mpsc::channel();
+        ::std::thread::spawn(move || {
+            ThreadLog::new(
+                to_store, from_outside,
+                ready_reads_s,
+                finished_writes_s,
+                fetch_boring_multis,
+                ack_writes,
+                interesting_chains
+            ).run()
+        });
+
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
     }
 
     pub fn with_store<C, F>(
@@ -369,6 +469,7 @@ where V: Storeable {
                 ready_reads_s,
                 finished_writes_s,
                 fetch_boring_multis,
+                true,
                 interesting_chains
             ).run()
         });
@@ -573,6 +674,7 @@ where V: Storeable {
                 to_store, from_outside,
                 ready_reads_s,
                 finished_writes_s,
+                true,
                 true,
                 interesting_chains
             );
@@ -1523,5 +1625,74 @@ where V: Storeable {
         } else {
             None
         }
+    }
+}
+
+impl<V: ?Sized> AtomicWriteHandle<V>
+where V: Storeable {
+
+    pub fn async_append(&self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
+        //TODO no-alloc?
+        let id = Uuid::new_v4();
+        let mut buffer = Vec::new();
+        EntryContents::Single {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            loc: &OrderIndex(chain, 0.into()),
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        id
+    }
+
+    pub fn async_multiappend(&self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Uuid {
+        //TODO no-alloc?
+        assert!(chains.len() > 1);
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
+        locs.sort();
+        locs.dedup();
+        assert!(locs.len() >= 1);
+        if locs.len() == 1 {
+            return self.async_append(locs[0].0, data, deps)
+        }
+        let id = Uuid::new_v4();
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &locs,
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        id
+    }
+
+    pub fn async_no_remote_multiappend(&self, chains: &[order], data: &V, deps: &[OrderIndex])
+    -> Uuid {
+        //TODO no-alloc?
+        assert!(chains.len() > 1);
+        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
+        locs.sort();
+        locs.dedup();
+        assert!(locs.len() >= 1);
+        if locs.len() == 1 {
+            return self.async_append(locs[0].0, data, deps)
+        }
+        let id = Uuid::new_v4();
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::NoRemote,
+            lock: &0,
+            locs: &locs,
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        id
     }
 }

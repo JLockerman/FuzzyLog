@@ -51,6 +51,7 @@ pub struct ThreadLog {
     num_errors: u64,
 
     fetch_boring_multis: bool,
+    ack_writes: bool,
 
     finished: bool,
 
@@ -131,6 +132,7 @@ impl ThreadLog {
         ready_reads: FinshedReadQueue,
         finished_writes: FinshedWriteQueue,
         fetch_boring_multis: bool,
+        ack_writes: bool,
         interesting_chains: I
     ) -> Self
     where I: IntoIterator<Item=order>{
@@ -151,6 +153,7 @@ impl ThreadLog {
             print_data: Default::default(),
             finished: false,
             fetch_boring_multis,
+            ack_writes,
         }
     }
 
@@ -281,7 +284,7 @@ impl ThreadLog {
         match msg {
             WriteComplete(id, locs) => {
                 self.print_data.write_done(1);
-                if self.finished_writes.send(Ok((id, locs))).is_err() {
+                if self.ack_writes && self.finished_writes.send(Ok((id, locs))).is_err() {
                     self.finished = true;
                 }
             },
@@ -291,7 +294,11 @@ impl ThreadLog {
             },
             IoError(kind, server) => {
                 let err = self.make_error(kind, server);
-                let e1 = self.finished_writes.send(Err(err.clone()));
+                let e1 = if self.ack_writes {
+                    self.finished_writes.send(Err(err.clone()))
+                } else {
+                    Ok(())
+                };
                 let e2 = self.ready_reads.send(Err(err));
                 if e1.is_err() || e2.is_err() {
                     self.finished = true;
