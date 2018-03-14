@@ -465,17 +465,20 @@ impl Worker {
             let next_hop = self.inner.next_hop(self.inner.worker_num, recv_token, src_addr);
             let continue_replication = next_hop
                 .map(|(_, send_token)| send_token == DOWNSTREAM).unwrap_or(false);
-            let (buffer, send_token) = ::handle_to_worker2(log_work, self.inner.worker_num, continue_replication,
-                |to_send, _| {
+            let (buffer, send_token) =
+                ::handle_to_worker2(log_work, self.inner.worker_num, continue_replication,
+                |to_send, _u| {
                     match next_hop {
                         None => {
                             trace!("WORKER {:?} re dist {:?}",
                                 self.inner.worker_num, src_addr);
+                            unreachable!();
                             self.redist_to_client(src_addr, to_send);
                             None
                         },
                         Some((worker_num, DOWNSTREAM)) => {
                             if worker_num != self.inner.worker_num {
+                                unreachable!();
                                 self.redist_downstream(worker_num, src_addr, to_send);
                                 return None
                             }
@@ -621,9 +624,10 @@ impl Worker {
             ToSend::Nothing => return,
             ToSend::OldReplication(..) => unreachable!(),
 
-            ToSend::Read(to_send) =>
-                self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, to_send))
-                    .ok().expect("redist c failed 1"),
+            ToSend::Read(_) =>
+                unreachable!("Reads should always be acked by the thread which discharges them @ {:?} {:?}.", src_addr, self.inner.ip_to_worker),
+                // self.inner.to_dist.send(WorkerToDist::ToClient(src_addr, to_send))
+                //     .ok().expect("redist c failed 1"),
 
             ToSend::Slice(to_send) =>
                 self.inner.to_dist.send(
@@ -717,6 +721,12 @@ impl WorkerInner {
                 // trace!("WORKER {} finished recv from client.", self.worker_num);
                 self.print_data.finished_recv_from_client(1);
                 let worker = self.worker_num;
+                if self.downstream_workers == 0 {
+                    match self.worker_and_token_for_addr(src_addr) {
+                        Some(wt) => assert_eq!(wt.0, worker),
+                        None => panic!("{:?} not in {:?}", src_addr, self.ip_to_worker),
+                    }
+                }
                 self.send_to_log(packet, worker, token, src_addr, socket_state);
                 //self.awake_io.push_back(token)
             }
@@ -725,6 +735,13 @@ impl WorkerInner {
                 self.print_data.finished_recv_from_up(1);
                 //let (worker, work_tok) = self.next_hop(token, src_addr, socket_kind);
                 let worker = self.worker_num;
+                //FIXME
+                if self.downstream_workers == 0 {
+                    match self.worker_and_token_for_addr(src_addr) {
+                        Some(wt) => assert_eq!(wt.0, worker),
+                        None => panic!("{:?} not in {:?}", src_addr, self.ip_to_worker),
+                    }
+                }
                 self.send_replication_to_log(packet, storage_loc, worker, token, src_addr);
                 //self.awake_io.push_back(token)
             }
@@ -753,13 +770,14 @@ impl WorkerInner {
                         // self.worker_num, worker_and_token);
                     Some(worker_and_token)
                 },
-                None => None,
+                None => panic!("wrong worker for {:?}: {} => {:?}", src_addr, worker_num, self.ip_to_worker, ),
             }
         }
         else if self.has_downstream {
             return Some((self.worker_num, DOWNSTREAM))
         }
         else {
+            panic!("now downstream {}", worker_num);
             trace!("WORKER {} send DOWNSTREAM to {}",
                 self.worker_num, self.worker_num % self.downstream_workers);
             //TODO actually balance this

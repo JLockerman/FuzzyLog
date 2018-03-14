@@ -18,6 +18,13 @@ impl Ipv4SocketAddr {
         Ipv4SocketAddr { bytes: bytes }
     }
 
+    pub fn from_u64(num: u64) -> Self {
+        use ::byteorder::{LittleEndian, ByteOrder};
+        let mut bytes = [0; 16];
+        LittleEndian::write_u64(&mut bytes, num);
+        Ipv4SocketAddr { bytes: bytes }
+    }
+
     pub fn from_slice(slice: &[u8]) -> Self {
         let slice = &slice[..16];
         let mut bytes = [0; 16];
@@ -74,5 +81,24 @@ mod tests {
     #[test]
     fn test_align() {
         assert_eq!(mem::align_of::<Ipv4SocketAddr>(), 1);
+    }
+
+    #[test]
+    fn test_from_u64_id_hash() {
+        use std::hash::{Hash, Hasher};
+        use hash::{UuidHasher, IdHasher};
+        for i in 0..100 {
+            let mut hasher = IdHasher::default();
+            let addr = Ipv4SocketAddr::from_u64(i);
+            addr.hash(&mut hasher);
+            assert_eq!(hasher.finish(), i);
+        }
+
+        for i in 0..100 {
+            let mut hasher = UuidHasher::default();
+            let addr = Ipv4SocketAddr::from_u64(i);
+            addr.hash(&mut hasher);
+            assert_eq!(hasher.finish(), i);
+        }
     }
 }

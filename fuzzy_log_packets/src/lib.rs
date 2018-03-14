@@ -27,6 +27,7 @@ use self::EntryFlag::Flag;
 pub mod buffer;
 pub mod buffer2;
 pub mod storeables;
+pub mod double_buffer;
 
 custom_derive! {
     #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeBitAnd(u32), NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
@@ -508,9 +509,10 @@ impl<'a> Packet::Ref<'a> {
             | SentiToReplica{lock, ..}
             | Skeens2ToReplica{lock, ..}
             | UpdateRecovery{lock, ..}
-            | Snapshot{lock, ..} | SnapshotToReplica{lock, ..}=> *lock,
+            | Snapshot{lock, ..} | SnapshotToReplica{lock, ..}  => *lock,
+            SingleToReplica{timestamp, ..} => *timestamp,
 
-            Read{..} | Single{..} | SingleToReplica{..}
+            Read{..} | Single{..}
             | GC{..}
             | FenceClient{..} | CheckSkeens1{..}  => unreachable!(),
         }

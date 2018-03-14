@@ -3,26 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 use std::sync::atomic::Ordering::Relaxed;
 
-#[derive(Debug)]
-pub enum MessageFromClient {
-    Mut(Id, MutationCallback),
-    Obs(Observation),
-    EndOfSnapshot,
-}
-
-impl MessageFromClient {
-    pub fn is_end_of_snapshot(&self) -> bool {
-        if let &MessageFromClient::EndOfSnapshot = self {
-            return true;
-        }
-        false
-    }
-}
-
 pub enum MutationCallback {
-    Stat(Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Stat), ()>) + Send>),
-    Path(Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Path), ()>) + Send>),
-    Void(Box<for<'a> FnMut(Result<&'a Path, ()>) + Send>),
+    Stat(Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Stat), u32>) + Send>),
+    Path(Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Path), u32>) + Send>),
+    Void(Box<for<'a> FnMut(Result<&'a Path, u32>) + Send>),
     None,
 }
 
@@ -42,11 +26,17 @@ pub type ClientId = u64;
 pub type Count = u64;
 pub type Version = i64;
 
-pub static CLIENT_ID: AtomicUsize = ATOMIC_USIZE_INIT;
+static CLIENT_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 static COUNTER: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub fn client_id() -> u64 {
-    CLIENT_ID.load(Relaxed) as u64
+    let id = CLIENT_ID.load(Relaxed) as u64;
+    assert!(id != 0, "{}", id);
+    id
+}
+
+pub fn set_client_id(id: u32) {
+    CLIENT_ID.store(id as usize, Relaxed);
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash)]
@@ -64,7 +54,7 @@ impl Id {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Mutation {
     Create {
         id: Id,
@@ -115,6 +105,7 @@ pub enum Mutation {
         part1_id: Id,
         old_path: PathBuf,
         new_path: PathBuf,
+        due_to_old: bool,
     },
 }
 
@@ -140,6 +131,24 @@ impl Mutation {
             | &RenameOldExists { ref old_path, .. }
             | &RenameNewEmpty { ref old_path, .. }
             | &RenameNack { ref old_path, .. } => &old_path,
+        }
+    }
+
+    pub fn path2(&self) -> Option<&PathBuf> {
+        use self::Mutation::*;
+        match self {
+            &RenamePart1 { ref new_path, .. }
+            | &RenameOldExists { ref new_path, .. }
+            | &RenameNewEmpty { ref new_path, .. }
+            | &RenameNack { ref new_path, .. } => Some(new_path),
+            _ => None,
+        }
+    }
+
+    pub fn is_nack(&self) -> bool {
+        match self {
+            &Mutation::RenameNack { .. } => true,
+            _ => false,
         }
     }
 }
@@ -194,21 +203,21 @@ pub enum Observation {
         id: Id,
         path: PathBuf,
         watch: bool,
-        callback: Box<FnMut(Result<(&Path, &Stat), ()>) + Send>,
+        callback: Box<FnMut(Result<(&Path, &Stat), u32>) + Send>,
     },
 
     GetData {
         id: Id,
         path: PathBuf,
         watch: bool,
-        callback: Box<FnMut(Result<(&Path, &[u8], &Stat), ()>) + Send>,
+        callback: Box<FnMut(Result<(&Path, &[u8], &Stat), u32>) + Send>,
     },
 
     GetChildren {
         id: Id,
         path: PathBuf,
         watch: bool,
-        callback: Box<FnMut(Result<(&Path, &Iterator<Item = &Path>), ()>) + Send>,
+        callback: Box<FnMut(Result<(&Path, &Iterator<Item = &Path>), u32>) + Send>,
     },
 }
 

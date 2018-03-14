@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use hash::HashMap;
+use hash::IdHashMap as HashMap;
 use std::ops::{Index, IndexMut};
 
 #[derive(Clone, Debug)]
@@ -13,6 +13,7 @@ pub struct VecDequeMap<V> {
     data: HashMap<u64, V>,
     start: u64,
     next: u64,
+    min: u64,
 }
 
 
@@ -22,6 +23,7 @@ impl<V> VecDequeMap<V> {
             data: Default::default(),
             start: 0,
             next: 0,
+            min: 0,
         }
     }
 
@@ -39,11 +41,15 @@ impl<V> VecDequeMap<V> {
 
         let val = self.data.remove(&self.start);
         self.start += 1;
+        self.min = self.start;
         //FIXME skip elems until Some(..)?
         val
     }
 
     pub fn insert(&mut self, key: u64, val: V) -> Option<V> {
+        if key < self.min {
+            panic!("cannot insert {} in [{}, {}, {})", key, self.min, self.start, self.next);
+        }
         if key < self.start {
             self.start = key;
         }
@@ -247,13 +253,13 @@ mod test {
     }
 
     #[test]
-        fn test_insert() {
-            let mut m = VecDequeMap::new();
-            assert_eq!(m.insert(2, 2), None);
-            assert_eq!(m.insert(2, 3), Some(2));
-            assert_eq!(m.insert(2, 4), Some(3));
-            assert_eq!(m.insert(1, 1), None);
-            assert_eq!(m.insert(2, 5), Some(4));
-            assert_eq!(m.insert(1, 2), Some(1));
-        }
+    fn test_insert() {
+        let mut m = VecDequeMap::new();
+        assert_eq!(m.insert(2, 2), None);
+        assert_eq!(m.insert(2, 3), Some(2));
+        assert_eq!(m.insert(2, 4), Some(3));
+        assert_eq!(m.insert(1, 1), None);
+        assert_eq!(m.insert(2, 5), Some(4));
+        assert_eq!(m.insert(1, 2), Some(1));
+    }
 }

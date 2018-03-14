@@ -282,13 +282,13 @@ mod test {
     }
 
     #[test]
-        fn test_insert() {
-            let mut m = VecDequeMap::new();
-            assert_eq!(m.insert(2, 2), None);
-            assert_eq!(m.insert(2, 3), Some(2));
-            assert_eq!(m.insert(2, 4), Some(3));
-            assert_eq!(m.insert(1, 1), None);
-            assert_eq!(m.insert(2, 5), Some(4));
-            assert_eq!(m.insert(1, 2), Some(1));
-        }
+    fn test_insert() {
+        let mut m = VecDequeMap::new();
+        assert_eq!(m.insert(2, 2), None);
+        assert_eq!(m.insert(2, 3), Some(2));
+        assert_eq!(m.insert(2, 4), Some(3));
+        assert_eq!(m.insert(1, 1), None);
+        assert_eq!(m.insert(2, 5), Some(4));
+        assert_eq!(m.insert(1, 2), Some(1));
+    }
 }

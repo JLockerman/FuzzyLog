@@ -316,6 +316,8 @@ pub fn run_with_replication(
     upstream_admin_socket.take().map(|s| upstream.push(s));
     assert_eq!(downstream.len(), num_downstream);
     assert_eq!(upstream.len(), num_upstream);
+    if upstream.len() > 0 { assert_eq!(upstream.len(), num_workers) }
+    if downstream.len() > 0 { assert_eq!(downstream.len(), num_workers) }
     //let (log_to_dist, dist_from_log) = spmc::channel();
 
     trace!("SERVER {} {} up, {} down.", this_server_num, num_upstream, num_downstream);
@@ -429,12 +431,10 @@ pub fn run_with_replication(
             worker_for_client.insert(id, (worker, tok));
             worker
         };*/
-        let worker = {
-            let worker = worker_for_ip(id, num_workers as u64);
-            worker_for_client.insert(id, (worker, tok));
-            worker
-        };
-        trace!("SERVER new client @ {:?} => {:?}", (addr, id), (worker, tok));
+        let worker = worker_for_ip(id, num_workers as u64);
+        let old = worker_for_client.insert(id, (worker, tok));
+        assert!(old.is_none(), "Duplicate id {:?}", id);
+        println!("SERVER new client @ {:?} => {:?}", (addr, id), (worker, tok));
         dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
 
     }
@@ -483,6 +483,7 @@ pub fn run_with_replication(
                     }
                 }
                 FROM_WORKERS => {
+                    unreachable!("current impl is unsound and shouldn't be used");
                     trace!("SERVER dist getting finished work");
                     let packet = dist_from_workers.try_recv();
                     if let Ok(to_worker) = packet {
@@ -586,6 +587,7 @@ pub fn run_with_replication(
                                 continue
                             }
                         };
+                        //FIXME specifically this
                         dist_to_workers[worker].send(
                             DistToWorker::ToClient(token, buffer, addr, storage_loc));
                         continue
@@ -674,7 +676,7 @@ fn negotiate_num_upstreams(
                 Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
                     if refusals >= 60000 { panic!("write fail {:?}", e) }
                     refusals += 1;
-                    trace!("upstream refused reconnect attempt {}", refusals);
+                    // trace!("upstream refused reconnect attempt {}", refusals);
                     thread::sleep(Duration::from_millis(1));
                     **socket = TcpStream::connect(&remote_addr).unwrap();
                     let _ = socket.set_keepalive_ms(Some(1000));

@@ -122,8 +122,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         // Safety, since both the original append and the delayed portion
         // get finished by the same worker this does not race
         // the storage_loc is sent with the first round
-        DelayedSingle { index, trie_slot, storage, t, }
-        | Skeens2SingleReplica { index, trie_slot, storage, t, } => unsafe {
+        DelayedSingle { index, trie_slot, storage, timestamp, t, }
+        | Skeens2SingleReplica { index, trie_slot, storage, timestamp, t, } => unsafe {
+            assert!(timestamp > 0, "bad single max_ts {:#?}", Entry::wrap_bytes(&mut *storage.ptr()));
             //trace!("WORKER {} finish delayed single @ {:?}", worker_num);
             let color;
             let len = {
@@ -145,7 +146,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let e = storage.as_packet().contents();
                 send(ToSend::Contents(EntryContents::Skeens2ToReplica{
                     id: e.id(),
-                    lock: &0,//TODO
+                    lock: &timestamp,
                     loc: &OrderIndex(color, entry::from(index as u32)),
                 }), t)
             } else {
@@ -311,6 +312,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     );
                 }
             } else {
+                unreachable!();
                 u = send(ToSend::Nothing, t)
             };
             (None, u)
@@ -692,8 +694,8 @@ where SendFn: for<'a> FnMut(Result<&'a [u8], EntryContents<'a>>) -> U {
     match res {
         Ok(u) => u,
         Err(valid_locs) => {
-            trace!("WORKER {} overread {:?}: {:?} > {:?}",
-                worker_num, chain, index, valid_locs);
+            // trace!("WORKER {} overread {:?}: {:?} > {:?}",
+            //     worker_num, chain, index, valid_locs);
             let (old_id, old_loc) = {
                 let e = buffer.contents();
                 (e.id().clone(), e.locs()[0])

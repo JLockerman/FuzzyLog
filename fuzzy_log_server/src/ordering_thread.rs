@@ -75,7 +75,7 @@ impl<T: Copy> Chain<T> {
                             trace!("flush single {:?}", timestamp);
                             let (loc, ptr) = trie.prep_append(ValEdge::null());
                             //println!("s id {:?} ts {:?}", id, timestamp);
-                            on_finish(Single(loc, ptr, storage, t));
+                            on_finish(Single(loc, ptr, storage, timestamp, t));
                         },
                         GotMax::Multi{storage, t, id, timestamp, ..} => unsafe {
                             trace!("flush multi {:?}: {:?}", id, timestamp);
@@ -151,7 +151,7 @@ fn get_chain<T: Copy>(log: &ChainStore<T>, chain: order) -> Option<&Chain<T>> {
 }
 
 enum FinishSkeens<T> {
-    Single(u64, *mut ValEdge, ValEdge, T),
+    Single(u64, *mut ValEdge, ValEdge, u64, T),
     Multi(u64, *mut ValEdge, SkeensMultiStorage, u64, T),
     Snap(u64, SkeensMultiStorage, u64, T),
 }
@@ -172,7 +172,7 @@ where ToWorkers: DistributeToWorkers<T> {
             this_server_num, total_servers);
         ServerLog {
             log: chains,
-            //_seen_ids: HashSet::new(),
+            // seen_ids: Default::default(),
             this_server_num: this_server_num,
             total_servers: total_servers,
             to_workers: to_workers,
@@ -254,7 +254,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 debug_assert!(self.stores_chain(chain),
                     "tried to store {:?} at server {:?} of {:?}",
                     chain, self.this_server_num, self.total_servers);
-
+                // assert!(self.seen_ids.insert(*buffer.contents().id()));
                 let this_server_num = self.this_server_num;
 
                 let send = {
@@ -456,7 +456,10 @@ where ToWorkers: DistributeToWorkers<T> {
         let (mut needs_lock, mut needs_skeens) = (false, false);
         {
             for &OrderIndex(c, _) in buffer.contents().locs() {
-                if c == order::from(0) || !self.stores_chain(c) {
+                assert!(self.stores_chain(c));
+                //TODO
+                assert!(c != order::from(0), "{:?}", buffer.contents().locs());
+                if c == order::from(0) {
                     continue
                 }
 
@@ -475,6 +478,9 @@ where ToWorkers: DistributeToWorkers<T> {
         }
     }
 
+    // if the multiappend only touches this server,
+    // and there are not other multiappends pending
+    // we can simply apply the multiappend directly
     fn single_server_single_append_fast_path(
         &mut self,
         kind: EntryFlag::Flag,
@@ -488,6 +494,7 @@ where ToWorkers: DistributeToWorkers<T> {
             let pointers = &mut **pointers.as_mut().unwrap()
                 as *mut [u8]  as *mut [*mut ValEdge];
             let mut contents = buffer.contents_mut();
+            // assert!(self.seen_ids.insert(*contents.as_ref().id()));
             let locs = contents.locs_mut();
             let pointers = &mut (&mut *pointers)[..locs.len()];
             let mut is_sentinel = false;
@@ -603,6 +610,7 @@ where ToWorkers: DistributeToWorkers<T> {
     ) {
         trace!("SERVER {:?} new-style multiput Round 1 {:?}", self.this_server_num, kind);
         let val = buffer.contents();
+        // assert!(self.seen_ids.insert(*val.id()));
         let locs = val.locs();
         let timestamps = &mut unsafe { storage.get_mut().0 }[..locs.len()];
         let queue_indicies = &mut unsafe { storage.get_mut().1 }[..locs.len()];
@@ -693,7 +701,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         )
                     },
 
-                    FinishSkeens::Single(index, trie_slot, storage, t) => {
+                    FinishSkeens::Single(index, trie_slot, storage, timestamp, t) => {
                         trace!("server finish sk single");
                         print_data.msgs_sent(1);
                         to_workers.send_to_worker(
@@ -701,6 +709,7 @@ where ToWorkers: DistributeToWorkers<T> {
                                 index: index,
                                 trie_slot: trie_slot,
                                 storage: storage,
+                                timestamp,
                                 t: t
                             }
                         )
@@ -857,7 +866,7 @@ where ToWorkers: DistributeToWorkers<T> {
             self.to_workers.send_to_worker(Reply(buffer, t));
             return
         }
-        //debug_assert!(self._seen_ids.insert(buffer.entry().id));
+        // assert!(self.seen_ids.insert(buffer.entry().id));
 
         trace!("SERVER {:?} appending at {:?}",
             self.this_server_num, buffer.contents().locs());
@@ -988,19 +997,20 @@ where ToWorkers: DistributeToWorkers<T> {
             },
 
             ToReplicate::SingleSkeens1(buffer, storage_loc) => unsafe {
-                trace!("SERVER {:?} replicate skeens single", self.this_server_num);
-                let (id, (OrderIndex(c, ts), node_num), size) = {
+                let (id, (OrderIndex(c, _), node_num), size, ts) = {
                     let e = buffer.contents();
                     (*e.id(),
                         e.locs_and_node_nums().map(|(&o, &n)| (o, n)).next().expect("must have nodes & loc_nums"),
-                        e.non_replicated_len())
+                        e.non_replicated_len(),
+                        e.lock_num())
                 };
+                trace!("SERVER {:?} replicate skeens single {:?} {}", self.this_server_num, c, ts);
                 let storage;
                 {
                     let c = self.ensure_chain(c);
                     storage = c.trie.reserve_space_at(storage_loc, size);
                     c.skeens.replicate_single_append_round1(
-                        u32::from(ts) as u64, node_num, id, storage, t
+                        ts, node_num, id, storage, t
                     );
                 }
                 self.print_data.msgs_sent(1);
@@ -1082,6 +1092,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 let max_timestamp = buffer.contents().lock_num();
                 trace!("SERVER {:?} replicate skeens2 max {:?}, {:?}",
                     self.this_server_num, max_timestamp, id);
+                assert!(max_timestamp > 0, "SERVER {}: replicate 0 max ts {:#?}", self.this_server_num, buffer.contents());
                 'sk2_rep: for &OrderIndex(o, i) in buffer.contents().locs() {
                     if o == order::from(0) || !self.stores_chain(o) { continue 'sk2_rep }
                     //let c = self.ensure_chain(chain);
@@ -1092,7 +1103,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     let trie = &mut c.trie;
                     c.skeens.replicate_round2(&id, max_timestamp, index, |rep| match rep {
                         Multi{index, storage, max_timestamp, t} => {
-                            trace!("SERVER finish sk multi rep ({:?}, {:?})", o, index);
+                            trace!("SERVER finish sk multi rep ({:?}, {:?}, {})", o, index, max_timestamp);
                             let slot = unsafe { trie.prep_append_at(index) };
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
@@ -1106,7 +1117,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             )
                         },
                         Senti{index, storage, max_timestamp, t} => {
-                            trace!("SERVER finish sk multi rep ({:?}, {:?})", o, index);
+                            trace!("SERVER finish sk multi rep ({:?}, {:?}, {})", o, index, max_timestamp);
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2MultiReplica {
@@ -1119,7 +1130,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             )
                         },
                         Snap{index, storage, max_timestamp, t} => {
-                            trace!("SERVER finish sk multi snap ({:?}, {:?})", o, index);
+                            trace!("SERVER finish sk multi snap ({:?}, {:?}, {})", o, index, max_timestamp);
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2SnapReplica {
@@ -1130,10 +1141,10 @@ where ToWorkers: DistributeToWorkers<T> {
                                 }
                             )
                         },
-                        Single{index, storage, t} => unsafe {
+                        Single{index, storage, max_timestamp, t} => unsafe {
                             //trace!("SERVER finish sk single rep");
                             //let size = buffer.entry_size();
-                            trace!("SERVER replicating single sk2 ({:?}, {:?})", o, index);
+                            trace!("SERVER replicating single sk2 ({:?}, {:?}, {})", o, index, max_timestamp);
                             let slot = trie.prep_append_at(index);
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
@@ -1141,6 +1152,7 @@ where ToWorkers: DistributeToWorkers<T> {
                                     index: index,
                                     trie_slot: slot,
                                     storage: storage,
+                                    timestamp: max_timestamp,
                                     t: t
                                 }
                             )

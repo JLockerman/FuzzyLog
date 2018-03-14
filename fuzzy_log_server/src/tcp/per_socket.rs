@@ -1,6 +1,6 @@
 // use prelude::*;
 
-use std::collections::VecDeque;
+use std::collections::{LinkedList, VecDeque};
 use std::io::{Read, Write, ErrorKind};
 use std::mem;
 use socket_addr::Ipv4SocketAddr;
@@ -12,6 +12,7 @@ use mio::tcp::*;
 use buffer::Buffer;
 
 use packets::EntryContents;
+use packets::double_buffer::DoubleBuffer;
 
 use super::*;
 
@@ -43,7 +44,7 @@ pub enum PerSocket {
         being_written: DoubleBuffer,
         bytes_written: usize,
         stream: TcpStream,
-        pending: VecDeque<Vec<u8>>,
+        // pending: VecDeque<Vec<u8>>,
         needs_to_stay_awake: bool,
         is_staying_awake: bool,
 
@@ -166,7 +167,7 @@ impl PerSocket {
         PerSocket::Downstream {
             being_written: DoubleBuffer::with_first_buffer_capacity(WRITE_BUFFER_SIZE),
             bytes_written: 0,
-            pending: Default::default(),
+            // pending: Default::default(),
             stream: stream,
             needs_to_stay_awake: false,
             is_staying_awake: true,
@@ -269,12 +270,11 @@ impl PerSocket {
     pub fn send_burst(&mut self) -> Result<ShouldContinue, ()> {
         use self::PerSocket::*;
         match self {
-            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..}
-            | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut pending, ref mut needs_to_stay_awake, ref mut print_data, ..} => {
+            &mut Downstream {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut needs_to_stay_awake, ref mut print_data, ..}
+            | &mut Client {ref mut being_written, ref mut bytes_written, ref mut stream, ref mut needs_to_stay_awake, ref mut print_data, ..} => {
                 // trace!("SOCKET send actual.");
                 if being_written.is_empty() {
                     //debug_assert!(pending.iter().all(|p| p.is_empty()));
-                    assert!(pending.is_empty());
                     //TODO remove
                     //assert!(pending.iter().all(|p| p.is_empty()));
                     // trace!("SOCKET empty write.");
@@ -282,6 +282,7 @@ impl PerSocket {
                     //*needs_to_stay_awake = true;
                     return Ok(false)
                 }
+                assert!(!being_written.first_bytes().is_empty());
                 match stream.write(&being_written.first_bytes()[*bytes_written..]) {
                     Err(e) =>
                         if e.kind() == ErrorKind::WouldBlock { return Ok(false) }
@@ -306,13 +307,6 @@ impl PerSocket {
                 being_written.swap_if_needed();
                 print_data.sends(1);
                 //Done with burst check if more bursts to be sent
-                while !pending.is_empty() {
-                    let being_written = &mut *being_written;
-                    let added = being_written.try_fill(&*pending.front().unwrap());
-                    if !added { break }
-                    drop(pending.pop_front())
-                }
-
                 Ok(true)
             },
             _ => unreachable!()
@@ -326,18 +320,15 @@ impl PerSocket {
         // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
-            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
+            &mut Downstream {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..}
-            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+            | &mut Client {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 // trace!("SOCKET send down {}B", to_write.len());
                 print_data.sends_added(1);
                 print_data.bytes_to_send(to_write.len() as u64);
-                let added = being_written.try_fill(to_write);
-                if !added {
-                    pending.push_back(to_write.to_vec());
-                }
+                being_written.fill(&[to_write]);
             }
             _ => unreachable!()
         }
@@ -350,28 +341,15 @@ impl PerSocket {
         // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
-            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data, ref mut needs_to_stay_awake, ..}
-            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+            &mut Downstream {ref mut being_written, ref mut print_data, ref mut needs_to_stay_awake, ..}
+            | &mut Client {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 print_data.sends_added(1);
                 let write_len = to_write0.len() + to_write1.len() + to_write2.len();
                 // trace!("SOCKET send down {}B", write_len);
                 print_data.bytes_to_send(write_len as u64);
-                if being_written.can_hold_bytes(write_len) {
-                    let _added = being_written.try_fill(to_write0);
-                    assert!(_added);
-                    let _added = being_written.try_fill(to_write1);
-                    assert!(_added);
-                    let _added = being_written.try_fill(to_write2);
-                    assert!(_added);
-                } else {
-                    let mut pend = Vec::with_capacity(write_len);
-                    pend.extend_from_slice(to_write0);
-                    pend.extend_from_slice(to_write1);
-                    pend.extend_from_slice(to_write2);
-                    pending.push_back(pend);
-                }
+                being_written.fill(&[to_write0, to_write1, to_write2]);
             }
             _ => unreachable!()
         }
@@ -382,23 +360,16 @@ impl PerSocket {
         // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
-            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
+            &mut Downstream {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..}
-            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+            | &mut Client {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len();
                 // trace!("SOCKET send down contents {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
-                if being_written.can_hold_bytes(write_len) {
-                    let _added = being_written.try_fill_from_contents(to_write);
-                    assert!(_added)
-                } else {
-                    let mut pend = Vec::with_capacity(write_len);
-                    to_write.fill_vec(&mut pend);
-                    pending.push_back(pend);
-                }
+                being_written.fill_from_contents(to_write, &[]);
             }
             _ => unreachable!()
         }
@@ -412,25 +383,16 @@ impl PerSocket {
         // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
-            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
+            &mut Downstream {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..}
-            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+            | &mut Client {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len() + addr.len();
                 // trace!("SOCKET send down contents2 {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
-                if being_written.can_hold_bytes(write_len) {
-                    let _added = being_written.try_fill_from_contents(to_write);
-                    let _added = being_written.try_fill(addr) && _added;
-                    assert!(_added)
-                } else {
-                    let mut pend = Vec::with_capacity(write_len);
-                    to_write.fill_vec(&mut pend);
-                    pend.extend_from_slice(addr);
-                    pending.push_back(pend);
-                }
+                being_written.fill_from_contents(to_write, &[addr]);
             }
             _ => unreachable!()
         }
@@ -443,27 +405,16 @@ impl PerSocket {
         // trace!("SOCKET add downstream send");
         self.stay_awake();
         match self {
-            &mut Downstream {ref mut being_written, ref mut pending, ref mut print_data,
+            &mut Downstream {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..}
-            | &mut Client {ref mut being_written, ref mut pending, ref mut print_data,
+            | &mut Client {ref mut being_written, ref mut print_data,
                 ref mut needs_to_stay_awake, ..} => {
                 *needs_to_stay_awake = true;
                 let write_len = to_write.len() + to_write1.len() + to_write2.len();
                 // trace!("SOCKET send down contents3 {}B", write_len);
                 print_data.sends_added(1);
                 print_data.bytes_to_send(write_len as u64);
-                if being_written.can_hold_bytes(write_len) {
-                    let _added = being_written.try_fill_from_contents(to_write);
-                    let _added = being_written.try_fill(to_write1) && _added;
-                    let _added = being_written.try_fill(to_write2) && _added;
-                    assert!(_added)
-                } else {
-                    let mut pend = Vec::with_capacity(write_len);
-                    to_write.fill_vec(&mut pend);
-                    pend.extend_from_slice(to_write1);
-                    pend.extend_from_slice(to_write2);
-                    pending.push_back(pend);
-                }
+                being_written.fill_from_contents(to_write, &[to_write1, to_write2]);
             }
             _ => unreachable!()
         }
@@ -594,7 +545,6 @@ impl PerSocket {
             &Downstream {
                 ref being_written,
                 ref bytes_written,
-                ref pending,
                 ref needs_to_stay_awake,
                 ..
             } =>
@@ -602,7 +552,7 @@ impl PerSocket {
                     0, 0,
                     being_written.first_bytes().len(),
                     *bytes_written,
-                    pending.len(),
+                    being_written.pending_len(),
                     *needs_to_stay_awake
                 ),
 
@@ -618,7 +568,7 @@ impl PerSocket {
                 MoreData::new(
                     being_read.len(),
                     *bytes_read,
-                    being_written.first_bytes().len(),
+                    being_written.pending_len(),
                     *bytes_written,
                     pending.len(),
                     *needs_to_stay_awake
@@ -750,106 +700,4 @@ fn recv_packet(
             },
         }
     }
-}
-
-//TODO remove Debug
-#[derive(Debug)]
-pub struct DoubleBuffer {
-    first: Vec<u8>,
-    second: Vec<u8>,
-}
-
-const MAX_WRITE_BUFFER_SIZE: usize = 40000;
-
-//TODO move this and the one in async/store into a single file
-impl DoubleBuffer {
-
-    #[allow(dead_code)]
-    fn new() -> Self {
-        DoubleBuffer {
-            first: Vec::new(),
-            second: Vec::new(),
-        }
-    }
-
-    fn with_first_buffer_capacity(cap: usize) -> Self {
-        DoubleBuffer {
-            first: Vec::with_capacity(cap),
-            second: Vec::with_capacity(cap),
-        }
-    }
-
-    fn first_bytes(&self) -> &[u8] {
-        &self.first[..]
-    }
-
-    fn swap_if_needed(&mut self) {
-        self.first.clear();
-        if self.second.len() > 0 {
-            mem::swap(&mut self.first, &mut self.second)
-        }
-    }
-
-    fn can_hold_bytes(&self, bytes: usize) -> bool {
-        (self.is_filling_first() && buffer_can_hold_bytes(&self.first, bytes))
-        || buffer_can_hold_bytes(&self.second, bytes)
-    }
-
-    fn try_fill(&mut self, bytes: &[u8]) -> bool {
-        if self.is_filling_first() {
-            if buffer_can_hold_bytes(&self.first, bytes.len())
-            || self.first.is_empty() {
-                self.first.extend_from_slice(bytes);
-                return true
-            }
-        }
-
-        if buffer_can_hold_bytes(&self.second, bytes.len())
-        || self.second.capacity() < MAX_WRITE_BUFFER_SIZE {
-            self.second.extend_from_slice(bytes);
-            return true
-        }
-
-        return false
-    }
-
-    fn try_fill_from_contents(&mut self, contents: EntryContents) -> bool {
-        let contents_len = contents.len();
-        if self.is_filling_first() {
-            if buffer_can_hold_bytes(&self.first, contents_len)
-            || self.first.is_empty() {
-                let _old_len = self.first.len();
-                contents.fill_vec(&mut self.first);
-                assert!(
-                    self.first.len() > _old_len,
-                    "{:?} > {:?}, {:?}",
-                    _old_len, self.first.len(), contents_len
-                );
-                return true
-            }
-        }
-
-        if buffer_can_hold_bytes(&self.second, contents_len)
-        || self.second.capacity() < MAX_WRITE_BUFFER_SIZE {
-            let _old_len = self.second.len();
-            contents.fill_vec(&mut self.second);
-            assert!(self.second.len() > _old_len);
-            return true
-        }
-
-        return false
-    }
-
-
-    fn is_filling_first(&self) -> bool {
-        self.second.len() == 0
-    }
-
-    fn is_empty(&self) -> bool {
-        self.first.is_empty() && self.second.is_empty()
-    }
-}
-
-fn buffer_can_hold_bytes(buffer: &Vec<u8>, bytes: usize) -> bool {
-    buffer.capacity() - buffer.len() >= bytes
 }

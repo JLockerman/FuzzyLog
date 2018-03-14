@@ -5,7 +5,7 @@
 // add a optional return snapshot, which returns what the snapshotted OrderIndex is
 // use to know when we can return observations and resnapshot for a partition
 
-extern crate bincode;
+pub extern crate bincode;
 extern crate fuzzy_log_client;
 pub extern crate serde;
 
@@ -17,12 +17,14 @@ extern crate env_logger;
 
 #[cfg(test)]
 extern crate fuzzy_log_server;
-#[cfg(test)]
+
 #[macro_use]
 extern crate matches;
 
 use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::RandomState;
 use std::ffi::OsString;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -32,17 +34,18 @@ pub use fuzzy_log_client::fuzzy_log::log_handle::{entry, order, AtomicWriteHandl
                                                   LogHandle, OrderIndex, ReadHandle, TryWaitRes,
                                                   Uuid};
 
-use bincode::{deserialize, serialize_into, Infinite};
+pub use bincode::{deserialize, serialize_into, Infinite};
 
 pub use serde::{Deserialize, Serialize};
 
-use message::*;
-use files::*;
+pub use message::*;
+pub use files::*;
 
 pub use message::CreateMode;
 
-mod message;
-mod files;
+pub mod message;
+pub mod files;
+// pub mod parrallel_files;
 
 pub struct Client {
     to_materializer: Sender<MessageFromClient>,
@@ -54,6 +57,30 @@ pub struct Client {
 
     roots: HashMap<OsString, order>,
     my_root: OsString,
+}
+
+#[derive(Debug)]
+enum MessageFromClient {
+    Mut(Id, MutationCallback),
+    Obs(Observation),
+    EndOfSnapshot,
+    EarlyMut(Id, Result<(Arc<Path>, Stat), u32>),
+}
+
+impl MessageFromClient {
+    pub fn is_end_of_snapshot(&self) -> bool {
+        if let &MessageFromClient::EndOfSnapshot = self {
+            return true;
+        }
+        false
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum WhichPath {
+    Path1,
+    Path2,
+    Both,
 }
 
 impl Client {
@@ -100,7 +127,7 @@ impl Client {
         path: PathBuf,
         data: Vec<u8>,
         create_mode: CreateMode,
-        callback: Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Path), ()>) + Send>,
+        callback: Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Path), u32>) + Send>,
     ) {
         let id = Id::new();
         let msg = Mutation::Create {
@@ -116,7 +143,7 @@ impl Client {
         &mut self,
         path: PathBuf,
         version: Version,
-        callback: Box<for<'a, 'b> FnMut(Result<(&'a Path), ()>) + Send>,
+        callback: Box<for<'a, 'b> FnMut(Result<(&'a Path), u32>) + Send>,
     ) {
         let id = Id::new();
         let msg = Mutation::Delete { id, path, version };
@@ -128,7 +155,7 @@ impl Client {
         path: PathBuf,
         data: Vec<u8>,
         version: Version,
-        callback: Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Stat), ()>) + Send>,
+        callback: Box<for<'a, 'b> FnMut(Result<(&'a Path, &'b Stat), u32>) + Send>,
     ) {
         let id = Id::new();
         let msg = Mutation::Set {
@@ -144,7 +171,7 @@ impl Client {
         &mut self,
         old_path: PathBuf,
         new_path: PathBuf,
-        callback: Box<for<'a> FnMut(Result<&'a Path, ()>) + Send>,
+        callback: Box<for<'a> FnMut(Result<&'a Path, u32>) + Send>,
     ) {
         let id = Id::new();
         let old_mine = old_path.starts_with(&*self.my_root);
@@ -152,10 +179,16 @@ impl Client {
         let other = if !old_mine {
             assert!(new_mine);
             let root = old_path.components().skip(1).next().unwrap();
-            Some(self.roots[root.as_ref()])
+            if !self.roots.contains_key(root.as_os_str()) {
+                panic!("{:?} doesn't contain {:?}", self.roots, root);
+            }
+            Some(self.roots[root.as_os_str()])
         } else if !new_mine {
             let root = new_path.components().skip(1).next().unwrap();
-            Some(self.roots[root.as_ref()])
+            if !self.roots.contains_key(root.as_os_str()) {
+                panic!("{:?} doesn't contain {:?}", self.roots, root);
+            }
+            Some(self.roots[root.as_os_str()])
         } else {
             None
         };
@@ -194,12 +227,11 @@ impl Client {
         self.serialize_cache.clear();
     }
 
-    //TODO fn get_data, get_children
     pub fn exists(
         &mut self,
         path: PathBuf,
         watch: bool,
-        callback: Box<for<'a> FnMut(Result<(&Path, &Stat), ()>) + Send>,
+        callback: Box<for<'a> FnMut(Result<(&Path, &Stat), u32>) + Send>,
     ) {
         let id = Id::new();
         let obs = Observation::Exists {
@@ -215,7 +247,7 @@ impl Client {
         &mut self,
         path: PathBuf,
         watch: bool,
-        callback: Box<for<'a> FnMut(Result<(&Path, &[u8], &Stat), ()>) + Send>,
+        callback: Box<for<'a> FnMut(Result<(&Path, &[u8], &Stat), u32>) + Send>,
     ) {
         let id = Id::new();
         let obs = Observation::GetData {
@@ -231,7 +263,7 @@ impl Client {
         &mut self,
         path: PathBuf,
         watch: bool,
-        callback: Box<for<'a> FnMut(Result<(&Path, &Iterator<Item = &Path>), ()>) + Send>,
+        callback: Box<for<'a> FnMut(Result<(&Path, &Iterator<Item = &Path>), u32>) + Send>,
     ) {
         let id = Id::new();
         let obs = Observation::GetChildren {
@@ -251,22 +283,35 @@ impl Client {
 }
 
 struct Materializer {
-    data: FileSystem,
-
+    // data: FileSystem,
     to_server: AtomicWriteHandle<[u8]>,
 
     from_client: Receiver<MessageFromClient>,
     loopback: Sender<MessageFromClient>,
 
+    my_root: OsString,
     //TODO (Id, index) and multiversion?
-    early_mutations: HashMap<Id, Result<(Arc<Path>, Stat), ()>>,
+    early_mutations: HashMap<Id, Result<(Arc<Path>, Stat), u32>>,
     waiting_mutations: HashMap<Id, MutationCallback>,
     waiting_observations: VecDeque<Observation>,
+
+    balancer: RandomState,
+    to_files: Vec<Sender<Op>>,
 
     handle: ReadHandle<[u8]>,
     color: order,
 
     serialize_cache: Vec<u8>,
+}
+
+enum Op {
+    Mut(
+        Mutation,
+        Vec<OrderIndex>,
+        Option<MutationCallback>,
+        WhichPath,
+    ),
+    Obs(Observation),
 }
 
 impl Materializer {
@@ -279,14 +324,102 @@ impl Materializer {
         my_root: OsString,
         roots: HashMap<OsString, order>,
     ) -> Self {
+        let balancer = RandomState::new();
+        let to_files = (0..1)
+            .map(|me| {
+                let balancer = balancer.clone();
+                let mut files = FileSystem::new(my_root.clone(), roots.clone());
+                let my_root = my_root.clone().into_string().expect("root not valid");
+                // for i in 0..2_000_000 {
+                //     let mut hasher = balancer.build_hasher();
+                //     let path: PathBuf = format!("{}{}", &my_root, i).into();
+                //     let mut hasher = balancer.build_hasher();
+                //     (&*path).hash(&mut hasher);
+                //     let hash = hasher.finish();
+                //     if hash % 2 == me {
+                //         files.create(CreateMode::persistent(), path, vec![]).expect("no create");
+                //     }
+                // }
+                let to_server = to_server.clone();
+                let loopback = loopback.clone();
+                let mut serialize_cache = vec![];
+                let (send, recv) = channel();
+                ::std::thread::spawn(move || {
+                    for op in recv.iter() {
+                        match op {
+                            Op::Mut(m, locs, mut cb, which_path) => {
+                                files.apply_mutation(m, which_path, |id, result, msg1, msg2| {
+                                    for ref new_msg in msg1.into_iter().chain(msg2) {
+                                        let &id = new_msg.id();
+                                        serialize_into(&mut serialize_cache, &new_msg, Infinite)
+                                            .expect("cannot serialize");
+                                        // assert!(chain != 0.into());
+                                        if locs.len() > 1 {
+                                            assert_eq!(locs.len(), 2);
+                                            // to_server.async_no_remote_multiappend(
+                                            //     &[locs[0].0, locs[1].0],
+                                            //     &*serialize_cache,
+                                            //     &[],
+                                            // );
+                                            for loc in &locs {
+                                                to_server.async_append(loc.0, &*serialize_cache, &[]);
+                                            }
+                                        } else {
+                                            to_server.async_append(
+                                                locs[0].0,
+                                                &*serialize_cache,
+                                                &[],
+                                            );
+                                        }
+
+                                        serialize_cache.clear();
+                                        loopback
+                                            .send(MessageFromClient::Mut(
+                                                id,
+                                                MutationCallback::None,
+                                            ))
+                                            .unwrap();
+                                    }
+                                    if id.client != client_id() {
+                                        return;
+                                    }
+                                    match &mut cb {
+                                        &mut Some(ref mut callback) => {
+                                            do_callback(callback, result);
+                                        }
+                                        &mut None => {
+                                            let result =
+                                                result.map(|(p, s)| (p.clone(), s.clone()));
+                                            // early_mutations.insert(id, result);
+                                            loopback
+                                                .send(MessageFromClient::EarlyMut(id, result))
+                                                .unwrap()
+                                            //TODO send via loopback
+                                            //     if in waiting, finish
+                                            //     else add to early
+                                        }
+                                    }
+                                })
+                            }
+                            Op::Obs(o) => files.observe(o),
+                        }
+                    }
+                    // panic!("materializer dead", files);
+                });
+                send
+            })
+            .collect();
         Materializer {
-            data: FileSystem::new(my_root, roots),
+            // data: FileSystem::new(my_root, roots),
             to_server,
             from_client,
             loopback,
+            my_root,
             early_mutations: Default::default(),
             waiting_mutations: Default::default(),
             waiting_observations: Default::default(),
+            balancer,
+            to_files,
             handle,
             color,
             serialize_cache: Default::default(),
@@ -325,13 +458,13 @@ impl Materializer {
             match msg {
                 EndOfSnapshot => return true,
                 Obs(observation) => waiting_observations.push_back(observation),
-                Mut(mutation_id, callback) => {
+                Mut(mutation_id, mut callback) => {
                     let early = early_mutations.remove(&mutation_id);
                     match early {
                         Some(res) => {
                             do_callback(
-                                callback,
-                                res.as_ref().map(|&(ref p, ref s)| (p, s)).map_err(|_| ()),
+                                &mut callback,
+                                res.as_ref().map(|&(ref p, ref s)| (p, s)).map_err(|&u| u),
                             );
                         }
                         None => {
@@ -339,6 +472,18 @@ impl Materializer {
                         }
                     }
                 }
+                EarlyMut(id, result) => match waiting_mutations.remove(&id) {
+                    Some(mut callback) => {
+                        let result = result
+                            .as_ref()
+                            .map(|&(ref p, ref s)| (p, s))
+                            .map_err(|&u| u);
+                        do_callback(&mut callback, result)
+                    }
+                    None => {
+                        early_mutations.insert(id, result);
+                    }
+                },
             }
             return false;
         };
@@ -358,52 +503,101 @@ impl Materializer {
             match self.handle.get_next() {
                 Err(GetRes::Done) => break 'play,
                 Err(e) => panic!(e),
-                Ok((bytes, ..)) => {
-                    let &mut Materializer {
-                        ref mut data,
-                        ref mut serialize_cache,
-                        ref mut to_server,
-                        ref mut loopback,
-                        ref mut waiting_mutations,
-                        ref mut early_mutations,
-                        color,
-                        ..
-                    } = self;
-                    let msg = deserialize(bytes).expect("bad msg");
-                    data.apply_mutation(msg, |id, result, msg1, msg2| {
-                        for (chain, ref new_msg) in msg1.into_iter().chain(msg2) {
-                            let &id = new_msg.id();
-                            serialize_into(serialize_cache, &new_msg, Infinite)
-                                .expect("cannot serialize");
-                            assert!(chain != 0.into());
-                            if chain != color {
-                                to_server.async_no_remote_multiappend(
-                                    &[color, chain],
-                                    &*serialize_cache,
-                                    &[],
-                                );
-                            } else {
-                                to_server.async_append(color, &*serialize_cache, &[]);
-                            }
+                Ok((bytes, locs)) => {
+                    let msg: Mutation = deserialize(bytes).expect("bad msg");
+                    //FIXME rename across partitions?
+                    //FIXME clean into match
+                    // let my_root = &self.my_root;
+                    // let use_path = msg.path().starts_with(my_root);
+                    // let use_path2 = msg.path2().map(|p| p.starts_with(my_root));
+                    // if let Some(p2) = msg.path2() {
+                    //     println!("{:?} => {:?} @ {:?}", msg.path(), p2, locs);
+                    // }
 
-                            serialize_cache.clear();
-                            let _ =
-                                loopback.send(MessageFromClient::Mut(id, MutationCallback::None));
-                        }
-                        if id.client != client_id() {
-                            return;
-                        }
-                        let waiting = waiting_mutations.remove(&id);
-                        match waiting {
-                            Some(callback) => {
-                                do_callback(callback, result);
-                            }
-                            None => {
-                                let result = result.map(|(p, s)| (p.clone(), s.clone()));
-                                early_mutations.insert(id, result);
-                            }
-                        }
-                    });
+                    // let which_mine = match (use_path, use_path2) {
+                    //     (false, None) | (false, Some(false)) => continue 'play,
+                    //     (true, None) | (true, Some(false)) => WhichPath::Path1,
+                    //     (false, Some(true)) => WhichPath::Path2,
+                    //     (true, Some(true)) => WhichPath::Both,
+                    // };
+                //     let (hash, hash2) = match which_mine {
+                //         WhichPath::Path1 => {
+                //             let mut hasher = self.balancer.build_hasher();
+                //             msg.path().hash(&mut hasher);
+                //             (Some(hasher.finish()), None)
+                //         }
+                //         WhichPath::Path2 => {
+                //             let mut hasher = self.balancer.build_hasher();
+                //             msg.path2().unwrap().hash(&mut hasher);
+                //             (None, Some(hasher.finish()))
+                //         }
+                //         WhichPath::Both => {
+                //             let h1 = {
+                //                 let mut hasher = self.balancer.build_hasher();
+                //                 msg.path().hash(&mut hasher);
+                //                 Some(hasher.finish())
+                //             };
+                //             let h2 = {
+                //                 let mut hasher = self.balancer.build_hasher();
+                //                 msg.path2().unwrap().hash(&mut hasher);
+                //                 Some(hasher.finish())
+                //             };
+                //             (h1, h2)
+                //         }
+                //     };
+                //     let num_file_threads = self.to_files.len();
+                //     let (hash, hash2) = (
+                //         hash.map(|h| h as usize % num_file_threads),
+                //         hash2.map(|h| h as usize % num_file_threads)
+                //     );
+                //     match (hash, hash2) {
+                //         (None, None) => continue 'play,
+                //         (Some(h), Some(h2)) => if h == h2 {
+                //             let waiting = self.waiting_mutations.remove(msg.id());
+                //             self.to_files[h]
+                //                 .send(Op::Mut(msg, locs.to_vec(), waiting, WhichPath::Both))
+                //                 .unwrap();
+                //         } else {
+                //             let waiting = self.waiting_mutations.remove(msg.id());
+                //             self.to_files[h]
+                //                 .send(Op::Mut(
+                //                     msg.clone(),
+                //                     locs.to_vec(),
+                //                     waiting,
+                //                     WhichPath::Path1,
+                //                 ))
+                //                 .unwrap();
+                //             self.to_files[h2]
+                //                 .send(Op::Mut(msg, locs.to_vec(), None, WhichPath::Path2))
+                //                 .unwrap();
+                //         },
+                //         (Some(h), None) => {
+                //             let waiting = self.waiting_mutations.remove(msg.id());
+                //             self.to_files[h]
+                //                 .send(Op::Mut(
+                //                     msg.clone(),
+                //                     locs.to_vec(),
+                //                     waiting,
+                //                     WhichPath::Path1,
+                //                 ))
+                //                 .unwrap()
+                //         }
+                //         (None, Some(h2)) => {
+                //             let waiting = self.waiting_mutations.remove(msg.id());
+                //             self.to_files[h2]
+                //                 .send(Op::Mut(
+                //                     msg,
+                //                     locs.to_vec(),
+                //                     waiting,
+                //                     WhichPath::Path2,
+                //                 ))
+                //                 .unwrap()
+                //         }
+                //     }
+                    let waiting = self.waiting_mutations.remove(msg.id());
+                    self.to_files[0]
+                        .send(Op::Mut(msg, locs.to_vec(), waiting, WhichPath::Both))
+                        .unwrap();
                 }
             }
         }
@@ -411,8 +605,14 @@ impl Materializer {
 
     fn handle_observations(&mut self) {
         for observation in self.waiting_observations.drain(..) {
+            let hash = {
+                let mut hasher = self.balancer.build_hasher();
+                observation.path().hash(&mut hasher);
+                hasher.finish() as usize
+            } % self.to_files.len();
+            self.to_files[hash].send(Op::Obs(observation)).unwrap();
             //FIXME observation thread?
-            self.data.observe(observation);
+            // self.data.observe(observation);
             // let res = self.data.observe(observation);
             // if let Some(observation, data) = res {
             //     do_observation(observation, data)
@@ -421,13 +621,13 @@ impl Materializer {
     }
 }
 
-fn do_callback(callback: MutationCallback, result: Result<(&Arc<Path>, &Stat), ()>) {
+fn do_callback(callback: &mut MutationCallback, result: Result<(&Arc<Path>, &Stat), u32>) {
     use MutationCallback::*;
     match callback {
-        Stat(mut callback) => callback(result.map(|(p, s)| (&**p, s))),
-        Path(mut callback) => callback(result.map(|(p, _)| (&**p, &**p))),
-        Void(mut callback) => callback(result.map(|(p, _)| &**p)),
-        None => {}
+        &mut Stat(ref mut callback) => callback(result.map(|(p, s)| (&**p, s))),
+        &mut Path(ref mut callback) => callback(result.map(|(p, _)| (&**p, &**p))),
+        &mut Void(ref mut callback) => callback(result.map(|(p, _)| &**p)),
+        &mut None => {}
     }
 }
 
@@ -457,6 +657,8 @@ mod tests {
             ::std::thread::yield_now()
         }
 
+        message::set_client_id(101);
+
         let chain = order::from(101);
 
         let (reader, writer) = LogHandle::<[u8]>::unreplicated_with_servers(&[
@@ -467,7 +669,7 @@ mod tests {
 
         let my_root = "/abcd/".into();
         let mut roots = HashMap::new();
-        roots.insert("/abcd/".into(), chain);
+        roots.insert("abcd".into(), chain);
         let mut client = Client::new(reader, writer, chain, my_root, roots);
         println!("start test.");
 
@@ -486,6 +688,16 @@ mod tests {
                 Box::new(move |res| finished.send(res.map(|(p, _)| p.to_path_buf())).unwrap()),
             );
             done.recv().unwrap().unwrap()
+        };
+
+        let rename = |client: &mut Client, old, new| {
+            let (finished, done) = channel();
+            client.rename(
+                old,
+                new,
+                Box::new(move |res| finished.send(res.map(|_| ())).unwrap()),
+            );
+            done.recv().unwrap().is_ok()
         };
 
         let set_data = |client: &mut Client, name, data| {
@@ -519,9 +731,6 @@ mod tests {
             done.recv().unwrap().unwrap()
         };
 
-        let name = create(&mut client, "/abcd".into(), vec![]);
-        assert_eq!(&*name, path(&"/abcd"));
-
         for i in 0..100 {
             let name = format!("/abcd/{}", i);
             let created = create(&mut client, name.clone().into(), vec![1, 2, 3, i]);
@@ -531,13 +740,42 @@ mod tests {
             if i % 2 == 0 {
                 let set = set_data(&mut client, name.clone().into(), vec![5, 5, 5, 5, 5, i]);
                 assert!(set);
-                assert_eq!(get_data(&mut client, name.clone().into()), vec![5, 5, 5, 5, 5, i]);
+                assert_eq!(
+                    get_data(&mut client, name.clone().into()),
+                    vec![5, 5, 5, 5, 5, i]
+                );
             }
+            if i % 10 == 0 {
+                let ok = rename(
+                    &mut client,
+                    name.clone().into(),
+                    format!("/abcd/{}_{}", i, i).into(),
+                );
+                assert!(ok);
+            }
+            if i > 11 && i % 11 == 0 && (i - 11) % 10 != 0 {
+                let ok = rename(
+                    &mut client,
+                    name.clone().into(),
+                    format!("/abcd/{}", i - 11).into(),
+                );
+                //FIXME we don't know which thread gets the callback,
+                //      so we don't know if it will be ok or not
+                //assert!(!ok, "/abcd/{} => /abcd/{}", i, i - 11);
+            }
+            // if i > 0 && i % 11 == 0 {
+            //     let ok = rename(
+            //         &mut client,
+            //         format!("/abcd/Q{}", i - 11).into(),
+            //         format!("/abcd/P{}", i - 11).into(),
+            //     );
+            //     assert!(!ok);
+            // }
         }
         for i in 0..100 {
+            let name = format!("/abcd/{}", i);
             if i % 10 != 0 {
-                let name = format!("/abcd/{}", i);
-                assert!(exists(&mut client, name.clone().into()));
+                assert!(exists(&mut client, name.clone().into()), "{}", name);
                 let data = if i % 2 == 0 {
                     vec![5, 5, 5, 5, 5, i]
                 } else {
@@ -545,8 +783,17 @@ mod tests {
                 };
                 assert_eq!(get_data(&mut client, name.clone().into()), data);
             } else {
-                //TODO
+                let rename = format!("/abcd/{}_{}", i, i);
+                assert!(!exists(&mut client, name.clone().into()), "{}", name);
+                assert!(exists(&mut client, rename.clone().into()), "{}", name);
+                let data = if i % 2 == 0 {
+                    vec![5, 5, 5, 5, 5, i]
+                } else {
+                    vec![1, 2, 3, i]
+                };
+                assert_eq!(get_data(&mut client, rename.clone().into()), data);
             }
+            //TODO P Q
         }
         println!("test done.");
     }

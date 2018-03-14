@@ -79,7 +79,7 @@ where ToWorkers: DistributeToWorkers<T> {
     //TODO per chain locks...
     total_servers: u32,
     this_server_num: u32,
-    //_seen_ids: HashSet<Uuid>,
+    // seen_ids: hash::UuidHashSet,
     to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
     _pd: PhantomData<T>,
 
@@ -187,6 +187,7 @@ pub enum ToWorker<T: Send + Sync> {
         index: u64,
         trie_slot: *mut ValEdge,
         storage: ValEdge,
+        timestamp: u64,
         t: T,
     },
 
@@ -222,6 +223,7 @@ pub enum ToWorker<T: Send + Sync> {
         index: u64,
         trie_slot: *mut ValEdge,
         storage: ValEdge,
+        timestamp: u64,
         t: T,
     },
 

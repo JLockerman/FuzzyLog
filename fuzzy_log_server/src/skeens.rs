@@ -7,7 +7,7 @@ use std::cmp::Ordering::*;
 
 use uuid::Uuid;
 
-use hash::{HashMap, UuidHashMap};
+use hash::UuidHashMap;
 
 use vec_deque_map::VecDequeMap;
 
@@ -22,6 +22,7 @@ pub struct SkeensState<T: Copy> {
     got_max_timestamp: BinaryHeap<GotMax<T>>,
     append_status: UuidHashMap<AppendStatus>,
     recovering: UuidHashMap<(u64, Box<(Uuid, Box<[OrderIndex]>)>)>,
+    // early_sk2: UuidHashMap<u64>,
 }
 
 impl<T: Copy> ::std::fmt::Debug for SkeensState<T> {
@@ -54,7 +55,6 @@ pub enum SkeensAppendRes {
     NewAppend(Time, QueueIndex),
 }
 
-#[cfg(test)]
 impl SkeensAppendRes {
     fn assert_new(self) {
         match self {
@@ -82,6 +82,7 @@ impl<T: Copy> SkeensState<T> {
             got_max_timestamp: Default::default(),
             next_timestamp: 1,
             recovering: Default::default(),
+            // early_sk2: Default::default(),
         }
     }
 
@@ -382,7 +383,21 @@ impl<T: Copy> SkeensState<T> {
         //FIXME check both maps
 
         let start_index = self.phase1_queue.start_index();
-        if start_index > node_num { return false }
+        assert!(start_index <= node_num, "SKEENS single re-append {} <= {}", start_index, node_num);
+        // if start_index > node_num { return false }
+
+        // if let Some(early) = self.early_sk2.get(&id) {
+        //             println!("SKEENS got s round 1 {} @ {}, {:#?}, {:#?}, {}, {}, {:?}",
+        //                 early, self.next_timestamp, self.phase1_queue, self.got_max_timestamp, id, timestamp, node_num
+        //             );
+        //         }
+        // if !self.early_sk2.is_empty() {
+        //     println!("Waiting on early sk2, ts {} node_num {}, {:#?}", timestamp, node_num, self);
+        // }
+
+        if self.next_timestamp <= timestamp {
+            self.next_timestamp = timestamp + 1
+        }
 
         match self.append_status.entry(id) {
             Occupied(..) => false,
@@ -421,7 +436,25 @@ impl<T: Copy> SkeensState<T> {
         //FIXME check both maps
 
         let start_index = self.phase1_queue.start_index();
-        if start_index > node_num { return false }
+        assert!(start_index <= node_num, "SKEENS multi re-append {} <= {}", start_index, node_num);
+        // if start_index > node_num { return false }
+
+        // if let Some(early) = self.early_sk2.get(&id) {
+        //             println!("SKEENS got m round 1 {} @ self.nts {}, {:#?}, {:#?}, {}, ts {}, node_num {:?}",
+        //                 early,
+        //                 self.next_timestamp,
+        //                 self.phase1_queue,
+        //                 self.got_max_timestamp,
+        //                 id, timestamp, node_num
+        //             );
+        //         }
+        // if !self.early_sk2.is_empty() {
+        //     println!("Waiting on early sk2, ts {} node_num {}, {:#?}", timestamp, node_num, self);
+        // }
+
+        if self.next_timestamp <= timestamp {
+            self.next_timestamp = timestamp + 1
+        }
 
         match self.append_status.entry(id) {
             Occupied(..) => false,
@@ -464,7 +497,12 @@ impl<T: Copy> SkeensState<T> {
         t: T,
     ) -> bool {
         let start_index = self.phase1_queue.start_index();
-        if start_index > node_num { return false }
+        assert!(start_index <= node_num, "SKEENS snap re-append {} <= {}", start_index, node_num);
+        // if start_index > node_num { return false }
+
+        if self.next_timestamp <= timestamp {
+            self.next_timestamp = timestamp + 1
+        }
 
         match self.append_status.entry(id) {
             Occupied(..) => false,
@@ -490,20 +528,35 @@ impl<T: Copy> SkeensState<T> {
     pub fn replicate_round2<F>(&mut self, id: &Uuid, max_timestamp: u64, index: TrieIndex, mut f: F)
     where F: FnMut(ReplicatedSkeens<T>) {
         let offset = match self.append_status.get(&id) {
-            Some(&AppendStatus::Phase1(offset)) | Some(&AppendStatus::Singleton(offset)) =>
-                offset,
+            Some(&AppendStatus::Phase1(offset)) | Some(&AppendStatus::Singleton(offset)) => {
+                // if let Some(early) = self.early_sk2.remove(id) {
+                //     println!("SKEENS got round 1 {} @ {}, {:#?}, {:#?}, {}, {}, {:?}",
+                //         early, self.next_timestamp, self.phase1_queue, self.got_max_timestamp, id, max_timestamp, index
+                //     );
+                // }
+                offset
+            },
             _ => {
-                trace!("SKEENS early round 2 {:?}", self);
+                // TODO panic!("SKEENS early round 2 @ {:?}, {}, {}, {:?}", self, id, max_timestamp, index);
+
+                // let early = self.early_sk2.entry(*id).or_insert(0);
+                // *early += 1;
+                // println!("SKEENS early round 2 {} @ self.nts {}, {:#?}, {:#?}, {}, mts {}, idx {:?}",
+                //     *early, self.next_timestamp, self.phase1_queue, self.got_max_timestamp, id, max_timestamp, index
+                // );
                 return
             },
         };
+        if self.next_timestamp <= max_timestamp {
+            self.next_timestamp = max_timestamp + 1
+        }
         self.phase1_queue.get_mut(offset).map(|w|
             w.replicate_max_timetamp(max_timestamp, index, id));
         if offset != self.phase1_queue.start_index() {
             trace!("SKEENS not ready to flush replica {:?}", self);
             return
         }
-        trace!("{:#?}", self);
+        trace!("flush {:#?}", self);
         while self.phase1_queue.front().map(|w| w.has_replication()).unwrap_or(false) {
             let replica = self.phase1_queue.pop_front().expect("flushing nothing");
             //let old_start = self.phase1_queue.start_index() - 1;
@@ -599,7 +652,7 @@ pub enum ReplicatedSkeens<T> {
     Multi{index: TrieIndex, storage: SkeensMultiStorage, max_timestamp: Time, t: T},
     Senti{index: TrieIndex, storage: SkeensMultiStorage, max_timestamp: Time, t: T},
     Snap{index: TrieIndex, storage: SkeensMultiStorage, max_timestamp: Time, t: T},
-    Single{index: TrieIndex, storage: ValEdge, t: T},
+    Single{index: TrieIndex, storage: ValEdge, max_timestamp: Time, t: T},
 }
 
 #[allow(dead_code)]
@@ -795,7 +848,7 @@ impl<T: Copy> WaitingForMax<T> {
             &mut Single{timestamp, storage, t, id, ..}
             | &mut SimpleSingle{timestamp, storage, t, id, ..} => {
                 debug_assert_eq!(&id, rid);
-                //assert_eq!(max_timestamp, timestamp);
+                assert_eq!(max_timestamp, timestamp);
                 ReplicatedSingle{
                     max_timestamp: timestamp,
                     index: index,
@@ -872,8 +925,8 @@ impl<T: Copy> WaitingForMax<T> {
     fn to_replica(self) -> (Uuid, ReplicatedSkeens<T>) {
         use self::WaitingForMax::*;
         match self {
-            ReplicatedSingle{index, storage, t, id, ..} =>
-                (id, ReplicatedSkeens::Single{index: index, storage: storage, t: t}),
+            ReplicatedSingle{index, storage, t, id, max_timestamp, ..} =>
+                (id, ReplicatedSkeens::Single{index: index, storage: storage, max_timestamp, t: t}),
 
             ReplicatedMulti{index, storage, t, id, max_timestamp, ..} => {
                 (id, ReplicatedSkeens::Multi{

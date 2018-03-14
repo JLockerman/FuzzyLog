@@ -266,6 +266,10 @@ where V: Storeable {
         LogBuilder{ id: Some(Ipv4SocketAddr::from_bytes(bytes)), .. self }
     }
 
+    pub fn client_num(self, id: u64) -> Self {
+        LogBuilder{ id: Some(Ipv4SocketAddr::from_u64(id)), .. self }
+    }
+
     pub fn build(self) -> LogHandle<V> {
         let LogBuilder {
             servers, chains, reads_my_writes, fetch_boring_multis, ack_writes, id, _pd,
