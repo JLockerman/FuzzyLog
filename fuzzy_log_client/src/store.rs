@@ -51,6 +51,7 @@ pub struct AsyncTcpStore<Socket, C: AsyncStoreClient> {
     //sent_reads: HashMap<OrderIndex, Vec<u8>>,
     sent_reads: HashMap<OrderIndex, u16>,
     waiting_buffers: VecDeque<Vec<u8>>,
+    max_timestamp_seen: HashMap<order, u64>,
     num_chain_servers: usize,
     lock_token: Token,
     //FIXME change to spsc::Receiver<Buffer?>
@@ -219,6 +220,8 @@ where C: AsyncStoreClient {
             finished: false,
             reads_my_writes: false,
 
+            max_timestamp_seen: Default::default(),
+
             print_data: Default::default(),
         }, to_store))
     }
@@ -278,6 +281,8 @@ where C: AsyncStoreClient {
             new_multi: true,
             finished: false,
             reads_my_writes: false,
+
+            max_timestamp_seen: Default::default(),
 
             print_data: Default::default(),
         }, to_store))
@@ -350,6 +355,8 @@ where C: AsyncStoreClient {
             new_multi: true,
             finished: false,
             reads_my_writes: false,
+
+            max_timestamp_seen: Default::default(),
 
             print_data: Default::default(),
         }, to_store))
@@ -425,6 +432,8 @@ where C: AsyncStoreClient {
             finished: false,
             reads_my_writes: false,
 
+            max_timestamp_seen: Default::default(),
+
             print_data: Default::default(),
         }, to_store))
     }
@@ -480,6 +489,8 @@ where C: AsyncStoreClient {
             new_multi: false,
             finished: false,
             reads_my_writes: false,
+
+            max_timestamp_seen: Default::default(),
 
             print_data: Default::default(),
         }, to_store))
@@ -662,7 +673,7 @@ where PerServer<S>: Connected,
     fn handle_new_requests_from_client(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
         //trace!("CLIENT got new req");
-        let msg = match self.from_client.try_recv() {
+        let mut msg = match self.from_client.try_recv() {
             Ok(msg) => msg,
             Err(TryRecvError::Empty) => return false,
             //TODO Err(TryRecvError::Disconnected) => panic!("client disconnected.")
@@ -688,7 +699,16 @@ where PerServer<S>: Connected,
                 self.add_single_server_send(s, msg)
             }
             EntryLayout::Data => {
-                let loc = bytes_as_entry(&msg).locs()[0].0;
+                let loc;
+                {
+
+                    let mut contents = bytes_as_entry_mut(&mut msg);
+                    loc = contents.as_ref().locs()[0].0;
+                    let timestamp = self.max_timestamp_seen.get(&loc).cloned().unwrap_or_else(|| 0);
+                    *contents.lock_mut() = timestamp;
+                    // assert!(*contents.lock_mut() >= 1, "{:#?}", self.max_timestamp_seen);
+                    // assert!(contents.as_ref().lock_num() >= 1);
+                }
                 let s = self.write_server_for_chain(loc);
                 trace!("CLIENT will write {:?}, server {:?}:{:?}",
                     loc, s, self.num_chain_servers);
@@ -697,9 +717,14 @@ where PerServer<S>: Connected,
             }
             EntryLayout::Multiput => {
                 trace!("CLIENT will multi write");
+                //FIXME set max_timestamp from local
                 //TODO
                 let use_fastpath = true;
                 if use_fastpath && self.is_single_node_append(&msg) {
+                    {
+                        let mut contents = bytes_as_entry_mut(&mut msg);
+                        *contents.lock_mut() = 1;
+                    }
                     let chain = bytes_as_entry(&msg).locs()[0].0;
                     let s = self.write_server_for_chain(chain);
                     self.add_single_server_send(s, msg)
@@ -1068,6 +1093,7 @@ where PerServer<S>: Connected,
                 //if lock
                 //    for server in v.servers()
                 //         server.send_lock+data
+
                 WriteState::ToLockServer(mut msg) => {
                     unreachable!();
                     trace!("CLIENT finished lock");
@@ -1159,6 +1185,7 @@ where PerServer<S>: Connected,
                         num_chain_servers,
                         &remaining_servers,
                         &timestamps,
+                        &mut self.max_timestamp_seen,
                         unreplicated
                     );
                     match ready_for_skeens2 {
@@ -1222,6 +1249,12 @@ where PerServer<S>: Connected,
                             //TODO assert!(Rc::get_mut(&mut buf).is_some());
                             //let locs = buf.locs().to_vec();
                             let locs = bytes_as_entry(&b).locs().to_vec();
+                            for &OrderIndex(o, _) in &locs {
+                                let mts = self.max_timestamp_seen.entry(o).or_insert(max_ts);
+                                if max_ts >= *mts {
+                                    *mts = max_ts
+                                }
+                            }
                             Some(locs)
                         } else { None }
                     };
@@ -1269,6 +1302,7 @@ where PerServer<S>: Connected,
                         num_chain_servers,
                         &remaining_servers,
                         &timestamps,
+                        &mut self.max_timestamp_seen,
                         unreplicated
                     );
                     match ready_for_skeens2 {
@@ -1338,6 +1372,14 @@ where PerServer<S>: Connected,
                         if filled < contents.locs().len() {
                             return Err(())
                         }
+                        let max_ts = contents.lock_num();
+                        // assert!(max_ts >= 1);
+                        for &OrderIndex(o, _) in contents.locs() {
+                            let mts = self.max_timestamp_seen.entry(o).or_insert(max_ts);
+                            if max_ts >= *mts {
+                                *mts = max_ts
+                            }
+                        }
                     }
                     let locs = packet.contents().locs().to_vec();
                     let e = self.client.on_finished_write(id, locs);
@@ -1357,6 +1399,7 @@ where PerServer<S>: Connected,
                 num_chain_servers: usize,
                 remaining_servers: &Rc<RefCell<HashSet<usize>>>,
                 timestamps: &Rc<RefCell<Box<[u64]>>>,
+                max_timestamp_seen: &mut HashMap<order, u64>,
                 unreplicated: bool,
             ) -> Option<u64> {
                 let mut r = remaining_servers.borrow_mut();
@@ -1384,7 +1427,13 @@ where PerServer<S>: Connected,
 
                 if finished_writes {
                     let max_ts = ts.iter().cloned().max().unwrap();
-                    for t in ts.iter() { assert!(&max_ts >= t); }
+                    for &OrderIndex(o, _) in e.locs() {
+                        let mts = max_timestamp_seen.entry(o).or_insert(max_ts);
+                        if max_ts >= *mts {
+                            *mts = max_ts
+                        }
+                    }
+                    // for t in ts.iter() { assert!(&max_ts >= t); }
                     trace!("CLIENT finished snap skeens1 {:?}: {:?} max {:?}",
                         e.id(), ts, max_ts);
                     Some(max_ts)
@@ -1454,14 +1503,31 @@ where PerServer<S>: Connected,
         //FIXME remove
         let mut was_needed = false;
         let mut is_sentinel_loc = false;
-        for &oi in packet.contents().locs() {
+        let contents = packet.contents();
+        let max_ts = contents.lock_num();
+        let num_locs = contents.locs().len();
+        // if num_locs > 1 && contents.flag().contains(EntryFlag::TakeLock) {
+        //     assert!(max_ts > 0, "max_ts for {:?} = {:?}", contents.locs(), max_ts);
+        // }
+        // println!("> {:?}: {:?}", contents.locs(), contents.lock_num());
+        for &oi in contents.locs() {
             if oi == OrderIndex(0.into(), 0.into()) {
                 is_sentinel_loc = true;
                 continue
             }
             if my_write {
                 assert!(oi.1 != entry::from(0), "mywrite {:?}", packet.contents());
+            } else {
+
             }
+            //FIXME only needed?
+            if contents.flag().contains(EntryFlag::ReadSuccess) {
+                let mts = self.max_timestamp_seen.entry(oi.0).or_insert(max_ts);
+                if max_ts >= *mts {
+                    *mts = max_ts
+                }
+            }
+
             if is_sentinel && !is_sentinel_loc  {
                 // we don't want to return a sentinel for an actual multi;
                 // we need the data

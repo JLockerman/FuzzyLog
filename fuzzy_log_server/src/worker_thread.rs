@@ -83,7 +83,9 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
         SingleSkeens { mut buffer, storage, storage_loc, time, queue_num, t, } => unsafe {
             {
                 let len = {
+                    // assert!(time >= 1);
                     let mut e = buffer.contents_mut();
+                    *e.lock_mut() = time;
                     e.flag_mut().insert(EntryFlag::ReadSuccess);
                     e.as_ref().len()
                 };
@@ -134,6 +136,8 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     color = locs[0].0;
                     locs[0].1 = entry::from(index as u32);
                 }
+                // assert!(timestamp >= 1);
+                *e.lock_mut() = timestamp;
                 debug_assert!(e.flag_mut().contains(EntryFlag::ReadSuccess));
                 e.as_ref().len()
             };
@@ -312,7 +316,7 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                     );
                 }
             } else {
-                unreachable!();
+                // unreachable!();
                 u = send(ToSend::Nothing, t)
             };
             (None, u)
@@ -371,13 +375,18 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, T) -> U {
                 let (_ts, _indicies, st0, st1) = storage.get_mut();
                 let is_sentinel = {
                     let mut st0 = bytes_as_entry_mut(st0);
+                    // assert!(timestamp >= 1);
+                    *st0.lock_mut() = timestamp;
                     id = *st0.as_ref().id();
                     let st0_l = st0.locs_mut();
                     let i = st0_l.iter().position(|oi| oi.0 == chain).expect("no val");
                     //FIXME atomic?
                     st0_l[i].1 = loc.1;
+
                     if let &mut Some(ref mut st1) = st1 {
-                        bytes_as_entry_mut(st1).locs_mut()[i].1 = loc.1;
+                        let mut st1 = bytes_as_entry_mut(st1);
+                        st1.locs_mut()[i].1 = loc.1;
+                        *st1.lock_mut() = timestamp;
                         let s_i = st0_l.iter()
                             .position(|oi| oi == &OrderIndex(0.into(), 0.into()));
                         i > s_i.expect("no index")

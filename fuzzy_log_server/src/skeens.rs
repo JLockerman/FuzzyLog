@@ -18,6 +18,7 @@ use packets::OrderIndex;
 
 pub struct SkeensState<T: Copy> {
     next_timestamp: u64,
+    last_flush: u64,
     phase1_queue: VecDequeMap<WaitingForMax<T>>,
     got_max_timestamp: BinaryHeap<GotMax<T>>,
     append_status: UuidHashMap<AppendStatus>,
@@ -81,13 +82,14 @@ impl<T: Copy> SkeensState<T> {
             phase1_queue: Default::default(),
             got_max_timestamp: Default::default(),
             next_timestamp: 1,
+            last_flush: 0,
             recovering: Default::default(),
             // early_sk2: Default::default(),
         }
     }
 
     pub fn add_single_append(
-        &mut self, id: Uuid, storage: ValEdge, t: T
+        &mut self, id: Uuid, timestamp: Time, storage: ValEdge, t: T
     ) -> SkeensAppendRes {
         debug_assert!({
             // debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len());
@@ -98,6 +100,9 @@ impl<T: Copy> SkeensState<T> {
         });
 
         assert!(!self.phase1_queue.is_empty());
+        if self.next_timestamp <= timestamp {
+            self.next_timestamp = timestamp + 1;
+        }
 
         match self.append_status.entry(id) {
             Occupied(o) => {
@@ -126,6 +131,15 @@ impl<T: Copy> SkeensState<T> {
                 SkeensAppendRes::NewAppend(timestamp, node_num)
             },
         }
+    }
+
+    pub fn need_single_at(&mut self, timestamp: Time) -> bool {
+        let is_empty = self.phase1_queue.is_empty() && self.got_max_timestamp.is_empty();
+        if !is_empty && self.last_flush <= timestamp {
+            return true
+        }
+        // self.next_timestamp = timestamp + 1;
+        false
     }
 
     //AKA skeens1
@@ -323,6 +337,7 @@ impl<T: Copy> SkeensState<T> {
             //      due to the failing path,
             //      instead we should just set state to complete on multi-server appends
             let _old = self.append_status.remove(&id);
+            self.last_flush = ::std::cmp::max(g.timestamp(), self.last_flush);
             debug_assert!(_old.is_some(), "no skeen for {:?}", id);
             f(g)
             // debug_assert_eq!(self.phase2_ids.len(), self.got_max_timestamp.len(),
@@ -561,6 +576,7 @@ impl<T: Copy> SkeensState<T> {
             let replica = self.phase1_queue.pop_front().expect("flushing nothing");
             //let old_start = self.phase1_queue.start_index() - 1;
             //assert!(replica.contains_node_num(old_start));
+            //TODO self.last_flush = ::std::cmp::max(replica.timestamp(), self.last_flush);
             let (id, replica) = replica.to_replica();
             //FIXME for non-single-server appends
             //      this should get delayed until the multi is fully complete
@@ -679,7 +695,7 @@ enum Timestamp {
     Phase2(u64),
 }
 
-impl<T: Copy> WaitingForMax<T> {
+impl<T> WaitingForMax<T> {
     #[allow(dead_code)]
     fn contains_node_num(&self, node_num: u64) -> bool {
         use self::WaitingForMax::*;
@@ -723,7 +739,8 @@ impl<T: Copy> WaitingForMax<T> {
         }
     }
 
-    fn set_max_timestamp(&mut self, max_timestamp: u64) -> Result<(), u64> {
+    fn set_max_timestamp(&mut self, max_timestamp: u64) -> Result<(), u64>
+    where T: Copy {
         use self::WaitingForMax::*;
         *self = match self {
             &mut GotMaxMulti{timestamp, ..}
@@ -833,7 +850,8 @@ impl<T: Copy> WaitingForMax<T> {
         }
     }
 
-    fn replicate_max_timetamp(&mut self, max_timestamp: Time, index: TrieIndex, rid: &Uuid) {
+    fn replicate_max_timetamp(&mut self, max_timestamp: Time, index: TrieIndex, rid: &Uuid)
+    where T: Copy {
         use self::WaitingForMax::*;
         *self = match self {
             &mut GotMaxMulti{..}
@@ -967,6 +985,26 @@ impl<T: Copy> WaitingForMax<T> {
             | &ReplicatedSenti{max_timestamp, ..}
             | &ReplicatedSnap{max_timestamp, ..}
             | &ReplicatedSingle{max_timestamp, ..} => Timestamp::Phase2(max_timestamp),
+        }
+    }
+
+    fn get_id(&self) -> Uuid {
+        use self::WaitingForMax::*;
+        match self {
+            &Multi{id, ..}
+            | &Senti{id, ..}
+            | &Snap{id, ..}
+            | &Single{id, ..} => id,
+
+            &GotMaxMulti{id, ..}
+            | &GotMaxSenti{id, ..}
+            | &GotMaxSnap{id, ..}
+            | &SimpleSingle{id, ..} => id,
+
+            &ReplicatedMulti{id, ..}
+            | &ReplicatedSenti{id, ..}
+            | &ReplicatedSnap{id, ..}
+            | &ReplicatedSingle{id, ..} => id,
         }
     }
 }
@@ -1107,6 +1145,13 @@ impl<T> GotMax<T> {
 
     fn happens_before<U>(&self, other: &WaitingForMax<U>) -> bool {
         //g.timestamp() <= v.timestamp()
+        // let my_ts = self.timestamp();
+        // match other.multi_timestamp() {
+        //     Timestamp::Phase1(other_ts) | Timestamp::Phase2(other_ts) if my_ts < other_ts => true,
+        //     Timestamp::Phase1(other_ts) | Timestamp::Phase2(other_ts) if my_ts == other_ts =>
+        //         self.get_id() < other.get_id(),
+        //     _ => false,
+        // }
         match (self, other) {
             (&GotMax::Multi{timestamp: my_ts, ..},
                 &WaitingForMax::Multi{timestamp: other_ts, ..})
@@ -1167,10 +1212,19 @@ impl<T> GotMax<T> {
             | (&GotMax::Senti{..}, &WaitingForMax::Snap{..})
             | (&GotMax::Snap{..}, &WaitingForMax::Senti{..}) => false,
 
-            (_, &WaitingForMax::SimpleSingle{..}) => true,
-            (_, &WaitingForMax::Single{..}) => true,
-            (&GotMax::SimpleSingle{..}, _) => true,
-            (&GotMax::Single{..}, _) => true,
+            //FIXME
+            (_, &WaitingForMax::SimpleSingle{..})
+            | (_, &WaitingForMax::Single{..})
+            | (&GotMax::SimpleSingle{..}, _)
+            | (&GotMax::Single{..}, _) => {
+                let my_ts = self.timestamp();
+                match other.multi_timestamp() {
+                    Timestamp::Phase1(other_ts) | Timestamp::Phase2(other_ts) if my_ts <= other_ts => true,
+                    // Timestamp::Phase1(other_ts) | Timestamp::Phase2(other_ts) if my_ts == other_ts =>
+                    //     self.get_id() < other.get_id(),
+                    _ => false,
+                }
+            },
 
             (_, &WaitingForMax::GotMaxMulti{..})
             | (_, &WaitingForMax::GotMaxSenti{..})
@@ -1265,6 +1319,7 @@ impl<T> ::std::fmt::Debug for GotMax<T> {
 //We only have a max-heap so number with a _lower_ magnitude make a GotMax _greater_
 // that is, Greater ord happens earlier in time
 impl<T> Ord for GotMax<T> {
+    //FIXME
     fn cmp(&self, other: &Self) -> Ordering {
         use self::GotMax::*;
         match (self, other) {
@@ -1305,20 +1360,44 @@ impl<T> Ord for GotMax<T> {
                     o => o.reverse(),
                 },
 
-            (&SimpleSingle{timestamp: my_timestamp, storage: ms, ..},
-                &SimpleSingle{timestamp: other_timestamp, storage: os, ..}) =>
+            // (&SimpleSingle{timestamp: my_timestamp, storage: ms, ..},
+            //     &SimpleSingle{timestamp: other_timestamp, storage: os, ..}) =>
+            //     match my_timestamp.cmp(&other_timestamp) {
+            //         Equal => panic!(
+            //             "cannot have multiple singles with the same time:
+            //             \nleft: SimpleSingle {{
+            //                 timestamp: {:?},
+            //                 storage: {:?}
+            //             }}
+            //             \nright: SimpleSingle {{
+            //                 timestamp: {:?},
+            //                 storage: {:?}
+            //             }}",
+            //             my_timestamp, ms, other_timestamp, os),
+            //         o => o.reverse(),
+            //     },
+            (&SimpleSingle{timestamp: my_timestamp, storage: ms, id: ref my_id,..},
+                &SimpleSingle{timestamp: other_timestamp, storage: os, id: ref other_id, ..}) =>
                 match my_timestamp.cmp(&other_timestamp) {
-                    Equal => panic!(
-                        "cannot have multiple singles with the same time:
-                        \nleft: SimpleSingle {{
-                            timestamp: {:?},
-                            storage: {:?}
-                        }}
-                        \nright: SimpleSingle {{
-                            timestamp: {:?},
-                            storage: {:?}
-                        }}",
-                        my_timestamp, ms, other_timestamp, os),
+                    Equal => {
+                        let cmp = my_id.cmp(other_id).reverse();
+                        if cmp == Equal {
+                            panic!(
+                            "cannot have multiple singles with the same time and id:
+                            \nleft: SimpleSingle {{
+                                timestamp: {:?},
+                                storage: {:?}
+                                id: {:?}
+                            }}
+                            \nright: SimpleSingle {{
+                                timestamp: {:?},
+                                storage: {:?},
+                                id: {:?}
+                            }}",
+                            my_timestamp, ms, my_id, other_timestamp, os, other_id)
+                        }
+                        cmp
+                    },
                     o => o.reverse(),
                 },
 
@@ -1740,13 +1819,13 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id1, val(1), ());
+        let r = skeen.add_single_append(id1, 0, val(1), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(2, 1));
         assert_eq!(skeen.next_timestamp, 3);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id2, val(3), ());
+        let r = skeen.add_single_append(id2, 0, val(3), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(3, 2));
         assert_eq!(skeen.next_timestamp, 4);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
@@ -1782,13 +1861,13 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id1, val(1), ());
+        let r = skeen.add_single_append(id1, 0, val(1), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(2, 1));
         assert_eq!(skeen.next_timestamp, 3);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id2, val(3), ());
+        let r = skeen.add_single_append(id2, 0, val(3), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(3, 2));
         assert_eq!(skeen.next_timestamp, 4);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
@@ -1824,13 +1903,13 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id1, val(1), ());
+        let r = skeen.add_single_append(id1, 0, val(1), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(2, 1));
         assert_eq!(skeen.next_timestamp, 3);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id2, val(3), ());
+        let r = skeen.add_single_append(id2, 0, val(3), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(3, 2));
         assert_eq!(skeen.next_timestamp, 4);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
@@ -1867,13 +1946,13 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id1, val(1), ());
+        let r = skeen.add_single_append(id1, 0, val(1), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(2, 1));
         assert_eq!(skeen.next_timestamp, 3);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id2, val(3), ());
+        let r = skeen.add_single_append(id2, 0, val(3), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(3, 2));
         assert_eq!(skeen.next_timestamp, 4);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
@@ -1910,13 +1989,13 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id1, val(1), ());
+        let r = skeen.add_single_append(id1, 0, val(1), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(2, 1));
         assert_eq!(skeen.next_timestamp, 3);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id2, val(3), ());
+        let r = skeen.add_single_append(id2, 0, val(3), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(3, 2));
         assert_eq!(skeen.next_timestamp, 4);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
@@ -1952,7 +2031,7 @@ mod test {
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
 
-        let r = skeen.add_single_append(id1, val(1), ());
+        let r = skeen.add_single_append(id1, 0, val(1), ());
         assert_eq!(r, SkeensAppendRes::NewAppend(2, 1));
         assert_eq!(skeen.next_timestamp, 3);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
@@ -1969,6 +2048,43 @@ mod test {
 
                 SimpleSingle{timestamp: 2, t: (), storage: val(1), id: id1},
                 Multi{timestamp: 4, id: id0, t: (), storage: s0},
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_single_rev() {
+        let id0 = Uuid::new_v4();
+        let s0 = multi_storage();
+        let id1 = Uuid::new_v4();
+        let mut v = Vec::with_capacity(3);
+        let mut skeen = SkeensState::new();
+
+        let r = skeen.add_multi_append(id0, s0.clone(), false, ());
+        assert_eq!(r, SkeensAppendRes::NewAppend(1, 0));
+        assert_eq!(skeen.next_timestamp, 2);
+        skeen.flush_got_max_timestamp(|g| {v.push(g)});
+        assert_eq!(&*v, &[]);
+        assert!(!skeen.need_single_at(0));
+        assert!( skeen.need_single_at(1));
+        assert!( skeen.need_single_at(4));
+
+        let r = skeen.add_single_append(id1, 4, val(1), ());
+        assert_eq!(r, SkeensAppendRes::NewAppend(5, 1));
+        assert_eq!(skeen.next_timestamp, 6);
+        skeen.flush_got_max_timestamp(|g| {v.push(g)});
+        assert_eq!(&*v, &[]);
+
+        let r = skeen.set_max_timestamp(id0, 4);
+        assert_eq!(r, SkeensSetMaxRes::NeedsFlush);
+        assert_eq!(skeen.next_timestamp, 6);
+
+        skeen.flush_got_max_timestamp(|g| {v.push(g);});
+
+        assert_eq!(&*v,
+            &[
+                Multi{timestamp: 4, id: id0, t: (), storage: s0},
+                SimpleSingle{timestamp: 5, t: (), storage: val(1), id: id1},
             ]
         );
     }

@@ -8,6 +8,8 @@
 extern crate rustc_serialize;
 extern crate uuid;
 
+#[cfg(test)] extern crate byteorder;
+
 
 use std::fmt;
 use std::mem;
@@ -215,6 +217,7 @@ define_packet!{
             loc: OrderIndex,
             deps: [OrderIndex | num_deps],
             data: [u8 | data_bytes],
+            timestamp: u64,
         },
         Multi: EntryKind::Multiput => {
             id: Uuid,
@@ -510,10 +513,11 @@ impl<'a> Packet::Ref<'a> {
             | Skeens2ToReplica{lock, ..}
             | UpdateRecovery{lock, ..}
             | Snapshot{lock, ..} | SnapshotToReplica{lock, ..}  => *lock,
-            SingleToReplica{timestamp, ..} => *timestamp,
+            SingleToReplica{timestamp, ..}| Single{timestamp, ..} => *timestamp,
 
-            Read{..} | Single{..}
-            | GC{..}
+            Read{..} => 0,
+
+            GC{..}
             | FenceClient{..} | CheckSkeens1{..}  => unreachable!(),
         }
     }
@@ -572,8 +576,8 @@ impl<'a> Packet::Ref<'a> {
             | c @ UpdateRecovery{..} | c @ CheckSkeens1{..}
             | c @ Snapshot{..} | c @ SnapshotToReplica{..} => c.len(),
 
-            SingleToReplica{ id, flags, loc, deps, data, ..} =>
-                Single{id: id, flags: flags, loc: loc, deps: deps, data: data}.len(),
+            SingleToReplica{ id, flags, loc, deps, data, timestamp, ..} =>
+                Single{id: id, flags: flags, loc: loc, deps: deps, data: data, timestamp}.len(),
 
             MultiToReplica{ id, flags, lock, locs, deps, data, ..} =>
                 Multi{
@@ -593,7 +597,7 @@ impl<'a> Packet::Ref<'a> {
     pub fn single_skeens_to_replication(self, time: &'a u64, queue_num: &'a u64) -> Self {
         use self::Packet::Ref::*;
         match self {
-            Single{id, flags, loc, deps, data} => {
+            Single{id, flags, loc, deps, data, ..} => {
                 SingleToReplica{
                     id: id,
                     flags: flags,
@@ -667,8 +671,8 @@ impl<'a> Packet::Ref<'a> {
                 Snapshot{ id, flags, data_bytes, num_deps, lock, locs }
             }
 
-            SingleToReplica{id, flags, loc, deps, data, ..} => {
-                Single{id, flags, loc, deps, data }
+            SingleToReplica{id, flags, loc, deps, data, timestamp, ..} => {
+                Single{id, flags, loc, deps, data, timestamp }
             },
 
             o => panic!("tried to turn {:?} into a singleton skeens replica.", o),
@@ -783,7 +787,9 @@ impl<'a> Packet::Mut<'a> {
             &mut Snapshot{ref mut lock, ..}
             | &mut SnapshotToReplica{ref mut lock, ..} => &mut *lock,
 
-            &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..}
+            &mut Single{ref mut timestamp, ..} | &mut SingleToReplica{ref mut timestamp, ..} => &mut *timestamp,
+
+            &mut Read{..}
             | &mut GC{..}
             | &mut FenceClient{..}
             | &mut CheckSkeens1{..} => unreachable!(),
@@ -927,6 +933,7 @@ impl<'a, V:'a> SingletonBuilder<'a, V> {
                 loc: &OrderIndex(0.into(), 0.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
         buffer
@@ -942,6 +949,7 @@ impl<'a, V:'a> SingletonBuilder<'a, V> {
                 loc: &OrderIndex(0.into(), 0.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
     }
@@ -960,6 +968,7 @@ impl<'a, V:'a> SingletonBuilder<'a, [V]> {
                 loc: &OrderIndex(0.into(), 0.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
         buffer
@@ -975,6 +984,7 @@ impl<'a, V:'a> SingletonBuilder<'a, [V]> {
                 loc: &OrderIndex(0.into(), 0.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
     }
@@ -1050,32 +1060,55 @@ mod test {
     //use std::marker::PhantomData;
 
     //#[test]
-    fn packet_size_check() {
-        let b = Packet::Ref::Single {
-            id: &Uuid::nil(),
-            flags: &EntryFlag::Nothing,
-            loc: &OrderIndex(0.into(), 0.into()),
+    // fn packet_size_check() {
+    //     let b = Packet::Ref::Single {
+    //         id: &Uuid::nil(),
+    //         flags: &EntryFlag::Nothing,
+    //         loc: &OrderIndex(0.into(), 0.into()),
+    //         deps: &[],
+    //         data: &[],
+    //     }.len();
+    //     assert!(
+    //         Packet::min_len() >= b,
+    //         "{} >= {}",
+    //         Packet::min_len(), b,
+    //     );
+    //     /*let b = Packet::Ref::Multi {
+    //         id: &Uuid::nil(),
+    //         flags: &EntryFlag::Nothing,
+    //         lock: &0,
+    //         locs: &[],
+    //         deps: &[],
+    //         data: &[],
+    //     }.len();
+    //     assert!(
+    //         Packet::min_len() >= b,
+    //         "{} >= {}",
+    //         Packet::min_len(), b,
+    //     );*/
+    // }
+
+    #[test]
+    fn round_trip() {
+        let id = Uuid::new_v4();
+        let flag = EntryFlag::ReadSuccess;
+        let data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 99, 10];
+        // let deps = [OrderIndex(1.into(), 1.into()), OrderIndex(2.into(), 1.into()), OrderIndex(3.into(), 3.into())];
+
+        let timestamp = 0xdeadbeef;
+        let contents = EntryContents::Single {
+            id: &id,
+            flags: &flag,
+            timestamp: &timestamp,
             deps: &[],
-            data: &[],
-        }.len();
-        assert!(
-            Packet::min_len() >= b,
-            "{} >= {}",
-            Packet::min_len(), b,
-        );
-        /*let b = Packet::Ref::Multi {
-            id: &Uuid::nil(),
-            flags: &EntryFlag::Nothing,
-            lock: &0,
-            locs: &[],
-            deps: &[],
-            data: &[],
-        }.len();
-        assert!(
-            Packet::min_len() >= b,
-            "{} >= {}",
-            Packet::min_len(), b,
-        );*/
+            loc: &(1, 13).into(),
+            data: &data,
+        };
+        let mut bytes = vec![];
+        contents.fill_vec(&mut bytes);
+        assert_eq!(bytes.len(), contents.len());
+        assert_eq!(bytes_as_entry(&bytes), contents);
+        assert_eq!(bytes_as_entry_mut(&mut bytes).as_ref(), contents);
     }
 
     #[test]

@@ -347,6 +347,7 @@ impl<'a> AppendSlot<Packet<'a>> {
         let storage_size = bytes.len();
         assert_eq!(data_size, storage_size);
         ptr::copy_nonoverlapping::<u8>(bytes.as_ptr(), data_ptr.ptr(), storage_size);
+
         //*trie_entry = data_ptr;
         //let trie_entry: *mut AtomicPtr<u8> =
         //    mem::transmute::<*mut ValEdge, *mut AtomicPtr<u8>>(trie_entry);
@@ -354,7 +355,9 @@ impl<'a> AppendSlot<Packet<'a>> {
         //(*trie_entry).store(data_ptr, Ordering::Release);
         ValEdge::atomic_store(trie_entry, data_ptr, Ordering::Release);
         //Packet::wrap_slice(slice::from_raw_parts(data_ptr, storage_size))
-        data_ptr.to_sized_packet(data_size)
+        let written = data_ptr.to_sized_packet(data_size);
+        debug_assert_eq!(written.contents(), data.contents());
+        written
     }
 
     pub unsafe fn finish_append_with_contents(self, data: EntryContents) {

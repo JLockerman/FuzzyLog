@@ -1038,6 +1038,7 @@ where V: Storeable {
             loc: &OrderIndex(chain, 0.into()),
             deps: deps,
             data: data_to_slice(data),
+            timestamp: &0, //TODO
         }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
@@ -1484,6 +1485,7 @@ where V: Storeable {
             loc: &OrderIndex(chain, 0.into()),
             deps: deps,
             data: data_to_slice(data),
+            timestamp: &0, //TODO
         }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         self.num_async_writes += 1;
@@ -1645,6 +1647,7 @@ where V: Storeable {
             loc: &OrderIndex(chain, 0.into()),
             deps: deps,
             data: data_to_slice(data),
+            timestamp: &0, //TODO
         }.fill_vec(&mut buffer);
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         id

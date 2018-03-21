@@ -18,13 +18,13 @@ impl<T: Copy> Chain<T> {
         !self.skeens.is_empty()
     }
 
-    fn handle_skeens_single(&mut self, buffer: &mut BufferSlice, t: T)
+    fn handle_skeens_single(&mut self, buffer: &mut BufferSlice, timestamp: Time, t: T)
     -> (ValEdge, ByteLoc, Time, QueueIndex) {
         let val = buffer.contents();
         let size = val.len();
         let id = val.id().clone();
         let (slot, storage_loc) = unsafe { self.trie.reserve_space(size) };
-        let ts_and_queue_index = self.skeens.add_single_append(id, slot, t);
+        let ts_and_queue_index = self.skeens.add_single_append(id, timestamp, slot, t);
         match ts_and_queue_index {
             SkeensAppendRes::NewAppend(ts, queue_num) => {
                 trace!("singleton skeens @ {:?}", (ts, queue_num));
@@ -250,7 +250,11 @@ where ToWorkers: DistributeToWorkers<T> {
             EntryLayout::Data => {
                 trace!("SERVER {:?} Single Append", self.this_server_num);
 
-                let chain = buffer.contents().locs()[0].0;
+                let (chain, min_timestamp) = {
+                    let contents = buffer.contents();
+                    // assert!(contents.lock_num() >= 1,  "bad time {:#?}", contents);
+                    (contents.locs()[0].0, contents.lock_num())
+                };
                 debug_assert!(self.stores_chain(chain),
                     "tried to store {:?} at server {:?} of {:?}",
                     chain, self.this_server_num, self.total_servers);
@@ -259,8 +263,9 @@ where ToWorkers: DistributeToWorkers<T> {
 
                 let send = {
                     let log = self.ensure_chain(chain);
-                    if log.needs_skeens_single() {
-                        let s = log.handle_skeens_single(&mut buffer, t);
+                    if log.skeens.need_single_at(min_timestamp) {
+                    // if log.needs_skeens_single() {//TODO we don't need skeens if min_timestamp < current_timestamp
+                        let s = log.handle_skeens_single(&mut buffer, min_timestamp, t);
                         Troption::Right(s)
                     } else if log.trie.is_locked() {
                         trace!("SERVER append during lock {:?} @ {:?}",
@@ -458,7 +463,7 @@ where ToWorkers: DistributeToWorkers<T> {
             for &OrderIndex(c, _) in buffer.contents().locs() {
                 assert!(self.stores_chain(c));
                 //TODO
-                assert!(c != order::from(0), "{:?}", buffer.contents().locs());
+                // assert!(c != order::from(0), "{:?}", buffer.contents().locs());
                 if c == order::from(0) {
                     continue
                 }
@@ -974,7 +979,6 @@ where ToWorkers: DistributeToWorkers<T> {
             ToReplicate::Data(buffer, storage_loc) => {
                 trace!("SERVER {:?} Append", self.this_server_num);
                 //FIXME locks
-
                 let loc = buffer.contents().locs()[0];
                 debug_assert!(self.stores_chain(loc.0),
                     "tried to rep {:?} at server {:?} of {:?}",
