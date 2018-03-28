@@ -216,8 +216,9 @@ impl Worker {
             //let _ = self.inner.poll.poll(&mut events, None);
             let timeout = TIMEOUTS[timeout_idx];
             let timeout = Duration::new(timeout.0, timeout.1);
-            let _ = self.inner.poll.poll(&mut events, Some(timeout));
-            if events.len() == 0 {
+            // let _ = self.inner.poll.poll(&mut events, Some(timeout));
+            let _ = self.inner.poll.poll(&mut events, None);
+            if false && events.len() == 0 {
                 #[cfg(feature = "print_stats")]
                 {
                     if TIMEOUTS[timeout_idx].0 >= 10 {
@@ -279,9 +280,20 @@ impl Worker {
                 for _ in 0..ops_before_poll {
                     let token = self.inner.awake_io.pop_front().expect("no awake");
                     if let HashEntry::Occupied(mut o) = self.clients.entry(token) {
-                        let e = self.inner.handle_burst(token, o.get_mut());
-                        if e.is_err() {
+                        let mut err = false;
+                        for _ in 0..1 {
+                            let e = self.inner.handle_burst(token, o.get_mut());
+                            err |= e.is_err();
+                            if err || !o.get_mut().needs_to_stay_awake() {
+                                break
+                            }
+                        }
+
+                        if err {
                             o.remove();
+                        } else if o.get_mut().needs_to_stay_awake() {
+                            self.inner.awake_io.push_back(token);
+                            o.get_mut().is_staying_awake();
                         }
                     }
                 }
@@ -322,9 +334,20 @@ impl Worker {
             if let HashEntry::Occupied(mut o) = self.clients.entry(token) {
                 //TODO check token read/write
                 //let state = o.into_mut();
-                let e = self.inner.handle_burst(token, o.get_mut());
-                if e.is_err() {
+                let mut err = false;
+                for _ in 0..1 {
+                    let e = self.inner.handle_burst(token, o.get_mut());
+                    err |= e.is_err();
+                    if err || !o.get_mut().needs_to_stay_awake() {
+                        break
+                    }
+                }
+
+                if err {
                     o.remove();
+                } else if o.get_mut().needs_to_stay_awake() {
+                    self.inner.awake_io.push_back(token);
+                    o.get_mut().is_staying_awake();
                 }
             }
         }
@@ -467,7 +490,17 @@ impl Worker {
                 .map(|(_, send_token)| send_token == DOWNSTREAM).unwrap_or(false);
             let (buffer, send_token) =
                 ::handle_to_worker2(log_work, self.inner.worker_num, continue_replication,
-                |to_send, _u| {
+                |to_send, head_ack, _u| {
+                    if head_ack {
+                        match self.inner.hop_for_head_ack(self.inner.worker_num, recv_token, src_addr) {
+                            None => return None,
+                            Some((worker_num, send_token)) => {
+                                self.send_to_client(send_token, src_addr, to_send);
+                                return Some(send_token)
+                            },
+
+                        }
+                    }
                     match next_hop {
                         None => {
                             trace!("WORKER {:?} re dist {:?}",
@@ -672,13 +705,13 @@ impl WorkerInner {
         }
         if recv {
             //FIXME need to disinguish btwn from client and from upstream
-            for _ in 0..5 { self.recv_packet(token, socket_state)? }
+            for _ in 0..5 {
+                if !self.recv_packet(token, socket_state)? {
+                    break
+                }
+            }
         }
 
-        if socket_state.needs_to_stay_awake() {
-            self.awake_io.push_back(token);
-            socket_state.is_staying_awake();
-        }
         Ok(())
     }
 
@@ -706,7 +739,7 @@ impl WorkerInner {
         &mut self,
         token: mio::Token,
         socket_state: &mut PerSocket
-    ) -> Result<(), ()> {
+    ) -> Result<bool, ()> {
         //TODO let socket_kind = socket_state.kind();
         let packet = socket_state.recv_packet();
         match packet {
@@ -716,7 +749,7 @@ impl WorkerInner {
                 let _ = self.poll.deregister(socket_state.stream());
                 return Err(())
             },
-            RecvPacket::Pending => {},
+            RecvPacket::Pending => return Ok(false),
             RecvPacket::FromClient(packet, src_addr) => {
                 // trace!("WORKER {} finished recv from client.", self.worker_num);
                 self.print_data.finished_recv_from_client(1);
@@ -746,7 +779,7 @@ impl WorkerInner {
                 //self.awake_io.push_back(token)
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn next_hop(
@@ -783,6 +816,11 @@ impl WorkerInner {
             //TODO actually balance this
             return Some((self.worker_num % self.downstream_workers, DOWNSTREAM))
         }
+    }
+
+    fn hop_for_head_ack(&self, worker_num: WorkerNum, token: mio::Token, src_addr: Ipv4SocketAddr)
+         -> Option<(WorkerNum, mio::Token)> {
+        return Some((self.worker_num, token))
     }
 
     fn worker_and_token_for_addr(&self, addr: Ipv4SocketAddr)

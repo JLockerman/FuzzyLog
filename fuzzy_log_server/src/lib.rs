@@ -73,20 +73,20 @@ mod tests;
 pub type ChainStore<T> = WriteHandle<order, TrivialEqArc<Chain<T>>>;
 pub type ChainReader<T> = ReadHandle<order, TrivialEqArc<Chain<T>>>;
 
-struct ServerLog<T: Send + Sync + Copy, ToWorkers>
+pub struct ServerLog<T: Send + Sync + Copy, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
     log: ChainStore<T>,
     //TODO per chain locks...
     total_servers: u32,
     this_server_num: u32,
     // seen_ids: hash::UuidHashSet,
-    to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
+    pub to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
     _pd: PhantomData<T>,
 
     print_data: LogData,
 }
 
-fn new_chain_store_and_reader<T: Copy>() -> (ChainStore<T>, ChainReader<T>) {
+pub fn new_chain_store_and_reader<T: Copy>() -> (ChainStore<T>, ChainReader<T>) {
     let (read, write) = ::evmap::new();
     (write, read)
 }
@@ -248,7 +248,7 @@ pub struct SkeensMultiStorage(
 unsafe impl Send for SkeensMultiStorage {}
 
 impl SkeensMultiStorage {
-    fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
+    pub fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
             let timestamps = vec![0; num_locs];
             let queue_indicies = vec![0; num_locs];
             let data = RcSlice::with_len(entry_size);
@@ -284,7 +284,7 @@ impl SkeensMultiStorage {
         &*(self.0)
     }
 
-    fn fill_from(&mut self, buffer: &mut Buffer) {
+    pub fn fill_from(&mut self, buffer: &mut Buffer) {
         let (_ts, _indicies, st0, st1) = unsafe { self.get_mut() };
         let len = {
             let mut e = buffer.contents_mut();
@@ -340,7 +340,7 @@ impl<T> ToWorker<T>
 where T: Copy + Send + Sync {
 
     #[inline(always)]
-    fn get_associated_data(&self) -> T {
+    pub fn get_associated_data(&self) -> T {
         match self {
             &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
             &MultiFastPath(_, _, t) => t,

@@ -439,6 +439,7 @@ pub fn run_with_replication(
 
     }
 
+    let mut accepted = 0;
     trace!("SERVER start server loop");
     loop {
         let _ = poll.poll(&mut events, None);
@@ -478,6 +479,8 @@ pub fn run_with_replication(
                             trace!("SERVER accepting client @ {:?} => {:?}",
                                 (addr, id), (worker, tok));
                             dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
+                            accepted += 1;
+                            println!("accepted {:?}", accepted);
                             //FIXME tell other workers
                         }
                     }

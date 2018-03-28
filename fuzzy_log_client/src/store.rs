@@ -571,8 +571,9 @@ where PerServer<S>: Connected,
             //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
             let timeout = TIMEOUTS[timeout_idx];
             let timeout = Duration::new(timeout.0, timeout.1);
-            let _ = poll.poll(&mut events, Some(timeout));
-            if events.len() == 0 {
+            // let _ = poll.poll(&mut events, Some(timeout));
+            let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
+            if false && events.len() == 0 {
                 #[cfg(feature = "print_stats")]
                 {
                     if TIMEOUTS[timeout_idx].0 >= 10 {
@@ -1403,8 +1404,10 @@ where PerServer<S>: Connected,
                 unreplicated: bool,
             ) -> Option<u64> {
                 let mut r = remaining_servers.borrow_mut();
+                //FIXME store if from head or tail
+                //FIXME don't return until gotten from tail
                 if !r.remove(&token.0) {
-                    error!("CLIENT repeat sk1 section");
+                    // error!("CLIENT repeat sk1 section");
                     return None
                 }
                 let finished_writes = r.is_empty();
