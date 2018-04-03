@@ -12,7 +12,7 @@ fuzzy_log_server = {path = "../../fuzzy_log_server"}
 
 [profile.release]
 opt-level = 3
-#debug = true
+# debug = true
 debug = false
 rpath = false
 lto = false

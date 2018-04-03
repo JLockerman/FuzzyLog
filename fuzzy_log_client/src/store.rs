@@ -190,6 +190,8 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut [0]).unwrap();
+            blocking_write(&mut server.stream, &[2]).unwrap();
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         let mut ack = [0; 16];
@@ -252,6 +254,8 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut [0]).unwrap();
+            blocking_write(&mut server.stream, &[2]).unwrap();
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         let mut ack = [0; 16];
@@ -323,6 +327,8 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut [0]).unwrap();
+            blocking_write(&mut server.stream, &[2]).unwrap();
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         let mut ack = [0; 16];
@@ -402,6 +408,8 @@ where C: AsyncStoreClient {
                 .expect("could not reregister client socket")
         }
         for server in servers.iter_mut().rev() {
+            blocking_read(&mut server.stream, &mut [0]).unwrap();
+            blocking_write(&mut server.stream, &[2]).unwrap();
             blocking_write(&mut server.stream, &*server.receiver.bytes()).unwrap();
         }
         let mut ack = [0; 16];
@@ -2475,7 +2483,7 @@ fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
         match r.read(buffer) {
             Ok(i) => { let tmp = buffer; buffer = &mut tmp[i..]; }
             Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted | io::ErrorKind::NotConnected => {
                     thread::yield_now();
                     continue 'recv
                 },

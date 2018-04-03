@@ -625,6 +625,7 @@ macro_rules! async_tests {
 
         #[test]
         #[inline(never)]
+        //FIXME append not getting ACKs
         pub fn test_multi_and_single() {
             use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT, Ordering};
             use std::thread;
@@ -669,6 +670,7 @@ macro_rules! async_tests {
             lh.snapshot(73.into());
             let num_appends = NUM_APPENDS.load(Ordering::Acquire);
             for i in 0..num_appends {
+                println!("get {:?}", i);
                 assert!(lh.get_next().is_ok(),
                     "got {:?} out of {:?} appends",
                     i, num_appends
@@ -938,7 +940,7 @@ macro_rules! async_tests {
         //TODO test append after prefetch but before read
     );
     () => {
-        async_tests!(tcp);
+        // async_tests!(tcp);
         // async_tests!(udp);
         async_tests!(stcp);
         async_tests!(rtcp);
@@ -1265,10 +1267,11 @@ macro_rules! async_tests {
                         let addrs: (SocketAddr, SocketAddr) = (addr_str1.parse().unwrap(), addr_str2.parse().unwrap());
                         let mut event_loop = mio::Poll::new().unwrap();
                         trace!("RTCP make store");
-                        let (store, to_store) = AsyncTcpStore::replicated_tcp(
-                            None::<SocketAddr>,
+                        let (store, to_store) = AsyncTcpStore::replicated_new_tcp(
+                            ::fuzzy_log_util::socket_addr::Ipv4SocketAddr::random(),
                             ::std::iter::once::<(SocketAddr, SocketAddr)>(addrs),
-                            client, &mut event_loop
+                            client,
+                            &mut event_loop
                         ).expect("");
                         *tsm.lock().unwrap() = Some(to_store);
                         trace!("RTCP store setup");
@@ -1294,29 +1297,74 @@ macro_rules! async_tests {
 
                 static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
                 let local_host = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-                for i in 0..addr_strs.len() {
-                    let prev_server: Option<SocketAddr> =
-                        if i > 0 { Some(addr_strs[i-1]) } else { None }
-                        .map(|s| s.parse().unwrap());
-                    let prev_server = prev_server.map(|mut s| {s.set_ip(local_host); s});
-                    let next_server: Option<SocketAddr> = addr_strs.get(i+1)
-                        .map(|s| s.parse().unwrap());
-                    let next_server = next_server.map(|mut s| {s.set_ip(local_host); s});
-                    let next_server = next_server.map(|s| s.ip());
-                    let addr = addr_strs[i].parse().unwrap();
-                    let acceptor = mio::tcp::TcpListener::bind(&addr);
-                    if let Ok(acceptor) = acceptor {
+
+                let head_acceptor = mio::tcp::TcpListener::bind(
+                    &addr_strs[0].parse().unwrap()
+                );
+
+                match head_acceptor {
+                    Err(e) => trace!("head server error {:?} @ {}", e, addr_strs[0]),
+                    Ok(head) => {
                         thread::spawn(move || {
-                            trace!("starting replica server {}", i);
-                            ::servers2::tcp::run_with_replication(acceptor, 0, 1,
-                                prev_server, next_server,
-                                2, &SERVERS_READY)
+                            trace!("starting replica server head");
+                            ::servers2::tcp::run_with_replication(
+                                head, 0, 1,
+                                None,
+                                Some(local_host),
+                                2,
+                                &SERVERS_READY
+                            );
                         });
-                    }
-                    else {
-                        trace!("server already started @ {}", addr_strs[i]);
-                    }
+                    },
+
                 }
+
+                let tail_acceptor = mio::tcp::TcpListener::bind(
+                    &addr_strs[1].parse().unwrap()
+                );
+
+                match tail_acceptor {
+                    Err(e) => trace!("tail server error {:?} @ {}", e, addr_strs[0]),
+                    Ok(tail) => {
+                        thread::spawn(move || {
+                            let mut prev_addr: SocketAddr = addr_strs[0].parse().unwrap();
+                            prev_addr.set_ip(local_host);
+                            trace!("starting replica server tail");
+                            ::servers2::tcp::run_with_replication(
+                                tail, 0, 1,
+                                Some(prev_addr),
+                                None,
+                                2,
+                                &SERVERS_READY
+                            );
+                        });
+                    },
+
+                }
+
+                // for i in 0..addr_strs.len() {
+                //     let prev_server: Option<SocketAddr> =
+                //         if i > 0 { Some(addr_strs[i-1]) } else { None }
+                //         .map(|s| s.parse().unwrap());
+                //     let prev_server = prev_server.map(|mut s| {s.set_ip(local_host); s});
+                //     let next_server: Option<SocketAddr> = addr_strs.get(i+1)
+                //         .map(|s| s.parse().unwrap());
+                //     let next_server = next_server.map(|mut s| {s.set_ip(local_host); s});
+                //     let next_server = next_server.map(|s| s.ip());
+                //     let addr = addr_strs[i].parse().unwrap();
+                //     let acceptor = mio::tcp::TcpListener::bind(&addr);
+                //     if let Ok(acceptor) = acceptor {
+                //         thread::spawn(move || {
+                //             trace!("starting replica server {}", i);
+                //             ::servers2::tcp::run_with_replication(acceptor, 0, 1,
+                //                 prev_server, next_server,
+                //                 2, &SERVERS_READY)
+                //         });
+                //     }
+                //     else {
+                //         trace!("server already started @ {}", addr_strs[i]);
+                //     }
+                // }
 
                 while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() {}
                 thread::sleep(Duration::from_millis(100));

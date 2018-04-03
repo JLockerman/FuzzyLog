@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Debug)]
 pub enum ToSend<'a> {
     Nothing,
     Contents(EntryContents<'a>),

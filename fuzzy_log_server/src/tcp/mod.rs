@@ -20,6 +20,7 @@ use packets::EntryContents;
 
 mod worker;
 mod per_socket;
+mod socket_negotiate;
 
 /*
   GC with parrallel readers plan:
@@ -201,7 +202,7 @@ pub fn run_with_replication(
 
     let num_workers = max(num_workers, 1);
 
-    let poll = mio::Poll::new().unwrap();
+    let mut poll = mio::Poll::new().unwrap();
     poll.register(&acceptor,
         ACCEPT,
         mio::Ready::readable(),
@@ -213,115 +214,66 @@ pub fn run_with_replication(
     //let prev_server_ip: Option<_> = Some(panic!());
     let next_server_ip: Option<_> = next_server;
     let prev_server_ip: Option<_> = prev_server;
-    let mut downstream_admin_socket = None;
-    let mut upstream_admin_socket = None;
-    let mut other_sockets = Vec::new();
-    match acceptor.accept() {
-        Err(e) => trace!("error {}", e),
-        Ok((socket, addr)) => if Some(addr.ip()) != next_server_ip {
-            trace!("SERVER got other connection {:?}", addr);
-            other_sockets.push((socket, addr))
-        } else {
-            trace!("SERVER {} connected downstream.", this_server_num);
-            let _ = socket.set_keepalive_ms(Some(1000));
-            let _ = socket.set_nodelay(true);
-            downstream_admin_socket = Some(socket)
-        }
-    }
-    while next_server_ip.is_some() && downstream_admin_socket.is_none() {
-        trace!("SERVER {} waiting for downstream {:?}.", this_server_num, next_server);
-        let _ = poll.poll(&mut events, None);
-        for event in events.iter() {
-            match event.token() {
-                ACCEPT => {
-                    match acceptor.accept() {
-                        Err(e) => trace!("error {}", e),
-                        Ok((socket, addr)) => if Some(addr.ip()) != next_server_ip {
-                            trace!("SERVER got other connection {:?}", addr);
-                            other_sockets.push((socket, addr))
-                        } else {
-                            trace!("SERVER {} connected downstream.", this_server_num);
-                            let _ = socket.set_keepalive_ms(Some(1000));
-                            let _ = socket.set_nodelay(true);
-                            downstream_admin_socket = Some(socket)
-                        }
-                    }
-                }
-                _ => unreachable!()
-            }
-        }
-    }
+    // let mut downstream_admin_socket = None;
+    // let mut upstream_admin_socket = None;
+    // let mut other_sockets = Vec::new();
+    // match acceptor.accept() {
+    //     Err(e) => trace!("error {}", e),
+    //     Ok((socket, addr)) => if Some(addr.ip()) != next_server_ip {
+    //         trace!("SERVER got other connection {:?}", addr);
+    //         other_sockets.push((socket, addr))
+    //     } else {
+    //         trace!("SERVER {} connected downstream.", this_server_num);
+    //         let _ = socket.set_keepalive_ms(Some(1000));
+    //         let _ = socket.set_nodelay(true);
+    //         downstream_admin_socket = Some(socket)
+    //     }
+    // }
+    // while next_server_ip.is_some() && downstream_admin_socket.is_none() {
+    //     trace!("SERVER {} waiting for downstream {:?}.", this_server_num, next_server);
+    //     let _ = poll.poll(&mut events, None);
+    //     for event in events.iter() {
+    //         match event.token() {
+    //             ACCEPT => {
+    //                 match acceptor.accept() {
+    //                     Err(e) => trace!("error {}", e),
+    //                     Ok((socket, addr)) => if Some(addr.ip()) != next_server_ip {
+    //                         trace!("SERVER got other connection {:?}", addr);
+    //                         other_sockets.push((socket, addr))
+    //                     } else {
+    //                         trace!("SERVER {} connected downstream.", this_server_num);
+    //                         let _ = socket.set_keepalive_ms(Some(1000));
+    //                         let _ = socket.set_nodelay(true);
+    //                         downstream_admin_socket = Some(socket)
+    //                     }
+    //                 }
+    //             }
+    //             _ => unreachable!()
+    //         }
+    //     }
+    // }
 
-    let is_replica = prev_server_ip.is_some();
-    if let Some(ref ip) = prev_server_ip {
-        trace!("SERVER {} waiting for upstream {:?}.", this_server_num, prev_server_ip);
-        while upstream_admin_socket.is_none() {
-            if let Ok(socket) = TcpStream::connect(ip) {
-                trace!("SERVER {} connected upstream on {:?}.",
-                    this_server_num, socket.local_addr().unwrap());
-                let _ = socket.set_nodelay(true);
-                upstream_admin_socket = Some(socket)
-            } else {
-                //thread::yield_now()
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
-        trace!("SERVER {} connected upstream.", this_server_num);
-    }
+    // let is_replica = prev_server_ip.is_some();
+    // if let Some(ref ip) = prev_server_ip {
+    //     trace!("SERVER {} waiting for upstream {:?}.", this_server_num, prev_server_ip);
+    //     while upstream_admin_socket.is_none() {
+    //         if let Ok(socket) = TcpStream::connect(ip) {
+    //             trace!("SERVER {} connected upstream on {:?}.",
+    //                 this_server_num, socket.local_addr().unwrap());
+    //             let _ = socket.set_nodelay(true);
+    //             upstream_admin_socket = Some(socket)
+    //         } else {
+    //             //thread::yield_now()
+    //             thread::sleep(Duration::from_millis(1));
+    //         }
+    //     }
+    //     trace!("SERVER {} connected upstream.", this_server_num);
+    // }
 
-    let num_downstream = negotiate_num_downstreams(&mut downstream_admin_socket, num_workers as u16);
-    let num_upstream = negotiate_num_upstreams(&mut upstream_admin_socket, num_workers as u16, prev_server_ip);
-    let mut downstream = Vec::with_capacity(num_downstream);
-    let mut upstream = Vec::with_capacity(num_upstream);
-    while downstream.len() + 1 < num_downstream {
-        let _ = poll.poll(&mut events, None);
-        for event in events.iter() {
-            match event.token() {
-                ACCEPT => {
-                    match acceptor.accept() {
-                        Err(e) => trace!("error {}", e),
-                        Ok((mut socket, addr)) => if Some(addr.ip()) == next_server_ip {
-                            trace!("SERVER {} add downstream.", this_server_num);
-                            let _ = socket.set_keepalive_ms(Some(1000));
-                            let _ = socket.set_nodelay(true);
-                            let socket_num = [downstream.len() as u8 + 1];
-                            blocking_write(&mut socket, &socket_num);
-                            downstream.push(socket)
-                        } else {
-                            trace!("SERVER got other connection {:?}", addr);
-                            let _ = socket.set_keepalive_ms(Some(1000));
-                            let _ = socket.set_nodelay(true);
-                            other_sockets.push((socket, addr))
-                        }
-                    }
-                }
-                _ => unreachable!()
-            }
-        }
-    }
+    // //FIXME use for keepalive?
+    // drop(downstream_admin_socket);
+    // drop(upstream_admin_socket);
 
-    if let Some(ref ip) = prev_server_ip {
-        for i in 1..num_upstream {
-            let mut up = TcpStream::connect(ip).expect("cannot connect upstream");
-            let _ = up.set_keepalive_ms(Some(1000));
-            let _ = up.set_nodelay(true);
-            let mut socket_num = [255u8];
-            blocking_read(&mut up, &mut socket_num);
-            assert_eq!(socket_num[0], i as u8);
-            upstream.push(up)
-        }
-    }
-
-    downstream_admin_socket.take().map(|s| downstream.push(s));
-    upstream_admin_socket.take().map(|s| upstream.push(s));
-    assert_eq!(downstream.len(), num_downstream);
-    assert_eq!(upstream.len(), num_upstream);
-    if upstream.len() > 0 { assert_eq!(upstream.len(), num_workers) }
-    if downstream.len() > 0 { assert_eq!(downstream.len(), num_workers) }
-    //let (log_to_dist, dist_from_log) = spmc::channel();
-
-    trace!("SERVER {} {} up, {} down.", this_server_num, num_upstream, num_downstream);
-    trace!("SERVER {} starting {} workers.", this_server_num, num_workers);
     let mut log_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let mut dist_to_workers: Vec<_> = Vec::with_capacity(num_workers);
     let (log_writer, log_reader) = ::new_chain_store_and_reader();
@@ -332,8 +284,6 @@ pub fn run_with_replication(
         let to_log = workers_to_log.clone();
         let (to_worker, from_log) = spsc::channel();
         let (dist_to_worker, from_dist) = spsc::channel();
-        let upstream = upstream.pop();
-        let downstream = downstream.pop();
         let log_reader = log_reader.clone();
         thread::spawn(move ||
             Worker::new(
@@ -342,11 +292,10 @@ pub fn run_with_replication(
                 from_log,
                 to_log,
                 log_reader,
-                upstream,
-                downstream,
-                num_downstream,
                 num_workers,
                 is_unreplicated,
+                prev_server.is_some(),
+                next_server.is_some(),
                 n,
             ).run()
         );
@@ -371,11 +320,11 @@ pub fn run_with_replication(
         for to_log in recv_from_workers.iter() {
             match to_log {
                 ToLog::New(buffer, storage, st) => {
-                    assert!(!is_replica);
+                    // assert!(!is_replica);
                     log.handle_op(buffer, storage, st)
                 },
                 ToLog::Replication(tr, st) => {
-                    assert!(is_replica);
+                    // assert!(is_replica);
                     log.handle_replication(tr, st)
                 },
                 ToLog::Recovery(r, st) => log.handle_recovery(r, st),
@@ -414,139 +363,60 @@ pub fn run_with_replication(
     //let mut buffer_cache = VecDeque::new();
     // let mut next_worker = 0usize;
 
-    for (mut socket, addr) in other_sockets {
-        let mut id = [0u8; 16];
-        blocking_read(&mut socket, &mut id).unwrap();
-        let id = Ipv4SocketAddr::from_bytes(id);
-        let tok = get_next_token(&mut next_token);
-        /*let worker = if is_unreplicated {
-            let worker = next_worker;
-            next_worker = next_worker.wrapping_add(1);
-            if next_worker >= dist_to_workers.len() {
-                next_worker = 0;
-            }
-            worker
-        } else {
-            let worker = worker_for_ip(id, num_workers as u64);
-            worker_for_client.insert(id, (worker, tok));
-            worker
-        };*/
-        let worker = worker_for_ip(id, num_workers as u64);
-        let old = worker_for_client.insert(id, (worker, tok));
-        assert!(old.is_none(), "Duplicate id {:?}", id);
-        println!("SERVER new client @ {:?} => {:?}", (addr, id), (worker, tok));
-        dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
+    let position = match (prev_server, next_server) {
+        (None,           None) => socket_negotiate::Position::Solo,
+        (Some(upstream), None) => socket_negotiate::Position::Tail(upstream),
+        (None,           Some(..)) => socket_negotiate::Position::Head,
+        (Some(upstream), Some(..)) => socket_negotiate::Position::Mid(upstream),
+    };
+    let mut negotiator = socket_negotiate::Negotiator::new(position);
 
-    }
+    // for (mut socket, addr) in other_sockets {
+    //     let up_tok = get_next_token(&mut next_token);
+    //     let client = negotiator.got_client(up_tok, socket, || get_next_token(&mut next_token));
+    //     if let Ok((id, up_tok, upstream, down)) = client {
+    //         let worker = worker_for_ip(id, num_workers as u64);
+    //         let old = worker_for_client.insert(id, (worker, up_tok));
+    //         assert!(old.is_none(), "Duplicate id {:?}", id);
+    //         dist_to_workers[worker].send(DistToWorker::NewClient(up_tok, upstream, down, id));
+    //     }
+    // }
 
     let mut accepted = 0;
     trace!("SERVER start server loop");
     loop {
         let _ = poll.poll(&mut events, None);
         for event in events.iter() {
+            // println!("{:?} event {:?}", acceptor.local_addr(), event.token());
             match event.token() {
                 ACCEPT => {
                     match acceptor.accept() {
-                        Err(e) => trace!("error {}", e),
+                        Err(e) => error!("error {}", e),
                         Ok((mut socket, addr)) => {
+                            // println!("new connection at {:?}, {:?}", socket.local_addr(), socket.peer_addr());
                             let _ = socket.set_keepalive_ms(Some(1000));
                             let _ = socket.set_nodelay(true);
                             //TODO oveflow
-                            let tok = get_next_token(&mut next_token);
-                            let mut id = [0u8; 16];
-                            blocking_read(&mut socket, &mut id).unwrap();
-                            let id = Ipv4SocketAddr::from_bytes(id);
-                            /*poll.register(
-                                &socket,
-                                tok,
-                                mio::Ready::readable(),
-                                mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-                            );
-                            receivers.insert(tok, Some(socket));*/
-                            /*let worker = if is_unreplicated {
-                                let worker = next_worker;
-                                next_worker = next_worker.wrapping_add(1);
-                                if next_worker >= dist_to_workers.len() {
-                                    next_worker = 0;
-                                }
-                                worker
-                            } else {
-                                worker_for_ip(id, num_workers as u64)
-                            };*/
-                            let worker = worker_for_ip(id, num_workers as u64);
-                            let old = worker_for_client.insert(id, (worker, tok));
-                            assert!(old.is_none(), "Duplicate id {:?}", id);
-                            trace!("SERVER accepting client @ {:?} => {:?}",
-                                (addr, id), (worker, tok));
-                            dist_to_workers[worker].send(DistToWorker::NewClient(tok, socket, id));
-                            accepted += 1;
-                            println!("accepted {:?}", accepted);
-                            //FIXME tell other workers
+                            let client = negotiator.got_connection(socket, &mut poll, || get_next_token(&mut next_token));
+                            if let Ok((id, up_tok, upstream, down)) = client {
+                                let worker = worker_for_ip(id, num_workers as u64);
+                                let old = worker_for_client.insert(id, (worker, up_tok));
+                                assert!(old.is_none(), "Duplicate id {:?}", id);
+                                println!("SERVER accepting connection @ {:?}, {:?}", (addr, id), (worker, up_tok));
+                                dist_to_workers[worker]
+                                    .send(DistToWorker::NewClient(up_tok, upstream, down, id));
+                                accepted += 1;
+                                println!("accepted {:?}", accepted);
+                            }
                         }
                     }
                 }
                 FROM_WORKERS => {
-                    unreachable!("current impl is unsound and shouldn't be used");
+                    unreachable!();
                     trace!("SERVER dist getting finished work");
                     let packet = dist_from_workers.try_recv();
                     if let Ok(to_worker) = packet {
-                        let (worker, token, buffer, addr, storage_loc) = match to_worker {
-                            WorkerToDist::Downstream(worker, addr, buffer, storage_loc) => {
-                                trace!("DIST {} downstream worker for {} is {}.",
-                                    this_server_num, addr, worker);
-                                (worker, DOWNSTREAM, buffer, addr, storage_loc)
-                            },
-
-                            WorkerToDist::DownstreamB(worker, addr, buffer, storage_loc) => {
-                                trace!("DIST {} downstream worker for {} is {}.",
-                                    this_server_num, addr, worker);
-                                let sent = dist_to_workers.get_mut(worker)
-                                    .map(|s| {
-                                        s.send(DistToWorker::ToClientB(
-                                            DOWNSTREAM, buffer, addr, storage_loc));
-                                        true
-                                }).unwrap_or(false);
-                                if !sent {
-                                    panic!("No downstream for {:?} in {:?}",
-                                        worker, dist_to_workers.len())
-                                }
-                                continue
-                            },
-
-                            WorkerToDist::ToClient(addr, buffer) => {
-                                trace!("DIST {} looking for worker for {}.",
-                                    this_server_num, addr);
-                                //FIXME this is racey, if we don't know who gets the message it fails
-                                let (worker, token) = worker_for_client
-                                    .get(&addr)
-                                    .unwrap_or_else(||
-                                        panic!(
-                                            "A No worker found for {:?} in {:?}",
-                                            addr, worker_for_client,
-                                        )
-                                    )
-                                    .clone();
-                                (worker, token, buffer, addr, 0)
-                            }
-
-                            WorkerToDist::ToClientB(addr, buffer) => {
-                                trace!("DIST {} looking for worker for {}.",
-                                    this_server_num, addr);
-                                //FIXME this is racey, if we don't know who gets the message it fails
-                                let (worker, token) = worker_for_client.get(&addr)
-                                    .cloned().unwrap_or_else(||
-                                        panic!(
-                                            "B No worker found for {:?} in {:?}",
-                                            addr, worker_for_client,
-                                        )
-                                );
-
-                                dist_to_workers[worker].send(
-                                    DistToWorker::ToClientB(token, buffer, addr, 0)
-                                );
-                                continue
-                            }
-
+                        match to_worker {
                             WorkerToDist::FenceClient(buffer) => {
                                 let (client_to_fence, fencing_client) = match buffer.contents() {
                                     EntryContents::FenceClient{
@@ -590,132 +460,41 @@ pub fn run_with_replication(
                                 continue
                             }
                         };
-                        //FIXME specifically this
-                        dist_to_workers[worker].send(
-                            DistToWorker::ToClient(token, buffer, addr, storage_loc));
-                        continue
 
                     }
-                    /*while let Ok((buffer, socket, tok)) = dist_from_workers.try_recv() {
-                        trace!("SERVER dist got {:?}", tok);
-                        //buffer_cache.push_back(buffer);
-                        poll.reregister(
-                            &socket,
-                            tok,
-                            mio::Ready::readable(),
-                            mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-                        );
-                        *receivers.get_mut(&tok).unwrap() = Some(socket)
-                    }*/
                 },
                 DIST_FROM_LOG => {
-                    //unreachable!()
-                    //FIXME handle completing work on original thread, only do send on DOWNSTREAM
-                    /*let packet = dist_from_log.try_recv();
-                    if let Some(mut to_worker) = packet {
-                        let (_, _, addr) = to_worker.get_associated_data();
-                        trace!("DIST {} looking for worker for {}.", this_server_num, addr);
-                        let (worker, token) = worker_for_client[&addr].clone();
-                        to_worker.edit_associated_data(|t| t.1 = token);
-                        dist_to_workers[worker].send(DistToWorker::ToClient(to_worker))
-                    }*/
+                    unreachable!()
                 },
-                _recv_tok => {
-                    //unreachable!()
-                    /*let recv = receivers.get_mut(&recv_tok).unwrap();
-                    let recv = mem::replace(recv, None);
-                    match recv {
-                        None => trace!("spurious wakeup for {:?}", recv_tok),
-                        Some(socket) => {
-                            trace!("SERVER need to recv from {:?}", recv_tok);
-                            //TODO should be min size ?
-                            let buffer =
-                                buffer_cache.pop_back().unwrap_or(Buffer::empty());
-                            //dist_to_workers.send((buffer, socket, recv_tok))
-                            dist_to_workers[next_worker].send((buffer, socket, recv_tok));
-                            next_worker = next_worker.wrapping_add(1);
-                            if next_worker >= dist_to_workers.len() {
-                                next_worker = 0;
-                            }
-                        }
-                    }*/
+                recv_tok => {
+                    let client = negotiator.handle_event(recv_tok, &mut poll);
+                    if let Ok((id, up_tok, upstream, down)) = client {
+                        let worker = worker_for_ip(id, num_workers as u64);
+                        let old = worker_for_client.insert(id, (worker, up_tok));
+                        assert!(old.is_none(), "Duplicate id {:?}", id);
+                        println!("SERVER accepting connection @ {:?} => {:?} ({:?} => {:?}), {:?}, {:?}",
+                            upstream.local_addr(), upstream.peer_addr(),
+                            down.as_ref().map(|&(_, ref d)| d.local_addr()),
+                            down.as_ref().map(|&(_, ref d)| d.peer_addr()),
+                            id, (worker, up_tok));
+                        dist_to_workers[worker]
+                            .send(DistToWorker::NewClient(up_tok, upstream, down, id));
+                        accepted += 1;
+                        // println!("accepted {:?}", accepted);
+                    }
                 }
             }
         }
     }
 }
 
-fn negotiate_num_downstreams(socket: &mut Option<TcpStream>, num_workers: u16) -> usize {
-    use std::cmp::min;
-    if let Some(ref mut socket) = socket.as_mut() {
-        let mut num_other_threads = [0u8; 2];
-        blocking_read(socket, &mut num_other_threads).expect("downstream failed");
-        let num_other_threads = unsafe { mem::transmute(num_other_threads) };
-        let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
-        blocking_write(socket, &to_write).expect("downstream failed");
-        trace!("SERVER down workers: {}, other's workers {}.", num_workers, num_other_threads);
-        min(num_other_threads, num_workers) as usize
-    }
-    else {
-        trace!("SERVER no need to negotiate downstream.");
-        0
-    }
-}
-
-fn negotiate_num_upstreams(
-    socket: &mut Option<TcpStream>,
-    num_workers: u16,
-    remote_addr: Option<SocketAddr>
-) -> usize {
-    use std::cmp::min;
-    if let Some(ref mut socket) = socket.as_mut() {
-        let remote_addr = remote_addr.unwrap();
-        let to_write: [u8; 2] = unsafe { mem::transmute(num_workers) };
-        trace!("will req {:?}", to_write);
-        let mut refusals = 0;
-        'write: loop {
-            let r = blocking_write(socket, &to_write);
-            match r {
-                Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-                    if refusals >= 60000 { panic!("write fail {:?}", e) }
-                    refusals += 1;
-                    // trace!("upstream refused reconnect attempt {}", refusals);
-                    thread::sleep(Duration::from_millis(1));
-                    **socket = TcpStream::connect(&remote_addr).unwrap();
-                    let _ = socket.set_keepalive_ms(Some(1000));
-                    let _ = socket.set_nodelay(true);
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::NotConnected => {
-                    if refusals >= 60000 { panic!("write fail {:?}", e) }
-                    refusals += 1;
-                    trace!("upstream connection not ready {}", refusals);
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(e) => panic!("write fail {:?}", e),
-                Ok(..) => break 'write,
-            }
-        }
-        trace!("req {:?}", to_write);
-        let mut num_other_threads = [0u8; 2];
-        blocking_read(socket, &mut num_other_threads).expect("upstream failed");
-        trace!("other {:?}", to_write);
-        let num_other_threads = unsafe { mem::transmute(num_other_threads) };
-        trace!("SERVER up workers: {}, other's workers {}.", num_workers, num_other_threads);
-        min(num_other_threads, num_workers) as usize
-    }
-    else {
-        trace!("SERVER no need to negotiate upstream.");
-        0
-    }
-}
-
-fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
+pub fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
     //like Read::read_exact but doesn't die on WouldBlock
     'recv: while !buffer.is_empty() {
         match r.read(buffer) {
             Ok(i) => { let tmp = buffer; buffer = &mut tmp[i..]; }
             Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted | io::ErrorKind::NotConnected => {
                     thread::yield_now();
                     continue 'recv
                 },
@@ -732,13 +511,13 @@ fn blocking_read<R: Read>(r: &mut R, mut buffer: &mut [u8]) -> io::Result<()> {
     }
 }
 
-fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
+pub fn blocking_write<W: Write>(w: &mut W, mut buffer: &[u8]) -> io::Result<()> {
     //like Write::write_all but doesn't die on WouldBlock
     'recv: while !buffer.is_empty() {
         match w.write(buffer) {
             Ok(i) => { let tmp = buffer; buffer = &tmp[i..]; }
             Err(e) => match e.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted | io::ErrorKind::NotConnected => {
                     thread::yield_now();
                     continue 'recv
                 },

@@ -95,7 +95,7 @@ fn handle_op(
     server.handle_op(buffer, storage, ());
     let mut buffer = None;
     while let Some(msg) = server.to_workers.pop_front() {
-        let (b, u) = handle_to_worker2(msg, 0, false, |_, _| {});
+        let (b, u) = handle_to_worker2(msg, 0, false, |_, _, _| {});
         if let Some(b) = b {
             buffer = Some(b)
         }

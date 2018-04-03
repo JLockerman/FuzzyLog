@@ -1325,7 +1325,7 @@ impl AsyncStoreClient for mpsc::Sender<Message> {
     fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>)
     -> Result<(), ()> {
         if bytes_as_entry(&*read_packet).locs().len() > 1 {
-            assert!(read_loc.1 != entry::from(0), "read {:?}", bytes_as_entry(&*read_packet));
+            // FIXME assert!(read_loc.1 != entry::from(0), "read {:?}", bytes_as_entry(&*read_packet));
         }
         self.send(Message::FromStore(ReadComplete(read_loc, read_packet)))
             .map(|_| ()).map_err(|_| ())
