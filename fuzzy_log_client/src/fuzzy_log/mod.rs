@@ -465,8 +465,8 @@ impl ThreadLog {
                 if needed {
                     //FIXME ensure other pieces get fetched if reading those chains
                     let packet = Rc::new(msg);
-                    //TODO checks to ensure multiple parts of hte append are returned atomically
-                    // self.ensure_read(read_loc, &packet);
+                    //TODO checks to ensure multiple parts of the append are returned atomically
+                    if false { self.ensure_read(read_loc, &packet) };
                     self.add_blockers_at(read_loc, &packet);
                     self.try_returning_at(read_loc, packet);
                 }

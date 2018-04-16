@@ -393,6 +393,7 @@ where V: Storeable {
                 self
             );
             drop(finished_writes);
+            let _ = num_async_writes;
             let last_dropped = Arc::new(());
             let reader = ReadHandle {
                 _pd, num_snapshots, ready_reads, curr_entry, num_errors,

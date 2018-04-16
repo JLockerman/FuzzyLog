@@ -2,7 +2,7 @@
 use std::mem;
 use std::rc::Rc;
 
-use hash::{HashMap, HashSet, UuidHashMap, UuidHashSet};
+use hash::{UuidHashMap, UuidHashSet};
 use packets::{order, entry, OrderIndex, bytes_as_entry};
 
 use fuzzy_log_util::uuid::Uuid;

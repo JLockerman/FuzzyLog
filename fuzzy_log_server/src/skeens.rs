@@ -348,10 +348,11 @@ impl<T: Copy> SkeensState<T> {
     }
 
 
-    pub fn set_snapshot_max_timestamp(&mut self, sk2_id: Uuid, max_timestamp: u64)
-    -> SkeensSetMaxRes {
-        unimplemented!()
-    }
+    // TODO
+    // pub fn set_snapshot_max_timestamp(&mut self, sk2_id: Uuid, max_timestamp: u64)
+    // -> SkeensSetMaxRes {
+    //     unimplemented!()
+    // }
 
     ////////////////////////////////////////
 

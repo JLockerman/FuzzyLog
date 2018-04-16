@@ -309,7 +309,7 @@ macro_rules! atomic_index {
     // };
 // }
 
-
+#[allow(unused_macros)]
 macro_rules! entry {
     ($array:ident, $k:expr, $depth:expr, $constructor:ident) => {
         {

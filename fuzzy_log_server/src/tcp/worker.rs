@@ -132,7 +132,7 @@ impl Worker {
             mio::Ready::readable(),
             mio::PollOpt::edge()
         ).expect("cannot pol from log on worker");
-        let mut awake_io: VecDeque<_> = Default::default();
+        let awake_io: VecDeque<_> = Default::default();
         let clients: HashMap<_, _> = Default::default();
         trace!("has up {}, hash down {}, is_unrep {}", has_upstream, has_downstream, is_unreplicated);
         Worker {
@@ -169,8 +169,8 @@ impl Worker {
             //let _ = self.inner.poll.poll(&mut events, Some(Duration::from_secs(10)));
             //#[cfg(not(feature = "print_stats"))]
             //let _ = self.inner.poll.poll(&mut events, None);
-            let timeout = TIMEOUTS[timeout_idx];
-            let timeout = Duration::new(timeout.0, timeout.1);
+            // let timeout = TIMEOUTS[timeout_idx];
+            // let timeout = Duration::new(timeout.0, timeout.1);
             // let _ = self.inner.poll.poll(&mut events, Some(timeout));
             let _ = self.inner.poll.poll(&mut events, None);
             if false && events.len() == 0 {

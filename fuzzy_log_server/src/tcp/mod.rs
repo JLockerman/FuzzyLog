@@ -1,10 +1,10 @@
 use std::collections::hash_map::Entry as HashEntry;
 use std::io::{self, Read, Write};
-use std::{mem, thread};
+use std::thread;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+// use std::time::Duration;
 
 // use prelude::*;
 use ::{spsc, ServerLog};
@@ -14,9 +14,9 @@ use socket_addr::Ipv4SocketAddr;
 use mio;
 use mio::tcp::*;
 
-use self::worker::{Worker, WorkerToDist, DistToWorker, ToLog};
+use self::worker::{Worker, DistToWorker, ToLog};
 
-use packets::EntryContents;
+// use packets::EntryContents;
 
 mod worker;
 mod per_socket;
@@ -135,8 +135,8 @@ const FROM_LOG: mio::Token = mio::Token(1);
 // we don't really need to special case this;
 // all writes are bascially the same,
 // but it's convenient for all workers to be in the same token space
-const UPSTREAM: mio::Token = mio::Token(2);
-const DOWNSTREAM: mio::Token = mio::Token(3);
+// const UPSTREAM: mio::Token = mio::Token(2);
+// const DOWNSTREAM: mio::Token = mio::Token(3);
 
 // It's convenient to share a single token-space among all workers so any worker
 // can determine who is responsible for a client
@@ -212,8 +212,8 @@ pub fn run_with_replication(
 
     //let next_server_ip: Option<_> = Some(panic!());
     //let prev_server_ip: Option<_> = Some(panic!());
-    let next_server_ip: Option<_> = next_server;
-    let prev_server_ip: Option<_> = prev_server;
+    // let next_server_ip: Option<_> = next_server;
+    // let prev_server_ip: Option<_> = prev_server;
     // let mut downstream_admin_socket = None;
     // let mut upstream_admin_socket = None;
     // let mut other_sockets = Vec::new();
@@ -382,7 +382,7 @@ pub fn run_with_replication(
     //     }
     // }
 
-    let mut accepted = 0;
+    // let mut accepted = 0;
     trace!("SERVER start server loop");
     loop {
         let _ = poll.poll(&mut events, None);
@@ -392,7 +392,7 @@ pub fn run_with_replication(
                 ACCEPT => {
                     match acceptor.accept() {
                         Err(e) => error!("error {}", e),
-                        Ok((mut socket, addr)) => {
+                        Ok((mut socket, _addr)) => {
                             // println!("new connection at {:?}, {:?}", socket.local_addr(), socket.peer_addr());
                             let _ = socket.set_keepalive_ms(Some(1000));
                             let _ = socket.set_nodelay(true);
@@ -402,70 +402,19 @@ pub fn run_with_replication(
                                 let worker = worker_for_ip(id, num_workers as u64);
                                 let old = worker_for_client.insert(id, (worker, up_tok));
                                 assert!(old.is_none(), "Duplicate id {:?}", id);
-                                // println!("SERVER accepting connection @ {:?}, {:?}", (addr, id), (worker, up_tok));
+                                // println!("SERVER accepting connection @ {:?}, {:?}", (_addr, id), (worker, up_tok));
                                 dist_to_workers[worker]
                                     .send(DistToWorker::NewClient(up_tok, upstream, down, id));
-                                accepted += 1;
-                                println!("accepted {:?}", accepted);
+                                // accepted += 1;
+                                // println!("accepted {:?}", accepted);
                             }
                         }
                     }
                 }
-                FROM_WORKERS => {
-                    unreachable!();
-                    trace!("SERVER dist getting finished work");
-                    let packet = dist_from_workers.try_recv();
-                    if let Ok(to_worker) = packet {
-                        match to_worker {
-                            WorkerToDist::FenceClient(buffer) => {
-                                let (client_to_fence, fencing_client) = match buffer.contents() {
-                                    EntryContents::FenceClient{
-                                        client_to_fence, fencing_client, ..
-                                    } => (*client_to_fence, *fencing_client),
-                                    _ => unreachable!(),
-                                };
-                                if let Some(&(worker, token)) = worker_for_client
-                                    .get(&client_to_fence.into()) {
-                                    dist_to_workers[worker].send(
-                                        DistToWorker::FenceOff(token, buffer)
-                                    );
-                                    continue
-                                };
-                                worker_for_client.get(&fencing_client.into())
-                                .map(|&(worker, token)|
-                                    dist_to_workers[worker].send(
-                                        DistToWorker::FinishedFence(token, buffer)
-                                    )
-                                );
-                                continue
-                            },
 
-                            WorkerToDist::ClientFenced(buffer) => {
-                                let fencing_client = match buffer.contents() {
-                                    EntryContents::FenceClient{fencing_client, ..} =>
-                                        *fencing_client,
-                                    _ => unreachable!(),
-                                };
-                                //TODO we should probably store the worker on the outbound hop
-                                //     to ensure it can get the buffer back if it's client
-                                //     gets fenced in the interim
+                FROM_WORKERS => unreachable!(),
+                DIST_FROM_LOG => unreachable!(),
 
-                                //TODO we should probably GC the worker_for_client entry here
-                                worker_for_client.get(&fencing_client.into())
-                                .map(|&(worker, token)|
-                                    dist_to_workers[worker].send(
-                                        DistToWorker::FinishedFence(token, buffer)
-                                    )
-                                );
-                                continue
-                            }
-                        };
-
-                    }
-                },
-                DIST_FROM_LOG => {
-                    unreachable!()
-                },
                 recv_tok => {
                     let client = negotiator.handle_event(recv_tok, &mut poll);
                     if let Ok((id, up_tok, upstream, down)) = client {
@@ -479,7 +428,7 @@ pub fn run_with_replication(
                         //     id, (worker, up_tok));
                         dist_to_workers[worker]
                             .send(DistToWorker::NewClient(up_tok, upstream, down, id));
-                        accepted += 1;
+                        // accepted += 1;
                         // println!("accepted {:?}", accepted);
                     }
                 }

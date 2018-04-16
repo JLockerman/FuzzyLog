@@ -476,10 +476,9 @@ where PerServer<S>: Connected,
             const TIMEOUTS: [(u64, u32); 9] =
                 [(0, 10_000), (0, 100_000), (0, 500_000), (0, 1_000_000),
                 (0, 10_000_000), (0, 100_000_000), (1, 0), (10, 0), (10, 0)];
-            //poll.poll(&mut events, None).expect("worker poll failed");
             //let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
-            let timeout = TIMEOUTS[timeout_idx];
-            let timeout = Duration::new(timeout.0, timeout.1);
+            // let timeout = TIMEOUTS[timeout_idx];
+            // let timeout = Duration::new(timeout.0, timeout.1);
             // let _ = poll.poll(&mut events, Some(timeout));
             let _ = poll.poll(&mut events, Some(Duration::from_secs(10)));
             if false && events.len() == 0 {
@@ -1305,8 +1304,8 @@ where PerServer<S>: Connected,
         let mut is_sentinel_loc = false;
         let contents = packet.contents();
         let max_ts = contents.lock_num();
-        let num_locs = contents.locs().len();
-        // if num_locs > 1 && contents.flag().contains(EntryFlag::TakeLock) {
+        let _num_locs = contents.locs().len();
+        // if +num_locs > 1 && contents.flag().contains(EntryFlag::TakeLock) {
         //     assert!(max_ts > 0, "max_ts for {:?} = {:?}", contents.locs(), max_ts);
         // }
         // println!("> {:?}: {:?}", contents.locs(), contents.lock_num());
