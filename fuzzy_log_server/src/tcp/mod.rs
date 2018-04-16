@@ -402,7 +402,7 @@ pub fn run_with_replication(
                                 let worker = worker_for_ip(id, num_workers as u64);
                                 let old = worker_for_client.insert(id, (worker, up_tok));
                                 assert!(old.is_none(), "Duplicate id {:?}", id);
-                                println!("SERVER accepting connection @ {:?}, {:?}", (addr, id), (worker, up_tok));
+                                // println!("SERVER accepting connection @ {:?}, {:?}", (addr, id), (worker, up_tok));
                                 dist_to_workers[worker]
                                     .send(DistToWorker::NewClient(up_tok, upstream, down, id));
                                 accepted += 1;
@@ -472,11 +472,11 @@ pub fn run_with_replication(
                         let worker = worker_for_ip(id, num_workers as u64);
                         let old = worker_for_client.insert(id, (worker, up_tok));
                         assert!(old.is_none(), "Duplicate id {:?}", id);
-                        println!("SERVER accepting connection @ {:?} => {:?} ({:?} => {:?}), {:?}, {:?}",
-                            upstream.local_addr(), upstream.peer_addr(),
-                            down.as_ref().map(|&(_, ref d)| d.local_addr()),
-                            down.as_ref().map(|&(_, ref d)| d.peer_addr()),
-                            id, (worker, up_tok));
+                        // println!("SERVER accepting connection @ {:?} => {:?} ({:?} => {:?}), {:?}, {:?}",
+                        //     upstream.local_addr(), upstream.peer_addr(),
+                        //     down.as_ref().map(|&(_, ref d)| d.local_addr()),
+                        //     down.as_ref().map(|&(_, ref d)| d.peer_addr()),
+                        //     id, (worker, up_tok));
                         dist_to_workers[worker]
                             .send(DistToWorker::NewClient(up_tok, upstream, down, id));
                         accepted += 1;

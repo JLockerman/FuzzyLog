@@ -944,8 +944,8 @@ macro_rules! async_tests {
         // async_tests!(udp);
         async_tests!(stcp);
         async_tests!(rtcp);
-
         async_tests!(rstcp);
+        async_tests!(r3tcp);
     };
     (tcp) => (
         mod ptcp {
@@ -1228,6 +1228,96 @@ macro_rules! async_tests {
                                 acceptor, 1, 2,
                                 prev_server,
                                 next_server,
+                                3,
+                                &SERVERS_READY
+                            )
+                        });
+                    }
+                }
+
+                while SERVERS_READY.load(Ordering::Acquire) < SERVER1_ADDRS.len() + SERVER2_ADDRS.len() {}
+            }
+        }
+    };
+    (r3tcp) => {
+        mod r3tcp {
+            use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+            use std::{thread, iter};
+            use std::net::{SocketAddr, Ipv4Addr, IpAddr};
+
+            use mio;
+
+            async_tests!(test new_thread_log);
+
+            const SERVER1_ADDRS: &'static [&'static str] = &["0.0.0.0:13790", "0.0.0.0:13791", "0.0.0.0:13792"];
+            const SERVER2_ADDRS: &'static [&'static str] = &["0.0.0.0:13890", "0.0.0.0:13891", "0.0.0.0:13892"];
+
+            fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                let addrs = iter::once((SERVER1_ADDRS.first().unwrap(), SERVER1_ADDRS.last().unwrap()))
+                    .chain(iter::once((SERVER2_ADDRS.first().unwrap(), SERVER2_ADDRS.last().unwrap())))
+                    .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+                LogHandle::replicated_with_servers(addrs)
+                    .chains(interesting_chains)
+                    .fetch_boring_multis()
+                    .build()
+            }
+
+
+            fn start_tcp_servers()
+            {
+                static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+                static SERVER_STARTING: AtomicUsize = ATOMIC_USIZE_INIT;
+
+                if SERVER_STARTING.swap(2, Ordering::SeqCst) == 0 {
+
+                    let local_host = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+                    let server1s = [
+                        ("0.0.0.0:13790".parse().unwrap(), None, Some(local_host)),
+                        ("0.0.0.0:13791".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13790))),
+                            Some(local_host)),
+                        ("0.0.0.0:13792".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13791))),
+                            None),
+                    ];
+
+                    let server2s = [
+                        ("0.0.0.0:13890".parse().unwrap(), None, Some(local_host)),
+                        ("0.0.0.0:13891".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13890))),
+                            Some(local_host)),
+                        ("0.0.0.0:13892".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13891))),
+                            None),
+                    ];
+
+                    for &(addr, prev, next) in server1s.iter() {
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        let acceptor = acceptor.unwrap();
+                        thread::spawn(move || {
+                            // trace!("starting replica server {:?}", (0, i));
+                            ::servers2::tcp::run_with_replication(
+                                acceptor, 0, 2,
+                                prev,
+                                next,
+                                3,
+                                &SERVERS_READY
+                            )
+                        });
+                    }
+
+                    for &(addr, prev, next) in server2s.iter() {
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        let acceptor = acceptor.unwrap();
+                        thread::spawn(move || {
+                            // trace!("starting replica server {:?}", (1, i));
+                            ::servers2::tcp::run_with_replication(
+                                acceptor, 1, 2,
+                                prev,
+                                next,
                                 3,
                                 &SERVERS_READY
                             )

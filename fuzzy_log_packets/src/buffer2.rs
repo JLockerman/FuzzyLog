@@ -102,10 +102,12 @@ impl Buffer {
     }*/
 
     pub fn try_contents_until(&self, len: usize) -> Result<(EntryContents, &[u8]), WrapErr> {
+        debug_assert!(self.start <= self.inner.len());
         unsafe { EntryContents::try_ref(&self.inner[self.start..len]) }
     }
 
     pub fn try_contents_mut_until(&mut self, len: usize) -> Result<(EntryContentsMut, &mut [u8]), WrapErr> {
+        debug_assert!(self.start <= self.inner.len());
         unsafe { EntryContentsMut::try_mut(&mut self.inner[self.start..len]) }
     }
 
@@ -120,6 +122,7 @@ impl Buffer {
 
     pub fn entry_slice(&self) -> &[u8] {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        debug_assert!(self.start <= self.inner.len());
         let size = self.entry_size();
         &self.inner[self.start..self.start+size]
     }
@@ -138,6 +141,7 @@ impl Buffer {
     }
 
     pub fn ensure_capacity(&mut self, capacity: usize) -> usize {
+        debug_assert!(self.start <= self.inner.len());
         let effective_cap = self.inner.len() - self.start;
         if effective_cap >= capacity {
             return 0
@@ -149,7 +153,7 @@ impl Buffer {
 
         if self.inner.capacity() < capacity {
             let curr_cap = self.inner.capacity();
-            self.inner.reserve_exact(capacity - curr_cap);
+            self.inner.reserve_exact(capacity.checked_sub(curr_cap).unwrap());
             unsafe { self.inner.set_len(capacity) }
         } else {
             let cap = self.inner.capacity();
@@ -160,7 +164,9 @@ impl Buffer {
     }
 
     pub fn finished_entry(&mut self) {
-        self.start += self.entry_size()
+        debug_assert!(self.start <= self.inner.len());
+        self.start += self.entry_size();
+        debug_assert!(self.start <= self.inner.len());
     }
 
     /*

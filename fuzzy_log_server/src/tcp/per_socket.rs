@@ -1,6 +1,6 @@
 // use prelude::*;
 
-use std::collections::{LinkedList, VecDeque};
+use std::collections::{/*LinkedList,*/ VecDeque};
 use std::io::{Read, Write, ErrorKind};
 use std::mem;
 use socket_addr::Ipv4SocketAddr;
@@ -31,10 +31,9 @@ const WRITE_BUFFER_SIZE: usize = 1024 * 8;
 
 #[derive(Debug)]
 pub struct PerSocket {
-    being_read: VecDeque<Buffer>,
-    bytes_read: usize,
-    upstream: Option<TcpStream>,
-    downstream: Option<(mio::Token, TcpStream)>,
+    buffer_cache: VecDeque<Buffer>,
+    upstream: Option<Reader>,
+    downstream: Option<Reader>,
     being_written: DoubleBuffer,
     bytes_written: usize,
     pending: VecDeque<Vec<u8>>,
@@ -44,6 +43,13 @@ pub struct PerSocket {
     has_upstream: bool,
 
     print_data: PerSocketData,
+}
+
+#[derive(Debug)]
+struct Reader {
+    buffer: Option<Buffer>,
+    bytes_read: usize,
+    stream: TcpStream,
 }
 
 counters! {
@@ -59,35 +65,12 @@ counters! {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum PerSocketKind {
-    Upstream,
-    Downstream,
-    Client,
-}
-/*
-struct Upstream {
-    being_read: Buffer,
-    stream: TcpStream,
-    bytes_handled: usize,
-}
-
-struct Downstream {
-    being_written: Vec<u8>,
-    bytes_written: usize,
-    stream: TcpStream,
-    pending: VecDeque<Vec<u8>>,
-}
-
-struct Client {
-    being_read: Buffer,
-    bytes_read: usize,
-    being_written: Vec<u8>,
-    bytes_written: usize,
-    stream: TcpStream,
-    pending: VecDeque<Vec<u8>>,
-}
-*/
+// #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+// pub enum PerSocketKind {
+//     Upstream,
+//     Downstream,
+//     Client,
+// }
 
 pub enum RecvPacket {
     Err,
@@ -96,34 +79,23 @@ pub enum RecvPacket {
     FromClient(Buffer, Ipv4SocketAddr),
 }
 
-impl PerSocket {
-    /*
-    Upstream {
-        being_read: Buffer,
-        bytes_read: usize,
-        stream: TcpStream,
-    },
-    Downstream {
-        being_written: Vec<u8>,
-        bytes_written: usize,
-        stream: TcpStream,
-        pending: VecDeque<Vec<u8>>,
-    },
-    Client {
-        being_read: Buffer,
-        bytes_read: usize,
-        stream: TcpStream,
-        being_written: Vec<u8>,
-        bytes_written: usize,
-        pending: VecDeque<Vec<u8>>,
+impl Reader {
+    fn new(stream: TcpStream) -> Self {
+        Reader {
+            buffer: None,
+            bytes_read: 0,
+            stream,
+        }
     }
-    */
+}
+
+impl PerSocket {
+
     pub fn client(upstream: TcpStream, downstream: Option<(mio::Token, TcpStream)>, has_upstream: bool) -> Self {
         Self {
-            being_read: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::empty()).collect(),
-            bytes_read: 0,
-            upstream: Some(upstream),
-            downstream,
+            buffer_cache: (0..NUMBER_READ_BUFFERS).map(|_| Buffer::empty()).collect(),
+            upstream: Some(Reader::new(upstream)),
+            downstream: downstream.map(|(_, down)| Reader::new(down)),
             being_written: DoubleBuffer::with_first_buffer_capacity(WRITE_BUFFER_SIZE),
             bytes_written: 0,
             pending: Default::default(),
@@ -141,105 +113,64 @@ impl PerSocket {
     pub fn recv_packet(&mut self) -> RecvPacket {
         // trace!("SOCKET try recv");
         let &mut Self{
-            ref mut being_read,
-            ref mut bytes_read,
-            ref upstream,
+            ref mut buffer_cache,
+            ref mut upstream,
             ref mut needs_to_stay_awake,
             ref mut print_data, has_upstream,
             ..
         } = self;
-        let upstream = match upstream.as_ref() {
-            Some(up) => up, None => return RecvPacket::Pending,
-        };
+        let &mut Reader{ref mut buffer, ref mut bytes_read, stream: ref mut upstream} =
+            match upstream.as_mut() {
+                None => return RecvPacket::Pending,
+                Some(up) => up,
+            };
         if has_upstream {
-            if let Some(mut read_buffer) = being_read.pop_front() {
-                // trace!("SOCKET recv actual");
-                //TODO audit
-                let recv = recv_packet(&mut read_buffer, upstream, *bytes_read, mem::size_of::<u64>(), needs_to_stay_awake, print_data);
-                match recv {
-                    //TODO send to log
-                    RecvRes::Done(src_addr) => {
-                        print_data.packets_recvd(1);
-                        *bytes_read = 0;
-                        // trace!("SOCKET recevd replication for {}.", src_addr);
-                        *needs_to_stay_awake = true;
-                        let entry_size = read_buffer.entry_size();
-                        let end = entry_size + mem::size_of::<u64>();
-                        let storage_loc = LittleEndian::read_u64(&read_buffer[entry_size..end]);
-                        print_data.read_buffers_sent(1);
-                        RecvPacket::FromUpstream(read_buffer, src_addr, storage_loc)
-                    },
-                    //FIXME remove from map
-                    RecvRes::Error => {
-                        *bytes_read = 0;
-                        error!("upstream; returned buffer now @ {}", being_read.len());
-                        being_read.push_front(read_buffer);
-                        RecvPacket::Err
-                    },
-
-                    RecvRes::NeedsMore(total_read) => {
-                        *bytes_read = total_read;
-                        being_read.push_front(read_buffer);
-                        RecvPacket::Pending
-                    },
-                }
+            if let &mut None = buffer {
+                *buffer = buffer_cache.pop_front();
             }
-            else {
-                // trace!("SOCKET Upstream recv no buffer");
-                RecvPacket::Pending
+            let mut read_buffer = match buffer.take() {
+                None => return RecvPacket::Pending,
+                Some(buffer) => buffer,
+            };
+            // trace!("SOCKET recv actual");
+            //TODO audit
+            let recv = recv_packet(&mut read_buffer, upstream, *bytes_read, mem::size_of::<u64>(), needs_to_stay_awake, print_data);
+            match recv {
+                //TODO send to log
+                RecvRes::Done(src_addr) => {
+                    print_data.packets_recvd(1);
+                    *bytes_read = 0;
+                    // trace!("SOCKET recevd replication for {}.", src_addr);
+                    *needs_to_stay_awake = true;
+                    let entry_size = read_buffer.entry_size();
+                    let end = entry_size + mem::size_of::<u64>();
+                    let storage_loc = LittleEndian::read_u64(&read_buffer[entry_size..end]);
+                    print_data.read_buffers_sent(1);
+                    RecvPacket::FromUpstream(read_buffer, src_addr, storage_loc)
+                },
+                //FIXME remove from map
+                RecvRes::Error => {
+                    *bytes_read = 0;
+                    error!("upstream; returned buffer now @ {}", buffer_cache.len());
+                    buffer_cache.push_front(read_buffer);
+                    RecvPacket::Err
+                },
+
+                RecvRes::NeedsMore(total_read) => {
+                    *bytes_read = total_read;
+                    *buffer = Some(read_buffer);
+                    RecvPacket::Pending
+                },
             }
         } else {
-            if let Some(mut read_buffer) = being_read.pop_front() {
-                // trace!("SOCKET recv actual");
-                let recv = recv_packet(&mut read_buffer, upstream, *bytes_read, 0,  needs_to_stay_awake, print_data);
-                match recv {
-                    //TODO send to log
-                    RecvRes::Done(src_addr) => {
-                        print_data.packets_recvd(1);
-                        *bytes_read = 0;
-                        // trace!("SOCKET recevd for {}.", src_addr);
-                        *needs_to_stay_awake = true;
-                        print_data.read_buffers_sent(1);
-                        RecvPacket::FromClient(read_buffer, src_addr)
-                    },
-                    //FIXME remove from map
-                    RecvRes::Error => {
-                        *bytes_read = 0;
-                        // trace!("error; returned buffer now @ {}", being_read.len());
-                        being_read.push_front(read_buffer);
-                        RecvPacket::Err
-                    },
-
-                    RecvRes::NeedsMore(total_read) => {
-                        *bytes_read = total_read;
-                        being_read.push_front(read_buffer);
-                        RecvPacket::Pending
-                    },
-                }
+            if let &mut None = buffer {
+                *buffer = buffer_cache.pop_front();
             }
-            else {
-                // trace!("SOCKET Client recv no buffer");
-                RecvPacket::Pending
-            }
-        }
-    }
-
-    pub fn recv_packet_from_down(&mut self) -> RecvPacket {
-        // trace!("SOCKET try recv");
-        let &mut Self{
-            ref mut being_read,
-            ref mut bytes_read,
-            ref downstream,
-            ref mut needs_to_stay_awake,
-            ref mut print_data,
-            ..
-        } = self;
-        let downstream = match downstream.as_ref() {
-            Some(&(_, ref down)) => down, None => return RecvPacket::Pending,
-        };
-        if let Some(mut read_buffer) = being_read.pop_front() {
-            // trace!("SOCKET recv actual");
-            let recv = recv_packet(&mut read_buffer, downstream, *bytes_read, 0,  needs_to_stay_awake, print_data);
+            let mut read_buffer = match buffer.take() {
+                None => return RecvPacket::Pending,
+                Some(buffer) => buffer,
+            };
+            let recv = recv_packet(&mut read_buffer, upstream, *bytes_read, 0,  needs_to_stay_awake, print_data);
             match recv {
                 //TODO send to log
                 RecvRes::Done(src_addr) => {
@@ -253,21 +184,65 @@ impl PerSocket {
                 //FIXME remove from map
                 RecvRes::Error => {
                     *bytes_read = 0;
-                    // trace!("error; returned buffer now @ {}", being_read.len());
-                    being_read.push_front(read_buffer);
+                    // trace!("error; returned buffer now @ {}", buffer_cache.len());
+                    buffer_cache.push_front(read_buffer);
                     RecvPacket::Err
                 },
 
                 RecvRes::NeedsMore(total_read) => {
                     *bytes_read = total_read;
-                    being_read.push_front(read_buffer);
+                    *buffer = Some(read_buffer);
                     RecvPacket::Pending
                 },
             }
         }
-        else {
-            // trace!("SOCKET Client recv no buffer");
-            RecvPacket::Pending
+    }
+
+    pub fn recv_packet_from_down(&mut self) -> RecvPacket {
+        // trace!("SOCKET try recv");
+        let &mut Self{
+            ref mut buffer_cache,
+            ref mut downstream,
+            ref mut needs_to_stay_awake,
+            ref mut print_data,
+            ..
+        } = self;
+        let &mut Reader{ref mut buffer, ref mut bytes_read, stream: ref mut downstream} =
+            match downstream.as_mut() {
+                None => return RecvPacket::Pending,
+                Some(down) => down,
+            };
+        if let &mut None = buffer {
+            *buffer = buffer_cache.pop_front();
+        }
+        let mut read_buffer = match buffer.take() {
+            None => return RecvPacket::Pending,
+            Some(buffer) => buffer,
+        };
+        let recv = recv_packet(&mut read_buffer, downstream, *bytes_read, 0,  needs_to_stay_awake, print_data);
+        match recv {
+            //TODO send to log
+            RecvRes::Done(src_addr) => {
+                print_data.packets_recvd(1);
+                *bytes_read = 0;
+                // trace!("SOCKET recevd for {}.", src_addr);
+                *needs_to_stay_awake = true;
+                print_data.read_buffers_sent(1);
+                RecvPacket::FromClient(read_buffer, src_addr)
+            },
+            //FIXME remove from map
+            RecvRes::Error => {
+                *bytes_read = 0;
+                // trace!("error; returned buffer now @ {}", buffer_cache.len());
+                buffer_cache.push_front(read_buffer);
+                RecvPacket::Err
+            },
+
+            RecvRes::NeedsMore(total_read) => {
+                *bytes_read = total_read;
+                *buffer = Some(read_buffer);
+                RecvPacket::Pending
+            },
         }
     }
 
@@ -280,10 +255,11 @@ impl PerSocket {
             ref mut needs_to_stay_awake,
             ref mut print_data,
         ..} = self;
+        //TODO check who to send to
         let stream = match downstream {
-            &mut Some((_, ref mut downstream)) => downstream,
+            &mut Some(ref mut down) => &mut down.stream,
             &mut None => match upstream {
-                &mut Some(ref mut up) => up,
+                &mut Some(ref mut up) => &mut up.stream,
                 &mut None => return Err(()),
             },
         };
@@ -394,22 +370,22 @@ impl PerSocket {
         //FIXME split up/down awake
         self.stay_awake();
         self.print_data.read_buffers_returned(1);
-        self.being_read.push_back(buffer);
-        // trace!("returned buffer now @ {}", being_read.len());
-        assert!(self.being_read.len() <= NUMBER_READ_BUFFERS);
+        self.buffer_cache.push_back(buffer);
+        // trace!("returned buffer now @ {}", buffer_cache.len());
+        assert!(self.buffer_cache.len() <= NUMBER_READ_BUFFERS);
     }
 
     //FIXME
     pub fn upstream(&self) -> Option<&TcpStream> {
-        self.upstream.as_ref()
+        self.upstream.as_ref().map(|up| &up.stream)
     }
     pub fn downstream(&self) -> Option<&TcpStream> {
-        self.downstream.as_ref().map(|&(_, ref s)| s)
+        self.downstream.as_ref().map(|down| &down.stream)
     }
 
     //FIXME
     pub fn is_backpressured(&self) -> bool {
-        self.being_read.is_empty() || self.being_written.has_pending()
+        self.buffer_cache.is_empty() || self.being_written.has_pending()
     }
 
     //FIXME split up/down?
@@ -446,8 +422,9 @@ impl PerSocket {
     #[allow(dead_code)]
     pub fn more_data(&self) -> MoreData {
         MoreData::new(
-            self.being_read.len(),
-            self.bytes_read,
+            self.buffer_cache.len(),
+            self.upstream.as_ref().map(|up| up.bytes_read).unwrap_or(0)
+            + self.downstream.as_ref().map(|up| up.bytes_read).unwrap_or(0),
             self.being_written.pending_len(),
             self.bytes_written,
             self.pending.len(),
