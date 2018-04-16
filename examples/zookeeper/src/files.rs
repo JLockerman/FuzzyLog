@@ -19,6 +19,7 @@ pub struct FileSystem {
     files: HashMap<Arc<Path>, FileNode>,
     roots: HashMap<OsString, order>,
     empty_path: Arc<Path>,
+    // seen_ids: HashSet<Id>,
 }
 
 #[derive(Debug)]
@@ -60,6 +61,7 @@ struct PendingRename {
     old_exists: CommitState,
     new_empty: CommitState,
     pending_ops: VecDeque<Operation>,
+    check_new: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -70,7 +72,7 @@ enum CommitState {
 }
 
 impl PendingRename {
-    fn new(id: Id, old_path: Arc<Path>, new_path: Arc<Path>) -> Self {
+    fn new(id: Id, old_path: Arc<Path>, new_path: Arc<Path>, check_new: bool) -> Self {
         PendingRename {
             id,
             old_path,
@@ -79,6 +81,19 @@ impl PendingRename {
             old_exists: CommitState::Pending,
             new_empty: CommitState::Pending,
             pending_ops: Default::default(),
+            check_new,
+        }
+    }
+
+    fn state(&self) -> CommitState {
+        use self::CommitState::*;
+        match (self.old_exists, self.new_empty, self.check_new) {
+            (old, _, false) => old,
+            (Ok, new, true) => new,
+            (Abort, Ok, _) => Abort,
+            (Abort, Abort, _) => Abort,
+            (Pending, _, _) => Pending,
+            (_, Pending, true) => Pending,
         }
     }
 }
@@ -119,6 +134,7 @@ impl FileSystem {
             files: Default::default(),
             num_entries: 0,
             empty_path,
+            // seen_ids: Default::default(),
         };
         let root_path: &Path = "/".as_ref();
         let root_dir: Arc<Path> = root_path.to_owned().into_boxed_path().into();
@@ -341,8 +357,11 @@ impl FileSystem {
                 id,
                 old_path,
                 new_path,
+                check_new,
             }) => {
-                let (res, msg0, msg1) = self.rename_part1(id, old_path, new_path, which_path);
+                // let new = self.seen_ids.insert(id);
+                // assert!(new);
+                let (res, msg0, msg1) = self.rename_part1(id, old_path, new_path, which_path, check_new);
                 mutation_callback(id, res.map(|p| (p, EMPTY_STAT)), msg0, msg1)
             }
         }
@@ -473,9 +492,9 @@ impl FileSystem {
         old_path: PathBuf,
         new_path: PathBuf,
         which_path: WhichPath,
+        check_new: bool,
     ) -> (Result<&Arc<Path>, u32>, Option<Mutation>, Option<Mutation>) {
         use Mutation::{RenameNack, RenameNewEmpty, RenameOldExists};
-
         let old_path: Arc<Path> = old_path.into_boxed_path().into();
         let new_path: Arc<Path> = new_path.into_boxed_path().into();
         let build_nack = |due_to_old| RenameNack {
@@ -497,7 +516,7 @@ impl FileSystem {
                 //FIXME dummy node to handle nacks?
                 //FIXME Err(line!()) condition
                 None => {
-                    unreachable!()
+                    unreachable!("{:?} => {:?} @ {:?}", old_path, new_path, which_path)
                     // error = true;
                     // Some(build_nack(true))
                 },
@@ -507,7 +526,7 @@ impl FileSystem {
                         unimplemented!()
                     }
                     file.pending_rename =
-                        Some(PendingRename::new(id, old_path.clone(), new_path.clone()).into());
+                        Some(PendingRename::new(id, old_path.clone(), new_path.clone(), check_new).into());
                     Some(RenameOldExists {
                         id: Id::new(),
                         part1_id: id,
@@ -528,15 +547,19 @@ impl FileSystem {
                 Some(file) => {
                     if file.pending_rename.is_some() {
                         //FIXME just buffer?
-                        unimplemented!()
+                        if check_new {
+                            unimplemented!()
+                        }
+                        (true, false)
+
                     } else {
                         file.pending_rename =
-                            Some(PendingRename::new(id, old_path.clone(), new_path.clone()).into());
+                            Some(PendingRename::new(id, old_path.clone(), new_path.clone(), check_new).into());
                         (false, true)
                     }
                 }
             };
-            if nack {
+            if nack && check_new {
                 msg1 = Some(build_nack(false));
                 return (Err(line!()), msg0, msg1);
             }
@@ -549,7 +572,7 @@ impl FileSystem {
                 self.num_entries += 1;
 
                 new_node.pending_rename =
-                    Some(PendingRename::new(id, old_path.clone(), new_path.clone()).into());
+                    Some(PendingRename::new(id, old_path.clone(), new_path.clone(), check_new).into());
                 //TODO self.triggerwatches
                 &self.files.insert(new_path.clone(), new_node.into());
             }
@@ -566,12 +589,14 @@ impl FileSystem {
                     }
                 }
             }
-            msg1 = Some(RenameNewEmpty {
-                id: Id::new(),
-                part1_id: id,
-                old_path: old_path.to_path_buf(),
-                new_path: new_path.to_path_buf(),
-            });
+            if check_new {
+                msg1 = Some(RenameNewEmpty {
+                    id: Id::new(),
+                    part1_id: id,
+                    old_path: old_path.to_path_buf(),
+                    new_path: new_path.to_path_buf(),
+                });
+            }
         }
         let path = if handle_old {
             match self.files.get(&*old_path) {
@@ -595,6 +620,10 @@ impl FileSystem {
         new_path: PathBuf,
         which_path: WhichPath,
     ) -> (Option<VecDeque<Operation>>, Option<VecDeque<Operation>>) {
+        // assert!(self.seen_ids.contains(&id), "rne didn't see rename {:?}: {:?} => {:?}", id, old_path, new_path);
+        // if !self.seen_ids.contains(&id) {
+        //     println!("panic rne didn't see rename {:?}: {:?} => {:?}", id, old_path, new_path);
+        // }
         let handle_old = old_path.starts_with(&self.my_root)
             && matches!(which_path, WhichPath::Path1 | WhichPath::Both);
         let handle_new = new_path.starts_with(&self.my_root)
@@ -605,19 +634,20 @@ impl FileSystem {
             match self.files.get_mut(&*old_path) {
                 None => unreachable!(),
                 Some(file) => {
-                    let old_exists = {
+                    let state = {
                         if file.pending_rename.is_none() {
-                            panic!("no pending rename {:?} => {:?}", old_path, new_path);
+                            return (None, None) //TODO
+                            // panic!("no pending rename {:?} => {:?}", old_path, new_path);
                         }
                         let pending = file.pending_rename.as_mut().expect("rne second after first");
                         if id != pending.id {
                             unimplemented!() //TODO buffer op?
                         }
                         pending.new_empty = CommitState::Ok;
-                        pending.old_exists
+                        pending.state()
                     };
 
-                    old_next = match old_exists {
+                    old_next = match state {
                         CommitState::Pending => Next::Nothing,
                         CommitState::Abort => Next::Abort(file.pending_rename.take().expect("rne old cannot abort no transaction")),
                         CommitState::Ok => Next::Finish,
@@ -634,16 +664,16 @@ impl FileSystem {
                         ref mut pending_rename,
                         ..
                     } = &mut *file;
-                    let old_exists = {
+                    let state = {
                         let pending = pending_rename.as_mut().unwrap();
                         if id != pending.id {
                             unimplemented!() //TODO buffer op?
                         }
                         pending.new_empty = CommitState::Ok;
-                        pending.old_exists
+                        pending.state()
                     };
 
-                    new_next = match old_exists {
+                    new_next = match state {
                         CommitState::Pending => Next::Nothing,
                         CommitState::Abort => Next::Abort(pending_rename.take().expect("rne new cannot abort no transaction")),
                         CommitState::Ok => Next::Finish,
@@ -672,6 +702,7 @@ impl FileSystem {
         new_data: Vec<u8>,
         which_path: WhichPath,
     ) -> (Option<VecDeque<Operation>>, Option<VecDeque<Operation>>) {
+        // assert!(self.seen_ids.contains(&id), "roe didn't see rename {:?} => {:?}", old_path, new_path);
         let handle_old = old_path.starts_with(&self.my_root)
             && matches!(which_path, WhichPath::Path1 | WhichPath::Both);
         let handle_new = new_path.starts_with(&self.my_root)
@@ -682,16 +713,16 @@ impl FileSystem {
             match self.files.get_mut(&*old_path) {
                 None => unreachable!(),
                 Some(file) => {
-                    let new_empty = {
+                    let state = {
                         let pending = file.pending_rename.as_mut().unwrap();
                         if id != pending.id {
                             unimplemented!() //TODO buffer op?
                         }
                         pending.old_exists = CommitState::Ok;
-                        pending.new_empty
+                        pending.state()
                     };
 
-                    old_next = match new_empty {
+                    old_next = match state {
                         CommitState::Pending => Next::Nothing,
                         CommitState::Abort => Next::Abort(file.pending_rename.take().unwrap()),
                         CommitState::Ok => Next::Finish,
@@ -708,17 +739,17 @@ impl FileSystem {
                         ref mut pending_rename,
                         ..
                     } = &mut *file;
-                    let new_empty = {
+                    let state = {
                         let pending = pending_rename.as_mut().unwrap();
                         if id != pending.id {
                             unimplemented!() //TODO buffer op?
                         }
                         pending.data = new_data;
                         pending.old_exists = CommitState::Ok;
-                        pending.new_empty
+                        pending.state()
                     };
 
-                    new_next = match new_empty {
+                    new_next = match state {
                         CommitState::Pending => Next::Nothing,
                         CommitState::Abort => Next::Abort(pending_rename.take().unwrap()),
                         CommitState::Ok => Next::Finish,
@@ -747,6 +778,7 @@ impl FileSystem {
         which_path: WhichPath,
         due_to_old: bool,
     ) -> (Option<VecDeque<Operation>>, Option<VecDeque<Operation>>) {
+        // assert!(self.seen_ids.contains(&id), "rn didn't see rename {:?} => {:?}", old_path, new_path);
         let handle_old = old_path.starts_with(&self.my_root)
             && matches!(which_path, WhichPath::Path1 | WhichPath::Both);
         let handle_new = new_path.starts_with(&self.my_root)
@@ -846,6 +878,7 @@ impl FileSystem {
 
     fn finish_rename_create(&mut self, new_path: PathBuf) -> VecDeque<Operation> {
         //TODO set data here?
+        //TODO for all parents ensure exists
         let (path, flush) = match self.files.get_mut(&*new_path) {
             None => unreachable!(),
             Some(new_node) => {

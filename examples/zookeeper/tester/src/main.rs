@@ -28,15 +28,36 @@ fn main() {
     println!("{:?}", args);
     let client_num = args.client_num as u32;
     ::zookeeper::message::set_client_id(client_num + 1);
-    let color = (client_num + 1).into();
+    let color = (client_num % 2 + 1).into();
+    // let color = (client_num + 1).into();
     let servers = &*args.servers.0;
-    let (mut reader, writer) = if servers[0].0 != servers[0].1 {
+    let replicated = servers[0].0 != servers[0].1;
+    let balance_num = if servers.len() > 1 {
+        let numbers = [1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6, 13, 7, 14];
+        println!("client_num {:?}, balance_num {:?}, color {:?}", client_num, numbers[client_num as usize], color);
+        numbers[client_num as usize]
+    } else {
+        (client_num as u64 + 1) * 1
+    };
+    let (mut reader, writer) = if replicated {
+            // LogHandle::<[u8]>::replicated_with_servers(&servers[..])
+            // if servers.len() > 1 {
+            //     if u32::from(color) % 2 == 0 {
+            //         LogHandle::<[u8]>::replicated_with_servers(&servers[0..1])
+            //     } else {
+            //         LogHandle::<[u8]>::replicated_with_servers(&servers[1..2])
+            //     }
+            // } else {
+            //     LogHandle::<[u8]>::replicated_with_servers(&servers[..])
+            // }
             LogHandle::<[u8]>::replicated_with_servers(&servers[..])
+
         } else {
+            println!("unreplicated!!");
             LogHandle::<[u8]>::unreplicated_with_servers(servers.iter().map(|&(a, _)| a))
         }
         .chains(&[color, 10_001.into()])
-        .client_num((client_num as u64 + 1) * 1)
+        .client_num(balance_num)
         .reads_my_writes()
         .build_handles();
 
@@ -71,8 +92,10 @@ fn main() {
     let num_clients = args.sync_clients;
 
     let my_root = format!("/foo{}/", my_dir).into();
-    let roots = (0..num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 + 1).into()))
+    let roots = (0..num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 % 2 + 1).into()))
         .collect();
+    // let roots = (0..num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 + 1).into()))
+    //     .collect();
 
     let mut client = Client::new(reader, writer, color, my_root, roots);
 
@@ -82,6 +105,29 @@ fn main() {
     static SENT: AtomicUsize = ATOMIC_USIZE_INIT;
     static DONE: AtomicBool = ATOMIC_BOOL_INIT;
     static STOPPED: AtomicBool = ATOMIC_BOOL_INIT;
+
+    static SEEDS: &[[u32; 4]] = &[
+        [3454879434, 2514150530, 2307584831, 3259277550],
+        [2675717231, 299990257, 193027058, 1682055575],
+        [788589415, 2003917122, 2795537290, 4104195951],
+        [596554834, 2952690321, 2189744100, 3027160689],
+        [1334634195, 1026708322, 3011024850, 2756417011],
+        [18275768, 2614899434, 2088480912, 853841533],
+        [3358821467, 1283043092, 1353023546, 832266079],
+        [1309154875, 3426142528, 313832552, 1805116763],
+        [2851648276, 4056285604, 2631203974, 1623572954],
+        [1476563191, 4003711912, 73809950, 2924249062],
+        [3235329122, 3299649619, 607456431, 3418298942],
+        [1020519273, 2806165509, 557625698, 2476164065],
+        [117057784, 617664764, 2594871634, 4199852127],
+        [527079516, 3447830561, 3249831678, 3677883057],
+        [1455014137, 41605930, 4204995745, 3904995018],
+        [3178902777, 366272502, 3040677457, 998192506],
+        [57103185, 1151241394, 3820680740, 3235644221],
+        [4251192596, 1647543665, 2564031356, 815853107],
+        [3098893464, 2575669856, 1344303158, 3402402061],
+        [293661294, 2712744277, 1327105791, 2664210530],
+    ];
 
     CREATED.store(num_prealloc, Relaxed);
 
@@ -94,8 +140,13 @@ fn main() {
 
     let window_size = args.window;
 
+    let one_in = args.one_in;
+
+    let do_transactions = args.do_transactions;
+
     thread::spawn(move || {
         let mut rand = Rand::from_seed([111, 234, client_num, 1010]);
+        // let mut rand = Rand::from_seed(SEEDS[client_num as usize]);
         let mut file_num = 0;
         let mut rename_num = 0;
         let mut window = 0;
@@ -123,12 +174,15 @@ fn main() {
                 // }
 
             }
-            if /*true*/ rand.gen_weighted_bool(1000) && rename_num < CREATED.load(Relaxed) {
-                let rename_dir = rand.gen_range(0, num_clients);
+            if /*true*/ /*client_num % 2 == 0 &&*/ do_transactions &&
+                rand.gen_weighted_bool(one_in as _) && rename_num < CREATED.load(Relaxed) {
+                // let rename_dir = client_num + 1;
+                let mut rename_dir = rand.gen_range(0, num_clients);
                 // let rename_dir = (dist.next_u32() + client_num + 1) as usize % num_clients;
-                // if rename_dir == my_dir as usize {
-                //     rename_dir = (my_dir as usize + 1) % num_clients
-                // }
+                //FIXME
+                while rename_dir == my_dir as usize {
+                    rename_dir = rand.gen_range(0, num_clients)//(my_dir as usize + 1) % num_clients
+                }
                 client.rename(
                     format!("/foo{}/{}", my_dir, rename_num).into(),
                     format!("/foo{}/r{}_{}", rename_dir, client_num, rename_num).into(),
@@ -196,6 +250,7 @@ fn main() {
     DONE.store(true, Relaxed);
     thread::sleep(Duration::from_secs(3));
 
+    // complete.remove(0);
     let avg: usize = complete.iter().map(|&c| c / 3).sum();
     let avg = avg / (complete.len() - 1);
 
@@ -229,7 +284,12 @@ struct Args {
 
     sync_clients: usize,
 
-    window: usize
+    window: usize,
+
+    one_in: usize,
+
+    #[structopt(short = "t", long = "transactions")]
+    do_transactions: bool,
 }
 
 #[derive(Debug, Clone)]

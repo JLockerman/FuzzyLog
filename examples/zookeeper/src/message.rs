@@ -81,6 +81,7 @@ pub enum Mutation {
         id: Id,
         old_path: PathBuf,
         new_path: PathBuf,
+        check_new: bool,
     },
 
     RenameOldExists {
@@ -120,6 +121,16 @@ impl Mutation {
             | &RenameOldExists { ref id, .. }
             | &RenameNewEmpty { ref id, .. }
             | &RenameNack { ref id, .. } => id,
+        }
+    }
+
+    pub fn part1_id(&self) -> &Id {
+        use self::Mutation::*;
+        match self {
+            &RenameOldExists { ref part1_id, .. }
+            | &RenameNewEmpty { ref part1_id, .. }
+            | &RenameNack { ref part1_id, .. } => part1_id,
+            _ => unreachable!(),
         }
     }
 

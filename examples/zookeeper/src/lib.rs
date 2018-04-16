@@ -196,6 +196,7 @@ impl Client {
             id,
             old_path,
             new_path,
+            check_new: true,
         };
         match other {
             Some(other) => self.send_multi(other, id, msg, MutationCallback::Void(callback)),
@@ -325,7 +326,7 @@ impl Materializer {
         roots: HashMap<OsString, order>,
     ) -> Self {
         let balancer = RandomState::new();
-        let to_files = (0..1)
+        let to_files = (0..2)
             .map(|me| {
                 let balancer = balancer.clone();
                 let mut files = FileSystem::new(my_root.clone(), roots.clone());
@@ -345,9 +346,16 @@ impl Materializer {
                 let mut serialize_cache = vec![];
                 let (send, recv) = channel();
                 ::std::thread::spawn(move || {
+                    // struct PrintOnDrop<T: ::std::fmt::Debug>(T);
+                    // impl<T: ::std::fmt::Debug> Drop for PrintOnDrop<T> {
+                    //     fn drop(&mut self) {
+                    //         println!("on drop {:?}", self.0);
+                    //     }
+                    // }
                     for op in recv.iter() {
                         match op {
                             Op::Mut(m, locs, mut cb, which_path) => {
+                                // let od = PrintOnDrop(&*locs);
                                 files.apply_mutation(m, which_path, |id, result, msg1, msg2| {
                                     for ref new_msg in msg1.into_iter().chain(msg2) {
                                         let &id = new_msg.id();
@@ -356,6 +364,7 @@ impl Materializer {
                                         // assert!(chain != 0.into());
                                         if locs.len() > 1 {
                                             assert_eq!(locs.len(), 2);
+                                            // println!("> {:?} to {:?}", new_msg.part1_id(), locs);
                                             // to_server.async_no_remote_multiappend(
                                             //     &[locs[0].0, locs[1].0],
                                             //     &*serialize_cache,
@@ -399,7 +408,8 @@ impl Materializer {
                                             //     else add to early
                                         }
                                     }
-                                })
+                                });
+                                // ::std::mem::forget(od)
                             }
                             Op::Obs(o) => files.observe(o),
                         }
@@ -507,97 +517,97 @@ impl Materializer {
                     let msg: Mutation = deserialize(bytes).expect("bad msg");
                     //FIXME rename across partitions?
                     //FIXME clean into match
-                    // let my_root = &self.my_root;
-                    // let use_path = msg.path().starts_with(my_root);
-                    // let use_path2 = msg.path2().map(|p| p.starts_with(my_root));
+                    let my_root = &self.my_root;
+                    let use_path = msg.path().starts_with(my_root);
+                    let use_path2 = msg.path2().map(|p| p.starts_with(my_root));
                     // if let Some(p2) = msg.path2() {
                     //     println!("{:?} => {:?} @ {:?}", msg.path(), p2, locs);
                     // }
 
-                    // let which_mine = match (use_path, use_path2) {
-                    //     (false, None) | (false, Some(false)) => continue 'play,
-                    //     (true, None) | (true, Some(false)) => WhichPath::Path1,
-                    //     (false, Some(true)) => WhichPath::Path2,
-                    //     (true, Some(true)) => WhichPath::Both,
-                    // };
-                //     let (hash, hash2) = match which_mine {
-                //         WhichPath::Path1 => {
-                //             let mut hasher = self.balancer.build_hasher();
-                //             msg.path().hash(&mut hasher);
-                //             (Some(hasher.finish()), None)
-                //         }
-                //         WhichPath::Path2 => {
-                //             let mut hasher = self.balancer.build_hasher();
-                //             msg.path2().unwrap().hash(&mut hasher);
-                //             (None, Some(hasher.finish()))
-                //         }
-                //         WhichPath::Both => {
-                //             let h1 = {
-                //                 let mut hasher = self.balancer.build_hasher();
-                //                 msg.path().hash(&mut hasher);
-                //                 Some(hasher.finish())
-                //             };
-                //             let h2 = {
-                //                 let mut hasher = self.balancer.build_hasher();
-                //                 msg.path2().unwrap().hash(&mut hasher);
-                //                 Some(hasher.finish())
-                //             };
-                //             (h1, h2)
-                //         }
-                //     };
-                //     let num_file_threads = self.to_files.len();
-                //     let (hash, hash2) = (
-                //         hash.map(|h| h as usize % num_file_threads),
-                //         hash2.map(|h| h as usize % num_file_threads)
-                //     );
-                //     match (hash, hash2) {
-                //         (None, None) => continue 'play,
-                //         (Some(h), Some(h2)) => if h == h2 {
-                //             let waiting = self.waiting_mutations.remove(msg.id());
-                //             self.to_files[h]
-                //                 .send(Op::Mut(msg, locs.to_vec(), waiting, WhichPath::Both))
-                //                 .unwrap();
-                //         } else {
-                //             let waiting = self.waiting_mutations.remove(msg.id());
-                //             self.to_files[h]
-                //                 .send(Op::Mut(
-                //                     msg.clone(),
-                //                     locs.to_vec(),
-                //                     waiting,
-                //                     WhichPath::Path1,
-                //                 ))
-                //                 .unwrap();
-                //             self.to_files[h2]
-                //                 .send(Op::Mut(msg, locs.to_vec(), None, WhichPath::Path2))
-                //                 .unwrap();
-                //         },
-                //         (Some(h), None) => {
-                //             let waiting = self.waiting_mutations.remove(msg.id());
-                //             self.to_files[h]
-                //                 .send(Op::Mut(
-                //                     msg.clone(),
-                //                     locs.to_vec(),
-                //                     waiting,
-                //                     WhichPath::Path1,
-                //                 ))
-                //                 .unwrap()
-                //         }
-                //         (None, Some(h2)) => {
-                //             let waiting = self.waiting_mutations.remove(msg.id());
-                //             self.to_files[h2]
-                //                 .send(Op::Mut(
-                //                     msg,
-                //                     locs.to_vec(),
-                //                     waiting,
-                //                     WhichPath::Path2,
-                //                 ))
-                //                 .unwrap()
-                //         }
-                //     }
-                    let waiting = self.waiting_mutations.remove(msg.id());
-                    self.to_files[0]
-                        .send(Op::Mut(msg, locs.to_vec(), waiting, WhichPath::Both))
-                        .unwrap();
+                    let which_mine = match (use_path, use_path2) {
+                        (false, None) | (false, Some(false)) => continue 'play,
+                        (true, None) | (true, Some(false)) => WhichPath::Path1,
+                        (false, Some(true)) => WhichPath::Path2,
+                        (true, Some(true)) => WhichPath::Both,
+                    };
+                    let (hash, hash2) = match which_mine {
+                        WhichPath::Path1 => {
+                            let mut hasher = self.balancer.build_hasher();
+                            msg.path().hash(&mut hasher);
+                            (Some(hasher.finish()), None)
+                        }
+                        WhichPath::Path2 => {
+                            let mut hasher = self.balancer.build_hasher();
+                            msg.path2().unwrap().hash(&mut hasher);
+                            (None, Some(hasher.finish()))
+                        }
+                        WhichPath::Both => {
+                            let h1 = {
+                                let mut hasher = self.balancer.build_hasher();
+                                msg.path().hash(&mut hasher);
+                                Some(hasher.finish())
+                            };
+                            let h2 = {
+                                let mut hasher = self.balancer.build_hasher();
+                                msg.path2().unwrap().hash(&mut hasher);
+                                Some(hasher.finish())
+                            };
+                            (h1, h2)
+                        }
+                    };
+                    let num_file_threads = self.to_files.len();
+                    let (hash, hash2) = (
+                        hash.map(|h| h as usize % num_file_threads),
+                        hash2.map(|h| h as usize % num_file_threads)
+                    );
+                    match (hash, hash2) {
+                        (None, None) => continue 'play,
+                        (Some(h), Some(h2)) => if h == h2 {
+                            let waiting = self.waiting_mutations.remove(msg.id());
+                            self.to_files[h]
+                                .send(Op::Mut(msg, locs.to_vec(), waiting, WhichPath::Both))
+                                .unwrap();
+                        } else {
+                            let waiting = self.waiting_mutations.remove(msg.id());
+                            self.to_files[h]
+                                .send(Op::Mut(
+                                    msg.clone(),
+                                    locs.to_vec(),
+                                    waiting,
+                                    WhichPath::Path1,
+                                ))
+                                .unwrap();
+                            self.to_files[h2]
+                                .send(Op::Mut(msg, locs.to_vec(), None, WhichPath::Path2))
+                                .unwrap();
+                        },
+                        (Some(h), None) => {
+                            let waiting = self.waiting_mutations.remove(msg.id());
+                            self.to_files[h]
+                                .send(Op::Mut(
+                                    msg.clone(),
+                                    locs.to_vec(),
+                                    waiting,
+                                    WhichPath::Path1,
+                                ))
+                                .unwrap()
+                        }
+                        (None, Some(h2)) => {
+                            let waiting = self.waiting_mutations.remove(msg.id());
+                            self.to_files[h2]
+                                .send(Op::Mut(
+                                    msg,
+                                    locs.to_vec(),
+                                    waiting,
+                                    WhichPath::Path2,
+                                ))
+                                .unwrap()
+                        }
+                    }
+                    // let waiting = self.waiting_mutations.remove(msg.id());
+                    // self.to_files[0]
+                    //     .send(Op::Mut(msg, locs.to_vec(), waiting, WhichPath::Both))
+                    //     .unwrap();
                 }
             }
         }
