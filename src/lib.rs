@@ -32,6 +32,7 @@ pub use fuzzy_log_client as async;
 pub use async::fuzzy_log::log_handle::LogHandle;
 
 #[cfg(test)] mod tests;
+#[cfg(test)] mod replication_tests;
 
 /// Start a fuzzy log TCP server.
 ///
