@@ -19,7 +19,6 @@ use fuzzy_log_util::socket_addr::Ipv4SocketAddr;
 use mio;
 use mio::tcp::*;
 use mio::Token;
-use mio::udp::UdpSocket;
 
 pub trait AsyncStoreClient {
     //TODO nocopy?
@@ -107,12 +106,6 @@ counters!{
 #[derive(Debug)]
 pub enum WriteState {
     SingleServer(Vec<u8>),
-    ToLockServer(Vec<u8>),
-    MultiServer(Rc<RefCell<Vec<u8>>>,
-        Rc<RefCell<HashSet<usize>>>,
-        Rc<Box<[OrderIndex]>>,
-        bool,
-    ),
     Skeens1(
         Rc<RefCell<Vec<u8>>>,
         Rc<RefCell<HashSet<usize>>>,
@@ -134,13 +127,7 @@ pub enum WriteState {
         Rc<RefCell<HashSet<usize>>>,
         u64,
     ),
-    UnlockServer(Rc<RefCell<Vec<u8>>>),
     GC(Vec<u8>),
-}
-
-struct UdpConnection {
-    socket: UdpSocket,
-    addr: SocketAddr,
 }
 
 //FIXME ugly hack to ease impl, put in constructor
@@ -451,60 +438,6 @@ where C: AsyncStoreClient {
     }
 }
 
-impl<C> AsyncTcpStore<UdpConnection, C>
-where C: AsyncStoreClient {
-    pub fn udp<I>(lock_server: SocketAddr, chain_servers: I, client: C,
-        event_loop: &mut mio::Poll)
-    -> Result<(Self, ToSelf), io::Error>
-    where I: IntoIterator<Item=SocketAddr> {
-        //TODO assert no duplicates
-        let mut servers = try!(chain_servers
-            .into_iter()
-            //TODO socket per servers is dumb, see if there's a better way to do multiplexing
-            .map(PerServer::udp)
-            .collect::<Result<Vec<_>, _>>());
-        let num_chain_servers = servers.len();
-        let lock_server = try!(PerServer::udp(lock_server));
-        //TODO if let Some(lock_server) = lock_server...
-        let lock_token = Token(servers.len());
-        servers.push(lock_server);
-        for (i, server) in servers.iter_mut().enumerate() {
-            server.token = Token(i);
-            event_loop.register(server.connection(), server.token,
-                mio::Ready::readable() | mio::Ready::writable() | mio::Ready::error(),
-                mio::PollOpt::edge())
-                .expect("could not reregister client socket")
-        }
-        let awake_io = servers.iter().map(|s| s.token.0).collect();
-        let from_client_token = Token(servers.len());
-        let (to_store, from_client) = channel();
-        event_loop.register(&from_client,
-            from_client_token,
-            mio::Ready::readable() | mio::Ready::error(),
-            mio::PollOpt::edge()
-        ).expect("could not reregister client channel");
-        Ok((AsyncTcpStore {
-            sent_writes: Default::default(),
-            sent_reads: Default::default(),
-            waiting_buffers: Default::default(),
-            awake_io: awake_io,
-            servers: servers,
-            num_chain_servers: num_chain_servers,
-            lock_token: lock_token,
-            client: client,
-            from_client: from_client,
-            is_unreplicated: true,
-            new_multi: false,
-            finished: false,
-            reads_my_writes: false,
-
-            max_timestamp_seen: Default::default(),
-
-            print_data: Default::default(),
-        }, to_store))
-    }
-}
-
 impl PerServer<TcpStream> {
     fn tcp(addr: SocketAddr) -> Result<Self, io::Error> {
         let stream = try!(TcpStream::connect(&addr));
@@ -529,38 +462,6 @@ impl PerServer<TcpStream> {
 
     fn connection(&self) -> &TcpStream {
         &self.stream
-    }
-}
-
-impl PerServer<UdpConnection> {
-    #[allow(unused_variables, unreachable_code)]
-    fn udp(addr: SocketAddr) -> Result<Self, io::Error> {
-        use std::os::unix::io::FromRawFd;
-        /*let fd: i32 = try!(nix::socket(
-                nix::AddressFamily::Inet,
-                nix::SockType::Datagram,
-                nix::SOCK_NONBLOCK | nix::SOCK_CLOEXEC,
-                0));*/
-        let fd: i32 = unimplemented!();
-        Ok(PerServer {
-            being_written: DoubleBuffer::new(),
-            being_sent: Default::default(),
-            read_buffer: Buffer::new(), //TODO cap
-            stream: UdpConnection { socket: unsafe { UdpSocket::from_raw_fd(fd) }, addr: addr },
-            bytes_read: 0,
-            bytes_sent: 0,
-            token: Token(::std::usize::MAX),
-            got_new_message: false,
-            receiver: Ipv4SocketAddr::from_uuid(&Uuid::nil()),
-            stay_awake: true,
-            dead: false,
-
-            print_data: Default::default(),
-        })
-    }
-
-    fn connection(&self) -> &UdpSocket {
-        &self.stream.socket
     }
 }
 
@@ -748,14 +649,7 @@ where PerServer<S>: Connected,
                     self.add_skeens1(msg);
                     true
                 } else {
-                    let mut msg = msg;
-                    {
-                        let mut e = bytes_as_entry_mut(&mut msg);
-                        e.flag_mut().insert(EntryFlag::LockServer);
-                        e.locs_mut().into_iter()
-                            .fold((), |_, &mut OrderIndex(_,ref mut i)| *i = 0.into());
-                    }
-                    self.add_get_lock_nums(msg)
+                    unreachable!("old locking code path")
                 }
             }
 
@@ -966,30 +860,6 @@ where PerServer<S>: Connected,
         (msg, servers, remaining_servers, timestamps)
     }
 
-    fn add_get_lock_nums(&mut self, msg: Vec<u8>) -> bool {
-        let lock_server = self.lock_token();
-        //let per_server = self.server_for_token_mut(lock_server);
-        let per_server = &mut self.servers[lock_server.0];
-        per_server.add_get_lock_nums(msg);
-        if !per_server.got_new_message {
-            per_server.got_new_message = true;
-            self.awake_io.push_back(lock_server.0)
-        }
-        for sent in per_server.being_sent.drain(..) {
-            let layout = sent.layout();
-            if layout == EntryLayout::Read {
-                let read_loc = sent.read_loc();
-                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
-                self.waiting_buffers.push_back(sent.take())
-            }
-            else if !sent.is_unlock() {
-                let id = sent.id();
-                self.sent_writes.insert(id, sent);
-            }
-        }
-        true
-    }
-
     fn handle_server_event(&mut self, server: usize) -> Result<(), ()> {
         // trace!("CLIENT handle server {:?} event", server);
         self.servers[server].got_new_message = false;
@@ -1099,86 +969,6 @@ where PerServer<S>: Connected,
         if let Some(v) = self.sent_writes.remove(&id) {
             trace!("CLIENT write needed completion");
             match v {
-                //if lock
-                //    for server in v.servers()
-                //         server.send_lock+data
-
-                WriteState::ToLockServer(mut msg) => {
-                    unreachable!();
-                    trace!("CLIENT finished lock");
-                    assert!(!self.new_multi);
-                    assert_eq!(token, self.lock_token());
-                    {
-                        let mut e = bytes_as_entry_mut(&mut msg);
-                        e.flag_mut().insert(EntryFlag::TakeLock);
-                        let msg_locs = e.locs_mut();
-                        let lock_locs = &packet.contents().locs()[..msg_locs.len()];
-                        for i in 0..msg_locs.len() {
-                            debug_assert_eq!(msg_locs[i].0, lock_locs[i].0);
-                            msg_locs[i] = lock_locs[i];
-                            if msg_locs[i].0 == order::from(0) {
-                                debug_assert_eq!(msg_locs[i], OrderIndex(0.into(), 0.into()));
-                            } else {
-                                debug_assert!(msg_locs[i].1 != entry::from(0));
-                            }
-                            debug_assert!(
-                                if msg_locs[i].0 != order::from(0) {
-                                    msg_locs[i].1 != entry::from(0)
-                                } else {
-                                    msg_locs[i].1 == entry::from(0)
-                                }
-                            );
-                        }
-                    }
-                    self.add_multis(msg, num_chain_servers);
-                    return Err(())
-                }
-                WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel) => {
-                    unreachable!();
-                    assert!(!self.new_multi);
-                    assert!(token != self.lock_token());
-                    assert!(!self.new_multi);
-                    trace!("CLIENT finished multi section");
-                    let ready_to_unlock = {
-                        let mut b = buf.borrow_mut();
-                        let filled = fill_locs(&mut b, packet.contents(),
-                            token, self.num_chain_servers, unreplicated);
-                        let mut r = remaining_servers.borrow_mut();
-                        if r.remove(&token.0) {
-                            assert!(filled > 0, "no fill for {:?}", token);
-                        }
-                        let finished_writes = r.is_empty();
-                        if finished_writes {
-                            //TODO assert!(Rc::get_mut(&mut buf).is_some());
-                            //let locs = buf.locs().to_vec();
-                            let locs = bytes_as_entry(&b).locs().to_vec();
-                            Some(locs)
-                        } else { None }
-                    };
-                    match ready_to_unlock {
-                        Some(locs) => {
-                            {
-                                bytes_as_entry_mut(&mut buf.borrow_mut())
-                                    .locs_mut()
-                                    .copy_from_slice(&locks)
-                            }
-                            self.add_unlocks(buf);
-                            trace!("CLIENT finished multi at {:?}", locs);
-                            //TODO
-                            let e = self.client.on_finished_write(id, locs);
-                            if e.is_err() {
-                                self.finished = true;
-                            }
-                            return Ok(true)
-                        }
-                        None => {
-                            self.sent_writes.insert(id,
-                                WriteState::MultiServer(buf, remaining_servers, locks, is_sentinel));
-                            return Err(())
-                        }
-                    }
-                }
-
                 WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel) => {
                     if !flag.contains(EntryFlag::Skeens1Queued) {
                         error!("CLIENT bad skeens1 ack @ {:?}", token);
@@ -1397,7 +1187,6 @@ where PerServer<S>: Connected,
                     }
                     return Ok(true)
                 }
-                WriteState::UnlockServer(..) => panic!("invalid wait state"),
                 WriteState::GC(..) => return Err(()),
             };
 
@@ -1647,62 +1436,6 @@ where PerServer<S>: Connected,
         }
     }
 
-    fn add_unlocks(&mut self, mut buf: Rc<RefCell<Vec<u8>>>) {
-        let servers = match Rc::get_mut(&mut buf) {
-            None => unreachable!(),
-            Some(mut buf) => {
-                let buf = buf.get_mut();
-                let server = self.get_servers_for_multi(&buf);
-                slice_to_sentinel(buf);
-                let size = {
-                    let mut e = bytes_as_entry_mut(buf);
-                    e.flag_mut().insert(EntryFlag::Unlock);
-                    e.as_ref().len()
-                };
-                unsafe { buf.set_len(size) };
-                server
-            }
-        };
-        assert_eq!(bytes_as_entry(&buf.borrow()).layout(), EntryLayout::Sentinel);
-        assert_eq!(bytes_as_entry(&buf.borrow()).len(), buf.borrow().len());
-        for server in servers {
-            trace!("CLIENT add unlock for {:?}", server);
-            let per_server = &mut self.servers[server];
-            per_server.add_unlock(buf.clone());
-            if !per_server.got_new_message {
-                per_server.got_new_message = true;
-                self.awake_io.push_back(server)
-            }
-        }
-    }
-
-    fn add_multis(&mut self, msg: Vec<u8>, num_servers: usize) {
-        debug_assert_eq!(bytes_as_entry(&msg).len(), msg.len());
-        let locks = Rc::new(bytes_as_entry(&msg).locs().to_vec().into_boxed_slice());
-        let servers = self.get_servers_for_multi(&msg);
-        let mut remaining_servers: HashSet<usize> = Default::default();
-        remaining_servers.reserve(servers.len());
-        for &writer in servers.iter() {
-            remaining_servers.insert(self.read_server_for_write_server(writer));
-        }
-        trace!("CLIENT multi to {:?}", remaining_servers);
-        let remaining_servers = Rc::new(RefCell::new(remaining_servers));
-        let msg = Rc::new(RefCell::new(msg));
-        for s in servers {
-            let per_server = &mut self.servers[s];
-            per_server.add_multi(
-                msg.clone(),
-                remaining_servers.clone(),
-                locks.clone(),
-                num_servers,
-            );
-            if !per_server.got_new_message {
-                per_server.got_new_message = true;
-                self.awake_io.push_back(s)
-            }
-        }
-    }
-
     fn is_single_node_append(&self, msg: &[u8]) -> bool {
         let mut single = true;
         let mut server_token = None;
@@ -1802,22 +1535,8 @@ pub trait Connected {
         self.add_send(send)
     }
 
-    fn add_multi(&mut self,
-        msg: Rc<RefCell<Vec<u8>>>,
-        remaining_servers: Rc<RefCell<HashSet<usize>>>,
-        locks: Rc<Box<[OrderIndex]>>,
-        num_servers: usize,
-    );
-
-    fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>);
-
     fn add_gc(&mut self, buffer: Vec<u8>) {
         let send = WriteState::GC(buffer);
-        self.add_send(send)
-    }
-
-    fn add_get_lock_nums(&mut self, msg: Vec<u8>) {
-        let send = WriteState::ToLockServer(msg);
         self.add_send(send)
     }
 
@@ -1953,15 +1672,15 @@ impl Connected for PerServer<TcpStream> {
         }*/
     }
 
-    fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
-        let to_ret = match &failed {
-            f @ &WriteState::MultiServer(..) => Some(f.clone_multi()),
-            _ => None,
-        };
-        self.add_send(failed);
+    fn handle_redo(&mut self, _failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
+        unimplemented!();
+        // let to_ret = match &failed {
+        //     _ => None,
+        // };
+        // self.add_send(failed);
         //TODO front or back?
         //self.awaiting_send.push_front(failed);
-        to_ret
+        // to_ret
     }
 
     fn send_next_burst(&mut self) -> bool {
@@ -2028,7 +1747,7 @@ impl Connected for PerServer<TcpStream> {
         num_servers: usize,
     ) {
         self.stay_awake = true;
-        let len = msg.borrow().len();
+        // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
         let is_data;
         {
@@ -2076,7 +1795,7 @@ impl Connected for PerServer<TcpStream> {
     ) {
         trace!("Add Skeens2");
         self.stay_awake = true;
-        let len = msg.borrow().len();
+        // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
         {
             let ts = msg.borrow();
@@ -2097,7 +1816,7 @@ impl Connected for PerServer<TcpStream> {
         timestamps: Rc<RefCell<Box<[u64]>>>,
     ) {
         self.stay_awake = true;
-        let len = msg.borrow().len();
+        // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
         {
             let ts = msg.borrow();
@@ -2120,7 +1839,7 @@ impl Connected for PerServer<TcpStream> {
     ) {
         trace!("Add snap Skeens2");
         self.stay_awake = true;
-        let len = msg.borrow().len();
+        // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
         {
             let ts = msg.borrow();
@@ -2134,68 +1853,6 @@ impl Connected for PerServer<TcpStream> {
         ))
     }
 
-    fn add_multi(&mut self,
-        msg: Rc<RefCell<Vec<u8>>>,
-        remaining_servers: Rc<RefCell<HashSet<usize>>>,
-        locks: Rc<Box<[OrderIndex]>>,
-        num_servers: usize,
-    ) {
-        self.stay_awake = true;
-        let len = msg.borrow().len();
-        self.print_data.packets_sending(1);
-        let is_data;
-        {
-            let mut ts = msg.borrow_mut();
-            let send_end = {
-                {
-                    let mut e = bytes_as_entry_mut(&mut *ts);
-                    is_data = e.as_ref().locs().into_iter()
-                        .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
-                        .any(|oi| is_write_server_for(oi.0, self.token, num_servers));
-                    debug_assert!(e.as_ref().layout() == EntryLayout::Multiput
-                        || e.as_ref().layout() == EntryLayout::Sentinel);
-                    {
-                        let f = e.flag_mut();
-                        debug_assert!(f.contains(EntryFlag::TakeLock));
-                        f.insert(EntryFlag::TakeLock);
-                    }
-                    if !is_data {
-                        debug_assert!(e.as_ref().locs()
-                            .contains(&OrderIndex(0.into(), 0.into())));
-                    }
-                }
-                if is_data {
-                    slice_to_multi(&mut ts[..]);
-                } else {
-                    slice_to_sentinel(&mut ts[..]);
-                }
-                bytes_as_entry_mut(&mut *ts).as_ref().len()
-            };
-            //Since sentinels have a different size than multis, we need to truncate
-            //for those sends
-            let sent = self.being_written.fill(&[&ts[..send_end], self.receiver.bytes()]);
-            debug_assert!(sent);
-        }
-        self.being_sent.push_back(WriteState::MultiServer(msg, remaining_servers, locks, !is_data))
-    }
-
-    fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
-        //unlike other reqs here we send the unlock first to minimize the contention window
-        self.stay_awake = true;
-        {
-            let b = buffer.borrow();
-            self.being_written.fill(&[&b[..], self.receiver.bytes()]);
-        }
-        self.print_data.packets_sending(1);
-        //FIXME this is unneeded
-        self.being_sent.push_back(WriteState::UnlockServer(buffer))
-    }
-
-    fn add_get_lock_nums(&mut self, msg: Vec<u8>) {
-        let send = WriteState::ToLockServer(msg);
-        self.add_send(send)
-    }
-
     fn needs_to_write(&self) -> bool {
         // debug_assert!(!(self.being_written.first_bytes().is_empty()
         //     && !self.being_written.second.is_empty()));
@@ -2205,155 +1862,12 @@ impl Connected for PerServer<TcpStream> {
     }
 }
 
-impl Connected for PerServer<UdpConnection> {
-    type Connection = UdpSocket;
-    fn connection(&self) -> &Self::Connection {
-        &self.stream.socket
-    }
-
-    fn close(&mut self) {
-        self.being_written.clear();
-        //TODO return these to the client?
-        self.being_sent.clear();
-        self.read_buffer.clear();
-        self.bytes_read = 0;
-        self.bytes_sent = 0;
-        self.got_new_message = false;
-        self.stay_awake = false;
-        self.dead = true;
-    }
-
-    fn recv_packet(&mut self) -> Result<Option<Buffer>, io::Error> {
-        //TODO
-        self.read_buffer.ensure_capacity(8192);
-        //FIXME handle WouldBlock and number of bytes read
-        let read = self.stream.socket.recv_from(&mut self.read_buffer[..])
-            .expect("cannot read");
-        if let Some((read, _)) = read {
-            if read > 0 {
-                let buff = mem::replace(&mut self.read_buffer, Buffer::empty());
-                self.stay_awake = true;
-                return Ok(Some(buff))
-            }
-        }
-
-        Ok(None)
-    }
-
-    //fn send_packet(&mut self, packet: &[u8]) -> bool {
-    //    let addr = &self.stream.addr;
-    //    //FIXME handle WouldBlock and number of bytes read
-    //    let sent = self.stream.socket.send_to(packet, addr).expect("cannot write");
-    //    if let Some(sent) = sent {
-    //        return sent > 0
-    //    }
-    //    return false
-    //}
-
-    fn handle_redo(&mut self, failed: WriteState, _kind: EntryKind::Kind) -> Option<WriteState> {
-        unimplemented!()
-    }
-
-    //FIXME add seperate write function which is split into TCP and UDP versions
-    //fn send_next_burst(&mut self) -> Option<WriteState> {
-    fn send_next_burst(&mut self) -> bool {
-        unimplemented!()
-    }
-
-    fn add_single_server_send(&mut self, msg: Vec<u8>) {
-        unimplemented!()
-    }
-
-    fn add_send(&mut self, to_send: WriteState) {
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    fn add_skeens1(
-        &mut self,
-        msg: Rc<RefCell<Vec<u8>>>,
-        remaining_servers: Rc<RefCell<HashSet<usize>>>,
-        timestamps: Rc<RefCell<Box<[u64]>>>,
-        num_servers: usize,
-    ) {
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    fn add_skeens2(
-        &mut self,
-        msg: Rc<RefCell<Vec<u8>>>,
-        remaining_servers: Rc<RefCell<HashSet<usize>>>,
-        max_timestamp: u64,
-    ) {
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    fn add_snapshot_skeens1(
-        &mut self,
-        msg: Rc<RefCell<Vec<u8>>>,
-        remaining_servers: Rc<RefCell<HashSet<usize>>>,
-        timestamps: Rc<RefCell<Box<[u64]>>>,
-    ) {
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    fn add_snapshot_skeens2(
-        &mut self,
-        msg: Rc<RefCell<Vec<u8>>>,
-        remaining_servers: Rc<RefCell<HashSet<usize>>>,
-        max_timestamp: u64,
-    ) {
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    fn add_multi(&mut self,
-        msg: Rc<RefCell<Vec<u8>>>,
-        remaining_servers: Rc<RefCell<HashSet<usize>>>,
-        locks: Rc<Box<[OrderIndex]>>,
-        num_servers: usize,
-    ) {
-    //fn add_multi(&mut self, msg: Rc<RefCell<Vec<u8>>>, remaining_servers: Rc<RefCell<HashSet<usize>>>, locks: Rc<Box<[OrderIndex]>>) {
-        //FIXME
-        unimplemented!()
-        //self.awaiting_send.push_back(WriteState::MultiServer(msg, remaining_servers, locks, false));
-    }
-
-    #[allow(unused_variables)]
-    fn add_unlock(&mut self, buffer: Rc<RefCell<Vec<u8>>>) {
-        //unlike other reqs here we send the unlock first to minimize the contention window
-        //self.awaiting_send.push_front(WriteState::UnlockServer(buffer))
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
-    fn add_get_lock_nums(&mut self, msg: Vec<u8>) {
-        //self.awaiting_send.push_back(WriteState::ToLockServer(msg));
-        //true
-        unimplemented!()
-    }
-
-    fn needs_to_write(&self) -> bool {
-        unimplemented!()
-    }
-}
-
 impl WriteState {
     fn with_packet<F, R>(&self, f: F) -> R
     where F: for<'a> FnOnce(&'a [u8]) -> R {
         use self::WriteState::*;
         match self {
-            &SingleServer(ref buf) | &ToLockServer(ref buf)
-            | &GC(ref buf) => f(&**buf),
-            &MultiServer(ref buf, _, _, is_sentinel) => {
-                let mut b = buf.borrow_mut();
-                if is_sentinel { slice_to_sentinel(&mut b[..]); }
-                else { slice_to_multi(&mut b[..]) }
-                f(&*b)
-            },
+            &SingleServer(ref buf) | &GC(ref buf) => f(&**buf),
 
             &Skeens1(ref buf, _, _, is_sentinel) => {
                 let mut b = buf.borrow_mut();
@@ -2362,8 +1876,7 @@ impl WriteState {
                 f(&*b)
             },
 
-            &UnlockServer(ref buf)
-            | &Skeens2(ref buf, ..)
+            &Skeens2(ref buf, ..)
             | &SnapshotSkeens1(ref buf, _, _) | &SnapshotSkeens2(ref buf, _, _) => {
                 let b = buf.borrow();
                 f(&*b)
@@ -2374,9 +1887,9 @@ impl WriteState {
     fn take(self) -> Vec<u8> {
         use self::WriteState::*;
         match self {
-            SingleServer(buf) | ToLockServer(buf) | GC(buf) => buf,
-            MultiServer(buf, ..) | UnlockServer(buf)
-            | Skeens1(buf, ..) | Skeens2(buf, ..)
+            SingleServer(buf) | GC(buf) => buf,
+
+            Skeens1(buf, ..) | Skeens2(buf, ..)
             | SnapshotSkeens1(buf, _, _) | SnapshotSkeens2(buf, _, _) =>
                 Rc::try_unwrap(buf).expect("taking from non unique WriteState")
                     .into_inner()
@@ -2385,14 +1898,12 @@ impl WriteState {
 
     fn is_unlock(&self) -> bool {
         match self {
-            &WriteState::UnlockServer(..) => true,
             _ => false,
         }
     }
 
     fn is_multi(&self) -> bool {
         match self {
-            &WriteState::MultiServer(..) => true,
             &WriteState::Skeens1(..) | &WriteState::Skeens2(..) => true,
             &WriteState::SnapshotSkeens1(..) | &WriteState::SnapshotSkeens2(..) => true,
             _ => false,
@@ -2421,15 +1932,6 @@ impl WriteState {
             loc = bytes_as_entry(p).locs()[0]
         });
         loc
-    }
-
-    fn clone_multi(&self) -> WriteState {
-        use self::WriteState::*;
-        match self {
-            &MultiServer(ref b, ref remaining_servers, ref locks, is_sentinel) => MultiServer(b.clone(), remaining_servers.clone(), locks.clone(), is_sentinel),
-            s => panic!("invlaid clone multi on {:?}", s)
-        }
-
     }
 }
 
