@@ -10,9 +10,9 @@ extern crate env_logger;
 
 #[cfg(test)]
 extern crate fuzzy_log_server;
-#[cfg(test)]
-#[macro_use]
-extern crate matches;
+// #[cfg(test)]
+// #[macro_use]
+// extern crate matches;
 
 use std::collections::{HashMap, VecDeque};
 pub use std::io;
@@ -49,7 +49,10 @@ pub enum ToSync<T> {
 
 pub struct RedBlueClient<RedMessage, BlueMessage, Observation> {
     handle: WriteHandle<[u8]>,
-    colors: Vec<order>, //TODO
+    red_chain: order,
+    my_chain: order,
+
+    //FIXME use AtomicPtr (AtomicArc?) instead of mutex
     causes: Arc<Mutex<HashMap<order, entry>>>,
     to_sync: Sender<ToSync<Observation>>,
 
@@ -66,8 +69,9 @@ where
 {
     pub fn new<I, ObservationResult, Data, Ack>(
         handle: LogHandle<[u8]>,
-        my_color: order,
-        other_colors: I,
+        my_chain: order,
+        red_chain: order,
+        other_chains: I,
         data: Data,
         ack: Ack,
         to_client: Sender<ObservationResult>,
@@ -79,20 +83,21 @@ where
         Ack: MutationAck + Send + 'static,
     {
         use std::thread::{spawn, yield_now};
-        let mut colors = vec![my_color];
-        colors.extend(other_colors);
+        let mut all_chains: Vec<_> = vec![my_chain, red_chain];
+        all_chains.extend(other_chains);
         let (reader, handle) = handle.split();
         let (to_sync, from_client) = channel();
         let loopback = to_sync.clone();
         let causes = Arc::new(Mutex::new(HashMap::new()));
         let ack = Box::new(ack);
-        let colors2 = colors.clone();
         let causes2 = causes.clone();
         spawn(move || {
             let mut m = Materializer {
                 ack,
                 to_client,
-                colors: colors2,
+                my_chain,
+                red_chain,
+                all_chains,
                 causes: causes2,
                 data: data,
                 early_mutations: Default::default(),
@@ -113,7 +118,8 @@ where
         });
         RedBlueClient {
             handle,
-            colors,
+            red_chain,
+            my_chain,
             causes,
             to_sync,
             happens_after: vec![],
@@ -123,44 +129,46 @@ where
     }
 
     pub fn do_red(&mut self, msg: RedMessage) -> Result<Uuid, bincode::Error> {
-        self.fill_happens_after();
         let message: Message<_, BlueMessage> = Message::Red(msg);
-        let data = serialize(&message, Infinite)?;
+        let chain = self.red_chain;
+        self.send(chain, &message)
+    }
+
+    pub fn do_blue(&mut self, msg: BlueMessage) -> Result<Uuid, bincode::Error> {
+        let message: Message<RedMessage, _> = Message::Blue(msg);
+        let chain = self.my_chain;
+        self.send(chain, &message)
+    }
+
+    fn send(&mut self, chain: order, msg: &Message<RedMessage, BlueMessage>)
+    -> Result<Uuid, bincode::Error> {
+        self.fill_happens_after(chain);
+        //TODO serialize_into
+        let data = serialize(&msg, Infinite)?;
         let id = self.handle
-            .async_multiappend(&self.colors[..], &data[..], &[]);
+            .async_append(chain, &data[..], &self.happens_after[..]);
         self.to_sync
             .send(ToSync::Mutation(id))
             .expect("materializer dead");
         Ok(id)
     }
 
-    pub fn do_blue(&mut self, msg: BlueMessage) -> Result<Uuid, bincode::Error> {
-        self.fill_happens_after();
-        let message: Message<RedMessage, _> = Message::Blue(msg);
-        let data = serialize(&message, Infinite)?;
-        let id = self.handle
-            .async_append(self.colors[0], &data[..], &self.happens_after[..]);
-        self.to_sync
-            .send(ToSync::Mutation(id))
-            .expect("materializer dead");
-        Ok(id)
+    fn fill_happens_after(&mut self, chain: order) {
+        self.happens_after.clear();
+        {
+            let mut causes = self.causes.lock().unwrap();
+            swap(&mut *causes, &mut self.cached_map);
+        }
+        self.cached_map.remove(&chain);
+        for loc in self.cached_map.drain() {
+            self.happens_after.push(loc.into())
+        }
     }
 
     pub fn do_observation(&mut self, observation: Observation) {
         self.to_sync
             .send(ToSync::Observation(observation))
             .expect("materializer dead");
-    }
-
-    fn fill_happens_after(&mut self) {
-        self.happens_after.clear();
-        {
-            let mut causes = self.causes.lock().unwrap();
-            swap(&mut *causes, &mut self.cached_map);
-        }
-        for loc in self.cached_map.drain() {
-            self.happens_after.push(loc.into())
-        }
     }
 }
 
@@ -180,7 +188,9 @@ where
     to_client: Sender<ObservationResult>,
 
     handle: ReadHandle<[u8]>,
-    colors: Vec<order>,
+    my_chain: order,
+    red_chain: order,
+    all_chains: Vec<order>,
     causes: Arc<Mutex<HashMap<order, entry>>>,
     idle: bool,
 
@@ -214,9 +224,9 @@ where
 
     fn snapshot(&mut self) {
         if self.idle {
-            self.handle.snapshot_colors(&self.colors[..])
+            self.handle.snapshot_colors(&self.all_chains[..])
         } else {
-            self.handle.snapshot(self.colors[0])
+            self.handle.snapshot_colors(&[self.my_chain, self.red_chain])
         };
     }
 
@@ -259,7 +269,7 @@ where
                                 self.to_client.send(result).expect("client gone");
                             }
                             self.ack.ack(id);
-                            return;
+                            break
                         }
                     }
 
@@ -273,7 +283,7 @@ where
     }
 
     fn play_log(&mut self) {
-        let my_color = self.colors[0];
+        let my_color = self.my_chain;
         loop {
             match self.handle.get_next2() {
                 Err(GetRes::Done) => break,
@@ -325,15 +335,15 @@ where
         }
 
         fn update_causes(
-            color: order,
+            _color: order,
             causes: &mut Arc<Mutex<HashMap<order, entry>>>,
             locs: &[OrderIndex],
         ) {
             let mut causes = causes.lock().unwrap();
             for &OrderIndex(o, i) in locs {
-                if o != color {
+                // if o != color {
                     causes.insert(o, i);
-                }
+                // }
             }
         }
 
@@ -444,12 +454,15 @@ mod tests {
     );
 
     impl Client {
-        fn new(handle: LogHandle<[u8]>, my_color: order, other_colors: &[order]) -> Self {
+        fn new(
+            handle: LogHandle<[u8]>, my_chain: order, red_chain: order, other_chains: &[order]
+        ) -> Self {
             let (to_client, resp) = channel();
             let client = RedBlueClient::new(
                 handle,
-                my_color,
-                other_colors.iter().cloned(),
+                my_chain,
+                red_chain,
+                other_chains.iter().cloned(),
                 Bank { balance: 0 },
                 (),
                 to_client,
@@ -517,11 +530,12 @@ mod tests {
                 let handle = LogHandle::unreplicated_with_servers(&[
                     "127.0.0.1:14005".parse().unwrap(),
                 ]).reads_my_writes()
-                    .chains(&[1.into(), 2.into()])
+                    .chains(&[1.into(), 2.into(), 3.into()])
                     .build();
                 Client::new(
                     handle,
                     i.into(),
+                    3.into(),
                     &if i == 1 { [2.into()] } else { [1.into()] },
                 )
             })
@@ -544,7 +558,8 @@ mod tests {
 
         assert_eq!(client[0].balance(), 1_000);
         assert_eq!(client[1].balance(), 1_010);
-        assert_eq!(client[0].withdraw(0), true);
+        // assert_eq!(client[0].withdraw(0), true); this is insufficient in the new impl
+        assert_eq!(client[1].withdraw(0), true);
         assert_eq!(client[0].balance(), 1_010);
         assert_eq!(client[1].balance(), 1_010);
     }
