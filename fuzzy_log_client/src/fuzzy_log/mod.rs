@@ -28,7 +28,7 @@ const MAX_PREFETCH: u32 = 1;
 
 type ChainEntry = Rc<Vec<u8>>;
 
-pub struct ThreadLog {
+pub struct ThreadLog<FinshedReadQueue, FinshedWriteQueue> {
     to_store: store::ToSelf, //TODO send WriteState or other enum?
     from_outside: mpsc::Receiver<Message>, //TODO should this be per-chain?
     blockers: HashMap<OrderIndex, Vec<ChainEntry>>,
@@ -60,12 +60,13 @@ pub struct ThreadLog {
     print_data: PrintData,
 }
 
-pub struct ThreadLogBuilder {
+pub struct ThreadLogBuilder<FinshedReadQueue, FinshedWriteQueue=()> {
     to_store: store::ToSelf,
     from_outside: mpsc::Receiver<Message>,
     ready_reads: FinshedReadQueue,
 
-    ack_writes: Option<FinshedWriteQueue>,
+    ack_writes: bool,
+    finished_writes: FinshedWriteQueue,
     return_snapshots: bool,
     per_chains: HashMap<order, PerColor>,
     fetch_boring_multis: bool,
@@ -79,7 +80,7 @@ enum NoRemoteStyle {
     Atomic,
 }
 
-impl ThreadLogBuilder {
+impl<FinshedReadQueue> ThreadLogBuilder<FinshedReadQueue, ()> {
     pub fn new(
         to_store: store::ToSelf,
         from_outside: mpsc::Receiver<Message>,
@@ -90,7 +91,8 @@ impl ThreadLogBuilder {
             from_outside,
             ready_reads,
 
-            ack_writes: None,
+            ack_writes: false,
+            finished_writes: (),
             return_snapshots: false,
             per_chains: HashMap::default(),
             fetch_boring_multis: false,
@@ -99,15 +101,42 @@ impl ThreadLogBuilder {
             no_remote_style: NoRemoteStyle::NoConnection,
         }
     }
+}
 
+impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, FinshedWriteQueue> {
     pub fn chains<I>(self, chains: I) -> Self
     where I: IntoIterator<Item=order> {
         let per_chains = chains.into_iter().map(|c| (c, PerColor::interesting(c))).collect();
         ThreadLogBuilder{ per_chains: per_chains, .. self}
     }
 
-    pub fn ack_writes(self, to: FinshedWriteQueue) -> Self {
-        ThreadLogBuilder{ ack_writes: Some(to), .. self}
+    pub fn ack_writes<FWQ>(self, to: FWQ) -> ThreadLogBuilder<FinshedReadQueue, FWQ> {
+        let ThreadLogBuilder{
+            to_store,
+            from_outside,
+            ready_reads,
+            ack_writes: _,
+            finished_writes: _,
+            return_snapshots,
+            per_chains,
+            fetch_boring_multis,
+            no_remote_style
+        } = self;
+        ThreadLogBuilder{
+            to_store,
+            from_outside,
+            ready_reads,
+            return_snapshots,
+            per_chains,
+            fetch_boring_multis,
+            no_remote_style,
+            ack_writes: true,
+            finished_writes: to,
+        }
+    }
+
+    fn no_ack_writes(&mut self) {
+        self.ack_writes = false;
     }
 
     pub fn return_snapshots(self) -> Self {
@@ -128,21 +157,21 @@ impl ThreadLogBuilder {
         ThreadLogBuilder{ no_remote_style: NoRemoteStyle::Atomic, .. self}
     }
 
-    pub fn build(self) -> ThreadLog {
+    pub fn build(self) -> ThreadLog<FinshedReadQueue, FinshedWriteQueue>
+    where
+        FinshedReadQueue: OnRead,
+        FinshedWriteQueue: OnWrote, {
         let ThreadLogBuilder {
             to_store,
             from_outside,
             ready_reads,
             ack_writes,
+            finished_writes,
             return_snapshots,
             per_chains,
             fetch_boring_multis,
             no_remote_style,
         } = self;
-        let (finished_writes, ack_writes) = match ack_writes {
-            Some(queue) => (queue, true),
-            None => (mpsc::channel().0, false),
-        };
         ThreadLog {
             to_store,
             from_outside,
@@ -232,15 +261,20 @@ enum MultiSearch {
     //MultiSearch::FirstPart(),
 }
 
-impl ThreadLog {
-
+impl<FinshedReadQueue> ThreadLog<FinshedReadQueue, ()> {
     pub fn builder(
         to_store: store::ToSelf,
         from_outside: mpsc::Receiver<Message>,
         ready_reads: FinshedReadQueue,
-    ) -> ThreadLogBuilder {
+    ) -> ThreadLogBuilder<FinshedReadQueue, ()> {
         ThreadLogBuilder::new(to_store, from_outside, ready_reads)
     }
+}
+
+impl<FinshedReadQueue, FinshedWriteQueue> ThreadLog<FinshedReadQueue, FinshedWriteQueue>
+where
+    FinshedReadQueue: OnRead,
+    FinshedWriteQueue: OnWrote, {
 
     //TODO
     pub fn new<I>(
@@ -253,18 +287,17 @@ impl ThreadLog {
         interesting_chains: I
     ) -> Self
     where I: IntoIterator<Item=order>{
-        let builder = Self::builder(to_store, from_outside, ready_reads)
-            .chains(interesting_chains);
-        let builder = if fetch_boring_multis {
+        let builder = ThreadLog::builder(to_store, from_outside, ready_reads)
+            .chains(interesting_chains)
+            .ack_writes(finished_writes);
+        let mut builder = if fetch_boring_multis {
             builder.fetch_boring_multis()
         } else {
             builder
         };
-        let builder = if ack_writes {
-            builder.ack_writes(finished_writes)
-        } else {
-            builder
-        };
+        if !ack_writes {
+            builder.no_ack_writes()
+        }
         builder.build()
     }
 
@@ -1467,5 +1500,72 @@ impl AsyncStoreClient for mpsc::Sender<Message> {
     -> Result<(), ()> {
         self.send(Message::FromStore(IoError(err.kind(), server)))
             .map(|_| ()).map_err(|_| ())
+    }
+}
+
+pub trait OnRead {
+    type Error: ::std::fmt::Debug;
+
+    fn send(&mut self, res: Result<Vec<u8>, Error>) -> Result<(), Self::Error>;
+}
+
+pub trait OnWrote {
+    type Error: ::std::fmt::Debug;
+
+    fn send(&mut self, res: Result<(Uuid, Vec<OrderIndex>), Error>) -> Result<(), Self::Error>;
+}
+
+impl OnRead for mpsc::Sender<Result<Vec<u8>, Error>> {
+    type Error = mpsc::SendError<Result<Vec<u8>, Error>>;
+
+    fn send(&mut self, res: Result<Vec<u8>, Error>) -> Result<(), Self::Error> {
+        mpsc::Sender::send(self, res)
+    }
+}
+
+impl OnWrote for mpsc::Sender<Result<(Uuid, Vec<OrderIndex>), Error>> {
+    type Error = mpsc::SendError<Result<(Uuid, Vec<OrderIndex>), Error>>;
+
+    fn send(&mut self, res: Result<(Uuid, Vec<OrderIndex>), Error>) -> Result<(), Self::Error> {
+        mpsc::Sender::send(self, res)
+    }
+}
+
+impl OnWrote for () {
+    type Error = (); //TODO should be !
+
+    fn send(&mut self, _res: Result<(Uuid, Vec<OrderIndex>), Error>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum Response {
+    Read(Vec<u8>),
+    Wrote(Uuid, Vec<OrderIndex>),
+    Err(Error),
+}
+
+impl OnRead for mpsc::Sender<Response> {
+    type Error = mpsc::SendError<Response>;
+
+    fn send(&mut self, res: Result<Vec<u8>, Error>) -> Result<(), Self::Error> {
+        let resp = match res {
+            Ok(read) => Response::Read(read),
+            Err(err) => Response::Err(err),
+        };
+        mpsc::Sender::send(self, resp)
+    }
+}
+
+impl OnWrote for mpsc::Sender<Response> {
+    type Error = mpsc::SendError<Response>;
+
+    fn send(&mut self, res: Result<(Uuid, Vec<OrderIndex>), Error>) -> Result<(), Self::Error> {
+        let resp = match res {
+            Ok((id, locs)) => Response::Wrote(id, locs),
+            Err(err) => Response::Err(err),
+        };
+        mpsc::Sender::send(self, resp)
     }
 }
