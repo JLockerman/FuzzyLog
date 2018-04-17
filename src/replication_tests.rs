@@ -82,6 +82,65 @@ fn deps() {
     }
 }
 
+#[test]
+fn long_deps() {
+    //chains 4, 5
+    let chains: Vec<_> = (4..6).map(|i| order::from(i)).collect();
+    let mut remote = remote_log_handle(chains.clone());
+    let mut local = local_log_handle(chains);
+    for i in 0..100 {
+        if i == 0 {
+            remote.append(4.into(), &[i], &[]);
+        } else {
+            remote.append(4.into(), &[i], &[OrderIndex(5.into(), (i as u32).into())]);
+        }
+    }
+
+    for i in 0..100 {
+        if i == 0 {
+            remote.append(5.into(), &[i], &[]);
+        } else {
+            remote.append(5.into(), &[i], &[OrderIndex(4.into(), (i as u32 + 1).into())]);
+        }
+    }
+
+    thread::sleep_ms(1000);
+
+    local.snapshot(5.into());
+    loop {
+        let next = local.get_next();
+        match next {
+            Ok((val, locs)) => {
+                // assert_eq!(locs.len(), 1);
+                // assert_eq!(locs[0], (2, (last + 1)).into());
+                // assert_eq!(val, &[1, 2, (last + 1) as u8][..]);
+                // last += 1;
+                // if last >= 4 { break }
+            }
+            Err(GetRes::Done) => break,
+            e @ Err(..) => panic!("{:?}", e),
+        }
+    }
+    // let mut last = 0;
+    // while last < 4 {
+    //     local.snapshot(3.into());
+    //     loop {
+    //         let next = local.get_next();
+    //         match next {
+    //             Ok((val, locs)) => {
+    //                 // assert_eq!(locs.len(), 1);
+    //                 // assert_eq!(locs[0], (2, (last + 1)).into());
+    //                 // assert_eq!(val, &[1, 2, (last + 1) as u8][..]);
+    //                 // last += 1;
+    //                 // if last >= 4 { break }
+    //             }
+    //             Err(GetRes::Done) => break,
+    //             e @ Err(..) => panic!("{:?}", e),
+    //         }
+    //     }
+    // }
+}
+
 fn local_log_handle(chains: Vec<order>) -> LogHandle<[u8]> {
     start_tcp_servers();
     LogHandle::unreplicated_with_servers(Some(&ADDR_STR1.parse().unwrap()))

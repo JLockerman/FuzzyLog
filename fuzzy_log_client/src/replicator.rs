@@ -1,8 +1,10 @@
 
 use std::cmp::max;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::thread;
+use std::rc::Rc;
 use std::sync::mpsc;
+use std::thread;
 
 use fuzzy_log_util::socket_addr::Ipv4SocketAddr as ClientAddr;
 
@@ -98,15 +100,19 @@ impl Builder {
             from_logs,
 
             inner: Inner {
-                to_local_log,
                 to_remote_log,
 
                 local_reads,
 
                 horizon: HashMap::default(),
+                blocked: HashMap::default(),
 
                 num_snapshots: 0,
-                outstanding_appends: 0,
+
+                appender: Appender {
+                    to_local_log,
+                    outstanding_appends: 0,
+                }
             }
         }
     }
@@ -149,14 +155,20 @@ pub struct Replicator {
 }
 
 struct Inner {
-    to_local_log: mpsc::Sender<Message>,
     to_remote_log: mpsc::Sender<Message>,
 
     local_reads: FinshedReadRecv,
 
     horizon: HashMap<order, entry>,
+    blocked: HashMap<OrderIndex, VecDeque<Rc<Vec<u8>>>>,
 
     num_snapshots: u64,
+
+    appender: Appender,
+}
+
+struct Appender {
+    to_local_log: mpsc::Sender<Message>,
     outstanding_appends: u64,
 }
 
@@ -199,16 +211,14 @@ impl Replicator {
 impl Inner {
     fn handle_message(&mut self, message: fuzzy_log::Response) -> bool {
         match message {
-            fuzzy_log::Response::Err(err) => {
+            fuzzy_log::Response::Err(err) =>
                 //TODO better error handling
-                error!("{:?}", err)
-            }
+                error!("{:?}", err),
 
             fuzzy_log::Response::Wrote(_id, locs) => {
-                self.outstanding_appends -= 1;
+                self.appender.got_append();
                 for OrderIndex(o, i) in locs {
-                    let val = self.horizon.entry(o).or_insert(i);
-                    *val = max(*val, i);
+                    self.after_write_ack(o, i);
                 }
             }
 
@@ -221,6 +231,7 @@ impl Inner {
                 enum Next {
                     Continue,
                     Append,
+                    Buffer,
                 }
 
                 let next = {
@@ -236,7 +247,18 @@ impl Inner {
                         },
 
                         EntryLayout::Data => {
-                            Next::Append
+                            //FIXME wait for write ACK from deps before sending next
+                            let horizon = &mut self.horizon;
+                            let can_append = entry.dependencies()
+                                .into_iter().all(|&OrderIndex(o, i)| {
+                                horizon.get(&o).map(|&h| h >= i).unwrap_or(false)
+                            });
+                            if can_append {
+                                Next::Append
+                            } else {
+                                Next::Buffer
+                            }
+
                         },
 
                         EntryLayout::Multiput => {
@@ -250,13 +272,11 @@ impl Inner {
                 };
                 match next {
                     Next::Continue => {},
-                    Next::Append => {
-                        //FIXME wait for write ACK from deps before sending next
-                        self.to_local_log.send(Message::FromClient(
-                            PerformAppend(message.clone())
-                        )).unwrap();
-                        self.outstanding_appends += 1;
-                    }
+                    Next::Append =>
+                        self.appender.append(message.clone()),
+
+                    Next::Buffer =>
+                        self.block(message.clone()),
                 }
                 self.to_remote_log
                     .send(Message::FromClient(ReturnBuffer(message)))
@@ -282,8 +302,53 @@ impl Inner {
         self.num_snapshots += 1;
     }
 
+    fn after_write_ack(&mut self, chain: order, index: entry) {
+        use std::collections::hash_map::Entry;
+        {
+            let val = self.horizon.entry(chain).or_insert(index);
+            *val = max(*val, index);
+        }
+        if let Entry::Occupied(entry) = self.blocked.entry((chain, index).into()) {
+            let mut blocked = entry.remove();
+            for node in blocked.drain(..) {
+                if let Ok(node) = Rc::try_unwrap(node) {
+                    self.appender.append(node);
+                }
+            }
+        }
+    }
+
+    fn block(&mut self, message: Vec<u8>) {
+        let node = Rc::new(message);
+
+        for &OrderIndex(o, i) in bytes_as_entry(&**node).dependencies() {
+            let needs_block = self.horizon.get(&o).map(|&h| h < i).unwrap_or(true);
+            if needs_block {
+                self.blocked.entry((o, i).into())
+                    .or_insert_with(VecDeque::new).push_back(node.clone());
+            }
+        }
+
+        if let Ok(node) = Rc::try_unwrap(node) {
+            self.appender.append(node);
+        }
+    }
+
     fn snapshot_remote(&mut self) {
         self.to_remote_log.send(Message::FromClient(SnapshotAndPrefetch(0.into()))).unwrap();
         self.num_snapshots += 1;
+    }
+}
+
+impl Appender {
+    fn append(&mut self, message: Vec<u8>) {
+        self.to_local_log.send(Message::FromClient(
+            PerformAppend(message)
+        )).unwrap();
+        self.outstanding_appends += 1;
+    }
+
+    fn got_append(&mut self) {
+        self.outstanding_appends -= 1;
     }
 }
