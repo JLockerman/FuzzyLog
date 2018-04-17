@@ -1,4 +1,5 @@
 
+use std::cmp::max;
 use std::net::SocketAddr;
 use std::thread;
 use std::sync::mpsc;
@@ -6,10 +7,10 @@ use std::sync::mpsc;
 use fuzzy_log_util::socket_addr::Ipv4SocketAddr as ClientAddr;
 
 use fuzzy_log::{
+    self,
     Message,
     ThreadLog,
     FinshedReadRecv,
-    FinshedWriteRecv,
 };
 
 use fuzzy_log::FromClient::*;
@@ -25,17 +26,7 @@ pub use packets::{
     EntryLayout,
 };
 
-pub struct Replicator {
-    to_local_log: mpsc::Sender<Message>,
-    to_remote_log: mpsc::Sender<Message>,
-
-    local_reads: FinshedReadRecv,
-    remote_reads: FinshedReadRecv,
-
-    local_writes: FinshedWriteRecv,
-
-    num_snapshots: u64,
-}
+use hash::HashMap;
 
 #[derive(Debug)]
 pub struct Builder {
@@ -80,17 +71,17 @@ impl Builder {
 
         let (to_local_log, local_from_outside) = mpsc::channel();
         let (local_ready_reads, local_reads) = mpsc::channel();
-        let (local_write_ack, local_writes) = mpsc::channel();
+        let (local_write_ack, from_logs) = mpsc::channel();
+        let remote_ready_reads = local_write_ack.clone();
         let to_local_store = make_store(local_servers, to_local_log.clone());
         thread::spawn(move || {
             ThreadLog::builder(to_local_store, local_from_outside, local_ready_reads)
-                // TODO .ack_writes(local_write_ack)
+                .ack_writes(local_write_ack)
                 .build()
                 .run();
         });
 
         let (to_remote_log, remote_from_outside) = mpsc::channel();
-        let (remote_ready_reads, remote_reads) = mpsc::channel();
         let to_remote_store = make_store(remote_servers, to_remote_log.clone());
         thread::spawn(move || {
             let mut log = ThreadLog::builder(
@@ -104,15 +95,19 @@ impl Builder {
         });
 
         Replicator {
-            to_local_log,
-            to_remote_log,
+            from_logs,
 
-            local_reads,
-            remote_reads,
+            inner: Inner {
+                to_local_log,
+                to_remote_log,
 
-            local_writes,
+                local_reads,
 
-            num_snapshots: 0,
+                horizon: HashMap::default(),
+
+                num_snapshots: 0,
+                outstanding_appends: 0,
+            }
         }
     }
 }
@@ -147,6 +142,24 @@ fn make_store(servers: Servers, to_client: mpsc::Sender<Message>) -> store::ToSe
     r.recv().unwrap()
 }
 
+pub struct Replicator {
+    from_logs: mpsc::Receiver<fuzzy_log::Response>, //remote reads and local writes
+
+    inner: Inner,
+}
+
+struct Inner {
+    to_local_log: mpsc::Sender<Message>,
+    to_remote_log: mpsc::Sender<Message>,
+
+    local_reads: FinshedReadRecv,
+
+    horizon: HashMap<order, entry>,
+
+    num_snapshots: u64,
+    outstanding_appends: u64,
+}
+
 impl Replicator {
     pub fn with_replicated_servers<S0, S1>(local_servers: S0, remote_servers: S1) -> Builder
     where
@@ -171,15 +184,37 @@ impl Replicator {
     pub fn run(mut self) -> ! {
         loop {
             self.snapshot_remote();
-            for message in self.remote_reads.iter() {
-                let message = message.unwrap(); //FIXME
+            for message in self.from_logs.iter() {
+                let done = self.inner.handle_message(message);
+                if done { break }
+            }
+        }
+    }
+
+    fn snapshot_remote(&mut self) {
+        self.inner.snapshot_remote()
+    }
+}
+
+impl Inner {
+    fn handle_message(&mut self, message: fuzzy_log::Response) -> bool {
+        match message {
+            fuzzy_log::Response::Err(err) => {
+                //TODO better error handling
+                error!("{:?}", err)
+            }
+
+            fuzzy_log::Response::Wrote(_id, locs) => {
+                self.outstanding_appends -= 1;
+                for OrderIndex(o, i) in locs {
+                    let val = self.horizon.entry(o).or_insert(i);
+                    *val = max(*val, i);
+                }
+            }
+
+            fuzzy_log::Response::Read(message) => {
                 if message.len() == 0 {
-                    self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
-                    if self.num_snapshots == 0 {
-                        // finished our current snapshots
-                        break
-                    }
-                    continue
+                    return self.finished_snapshot();
                 }
 
                 #[derive(Debug)]
@@ -196,10 +231,7 @@ impl Replicator {
 
                         EntryLayout::Read => {
                             let chain = entry.locs()[0].0;
-                            self.to_remote_log
-                                .send(Message::FromClient(SnapshotAndPrefetch(chain)))
-                                .unwrap();
-                            self.num_snapshots += 1;
+                            self.re_snapshot(chain);
                             Next::Continue
                         },
 
@@ -222,7 +254,8 @@ impl Replicator {
                         //FIXME wait for write ACK from deps before sending next
                         self.to_local_log.send(Message::FromClient(
                             PerformAppend(message.clone())
-                        )).unwrap()
+                        )).unwrap();
+                        self.outstanding_appends += 1;
                     }
                 }
                 self.to_remote_log
@@ -230,6 +263,23 @@ impl Replicator {
                     .unwrap();
             }
         }
+        false
+    }
+
+    fn finished_snapshot(&mut self) -> bool {
+        self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
+        if self.num_snapshots == 0 {
+            // finished all our current snapshots
+            return true
+        }
+        false
+    }
+
+    fn re_snapshot(&mut self, chain: order) {
+        self.to_remote_log
+            .send(Message::FromClient(SnapshotAndPrefetch(chain)))
+            .unwrap();
+        self.num_snapshots += 1;
     }
 
     fn snapshot_remote(&mut self) {
