@@ -464,7 +464,10 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
-        if !kind.contains(EntryFlag::TakeLock) {
+
+        if kind.contains(EntryFlag::DirectWrite) {
+            unimplemented!()
+        } else if !kind.contains(EntryFlag::TakeLock) {
             self.handle_single_server_append(kind, buffer, storage, t)
         } else if kind.contains(EntryFlag::NewMultiPut) {
             self.handle_new_multiappend(kind, buffer, storage, t)

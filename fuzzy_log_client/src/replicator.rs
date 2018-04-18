@@ -264,11 +264,22 @@ impl Inner {
                         },
 
                         EntryLayout::Multiput => {
-                            unimplemented!("replicate multi")
+                            entry.flag_mut().insert(EntryFlag::DirectWrite);
+                            let horizon = &mut self.horizon;
+                            let can_append = entry.as_ref().dependencies()
+                                .into_iter().all(|&OrderIndex(o, i)| {
+                                horizon.get(&o).map(|&h| h >= i).unwrap_or(false)
+                            });
+                            //TODO stall until chains are ready?
+                            if can_append {
+                                Next::Append
+                            } else {
+                                Next::Buffer
+                            }
                         },
 
                         EntryLayout::Sentinel => {
-                            unimplemented!("replicate senti")
+                            unimplemented!("should never need to replicate a sentinel on its own")
                         },
                     }
                 };

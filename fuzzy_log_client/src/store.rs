@@ -632,7 +632,13 @@ where PerServer<S>: Connected,
                 //FIXME set max_timestamp from local
                 //TODO
                 let use_fastpath = true;
-                if use_fastpath && self.is_single_node_append(&msg) {
+                if bytes_as_entry(&msg).flag().contains(EntryFlag::DirectWrite) {
+                    let servers = self.get_servers_for_multi(&msg);
+                    for s in servers {
+                        self.add_single_server_send(s, msg.clone());
+                    }
+                    true
+                } else if use_fastpath && self.is_single_node_append(&msg) {
                     {
                         let mut contents = bytes_as_entry_mut(&mut msg);
                         *contents.lock_mut() = 1;

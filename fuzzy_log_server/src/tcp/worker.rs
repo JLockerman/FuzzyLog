@@ -644,17 +644,35 @@ impl WorkerInner {
             },
 
             EntryLayout::Multiput | EntryLayout::Sentinel => {
-                let (size, senti_size, num_locs, has_senti, is_unlock) = {
+                let (size, senti_size, num_locs, has_senti, is_unlock, is_direct_write) = {
                     let e = buffer.contents();
                     let locs = e.locs();
                     let num_locs = locs.len();
                     //FIXME
                     let has_senti = locs.contains(&OrderIndex(0.into(), 0.into()))
                         || !e.flag().contains(EntryFlag::TakeLock);
-                    (e.len(), e.sentinel_entry_size(), num_locs, has_senti, e.flag().contains(EntryFlag::Unlock))
+                    (
+                        e.len(),
+                        e.sentinel_entry_size(),
+                        num_locs,
+                        has_senti,
+                        e.flag().contains(EntryFlag::Unlock),
+                        e.flag().contains(EntryFlag::DirectWrite),
+                    )
                 };
                 if is_unlock {
                     Troption::None
+                } else if is_direct_write {
+                    let storage = {
+                        let m = RcSlice::with_len(size);
+                        let s = RcSlice::with_len(senti_size);
+                        Box::new((m, s))
+                    };
+                    let t = (worker_num, token, src_addr);
+                    let to_send = ToLog::Replication(ToReplicate::Multi(buffer, storage), t);
+                    self.print_data.to_log(1);
+                    //self.waiting_for_log += 1;
+                    return self.to_log.send(to_send).expect("log gone")
                 } else if f.contains(EntryFlag::NewMultiPut) || !f.contains(EntryFlag::TakeLock) {
                     let senti_size = if has_senti { Some(senti_size) } else { None };
                     let mut storage = SkeensMultiStorage::new(num_locs, size, senti_size);
@@ -689,6 +707,14 @@ impl WorkerInner {
                 //TODO send downstream first?
                 Troption::None
             },
+            EntryLayout::Data if f.contains(EntryFlag::DirectWrite) => {
+                let t = (worker_num, token, src_addr);
+                let tr = ToReplicate::Data(buffer, ::std::u64::MAX);
+                let to_send = ToLog::Replication(tr, t);
+                self.print_data.to_log(1);
+                //self.waiting_for_log += 1;
+                return self.to_log.send(to_send).expect("log gone")
+            }
             _ => Troption::None,
         };
         self.print_data.new_to_log(1);
