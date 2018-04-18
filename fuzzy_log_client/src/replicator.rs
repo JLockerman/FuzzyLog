@@ -258,7 +258,6 @@ impl Inner {
                             } else {
                                 Next::Buffer
                             }
-
                         },
 
                         EntryLayout::Multiput => {

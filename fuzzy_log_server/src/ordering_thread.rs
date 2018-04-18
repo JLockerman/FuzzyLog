@@ -493,7 +493,6 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: SkeensMultiStorage,
         t: T
     ) {
-        let is_lock_server = kind.contains(EntryFlag::LockServer);
         unsafe {
             let (_locs, _indicies, _st0, pointers) = storage.get_mut();
             let pointers = &mut **pointers.as_mut().unwrap()
@@ -511,7 +510,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     continue
                 }
 
-                if !is_sentinel || is_lock_server {
+                if !is_sentinel {
                     let (index, ptr) =
                         self.ensure_chain(*o).trie.prep_append(ValEdge::null());
                     *i =  entry::from(index as u32);
@@ -1184,7 +1183,6 @@ where ToWorkers: DistributeToWorkers<T> {
                     is_multiserver = {
                         let flag = val.flag();
                         flag.contains(EntryFlag::TakeLock)
-                        || flag.contains(EntryFlag::LockServer)
                     };
                     //FIXME handle duplicates
                     'update_append_horizon: for i in 0..locs.len() {

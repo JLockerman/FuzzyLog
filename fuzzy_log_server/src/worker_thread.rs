@@ -174,7 +174,6 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 is_multiserver = {
                     let flag = e.flag();
                     flag.contains(EntryFlag::TakeLock)
-                    || flag.contains(EntryFlag::LockServer)
                 };
                 let len = e.len();
                 let b = &buffer[..len];
