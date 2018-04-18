@@ -180,12 +180,12 @@ pub mod EntryFlag {
         flags Flag: u8 {
             const Nothing = 0x0,
             const ReadSuccess = 0x1,
-            const NewMultiPut = 0x2,
+            const NewMultiPut = 0x2, //TODO this flag should always be on, remove?
             const Skeens1Queued = 0x4,
             const TakeLock = 0x8,
             const Unlock = 0x10,
             const NoRemote = 0x20,
-            // const LockServer = 0x40,
+            const DirectWrite = 0x40,
             const SnapshotAndFetch = 0x80,
         }
     }

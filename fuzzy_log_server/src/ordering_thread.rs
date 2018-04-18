@@ -35,6 +35,33 @@ impl<T: Copy> Chain<T> {
 
     }
 
+    unsafe fn append_data(&mut self, this_server_num: u32, chain: order, buffer: &mut Buffer)
+    -> AppendSlot<packets::Entry> {
+        //FIXME this should be done in the worker thread?
+        let index = self.trie.len();
+        let size = {
+            let mut val = buffer.contents_mut();
+            val.flag_mut().insert(EntryFlag::ReadSuccess);
+            //FIXME 64b entries
+            //FIXME this should be done on the worker?
+            val.locs_mut()[0].1 = entry::from(index as u32);
+            val.as_ref().len()
+        };
+        trace!("SERVER {:?} Writing entry {:?}", this_server_num, (chain, index));
+        self.trie.partial_append(size)
+    }
+
+    unsafe fn write_data(&mut self, index: entry, size: usize)
+    -> AppendSlot<packets::Entry> {
+        let location = u32::from(index) as u64;
+        if self.trie.len() == location {
+            //Do regular append
+            return self.trie.partial_append(size).extend_lifetime()
+        }
+
+        self.trie.partial_append_at(location, ::std::u64::MAX, size)
+    }
+
     fn timestamp_for_multi(
         &mut self, id: Uuid, storage: SkeensMultiStorage, is_sentinel: bool, t: T
     ) -> Result<(Time, QueueIndex), Time> {
@@ -102,6 +129,11 @@ impl<T: Copy> Chain<T> {
             }
         }
     }
+}
+
+enum SingleAppendKind<'a> {
+    Regular(AppendSlot<packets::Entry<'a>>),
+    Skeens((ValEdge, ByteLoc, Time, QueueIndex)),
 }
 
 fn horizon_or_add_blank(trie: &mut Trie, chain: order) -> u64 {
@@ -250,55 +282,49 @@ where ToWorkers: DistributeToWorkers<T> {
             EntryLayout::Data => {
                 trace!("SERVER {:?} Single Append", self.this_server_num);
 
-                let (chain, min_timestamp) = {
+                let (chain, index, min_timestamp, is_write, size) = {
                     let contents = buffer.contents();
                     // assert!(contents.lock_num() >= 1,  "bad time {:#?}", contents);
-                    (contents.locs()[0].0, contents.lock_num())
+                    (
+                        contents.locs()[0].0,
+                        contents.locs()[0].1,
+                        contents.lock_num(),
+                        contents.flag().contains(EntryFlag::DirectWrite),
+                        contents.len(),
+                    )
                 };
                 debug_assert!(self.stores_chain(chain),
                     "tried to store {:?} at server {:?} of {:?}",
                     chain, self.this_server_num, self.total_servers);
                 // assert!(self.seen_ids.insert(*buffer.contents().id()));
-                let this_server_num = self.this_server_num;
+                let server_num = self.this_server_num;
 
                 let send = {
                     let log = self.ensure_chain(chain);
-                    if log.skeens.need_single_at(min_timestamp) {
+                    if is_write {
+                        let slot = unsafe {
+                            log.write_data(index, size).extend_lifetime()
+                        };
+                        SingleAppendKind::Regular(slot)
+
+                    } else if log.skeens.need_single_at(min_timestamp) {
                     // if log.needs_skeens_single() {//TODO we don't need skeens if min_timestamp < current_timestamp
                         let s = log.handle_skeens_single(&mut buffer, min_timestamp, t);
-                        Troption::Right(s)
-                    } else if log.trie.is_locked() {
-                        trace!("SERVER append during lock {:?} @ {:?}",
-                            log.trie.lock_pair(), chain,
-                        );
-                        Troption::None
+                        SingleAppendKind::Skeens(s)
                     } else {
-                        //FIXME this shuld be done in the worker thread?
-                        let index = log.trie.len();
-                        let size = {
-                            let mut val = buffer.contents_mut();
-                            val.flag_mut().insert(EntryFlag::ReadSuccess);
-                            //FIXME 64b entries
-                            //FIXME this should be done on the worker?
-                            val.locs_mut()[0].1 = entry::from(index as u32);
-                            val.as_ref().len()
+                        let slot = unsafe {
+                            log.append_data(server_num, chain, &mut buffer)
+                                .extend_lifetime()
                         };
-                        trace!("SERVER {:?} Writing entry {:?}",
-                            this_server_num, (chain, index));
-                        let slot = unsafe { log.trie.partial_append(size).extend_lifetime() };
-                        Troption::Left(slot)
+                        SingleAppendKind::Regular(slot)
                     }
                 };
                 match send {
-                    Troption::None => {
-                        self.print_data.msgs_sent(1);
-                        self.to_workers.send_to_worker(Reply(buffer, t))
-                    },
-                    Troption::Left(slot) => {
+                    SingleAppendKind::Regular(slot) => {
                         self.print_data.msgs_sent(1);
                         self.to_workers.send_to_worker(Write(buffer, slot, t))
                     }
-                    Troption::Right((slot, storage_loc, time, queue_num)) => {
+                    SingleAppendKind::Skeens((slot, storage_loc, time, queue_num)) => {
                         self.print_data.msgs_sent(1);
                         let msg = SingleSkeens {
                             buffer: buffer,

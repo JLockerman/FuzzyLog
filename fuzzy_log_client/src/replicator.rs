@@ -21,10 +21,12 @@ use store;
 
 pub use packets::{
     bytes_as_entry,
+    bytes_as_entry_mut,
     order,
     entry,
     OrderIndex,
     Uuid,
+    EntryFlag,
     EntryLayout,
 };
 
@@ -222,7 +224,7 @@ impl Inner {
                 }
             }
 
-            fuzzy_log::Response::Read(message) => {
+            fuzzy_log::Response::Read(mut message) => {
                 if message.len() == 0 {
                     return self.finished_snapshot();
                 }
@@ -235,21 +237,22 @@ impl Inner {
                 }
 
                 let next = {
-                    let entry = bytes_as_entry(&*message);
-                    match entry.kind().layout() {
+                    let mut entry = bytes_as_entry_mut(&mut *message);
+                    match entry.as_ref().kind().layout() {
                         EntryLayout::Snapshot | EntryLayout::Lock | EntryLayout::GC  =>
                             unreachable!(),
 
                         EntryLayout::Read => {
-                            let chain = entry.locs()[0].0;
+                            let chain = entry.as_ref().locs()[0].0;
                             self.re_snapshot(chain);
                             Next::Continue
                         },
 
                         EntryLayout::Data => {
                             //FIXME wait for write ACK from deps before sending next
+                            entry.flag_mut().insert(EntryFlag::DirectWrite);
                             let horizon = &mut self.horizon;
-                            let can_append = entry.dependencies()
+                            let can_append = entry.as_ref().dependencies()
                                 .into_iter().all(|&OrderIndex(o, i)| {
                                 horizon.get(&o).map(|&h| h >= i).unwrap_or(false)
                             });

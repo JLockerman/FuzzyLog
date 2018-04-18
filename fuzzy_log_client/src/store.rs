@@ -613,8 +613,11 @@ where PerServer<S>: Connected,
 
                     let mut contents = bytes_as_entry_mut(&mut msg);
                     loc = contents.as_ref().locs()[0].0;
-                    let timestamp = self.max_timestamp_seen.get(&loc).cloned().unwrap_or_else(|| 0);
-                    *contents.lock_mut() = timestamp;
+                    if !contents.flag_mut().contains(EntryFlag::DirectWrite) {
+                        let timestamp = self.max_timestamp_seen.get(&loc)
+                            .cloned().unwrap_or_else(|| 0);
+                        *contents.lock_mut() = timestamp;
+                    }
                     // assert!(*contents.lock_mut() >= 1, "{:#?}", self.max_timestamp_seen);
                     // assert!(contents.as_ref().lock_num() >= 1);
                 }
