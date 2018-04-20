@@ -141,6 +141,53 @@ fn long_deps() {
     // }
 }
 
+#[test]
+fn multi() {
+    //chains 6, 7
+    let chains: Vec<_> = (6..8).map(|i| order::from(i)).collect();
+    let mut remote = remote_log_handle(chains.clone());
+    let mut local = local_log_handle(chains);
+    remote.append(6.into(), &[0, 6, 1], &[]);
+    remote.append(6.into(), &[0, 6, 2], &[]);
+    remote.append(6.into(), &[0, 6, 3], &[]);
+    remote.append(7.into(), &[0, 7, 1], &[]);
+    remote.append(7.into(), &[0, 7, 2], &[]);
+    remote.no_remote_multiappend(&[6.into(), 7.into()], &[6, 7, 1], &[]);
+    remote.append(7.into(), &[0, 7, 4], &[]);
+    remote.append(6.into(), &[0, 6, 4], &[]);
+
+    let mut last = 0;
+    while last < 4 {
+        local.snapshot(7.into());
+        loop {
+            let next = local.get_next();
+            match next {
+                Ok((val, locs)) => {
+                    if last < 2 || last == 3 {
+                        assert_eq!(locs.len(), 1);
+                        assert_eq!(locs[0], (7, (last + 1)).into());
+                        assert_eq!(val, &[0, 7, (last + 1) as u8][..]);
+                    } else {
+                        assert_eq!(locs, &[(6, 4).into(), (7, 3).into()]);
+                        assert_eq!(val, &[6, 7, 1][..]);
+                    }
+
+                    last += 1;
+                    if last >= 4 { break }
+                }
+                Err(GetRes::Done) => break,
+                e @ Err(..) => panic!("{:?}", e),
+            }
+        }
+        thread::yield_now()
+    }
+    match local.get_next() {
+        Ok(cl) => panic!("{:?}", cl),
+        Err(GetRes::Done) => {},
+        e @ Err(..) => panic!("{:?}", e),
+    }
+}
+
 fn local_log_handle(chains: Vec<order>) -> LogHandle<[u8]> {
     start_tcp_servers();
     LogHandle::unreplicated_with_servers(Some(&ADDR_STR1.parse().unwrap()))
@@ -210,7 +257,7 @@ fn start_replicator() {
             Replicator::with_unreplicated_servers(
                 Some(ADDR_STR1.parse().unwrap()),
                 Some(ADDR_STR2.parse().unwrap()),
-            ).chains((1..101).map(|i| i.into())).build().run()
+            ).chains((1..101).map(|i| i.into())).atomic_multi_appends().build().run()
         );
     });
 }
