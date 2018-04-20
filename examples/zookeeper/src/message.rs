@@ -192,7 +192,7 @@ impl CreateMode {
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
 pub struct ACL;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Stat {
     pub version: Version,
     pub create_time: u64,
@@ -228,7 +228,7 @@ pub enum Observation {
         id: Id,
         path: PathBuf,
         watch: bool,
-        callback: Box<FnMut(Result<(&Path, &Iterator<Item = &Path>), u32>) + Send>,
+        callback: Box<FnMut(Result<(&Path, &mut Iterator<Item = &Path>), u32>) + Send>,
     },
 }
 

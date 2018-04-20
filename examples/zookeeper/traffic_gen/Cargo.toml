@@ -1,0 +1,12 @@
+[package]
+name = "traffic_gen"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+# bincode = "0.8.0"
+#mio = "0.6.6"
+structopt = "0.2"
+structopt-derive = "0.2"
+zk_view = {path = "../view"}
+#reactor = {path = "../../../reactor"}

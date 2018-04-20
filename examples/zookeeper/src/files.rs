@@ -975,7 +975,7 @@ impl FileSystem {
                     }
                     Some(file) => {
                         //TODO watches //TODO callback thread
-                        callback(Ok((&*file.path, &file.children.iter().map(|p| &**p))))
+                        callback(Ok((&*file.path, &mut file.children.iter().map(|p| &**p))))
                     }
                 }
             }

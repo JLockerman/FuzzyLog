@@ -264,7 +264,7 @@ impl Client {
         &mut self,
         path: PathBuf,
         watch: bool,
-        callback: Box<for<'a> FnMut(Result<(&Path, &Iterator<Item = &Path>), u32>) + Send>,
+        callback: Box<for<'a> FnMut(Result<(&Path, &mut Iterator<Item = &Path>), u32>) + Send>,
     ) {
         let id = Id::new();
         let obs = Observation::GetChildren {
