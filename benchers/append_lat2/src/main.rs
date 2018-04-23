@@ -71,34 +71,21 @@ fn main() {
         }.chains(&[1.into()])
             .build();
 
-    let num_samples = 1_010_000;
+    let num_samples = 110_000;
+    let mut latencies = Vec::with_capacity(num_samples);
+
+    for _ in 0..num_samples {
+        let start = Instant::now();
+        let _ = handle.append(1.into(), &[1, 2, 3, 4, 5, 6, 7, 8], &[]);
+        let elapsed = start.elapsed();
+        latencies.push(elapsed);
+    }
 
     let mut histogram = vec![0; 200];
 
-    let mut to_send = num_samples;
-    while to_send > 0 {
-        const BATCH_SIZE: usize = 100;
-        let mut start_times = [Instant::now(); BATCH_SIZE];
-        for i in 0..BATCH_SIZE {
-            let start = Instant::now();
-            let _ = handle.async_append(1.into(), &[1, 2, 3, 4, 5, 6, 7, 8], &[]);
-            start_times[i] = start;
-        }
-        for i in 0..BATCH_SIZE {
-            let _ = handle.wait_for_any_append();
-            let elapsed = start_times[i].elapsed();
-            if num_samples - to_send >= 10_000 {
-                histogram[round_to_10(subsec_micros(elapsed)) / 10] += 1;
-            }
-        }
-        to_send -= BATCH_SIZE;
+    for latency in latencies.into_iter().skip(10_000) {
+        histogram[round_to_10(subsec_micros(latency)) / 10] += 1;
     }
-    // for _ in 0..num_samples {
-    //     let start = Instant::now();
-    //     let _ = handle.append(1.into(), &[1, 2, 3, 4, 5, 6, 7, 8], &[]);
-    //     let elapsed = start.elapsed();
-    //     latencies.push(elapsed);
-    // }
 
     let total_samples: usize = histogram.iter().sum();
 
