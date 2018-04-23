@@ -1,0 +1,18 @@
+[package]
+name = "or_set"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+bincode = "0.8.0"
+fuzzy_log_client = {path = "../../fuzzy_log_client"}
+matches = "0.1.6"
+serde = "1"
+serde_derive = "1"
+
+[dev-dependencies]
+fuzzy_log_server = {path = "../../fuzzy_log_server"}
+env_logger = "0.3"
+
+[features]
+print_stats = ["fuzzy_log_client/print_stats"]
