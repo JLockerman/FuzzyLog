@@ -25,8 +25,34 @@ def sync():
     #local("rsync --filter=':- .gitignore' -P -avz ./ " + env.host_string + ":~/" + dirname)
     rsync_project(remote_dir="~/", exclude=[".*",".*/"], extra_opts="--filter=':- .gitignore'")
 
+@parallel
+def clean():
+    mirror("./cleaner.sh")
+
+@parallel
+def update_rust():
+    mirror('rustup override remove')
+    run('rustup toolchain uninstall 1.21.0')
+    run('rustup toolchain uninstall 1.19.0')
+    run('rustup toolchain uninstall 1.18.0')
+    # run('rustup toolchain uninstall nightly')
+    run('rustup toolchain uninstall stable')
+    run('rustup default nightly') #rustup toolchain list
+    # run('rustup update')
+
 def export(dir):
     run("echo 'export DELOS_RUST_LOC=" + dir + "' >> ~/.bashrc")
+
+
+@parallel
+def zookeeper():
+    server_num = str(index_of_host() + 1)
+    with cd("../zookeeper-3.4.10"):
+        run("sudo mkdir /mnt/ramdisk && sudo mount -t tmpfs -o size=1G tmpfs /mnt/ramdisk && mkdir /mnt/ramdisk/zookeeper")
+        run("rm -rf /mnt/ramdisk/zookeeper/version-2/")
+        run("echo " + server_num +  " > /mnt/ramdisk/zookeeper/myid")
+        run("./bin/zkServer.sh start-foreground")
+
 
 
 @parallel
@@ -46,21 +72,30 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
     with settings(hide('warnings'), warn_only=True):
         run("pkill delos_tcp_serve")
         run("pkill delos_tcp_server")
+        run("pkill gdb")
     host_index = index_of_host()
     #cmd = "cd servers/tcp_server && "
     cmd = ""
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
     #cmd += "RUST_BACKTRACE=short RUSTFLAGS='-Z sanitizer=memory' cargo run --target x86_64-unknown-linux-gnu "
-    cmd += "RUSTFLAGS=\"-C target-cpu=native\" cargo run "
-    #cmd += "cargo run "
+    # cmd += "RUST_BACKTRACE=short RUSTFLAGS=\"-Z sanitizer=memory -C target-cpu=native\" ASAN_OPTIONS=detect_odr_violation=0 cargo run --target x86_64-unknown-linux-gnu "
+    # cmd += "RUST_BACKTRACE=short RUSTFLAGS=\"-Z sanitizer=thread\" ASAN_OPTIONS=detect_odr_violation=0 cargo run --target x86_64-unknown-linux-gnu "
+    #MSAN_options='suppressions=san_blacklist.txt'
+    # cmd += "RUST_BACKTRACE=short cargo run --target x86_64-unknown-linux-gnu "
+    cmd += "RUST_BACKTRACE=short cargo run "
+    # cmd += "cargo build "
     if debug == "":
         cmd += "--release "
     if stats != "":
-        cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
-    if nt != "":
-        cmd += "--features \"no_trace\" "
+        cmd += "--features \"no_trace print_stats\" " # fuzzy_log/debug_no_drop
+    else:
+        if nt != "":
+            cmd += "--features \"no_trace\" "
+    # cmd += "&& gdb -ex=run --args ./target/release/delos_tcp_server " + port
     cmd += "-- " + port
+
+    # cmd = "cargo build --release && perf record --quiet --call-graph dwarf -o perf.data -- ./target/release/delos_tcp_server " + port + " ""
 
     my_chain = []
     index_in_chain = 0
@@ -91,6 +126,7 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
     if num_chains > 1:
         cmd += " -ig " + str(my_chain_num) + ":" + str(num_chains)
     cmd = "cd servers/tcp_server && " + cmd
+    # print(cmd)
     mirror(cmd)
 
 @parallel
