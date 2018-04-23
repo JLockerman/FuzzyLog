@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::collections::hash_map::Entry as HashEntry;
 use std::{io, mem};
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use fuzzy_log_packets::double_buffer::DoubleBuffer;
 
@@ -142,7 +143,7 @@ where
                             self.inner.mark_as_staying_awake(token);
                         }
                     }
-                    self.io_state.poll.poll(&mut self.events, None)?;
+                    self.io_state.poll.poll(&mut self.events, Some(Duration::from_secs(0)))?;
                     self.handle_new_events()?;
                 }
             }
@@ -236,6 +237,38 @@ impl<PerStream> IoState<PerStream> {
 
 ///////////////////////////////////////
 
+impl Wakeable for () {
+    fn init(&mut self, _token: mio::Token, _poll: &mut mio::Poll) {}
+    fn needs_to_mark_as_staying_awake(&mut self, _token: mio::Token) -> bool {
+        false
+    }
+    fn mark_as_staying_awake(&mut self, _token: mio::Token) {}
+    fn is_marked_as_staying_awake(&self, _token: mio::Token) -> bool {
+        true
+    }
+}
+
+impl<Inner> Handler<Inner> for () {
+    type Error = ();
+
+    fn on_event(&mut self, _inner: &mut Inner, _token: mio::Token, _event: mio::Event)
+    -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn on_poll(&mut self, _inner: &mut Inner, _token: mio::Token) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn on_error(&mut self, _error: Self::Error, _poll: &mut mio::Poll) -> ShouldRemove {
+        false
+    }
+}
+
+///////////////////////////////////////
+///////////////////////////////////////
+///////////////////////////////////////
+
 #[derive(Debug)]
 pub struct TcpHandler<PacketReader, PacketHandler> {
     io: TcpIo,
@@ -243,7 +276,10 @@ pub struct TcpHandler<PacketReader, PacketHandler> {
     handler: PacketHandler,
 }
 
-impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler> {
+impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler>
+where
+    PacketReader: MessageReader, {
+
     pub fn new(stream: TcpStream, reader: PacketReader, handler: PacketHandler)
     -> Self {
         Self {
@@ -297,6 +333,7 @@ where
         use MessageReaderError::*;
 
         self.io.on_wake();
+
         if self.io.is_polling_write() {
             self.io.write()?;
         }
@@ -304,20 +341,28 @@ where
             self.io.read()?;
             let mut used = 0;
             let mut additional_needed = 0;
-            for message in self.reader.deserialize_messages(self.io.read_bytes(), &mut used) {
-                match message {
-                    Err(NeedMoreBytes(more)) => additional_needed += more,
-                    Err(e) => panic!("{:?}", e),
-                    Ok(msg) => {
-                        let err = self.handler.handle_message(inner, msg);
-                        if let Err(()) = err {
-                            //FIXME
-                            #[allow(unreachable_code)]
-                            return Err(unimplemented!())
+            {
+                let read_bytes = &self.io.read_buffer[..self.io.bytes_read];
+                let mut writer = TcpWriter {
+                    write_buffer: &mut self.io.write_buffer,
+                    polling_write: &mut self.io.polling_write,
+                };
+                for message in self.reader.deserialize_messages(read_bytes, &mut used) {
+                    match message {
+                        Err(NeedMoreBytes(more)) => additional_needed += more,
+                        Err(e) => panic!("{:?}", e),
+                        Ok(msg) => {
+                            let err = self.handler.handle_message(&mut writer, inner, msg);
+                            if let Err(()) = err {
+                                //FIXME
+                                #[allow(unreachable_code)]
+                                return Err(unimplemented!())
+                            }
                         }
                     }
                 }
             }
+
 
             self.io.consume_bytes(used);
             self.io.ensure_additional_read(additional_needed);
@@ -340,7 +385,8 @@ impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler> {
 ///////////////////
 
 pub trait MessageHandler<Inner, Message> {
-    fn handle_message(&mut self, inner: &mut Inner, msg: Message) -> Result<(), ()>;
+    fn handle_message(&mut self, io: &mut TcpWriter, inner: &mut Inner, msg: Message)
+    -> Result<(), ()>;
 }
 
 ///////////////////
@@ -474,10 +520,6 @@ impl TcpIo {
         }
     }
 
-    pub fn read_bytes(&self) -> &[u8] {
-        &self.read_buffer[..self.bytes_read]
-    }
-
     pub fn consume_bytes(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes_read, "{} <= {}", bytes, self.bytes_read);
         self.bytes_read -= bytes;
@@ -541,13 +583,6 @@ impl TcpIo {
         Ok(wrote)
     }
 
-    pub fn add_bytes_to_write(&mut self, bytes: &[&[u8]]) {
-        if self.write_buffer.is_empty() {
-            self.polling_write = true;
-        }
-        self.write_buffer.fill(bytes);
-    }
-
     ///////////////////////////////////
 
     pub fn needs_to_mark_as_staying_awake(&mut self) -> bool {
@@ -590,6 +625,37 @@ impl TcpIo {
 
     pub fn is_polling_write(&mut self) -> bool {
         self.polling_write
+    }
+
+    ///////////////////////////////////
+
+    pub fn read_bytes(&self) -> &[u8] {
+        &self.read_buffer[..self.bytes_read]
+    }
+
+    pub fn add_bytes_to_write(&mut self, bytes: &[&[u8]]) {
+        self.polling_write = true;
+        self.write_buffer.fill(bytes);
+    }
+
+    pub fn to_read_and_write_halves(&mut self) -> (&[u8], TcpWriter) {
+        (&self.read_buffer[..self.bytes_read], TcpWriter {
+            write_buffer: &mut self.write_buffer,
+            polling_write: &mut self.polling_write,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct TcpWriter<'s> {
+    write_buffer: &'s mut DoubleBuffer,
+    polling_write: &'s mut bool,
+}
+
+impl<'s> TcpWriter<'s> {
+    pub fn add_bytes_to_write(&mut self, bytes: &[&[u8]]) {
+        *self.polling_write = true;
+        self.write_buffer.fill(bytes);
     }
 }
 
