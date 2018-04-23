@@ -7,23 +7,25 @@ import time
 
 server_ip = '172.31.5.245:13289'
 
-write_host = 'ec2-54-84-203-95.compute-1.amazonaws.com'
+write_host = 'ec2-34-224-8-117.compute-1.amazonaws.com'
 
-client_hostnames = ['ec2-34-224-221-204.compute-1.amazonaws.com', 'ec2-54-208-107-64.compute-1.amazonaws.com', 'ec2-54-197-180-241.compute-1.amazonaws.com', 'ec2-34-207-153-105.compute-1.amazonaws.com', 'ec2-35-173-248-195.compute-1.amazonaws.com', 'ec2-54-197-174-177.compute-1.amazonaws.com', 'ec2-34-227-207-68.compute-1.amazonaws.com', 'ec2-34-229-167-26.compute-1.amazonaws.com', 'ec2-54-197-145-149.compute-1.amazonaws.com', 'ec2-34-233-119-214.compute-1.amazonaws.com', 'ec2-34-201-138-116.compute-1.amazonaws.com', 'ec2-54-242-125-228.compute-1.amazonaws.com']
+client_hostnames = ['ec2-35-173-128-2.compute-1.amazonaws.com', 'ec2-54-162-160-189.compute-1.amazonaws.com', 'ec2-34-224-174-112.compute-1.amazonaws.com', 'ec2-34-204-11-226.compute-1.amazonaws.com', 'ec2-34-227-221-75.compute-1.amazonaws.com', 'ec2-54-242-37-180.compute-1.amazonaws.com', 'ec2-54-166-140-78.compute-1.amazonaws.com', 'ec2-54-89-121-116.compute-1.amazonaws.com', 'ec2-35-174-6-11.compute-1.amazonaws.com', 'ec2-34-224-169-105.compute-1.amazonaws.com', 'ec2-52-91-159-228.compute-1.amazonaws.com']
 
-server_hostnames = 'ec2-52-207-240-246.compute-1.amazonaws.com'
+server_hostnames = 'ec2-54-196-152-202.compute-1.amazonaws.com'
 
-view_hosts = 'ec2-34-234-82-62.compute-1.amazonaws.com'
+view_hosts = 'ec2-35-172-212-149.compute-1.amazonaws.com,ec2-18-205-25-178.compute-1.amazonaws.com,ec2-35-172-213-113.compute-1.amazonaws.com,ec2-35-172-212-105.compute-1.amazonaws.com,ec2-34-229-206-166.compute-1.amazonaws.com,ec2-54-175-209-245.compute-1.amazonaws.com,ec2-54-165-209-245.compute-1.amazonaws.com'
 
 ips = '172.31.5.245'
 
 socket = 13333
-view_ip = '172.31.0.84:' + str(socket)
+view_ip = ['172.31.14.212', '172.31.11.45', '172.31.0.84', '172.31.3.165', '172.31.6.77', '172.31.4.131', '172.31.9.164']
 
 
 os.chdir('../..')
 
-for i in range(13, 14):
+print(len(client_hostnames))
+
+for i in range(1, 8):
     print("run " + str(i))
 
     command = "run_chain:chain_hosts=" + ips
@@ -59,27 +61,24 @@ for i in range(13, 14):
 
     ########################################
 
-    client_hoststring = ""
-    for name in client_hostnames[i:-1]:
-        client_hoststring += name + ","
-    client_hoststring += client_hostnames[-1]
+    rs = []
+    num = 0
+    print(client_hostnames[:i])
+    for client in client_hostnames[:i]:
+        command = 'mirror:pkill traffic_gen; cd examples/zookeeper/traffic_gen/ &&' +\
+            ' cargo run --release --' +\
+            ' read ' + str(num) + ' ' + view_ip[num] + ":" + str(socket) + ' ' + str(3) + ' ' + str(500)
+        num += 1
 
+        r = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", client,
+            command])
+        rs.append(r)
 
+    for r in rs:
+        r.wait()
 
-    command = 'mirror:pkill traffic_gen; cd examples/zookeeper/traffic_gen/ &&' +\
-        ' cargo run --release --' +\
-        ' read ' + str(i) + ' ' + view_ip + ' ' + str(1) + ' ' + str(1000)
-
-    r = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", client_hoststring,
-        command])
-
-    r.wait()
     w.wait()
     s.kill()
-    # p00.kill()
-    # p01.kill()
-
-    # subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", server_hostnames, "kill_server"])
 
     print("")
     print("> ")
