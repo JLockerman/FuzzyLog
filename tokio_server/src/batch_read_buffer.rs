@@ -1,0 +1,168 @@
+use std::mem::replace;
+use std::ops::{Deref, DerefMut};
+
+///
+/// Everything between start and cursor is readable,
+/// anything between cursor and capacity is writable
+///
+#[derive(Debug)]
+pub struct BatchReadBuffer {
+    cursor: usize,
+    start: usize,
+    bytes: Box<[u8]>,
+}
+
+impl BatchReadBuffer {
+    pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    pub fn from_vec(mut bytes: Vec<u8>) -> Self {
+        let start = 0;
+        let cursor = bytes.len();
+        let end = bytes.capacity();
+        unsafe {
+            bytes.set_len(end);
+        }
+        Self {
+            start,
+            cursor,
+            bytes: bytes.into_boxed_slice(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut vec = Vec::with_capacity(capacity);
+        let cap = vec.capacity();
+        unsafe { vec.set_len(cap) }
+        Self {
+            cursor: 0,
+            start: 0,
+            bytes: vec.into_boxed_slice(),
+        }
+    }
+
+    pub fn ensure_fits(&mut self, len: usize) {
+        if self.bytes.len() < len {
+            let buffer = replace(&mut self.bytes, vec![].into_boxed_slice());
+            let mut buffer: Vec<_> = buffer.into();
+            let needed = len.saturating_sub(buffer.capacity());
+            buffer.reserve(needed);
+            let cap = buffer.capacity();
+            unsafe { buffer.set_len(cap) }
+            self.bytes = buffer.into_boxed_slice();
+        }
+    }
+
+    pub fn freeze(&mut self, len: usize) {
+        self.ensure_fits(len);
+        self.cursor = len;
+    }
+
+    pub fn freeze_additional(&mut self, len: usize) {
+        let needed = self.cursor + len;
+        self.ensure_fits(needed);
+        self.cursor += len;
+    }
+
+    pub fn clear(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn pop_bytes(&mut self, len: usize) {
+        self.cursor = self.cursor.saturating_sub(len);
+    }
+
+    // pub fn split_off_at(&mut self, point: usize) -> Vec<u8> {
+    //     use std::ptr;
+    //     assert!(point <= self.cursor);
+    //     let to_remove = self.cursor - point;
+    //     unsafe {
+    //         let read = if to_remove < self.bytes.len() - point {
+    //             let read = self.bytes[..point].to_vec();
+    //             let copy_back = self.cursor - point;
+    //             ptr::copy(
+    //                 self.bytes[..point].as_mut_ptr(),
+    //                 self.bytes[point..self.cursor].as_mut_ptr(),
+    //                 copy_back,
+    //             );
+    //             read
+    //         } else {
+    //             let new_bytes = self.bytes[point..self.end].to_vec().into_boxed_slice();
+    //             let read = ::std::mem::replace(&mut self.bytes, new_bytes);
+    //             let mut read: Vec<_> = read.into();
+    //             read.set_len(point);
+    //             read
+    //         };
+    //         self.cursor = 0;
+    //         self.end = self.end.saturating_sub(point);
+    //         read
+    //     }
+    // }
+
+    // pub fn split_off_at(&mut self, point: usize) -> Vec<u8> {
+    //     assert!(self.start + point <= self.cursor);
+    //     let read = self.bytes[self.start..point].to_vec();
+    //     self.start += point;
+    //     read
+    // }
+
+    pub fn split_off(&mut self, len: usize) -> Vec<u8> {
+        assert!(self.start + len <= self.cursor);
+        let read = self.bytes[self.start..(self.start + len)].to_vec();
+        self.start += len;
+        assert_eq!(read.len(), len);
+        read
+    }
+
+    pub fn shift_back(&mut self) {
+        use std::ptr;
+        let copy_len = self.cursor - self.start;
+        unsafe {
+            let copy_from = self.bytes[self.start..self.cursor].as_mut_ptr();
+            let copy_to = self.bytes[0..].as_mut_ptr();
+            ptr::copy(copy_from, copy_to, copy_len);
+        }
+        self.cursor -= self.start;
+        self.start = 0;
+    }
+
+    pub fn shift_back_until(&mut self, end: usize) {
+        use std::ptr;
+        assert!(end >= self.cursor);
+        let copy_len = end - self.start;
+        unsafe {
+            let copy_from = self.bytes[self.start..end].as_mut_ptr();
+            let copy_to = self.bytes[0..].as_mut_ptr();
+            ptr::copy(copy_from, copy_to, copy_len);
+        }
+        self.cursor -= self.start;
+        self.start = 0;
+    }
+}
+
+// impl AsRef<[u8]> for ReadBuffer {
+//     fn as_ref(&self) -> &[u8] {
+//         &self.bytes[..self.start]
+//     }
+// }
+
+impl AsMut<[u8]> for BatchReadBuffer {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[self.cursor..]
+    }
+}
+
+impl Deref for BatchReadBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes[self.start..self.cursor]
+    }
+}
+
+impl DerefMut for BatchReadBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes[self.start..self.cursor]
+    }
+}
