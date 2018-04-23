@@ -9,6 +9,7 @@ fuzzy_log_packets = {path = "./fuzzy_log_packets"}
 fuzzy_log_util = {path = "./fuzzy_log_util"}
 fuzzy_log_client = {path = "./fuzzy_log_client"}
 fuzzy_log_server = {path = "./fuzzy_log_server"}
+reactor = {path = "./reactor"}
 # tokio_server = {path = "./tokio_server"}
 libc = "0.2"
 log = "0.3"
