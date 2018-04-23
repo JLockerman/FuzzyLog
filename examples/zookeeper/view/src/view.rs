@@ -16,6 +16,7 @@ use reactor::{
     Handler,
     IoState,
     TcpHandler,
+    TcpWriter,
     MessageReader,
     MessageReaderError,
     MessageHandler,
@@ -119,7 +120,7 @@ impl Wakeable for ClientInner {
     fn mark_as_staying_awake(&mut self, _token: mio::Token) {}
 
     fn is_marked_as_staying_awake(&self, _token: mio::Token) -> bool {
-        false
+        true
     }
 }
 
@@ -127,6 +128,11 @@ impl Handler<IoState<PerStream>> for ClientInner {
     type Error = ::std::io::Error;
 
     fn on_event(&mut self, inner: &mut IoState<PerStream>, token: mio::Token, _event: mio::Event)
+    -> Result<(), Self::Error> {
+        self.on_poll(inner, token)
+    }
+
+    fn on_poll(&mut self, inner: &mut IoState<PerStream>, token: mio::Token)
     -> Result<(), Self::Error> {
         if token == self.listener_token {
 
@@ -154,11 +160,6 @@ impl Handler<IoState<PerStream>> for ClientInner {
         }
     }
 
-    fn on_poll(&mut self, _inner: &mut IoState<PerStream>, _token: mio::Token)
-    -> Result<(), Self::Error> {
-        unreachable!()
-    }
-
     fn on_error(&mut self, _error: Self::Error, _poll: &mut mio::Poll) -> bool {
         false
     }
@@ -171,7 +172,8 @@ struct ZKHandler(mio::Token);
 
 #[allow(deprecated)]
 impl<'s> MessageHandler<ClientInner, Request<'s>> for ZKHandler {
-    fn handle_message(&mut self, inner: &mut ClientInner, message: Request) -> Result<(), ()> {
+    fn handle_message(&mut self, _: &mut TcpWriter, inner: &mut ClientInner, message: Request)
+    -> Result<(), ()> {
         let sender = inner.sender.clone();
         let token = self.0;
         match message {
