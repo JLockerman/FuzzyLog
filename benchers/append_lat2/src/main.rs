@@ -2,6 +2,7 @@ extern crate crossbeam;
 extern crate env_logger;
 extern crate fuzzy_log_client;
 extern crate fuzzy_log_util;
+extern crate mio;
 
 extern crate structopt;
 #[macro_use]
@@ -9,9 +10,12 @@ extern crate structopt_derive;
 
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use std::thread;
 
-use fuzzy_log_client::fuzzy_log::log_handle::LogHandle;
+use fuzzy_log_client::fuzzy_log::log_handle::{Uuid, OrderIndex, append_message};
+use fuzzy_log_client::store::{AsyncTcpStore, AsyncStoreClient};
 
 use structopt::StructOpt;
 
@@ -63,20 +67,25 @@ fn main() {
 
 
 
-    let replicated = args.servers.0[0].0 != args.servers.0[0].1;
-    let mut handle = if replicated {
-            LogHandle::<[u8]>::replicated_with_servers(&args.servers.0)
-        } else {
-            LogHandle::<[u8]>::unreplicated_with_servers(args.servers.0.iter().map(|&(a, _)| a))
-        }.chains(&[1.into()])
-            .build();
+    let (writer, reader) = build_store(args.servers);
 
     let num_samples = 110_000;
     let mut latencies = Vec::with_capacity(num_samples);
+    let (sl, rl) = mpsc::channel();
+
+    thread::spawn(move || {
+        for _ in 0..num_samples {
+            let start = Instant::now();
+            #[allow(deprecated)]
+            let _ = writer.send(append_message(1.into(), &[1, 2, 3, 4, 5, 6, 7, 8], &[]));
+            let _ = sl.send(start);
+            thread::sleep(Duration::new(0, 100))
+        }
+    });
 
     for _ in 0..num_samples {
-        let start = Instant::now();
-        let _ = handle.append(1.into(), &[1, 2, 3, 4, 5, 6, 7, 8], &[]);
+        let _ = reader.recv();
+        let start = rl.recv().unwrap();
         let elapsed = start.elapsed();
         latencies.push(elapsed);
     }
@@ -117,3 +126,49 @@ fn subsec_micros(time: Duration) -> usize {
     (time.subsec_nanos() / 1_000) as usize
 }
 
+fn build_store(ServerAddrs(servers): ServerAddrs)
+-> (::fuzzy_log_client::store::ToSelf, mpsc::Receiver<()>) {
+    let (ack, recv_ack) = mpsc::channel();
+    let ack_on = Acker{ ack };
+    let (s, r) = mpsc::channel();
+    thread::spawn(move || {
+        let replicated = servers[0].0 != servers[0].1;
+        let id = Uuid::new_v4().into();
+        let mut event_loop = mio::Poll::new().unwrap();
+        let (store, to_store) = if replicated {
+            AsyncTcpStore::replicated_new_tcp(id, servers, ack_on, &mut event_loop).unwrap()
+        } else {
+            AsyncTcpStore::new_tcp(id, servers.iter().map(|&(a, _)| a), ack_on, &mut event_loop).unwrap()
+        };
+        s.send(to_store).unwrap();
+        store.run(event_loop)
+    });
+    (r.recv().unwrap(), recv_ack)
+}
+
+struct Acker {
+    ack: mpsc::Sender<()>,
+}
+
+impl AsyncStoreClient for Acker {
+    fn on_finished_read(
+        &mut self,
+        _read_loc: OrderIndex,
+        _read_packet: Vec<u8>
+    ) -> Result<(), ()> {
+        // self.ack.send(()).map_err(|_| {})
+        Ok(())
+    }
+
+    fn on_finished_write(
+        &mut self,
+        _write_id: Uuid,
+        _write_locs: Vec<OrderIndex>
+    ) -> Result<(), ()> {
+        self.ack.send(()).map_err(|_| {})
+    }
+
+    fn on_io_error(&mut self, _err: ::std::io::Error, _server: usize) -> Result<(), ()> {
+        Err(())
+    }
+}

@@ -1471,6 +1471,11 @@ impl<V: ?Sized> ReadHandle<V> {
             None
         }
     }
+
+    pub fn read_until(&mut self, loc: OrderIndex) {
+        self.to_log.send(Message::FromClient(ReadUntil(loc))).unwrap();
+        self.num_snapshots = self.num_snapshots.saturating_add(1);
+    }
 }
 
 impl<V: ?Sized> WriteHandle<V>
@@ -1703,4 +1708,21 @@ where V: Storeable {
         self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
         id
     }
+}
+
+
+pub fn append_message<V: ?Sized>(chain: order, data: &V, deps: &[OrderIndex]) -> Vec<u8>
+where V: Storeable {
+    //TODO no-alloc?
+    let id = Uuid::new_v4();
+    let mut buffer = Vec::new();
+    EntryContents::Single {
+        id: &id,
+        flags: &EntryFlag::Nothing,
+        loc: &OrderIndex(chain, 0.into()),
+        deps: deps,
+        data: data_to_slice(data),
+        timestamp: &0, //TODO
+    }.fill_vec(&mut buffer);
+    buffer
 }
