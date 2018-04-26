@@ -281,6 +281,71 @@ impl Client {
             .send(MessageFromClient::Obs(observation))
             .expect("mat dead");
     }
+
+    pub fn observer(&self) -> Observer {
+        let to_materializer = self.to_materializer.clone();
+        Observer{ to_materializer }
+    }
+}
+
+pub struct Observer {
+    to_materializer: Sender<MessageFromClient>,
+}
+
+impl Observer {
+    pub fn exists(
+        &mut self,
+        path: PathBuf,
+        watch: bool,
+        callback: Box<for<'a> FnMut(Result<(&Path, &Stat), u32>) + Send>,
+    ) {
+        let id = Id::new();
+        let obs = Observation::Exists {
+            id,
+            path,
+            watch,
+            callback,
+        };
+        self.send_observation(obs);
+    }
+
+    pub fn get_data(
+        &mut self,
+        path: PathBuf,
+        watch: bool,
+        callback: Box<for<'a> FnMut(Result<(&Path, &[u8], &Stat), u32>) + Send>,
+    ) {
+        let id = Id::new();
+        let obs = Observation::GetData {
+            id,
+            path,
+            watch,
+            callback,
+        };
+        self.send_observation(obs);
+    }
+
+    pub fn get_children(
+        &mut self,
+        path: PathBuf,
+        watch: bool,
+        callback: Box<for<'a> FnMut(Result<(&Path, &mut Iterator<Item = &Path>), u32>) + Send>,
+    ) {
+        let id = Id::new();
+        let obs = Observation::GetChildren {
+            id,
+            path,
+            watch,
+            callback,
+        };
+        self.send_observation(obs);
+    }
+
+    fn send_observation(&mut self, observation: Observation) {
+        self.to_materializer
+            .send(MessageFromClient::Obs(observation))
+            .expect("mat dead");
+    }
 }
 
 struct Materializer {

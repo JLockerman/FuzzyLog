@@ -469,6 +469,7 @@ pub struct TcpIo {
     polling_write: bool,
 
     is_marked_as_staying_awake: bool,
+    writes_backpressure_reads: bool,
 }
 
 impl TcpIo {
@@ -487,7 +488,12 @@ impl TcpIo {
             polling_write: false,
 
             is_marked_as_staying_awake: false,
+            writes_backpressure_reads: false,
         }
+    }
+
+    pub fn set_writes_backpressure_reads(&mut self, wbr: bool) {
+        self.writes_backpressure_reads = wbr
     }
 
     pub fn register_to(&mut self, token: mio::Token, poll: &mut mio::Poll) -> io::Result<()> {
@@ -562,7 +568,7 @@ impl TcpIo {
         let res = self.stream.write(&self.write_buffer.first_bytes()[bytes_written..]);
         let wrote = match res {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.polling_read = false;
+                self.polling_write = false;
                 return Ok(0)
             },
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => return Ok(0),
@@ -572,13 +578,14 @@ impl TcpIo {
 
         self.bytes_written += wrote;
 
+        self.polling_write = true;
+
         if self.bytes_written < self.write_buffer.first_bytes().len() {
             return Ok(wrote)
         }
 
         self.bytes_written = 0;
         self.write_buffer.swap_if_needed();
-        self.polling_write = true;
 
         Ok(wrote)
     }
@@ -586,7 +593,7 @@ impl TcpIo {
     ///////////////////////////////////
 
     pub fn needs_to_mark_as_staying_awake(&mut self) -> bool {
-        (self.polling_read || self.polling_write) && !(self.is_marked_as_staying_awake)
+        (self.is_polling_read() || self.polling_write) && !(self.is_marked_as_staying_awake)
     }
 
     pub fn mark_as_staying_awake(&mut self) {
@@ -620,11 +627,17 @@ impl TcpIo {
     }
 
     pub fn is_polling_read(&mut self) -> bool {
-        self.polling_read
+        self.polling_read && !self.is_backpressured()
     }
 
     pub fn is_polling_write(&mut self) -> bool {
         self.polling_write
+    }
+
+    ///////////////////////////////////
+
+    pub fn is_backpressured(&mut self) -> bool {
+        self.write_buffer.has_pending()
     }
 
     ///////////////////////////////////

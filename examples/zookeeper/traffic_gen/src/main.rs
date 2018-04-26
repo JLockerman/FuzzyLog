@@ -42,6 +42,7 @@ fn main() {
     match args {
         Args::write{servers} => mutate(servers),
         Args::read{client_num, view_addr, num_threads, window} => {
+            let mut ops_completed = vec![[0; 10]; num_threads];
             let completed_reads: Vec<_> = (0..num_threads)
                 .map(|_| Arc::new(AtomicUsize::new(0)))
                 .collect();
@@ -53,8 +54,6 @@ fn main() {
                 });
 
             thread::sleep(Duration::from_secs(1));
-
-            let mut ops_completed = vec![[0; 10]; num_threads];
 
             for i in 0..10 {
                 thread::sleep(Duration::from_secs(1));

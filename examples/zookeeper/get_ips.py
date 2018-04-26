@@ -15,7 +15,8 @@ for reservation in response["Reservations"]:
 
 num_instances = len(private_ip)
 print(num_instances)
-num_clients = len(public_dns) - 8
+num_clients = len(public_dns) - 6
+num_views = 8
 
 all_hosts = ""
 for host in public_dns:
@@ -27,9 +28,20 @@ print(public_dns)
 print(len(public_dns))
 print("")
 print("")
-print("Clients")
+
+print("clients")
 print(public_dns[0:num_clients])
+print(private_ip[0:num_views])
+view_names = private_ip[0] + ":13333"
+for name in private_ip[1:num_views]:
+    view_names += "^" + name + ":13333"
+print(view_names)
 print("")
+
+print("Views")
+
+print("")
+
 print("Servers")
 print(public_dns[num_clients:])
 server_names = ""
@@ -37,15 +49,4 @@ print(private_ip[num_clients:])
 for name in public_dns[num_clients:]:
     server_names = server_names + name + ","
 print(server_names)
-print("")
-print("")
-print("Client Hosts")
-client_hosts = ""
-for client in public_dns[0:num_clients]:
-    client_hosts = client_hosts + client + ","
-print(client_hosts)
-server_ips = ""
-for i in range(0, len(private_ip[num_clients:]), 3):
-    server_ips = server_ips + private_ip[num_clients + i] + ":13289#" + private_ip[num_clients + i + 1] + ":13289#" + private_ip[num_clients + i + 2] + ":13289^"
-print(server_ips)
 

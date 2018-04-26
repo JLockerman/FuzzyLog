@@ -5,91 +5,138 @@ import subprocess
 import sys
 import time
 
-server_ip = '172.31.5.245:13289'
+def run(transaction_in=0, two_replica_sets=True, one_chain=False):
+    server_ip = None
+    server_hostnames = None
+    ips = None
+    if two_replica_sets:
+        server_ip = '172.31.5.245:13289#172.31.3.165:13289^172.31.6.77:13289#172.31.9.164:13289'
 
-write_host = 'ec2-34-224-8-117.compute-1.amazonaws.com'
+        ips = '172.31.5.245#172.31.0.84#172.31.3.165^172.31.6.77#172.31.4.131#172.31.9.164'
 
-client_hostnames = ['ec2-35-173-128-2.compute-1.amazonaws.com', 'ec2-54-162-160-189.compute-1.amazonaws.com', 'ec2-34-224-174-112.compute-1.amazonaws.com', 'ec2-34-204-11-226.compute-1.amazonaws.com', 'ec2-34-227-221-75.compute-1.amazonaws.com', 'ec2-54-242-37-180.compute-1.amazonaws.com', 'ec2-54-166-140-78.compute-1.amazonaws.com', 'ec2-54-89-121-116.compute-1.amazonaws.com', 'ec2-35-174-6-11.compute-1.amazonaws.com', 'ec2-34-224-169-105.compute-1.amazonaws.com', 'ec2-52-91-159-228.compute-1.amazonaws.com']
+        server_hostnames = 'ec2-34-227-111-91.compute-1.amazonaws.com,ec2-184-72-88-37.compute-1.amazonaws.com,ec2-34-201-150-244.compute-1.amazonaws.com,ec2-54-210-157-90.compute-1.amazonaws.com,ec2-52-91-171-122.compute-1.amazonaws.com,ec2-34-228-141-119.compute-1.amazonaws.com'
 
-server_hostnames = 'ec2-54-196-152-202.compute-1.amazonaws.com'
+    else:
+        server_ip = '172.31.5.245:13289#172.31.3.165:13289'
 
-view_hosts = 'ec2-35-172-212-149.compute-1.amazonaws.com,ec2-18-205-25-178.compute-1.amazonaws.com,ec2-35-172-213-113.compute-1.amazonaws.com,ec2-35-172-212-105.compute-1.amazonaws.com,ec2-34-229-206-166.compute-1.amazonaws.com,ec2-54-175-209-245.compute-1.amazonaws.com,ec2-54-165-209-245.compute-1.amazonaws.com'
+        ips = '172.31.5.245#172.31.0.84#172.31.3.165'
 
-ips = '172.31.5.245'
+        server_hostnames = 'ec2-34-227-111-91.compute-1.amazonaws.com,ec2-184-72-88-37.compute-1.amazonaws.com,ec2-34-201-150-244.compute-1.amazonaws.com'
 
-socket = 13333
-view_ip = ['172.31.14.212', '172.31.11.45', '172.31.0.84', '172.31.3.165', '172.31.6.77', '172.31.4.131', '172.31.9.164']
+
+    client_hostnames = ['ec2-34-234-97-84.compute-1.amazonaws.com', 'ec2-54-85-136-80.compute-1.amazonaws.com', 'ec2-34-228-144-48.compute-1.amazonaws.com', 'ec2-54-158-3-255.compute-1.amazonaws.com', 'ec2-54-205-228-200.compute-1.amazonaws.com', 'ec2-34-203-34-129.compute-1.amazonaws.com', 'ec2-54-91-120-53.compute-1.amazonaws.com', 'ec2-34-235-129-19.compute-1.amazonaws.com', 'ec2-54-235-35-175.compute-1.amazonaws.com', 'ec2-54-89-197-247.compute-1.amazonaws.com', 'ec2-18-204-225-178.compute-1.amazonaws.com', 'ec2-34-204-43-117.compute-1.amazonaws.com', 'ec2-107-20-112-1.compute-1.amazonaws.com', 'ec2-52-91-93-200.compute-1.amazonaws.com']
+
+    socket = 13333
+    view_ip = '172.31.2.223:13333^172.31.15.138:13333^172.31.2.64:13333^172.31.10.38:13333^172.31.2.161:13333^172.31.5.104:13333^172.31.14.200:13333^172.31.12.187:13333'
+
+    print(len(client_hostnames))
+
+    clients = client_hostnames[0]
+    for client in client_hostnames[1:]:
+        clients += ',' + client
+
+    for i in [8]:
+        print("run " + str(i))
+
+        command = "run_chain:chain_hosts=" + ips
+
+        s = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H",
+            server_hostnames, command])
+
+        time.sleep(3)
+
+        ########################################
+
+        command = 'mirror:pkill zkv; cd examples/zookeeper/view2/ &&' + \
+            ' RUST_BACKTRACE\=short cargo run --release --' + \
+            ' ' + str(server_ip) + \
+            ' ' + str(socket) + \
+            ' #server_num' + \
+            ' ' + str(i) + \
+            ' ' + str(1000) + \
+            ' ' + str(view_ip) + \
+            ' ' + str(2)
+
+        if transaction_in != 0:
+            command += ' -t ' + str(transaction_in)
+
+        if one_chain:
+            command += ' -o '
+
+        v = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", clients,
+            command])
+
+        # time.sleep(1)
+
+        ########################################
+
+        # command = 'mirror:pkill traffic_gen; cd examples/zookeeper/traffic_gen/ &&' +\
+        #     ' cargo run --release --' +\
+        #     ' write ' + server_ip
+
+        #w = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", write_host,
+        #    command])
+
+        ########################################
+
+        # rs = []
+        # num = 0
+        # print(client_hostnames[:i])
+        # for client in client_hostnames[:i]:
+        #     command = 'mirror:pkill traffic_gen; cd examples/zookeeper/traffic_gen/ &&' +\
+        #         ' cargo run --release --' +\
+        #         ' read ' + str(num) + ' ' + view_ip[num] + ":" + str(socket) + ' ' + str(3) + ' ' + str(500)
+        #     num += 1
+
+        #     r = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", client,
+        #         command])
+        #     rs.append(r)
+
+        # for r in rs:
+        #     r.wait()
+
+        #w.wait()
+        v.wait()
+        s.kill()
+
+        print("")
+        print("> ")
+        print("========================================")
+        print("> ----------------------------------------")
+        print("========================================")
+        print("> ")
+        print("")
+        sys.stdout.flush()
+
+    subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", server_hostnames, "kill_server"])
+
+    subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", clients,
+            'mirror:pkill zkv'])
 
 
 os.chdir('../..')
 
-print(len(client_hostnames))
+# run(0, True, False)
+# exit(0)
 
-for i in range(1, 8):
-    print("run " + str(i))
+for one_chain in [False, True]:
+    if one_chain:
+        print("> color per server")
+    else:
+        print("> color per view")
 
-    command = "run_chain:chain_hosts=" + ips
+    for two_replica_sets in [True, False]:
 
-    s = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H",
-        server_hostnames, command])
+        if two_replica_sets:
+            print("> 2 replica sets")
+        else:
+            print("> 1 replica sets")
 
-    time.sleep(1)
+        for transaction_in in [0, 1000, 100, 10, 1]:
+            if transaction_in == 0:
+                print("> 0%")
+            else:
+                print("> " + str(100.0 / transaction_in) + "%")
 
-    ########################################
-
-    #FIXME view list
-    command = 'mirror:pkill zk_view; cd examples/zookeeper/view/ &&' + \
-        ' cargo run --release --' + \
-        ' ' + str(server_ip) + \
-        ' ' + str(socket) + \
-        ' ' + str(i) + \
-        ' ' + str(500)
-
-    v = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", view_hosts,
-        command])
-
-    time.sleep(1)
-
-    ########################################
-
-    command = 'mirror:pkill traffic_gen; cd examples/zookeeper/traffic_gen/ &&' +\
-        ' cargo run --release --' +\
-        ' write ' + server_ip
-
-    w = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", write_host,
-        command])
-
-    ########################################
-
-    rs = []
-    num = 0
-    print(client_hostnames[:i])
-    for client in client_hostnames[:i]:
-        command = 'mirror:pkill traffic_gen; cd examples/zookeeper/traffic_gen/ &&' +\
-            ' cargo run --release --' +\
-            ' read ' + str(num) + ' ' + view_ip[num] + ":" + str(socket) + ' ' + str(3) + ' ' + str(500)
-        num += 1
-
-        r = subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", client,
-            command])
-        rs.append(r)
-
-    for r in rs:
-        r.wait()
-
-    w.wait()
-    s.kill()
-
-    print("")
-    print("> ")
-    print("========================================")
-    print("> ----------------------------------------")
-    print("========================================")
-    print("> ")
-    print("")
-    sys.stdout.flush()
-
-subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", server_hostnames, "kill_server"])
-
-subprocess.Popen(["fab", "-f", "./scripts/mirror_on_servers.py", "-H", view_hosts,
-        'mirror:pkill zk_view'])
+            sys.stdout.flush()
+            run(transaction_in, two_replica_sets, one_chain)
