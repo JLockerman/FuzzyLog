@@ -96,7 +96,8 @@ fn main() {
     let balance_num = |balance_num| if corfu || balance_num % 2 != 0 {
         balance_num
     } else {
-        (balance_num - 1 + 60)
+        // (balance_num - 1 + 60)
+        balance_num
     };
 
     let data_handles: Vec<_> = (0..handles_per_client).map(|i| {
@@ -106,8 +107,6 @@ fn main() {
         let handle = build_store(args.servers.0.clone(), balance_num, ack.into());
         (handle, ack2, acks)
     }).collect();
-
-
 
     let (kind, throughput) = if corfu {
         let handles = data_handles.into_iter().enumerate().map(|(i, (data_handle, ack, acks))| {

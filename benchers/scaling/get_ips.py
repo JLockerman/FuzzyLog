@@ -15,7 +15,7 @@ for reservation in response["Reservations"]:
 
 num_instances = len(private_ip)
 print(num_instances)
-num_clients = len(public_dns) - 9
+num_clients = len(public_dns) - 11
 
 all_hosts = ""
 for host in public_dns:
