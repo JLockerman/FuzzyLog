@@ -12,11 +12,13 @@ extern crate structopt_derive;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::thread::{sleep, yield_now};
-use std::time::{Duration};
+use std::sync::mpsc;
+use std::thread::{spawn, sleep, yield_now};
+use std::time::{Instant, Duration};
 
-use fuzzy_log_client::fuzzy_log::log_handle::LogHandle;
-use fuzzy_log_client::packets::{order, entry};
+use fuzzy_log_client::fuzzy_log::log_handle::{Uuid, append_message};
+use fuzzy_log_client::packets::{order, OrderIndex};
+use fuzzy_log_client::store::{AsyncTcpStore, AsyncStoreClient, mio};
 
 use structopt::StructOpt;
 
@@ -35,14 +37,14 @@ struct Args {
     #[structopt(short="r", long="rounds", help = "number of rounds.", default_value = "10")]
     num_rounds: usize,
 
-    #[structopt(short="t", long="time_per_round", help = "number of milliseconds per round.", default_value = "1000")]
-    ms_per_round: usize,
-
     #[structopt(short="w", long="write_window", help = "Number of outstanding mutations.", default_value = "500")]
     write_window: usize,
 
-    #[structopt(short="a", long="total_handles", help = "Number of handles that need to have started before we collect data.")]
-    total_handles: usize,
+    #[structopt(short="h", long="handles_per_client", help = "Number of handles per client instance.")]
+    handles_per_client: usize,
+
+    #[structopt(short="c", long="corfu", help = "use corfu style appends instead of fuzzylog.")]
+    corfu: bool,
 }
 
 #[derive(Debug)]
@@ -61,7 +63,12 @@ impl FromStr for ServerAddrs {
                     }
                 });
                 let head = addrs.next().expect("no head");
-                let tail = addrs.next().expect("no tail");
+                let tail = if let Some(addr) = addrs.next() {
+                    addr
+                } else {
+                    head
+                };
+                assert!(addrs.next().is_none());
                 (head, tail)
             }).collect()
         ))
@@ -69,94 +76,141 @@ impl FromStr for ServerAddrs {
 }
 
 fn main() {
-    use std::iter;
-    // let start_time = Instant::now();
-    let _ = env_logger::init();
-    let args @ Args{..} = StructOpt::from_args();
-    // println!("#{:?}", args);
-    //println!("#{:?} servers", args.servers.0.len());
+    let start_time = Instant::now();
+    let mut args @ Args{..} = StructOpt::from_args();
+    args.client_num = args.client_num * args.handles_per_client + 1;
+    // args.client_num += 1;
+    println!("{:?}", args);
+
+    let client_num = args.client_num;
+    let handles_per_client = args.handles_per_client;
+    let corfu = args.corfu;
+
+    // let balance_num = if corfu {
+    //         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15][args.client_num]
+    //     } else {
+    //         [1, 61, 2, 62, 3, 63, 4, 64, 5, 65, 6, 66, 7, 67, 8, 68, 9, 69, 10, 70, 11, 71, 12, 72, 13, 73, 14, 74, 15, 75][args.client_num]
+    //     };
+
+    //TODO
+    let balance_num = |balance_num| if corfu || balance_num % 2 != 0 {
+        balance_num
+    } else {
+        (balance_num - 1 + 60)
+    };
+
+    let data_handles: Vec<_> = (0..handles_per_client).map(|i| {
+        let (ack, acks) = mpsc::channel();
+        let balance_num = balance_num(client_num + i) as _;
+        let ack2 = if corfu { Some(ack.clone()) } else { None };
+        let handle = build_store(args.servers.0.clone(), balance_num, ack.into());
+        (handle, ack2, acks)
+    }).collect();
 
 
-    let mut data_handle = LogHandle::replicated_with_servers(&args.servers.0)
-        .chains((1u32..22).chain(12_000..12_010).chain(iter::once(10_000)).map(order::from))
-        .build();
 
-    let reg_writes = AtomicUsize::new(0);
-    let started = AtomicBool::new(false);
-    let done = AtomicBool::new(false);
-    let regular_throughput =
-        crossbeam::scope(|scope| {
-            let args = &args;
-            let done = &done;
-            let started = &started;
-
-            let reg_writes = &reg_writes;
-
-            let record = scope.spawn(move || collector(reg_writes, started, done, args));
-
-            wait_for_clients_start(&mut data_handle, 10_000.into(), started, args);
-
-            regular_append(
-                &mut data_handle, &[(args.client_num as u32 + 1).into()], reg_writes, done, args
+    let (kind, throughput) = if corfu {
+        let handles = data_handles.into_iter().enumerate().map(|(i, (data_handle, ack, acks))| {
+            let balance_num = balance_num(client_num + i) as _;
+            let sequencer_handle = build_store(
+                vec![(args.sequencer, args.sequencer)], balance_num, ack.unwrap().into()
             );
-            record.join()
-        });
+            (sequencer_handle, data_handle, acks)
+        }).collect();
 
+        ("c", measure_corfu(handles, args))
+    } else {
+        let handles = data_handles.into_iter().map(|(h, _, a)| (h, a)).collect();
+        ("r", measure_fuzzy_log(handles, args))
+    };
 
-    let mut sequencer_handle = LogHandle::unreplicated_with_servers(&[args.sequencer])
-        .chains(&[order::from(1)])
-        .build();
+    println!("> {} {}.{} = {} Hz", kind, client_num, handles_per_client, throughput);
+    println!("experiment {:?}s", start_time.elapsed().as_secs());
+}
 
+fn measure_corfu(
+    handles: Vec<(ToStore, ToStore, RecvAck)>, args: Args
+) -> usize {
     let corfu_writes = AtomicUsize::new(0);
-    let started = AtomicBool::new(false);
     let done = AtomicBool::new(false);
-    let corfu_throughput = crossbeam::scope(|scope| {
-            let data_chains: Vec<_> = (0..args.servers.0.len())
-                .map(|i| i as u32 + 12_000).map(order::from).collect();
+    let data_chains: Vec<_> = (0..args.servers.0.len())
+            .map(|i| i as u32 + 12_000).map(order::from).collect();
+    crossbeam::scope(|scope| {
+        let data_chains = &*data_chains;
 
-            let args = &args;
-            let done = &done;
-            let started = &started;
+        let args = &args;
+        let done = &done;
 
-            let corfu_writes = &corfu_writes;
+        let corfu_writes = &corfu_writes;
 
-            let record = scope.spawn(move || collector(corfu_writes, started, done, args));
+        let record = scope.spawn(move || collector(corfu_writes, done, args));
 
-            wait_for_clients_start(&mut data_handle, 10_000.into(), started, args);
+        let handles: Vec<_> = handles.into_iter().map(move |(sequencer_handle, data_handle, acks)|
+            scope.spawn(move ||
+                corfu_append(
+                    sequencer_handle,
+                    data_handle,
+                    acks,
+                    &data_chains[..],
+                    corfu_writes,
+                    done,
+                    args
+                )
+            )
+        ).collect();
+        for handle in handles {
+            handle.join()
+        }
 
-            corfu_append(
-                &mut sequencer_handle,
-                &mut data_handle,
-                &data_chains[..],
-                corfu_writes,
-                done,
-                args
-            );
-            record.join()
-        });
+        record.join()
+    })
+}
 
-    //println!("#elapsed {:?}", start_time.elapsed());
-    println!("reg appends/s @ {} = {}", args.servers.0.len(), regular_throughput);
-    println!("cor appends/s @ {} = {}", args.servers.0.len(), corfu_throughput);
+fn measure_fuzzy_log(data_handles: Vec<(ToStore, RecvAck)>, args: Args) -> usize {
+    let reg_writes = AtomicUsize::new(0);
+    let done = AtomicBool::new(false);
+    crossbeam::scope(|scope| {
+        let args = &args;
+        let done = &done;
+
+        let reg_writes = &reg_writes;
+
+        let record = scope.spawn(move || collector(reg_writes, done, args));
+
+        let handles: Vec<_> = data_handles.into_iter().enumerate().map(move |(i, (data_handle, acks))|
+            scope.spawn(move ||
+                regular_append(
+                    data_handle, acks, &[((args.client_num + i) as u32).into()], reg_writes, done, args
+                )
+            )
+        ).collect();
+        for handle in handles {
+            handle.join()
+        }
+
+        record.join()
+    })
 }
 
 /////////////////////////
 
 #[inline(never)]
 fn collector(
-    writes: &AtomicUsize, started: &AtomicBool, done: &AtomicBool, args: &Args,
+    writes: &AtomicUsize, done: &AtomicBool, args: &Args,
 ) -> usize {
-    while !started.load(Ordering::Relaxed) { yield_now() }
     let mut throughput = Vec::with_capacity(args.num_rounds);
+    sleep(Duration::from_secs(1));
+    writes.swap(0, Ordering::Relaxed);
+
     for _ in 0..args.num_rounds {
-        sleep(Duration::from_millis(args.ms_per_round as u64));
+        sleep(Duration::from_secs(1));
         let write = writes.swap(0, Ordering::Relaxed);
         throughput.push(write);
     }
-    sleep(Duration::from_millis(args.ms_per_round as u64));
+
+    sleep(Duration::from_secs(1));
     done.store(true, Ordering::Relaxed);
-    sleep(Duration::from_millis(2 * args.ms_per_round as u64));
-    done.store(true, Ordering::Relaxed);
+
     let total_writes = throughput.iter().sum::<usize>();
     let avg_writes = total_writes / args.num_rounds;
     avg_writes
@@ -168,8 +222,9 @@ fn collector(
 
 #[inline(never)]
 fn corfu_append(
-    sequencer_handle: &mut LogHandle<()>,
-    data_handle: &mut LogHandle<[u8]>,
+    sequencer_handle: ToStore,
+    data_handle: ToStore,
+    acks: RecvAck,
     storage_chains: &[order],
     writes: &AtomicUsize,
     done: &AtomicBool,
@@ -177,33 +232,45 @@ fn corfu_append(
 ) {
     let sequencer = order::from(1);
 
-    let bytes = vec![0xf; 40];
+    let bytes = [0xf; 20];
 
-    let mut outstanding_r1 = 0;
-    let mut outstanding_r2 = 0;
+    let mut outstanding = 0;
 
     while !done.load(Ordering::Relaxed) {
-        let outstanding_writes = outstanding_r1 + outstanding_r2;
-        for _ in outstanding_writes..(args.write_window*2) {
-            sequencer_handle.async_append(sequencer, &(), &[]);
-            outstanding_r1 += 1;
+
+        for _ in outstanding..args.write_window {
+            #[allow(deprecated)]
+            let _ = sequencer_handle.send(append_message(sequencer, &(), &[]));
+
+            outstanding += 1;
         }
 
-        while let Ok((_, locs)) = sequencer_handle.try_wait_for_any_append() {
-            outstanding_r1 -= 1;
-            let index: entry = locs[0].1;
-            let storage_chain = u32::from(index) as usize % storage_chains.len();
-            let _ = data_handle.async_append(storage_chains[storage_chain], &bytes[..], &[]);
-            outstanding_r2 += 1;
+        for OrderIndex(chain, index) in acks.try_iter() {
+            if chain == sequencer {
+                let storage_chain = u32::from(index) as usize % storage_chains.len();
+                let chain = storage_chains[storage_chain];
+                #[allow(deprecated)]
+                let _ = data_handle.send(append_message(chain, &bytes[..], &[]));
+            } else {
+                outstanding -= 1;
+                writes.fetch_add(1, Ordering::Relaxed);
+            }
+
         }
-        while let Ok((..)) = data_handle.try_wait_for_any_append() {
-            outstanding_r2 -= 1;
-            writes.fetch_add(1, Ordering::Relaxed);
+
+        if outstanding == args.write_window {
+            yield_now()
         }
     }
 
-    data_handle.wait_for_all_appends().unwrap();
-    sequencer_handle.wait_for_all_appends().unwrap();
+    if outstanding > 0 {
+        for _ in acks.iter() {
+            outstanding -= 1;
+            if outstanding == 0 {
+                break
+            }
+        }
+    }
 }
 
 /////////////////////////
@@ -211,48 +278,99 @@ fn corfu_append(
 
 #[inline(never)]
 fn regular_append(
-    data_handle: &mut LogHandle<[u8]>,
+    data_handle: ToStore,
+    acks: RecvAck,
     chains: &[order],
     writes: &AtomicUsize,
     done: &AtomicBool,
     args: &Args,
 ) {
-    let bytes = vec![0xf; 40];
+    let bytes = [0xf; 20];
 
     let mut outstanding = 0;
 
     while !done.load(Ordering::Relaxed) {
-        for _ in outstanding..args.write_window {;
-            if chains.len() == 1 {
-                data_handle.async_append(chains[0], &bytes[..], &[]);
-            } else {
-                data_handle.async_multiappend(chains, &bytes[..], &[]);
-            }
+        for _ in outstanding..args.write_window {
+            #[allow(deprecated)]
+            let _ = data_handle.send(append_message(chains[0], &bytes[..], &[]));
 
             outstanding += 1;
         }
 
-        while let Ok((..)) = data_handle.try_wait_for_any_append() {
+        for _ in acks.try_iter() {
             outstanding -= 1;
             writes.fetch_add(1, Ordering::Relaxed);
         }
+
+        if outstanding == args.write_window {
+            yield_now()
+        }
     }
 
-    data_handle.wait_for_all_appends().unwrap();
+    if outstanding > 0 {
+        for _ in acks.iter() {
+            outstanding -= 1;
+            if outstanding == 0 {
+                break
+            }
+        }
+    }
 }
 
 /////////////////////////
 
-fn wait_for_clients_start(
-    log: &mut LogHandle<[u8]>, wait_chain: order, start: &AtomicBool, args: &Args
-) {
-    log.append(wait_chain, &[], &[]);
-    let mut clients_started = 0;
-    while clients_started < args.total_handles {
-        log.snapshot(wait_chain);
-        while let Ok(..) = log.get_next() {
-            clients_started += 1
+type ToStore = ::fuzzy_log_client::store::ToSelf;
+type RecvAck = mpsc::Receiver<OrderIndex>;
+
+fn build_store(servers: Vec<(SocketAddr, SocketAddr)>, balance_num: u64, ack_on: Acker)
+-> ToStore {
+    let (s, r) = mpsc::channel();
+    spawn(move || {
+        let replicated = servers[0].0 != servers[0].1;
+        let id = balance_num.into();
+        let mut event_loop = mio::Poll::new().unwrap();
+        let (store, to_store) = if replicated {
+            AsyncTcpStore::replicated_new_tcp(id, servers, ack_on, &mut event_loop).unwrap()
+        } else {
+            AsyncTcpStore::new_tcp(id, servers.iter().map(|&(a, _)| a), ack_on, &mut event_loop).unwrap()
+        };
+        s.send(to_store).unwrap();
+        store.run(event_loop)
+    });
+    r.recv().unwrap()
+}
+
+struct Acker {
+    ack: mpsc::Sender<OrderIndex>,
+}
+
+impl From<mpsc::Sender<OrderIndex>> for Acker {
+    fn from(ack: mpsc::Sender<OrderIndex>) -> Self {
+        Self {
+            ack
         }
     }
-    start.store(true, Ordering::Relaxed);
+}
+
+impl AsyncStoreClient for Acker {
+    fn on_finished_read(
+        &mut self,
+        _read_loc: OrderIndex,
+        _read_packet: Vec<u8>
+    ) -> Result<(), ()> {
+        // self.ack.send(()).map_err(|_| {})
+        Ok(())
+    }
+
+    fn on_finished_write(
+        &mut self,
+        _write_id: Uuid,
+        write_locs: Vec<OrderIndex>
+    ) -> Result<(), ()> {
+        self.ack.send(write_locs[0]).map_err(|_| {})
+    }
+
+    fn on_io_error(&mut self, _err: ::std::io::Error, _server: usize) -> Result<(), ()> {
+        Err(())
+    }
 }

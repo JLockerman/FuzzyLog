@@ -1726,3 +1726,24 @@ where V: Storeable {
     }.fill_vec(&mut buffer);
     buffer
 }
+
+pub fn multiappend_message<V: ?Sized>(chains: &[order], data: &V, deps: &[OrderIndex]) -> Vec<u8>
+where V: Storeable {
+    //TODO no-alloc?
+    assert!(chains.len() > 1);
+    let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
+    locs.sort();
+    locs.dedup();
+    let id = Uuid::new_v4();
+    let mut buffer = Vec::new();
+    EntryContents::Multi {
+        id: &id,
+        flags: &(EntryFlag::NewMultiPut | EntryFlag::NoRemote),
+        lock: &0,
+        locs: &locs,
+        deps: deps,
+        data: data_to_slice(data),
+    }.fill_vec(&mut buffer);
+    buffer
+}
+

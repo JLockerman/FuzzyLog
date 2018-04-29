@@ -55,6 +55,12 @@ impl From<Uuid> for Ipv4SocketAddr {
     }
 }
 
+impl From<u64> for Ipv4SocketAddr {
+    fn from(id: u64) -> Self {
+        Self::from_u64(id)
+    }
+}
+
 impl fmt::Debug for Ipv4SocketAddr {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         Ok(try!(fmt.write_fmt(format_args!("{:?}", Uuid::from_bytes(&*self.bytes())))))

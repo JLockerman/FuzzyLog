@@ -47,12 +47,18 @@ def export(dir):
 @parallel
 def zookeeper():
     server_num = str(index_of_host() + 1)
-    with cd("../zookeeper-3.4.10"):
+    with cd("~/zookeeper-3.4.10"):
         run("sudo mkdir /mnt/ramdisk && sudo mount -t tmpfs -o size=1G tmpfs /mnt/ramdisk && mkdir /mnt/ramdisk/zookeeper")
         run("rm -rf /mnt/ramdisk/zookeeper/version-2/")
         run("echo " + server_num +  " > /mnt/ramdisk/zookeeper/myid")
         run("./bin/zkServer.sh start-foreground")
 
+@parallel
+def try_ex(cmd=''):
+    fuzzy_log_dir = os.path.basename(os.getcwd())
+    with settings(hide('warnings'), warn_only=True):
+        with cd(fuzzy_log_dir):
+            run(cmd, pty=False)
 
 
 @parallel

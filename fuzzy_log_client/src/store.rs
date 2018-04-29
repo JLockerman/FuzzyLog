@@ -16,7 +16,7 @@ use hash::{HashMap, HashSet, UuidHashMap};
 use fuzzy_log_util::socket_addr::Ipv4SocketAddr;
 
 
-use mio;
+pub use mio;
 use mio::tcp::*;
 use mio::Token;
 
