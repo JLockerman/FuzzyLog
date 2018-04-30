@@ -1,4 +1,4 @@
-#!/usr/local/bin/python2.7
+#!/usr/local/bin/python
 import boto3
 
 ec2client = boto3.client('ec2')

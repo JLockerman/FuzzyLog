@@ -1,4 +1,4 @@
-#!/usr/local/bin/python2.7
+#!/usr/local/bin/python
 
 import os
 import subprocess
@@ -13,11 +13,11 @@ def run(corfu, num_clients, handles_per_client, window=750):
     ds_ips = '172.31.13.138#172.31.3.204^172.31.9.12#172.31.14.212^172.31.11.45#172.31.5.245^172.31.0.84#172.31.3.165^172.31.6.77#172.31.4.131'
     s_ips = '172.31.9.164'
 
-    data_hostnames = 'ec2-34-204-45-150.compute-1.amazonaws.com,ec2-107-22-36-71.compute-1.amazonaws.com,ec2-34-207-150-242.compute-1.amazonaws.com,ec2-54-152-233-79.compute-1.amazonaws.com,ec2-35-172-219-72.compute-1.amazonaws.com,ec2-54-164-134-155.compute-1.amazonaws.com,ec2-54-145-242-112.compute-1.amazonaws.com,ec2-52-200-121-46.compute-1.amazonaws.com,ec2-34-235-114-64.compute-1.amazonaws.com,ec2-54-152-146-66.compute-1.amazonaws.com'
+    data_hostnames = 'ec2-34-207-242-140.compute-1.amazonaws.com,ec2-34-204-49-149.compute-1.amazonaws.com,ec2-34-207-145-229.compute-1.amazonaws.com,ec2-18-204-225-95.compute-1.amazonaws.com,ec2-54-174-87-12.compute-1.amazonaws.com,ec2-174-129-47-52.compute-1.amazonaws.com,ec2-34-201-69-2.compute-1.amazonaws.com,ec2-52-207-187-127.compute-1.amazonaws.com,ec2-52-201-238-167.compute-1.amazonaws.com,ec2-52-54-159-81.compute-1.amazonaws.com'
 
-    seq_hostnames = 'ec2-34-230-30-49.compute-1.amazonaws.com'
+    seq_hostnames = 'ec2-54-236-6-240.compute-1.amazonaws.com'
 
-    client_hostnames = ['ec2-52-90-145-196.compute-1.amazonaws.com', 'ec2-52-90-132-142.compute-1.amazonaws.com', 'ec2-34-228-79-215.compute-1.amazonaws.com', 'ec2-54-164-46-228.compute-1.amazonaws.com', 'ec2-34-234-91-206.compute-1.amazonaws.com', 'ec2-52-201-238-167.compute-1.amazonaws.com', 'ec2-54-211-67-236.compute-1.amazonaws.com', 'ec2-18-232-152-213.compute-1.amazonaws.com', 'ec2-52-54-121-117.compute-1.amazonaws.com']
+    client_hostnames = ['ec2-52-207-241-251.compute-1.amazonaws.com', 'ec2-54-152-77-38.compute-1.amazonaws.com', 'ec2-54-198-108-116.compute-1.amazonaws.com', 'ec2-52-87-218-45.compute-1.amazonaws.com', 'ec2-34-230-35-84.compute-1.amazonaws.com', 'ec2-52-91-102-90.compute-1.amazonaws.com', 'ec2-54-227-107-134.compute-1.amazonaws.com', 'ec2-34-229-156-220.compute-1.amazonaws.com', 'ec2-52-90-224-18.compute-1.amazonaws.com']
 
     print(len(client_hostnames))
 
@@ -78,8 +78,8 @@ def run(corfu, num_clients, handles_per_client, window=750):
 
 os.chdir('../..')
 
-run(False, 9, 2)
-exit(0)
+# run(False, 9, 2)
+# exit(0)
 
 for corfu in [False, True]:
 
