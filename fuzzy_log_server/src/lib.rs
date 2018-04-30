@@ -8,6 +8,7 @@ extern crate evmap;
 extern crate lazycell;
 extern crate mio;
 extern crate uuid;
+extern crate reactor;
 
 extern crate fuzzy_log_packets;
 #[macro_use] extern crate fuzzy_log_util;

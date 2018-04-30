@@ -10,6 +10,7 @@ use std::{io, mem};
 use std::io::{Read, Write};
 use std::time::Duration;
 
+use fuzzy_log_packets::EntryContents;
 use fuzzy_log_packets::double_buffer::DoubleBuffer;
 
 use fuzzy_log_util::hash::HashMap;
@@ -380,6 +381,10 @@ impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler> {
     pub fn add_writes(&mut self, bytes: &[&[u8]]) {
         self.io.add_bytes_to_write(bytes)
     }
+
+    pub fn add_contents(&mut self, contents: EntryContents, extra: &[&[u8]]) {
+        self.io.add_contents_to_write(contents, extra)
+    }
 }
 
 ///////////////////
@@ -651,6 +656,11 @@ impl TcpIo {
         self.write_buffer.fill(bytes);
     }
 
+    pub fn add_contents_to_write(&mut self, contents: EntryContents, extra: &[&[u8]]) {
+        self.polling_write = true;
+        self.write_buffer.fill_from_contents(contents, extra);
+    }
+
     pub fn to_read_and_write_halves(&mut self) -> (&[u8], TcpWriter) {
         (&self.read_buffer[..self.bytes_read], TcpWriter {
             write_buffer: &mut self.write_buffer,
@@ -669,6 +679,11 @@ impl<'s> TcpWriter<'s> {
     pub fn add_bytes_to_write(&mut self, bytes: &[&[u8]]) {
         *self.polling_write = true;
         self.write_buffer.fill(bytes);
+    }
+
+    pub fn add_contents_to_write(&mut self, contents: EntryContents, extra: &[&[u8]]) {
+        *self.polling_write = true;
+        self.write_buffer.fill_from_contents(contents, extra);
     }
 }
 
