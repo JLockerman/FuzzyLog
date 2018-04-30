@@ -1,7 +1,7 @@
 // use prelude::*;
 
 use std::collections::{/*LinkedList,*/ VecDeque};
-use std::io::{ErrorKind};
+use std::io::{self, ErrorKind};
 use std::mem;
 use socket_addr::Ipv4SocketAddr;
 
@@ -19,18 +19,28 @@ use self::worker::WorkerInner;
 
 use reactor::*;
 
-pub type PerStream = TcpHandler<PacketReader, PacketHandler>;
+pub type PerStream = TcpHandler<PacketReader, PacketHandler, WriteHandler>;
 
+#[derive(Debug)]
+pub struct WriteHandler {
+    upstream: Option<mio::Token>,
+}
+
+#[derive(Debug)]
 pub struct PacketHandler {
     token: mio::Token,
 }
 
-pub fn new_stream(stream: TcpStream, token: mio::Token, is_replica: bool) -> PerStream {
+pub fn new_stream(
+    stream: TcpStream, token: mio::Token, is_replica: bool, upstream: Option<mio::Token>
+) -> PerStream {
     let reader = PacketReader{
         buffer_cache: Default::default(),
         is_replica,
     };
-    TcpHandler::new(stream, reader, PacketHandler{ token })
+    let ps = (stream, reader, PacketHandler{ token }, WriteHandler{ upstream }).into();
+    let _: &Handler<_, Error=io::Error> = &ps as &Handler<_, Error=io::Error>;
+    ps
 }
 
 impl MessageHandler<WorkerInner, (Buffer, Ipv4SocketAddr, Option<u64>)> for PacketHandler {
@@ -42,6 +52,20 @@ impl MessageHandler<WorkerInner, (Buffer, Ipv4SocketAddr, Option<u64>)> for Pack
     ) -> Result<(), ()> {
         trace!("{} {:?}", addr, storage_loc);
         inner.handle_message(io, self.token, msg, addr, storage_loc)
+    }
+}
+
+impl AfterWrite<WorkerInner> for WriteHandler {
+    fn after_write(
+        &mut self,
+        io: &mut TcpWriter,
+        inner: &mut WorkerInner,
+        token: mio::Token,
+        _wrote: usize,
+    ) {
+        if let (Some(upstream), false) = (self.upstream, io.is_overflowing()) {
+            inner.end_backpressure(token)
+        }
     }
 }
 

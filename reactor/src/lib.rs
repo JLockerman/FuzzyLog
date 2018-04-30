@@ -35,6 +35,9 @@ pub trait Handler<Inner>: Wakeable {
     fn on_poll(&mut self, inner: &mut Inner, token: mio::Token) -> Result<(), Self::Error>;
 
     fn on_error(&mut self, error: Self::Error, poll: &mut mio::Poll) -> ShouldRemove;
+
+    //FIXME should be own trait
+    fn after_work(&mut self, _inner: &mut Inner) {}
 }
 
 ///////////////////////////////////////
@@ -147,6 +150,7 @@ where
                     self.io_state.poll.poll(&mut self.events, Some(Duration::from_secs(0)))?;
                     self.handle_new_events()?;
                 }
+                self.inner.after_work(&mut self.io_state);
             }
         }
     }
@@ -271,13 +275,14 @@ impl<Inner> Handler<Inner> for () {
 ///////////////////////////////////////
 
 #[derive(Debug)]
-pub struct TcpHandler<PacketReader, PacketHandler> {
+pub struct TcpHandler<PacketReader, PacketHandler, WriteHandler=()> {
     io: TcpIo,
     reader: PacketReader,
     handler: PacketHandler,
+    after_write: WriteHandler
 }
 
-impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler>
+impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler, ()>
 where
     PacketReader: MessageReader, {
 
@@ -287,12 +292,46 @@ where
             io: TcpIo::new(stream),
             reader,
             handler,
+            after_write: (),
         }
     }
 }
 
-impl<PacketReader, PacketHandler> Wakeable
-for TcpHandler<PacketReader, PacketHandler> {
+impl<PacketReader, PacketHandler>
+    From<(TcpStream, PacketReader, PacketHandler)>
+for TcpHandler<PacketReader, PacketHandler, ()> {
+    fn from(
+        (stream, reader, handler): (TcpStream, PacketReader, PacketHandler))
+    -> Self {
+        Self {
+            io: TcpIo::new(stream),
+            reader,
+            handler,
+            after_write: (),
+        }
+    }
+}
+
+impl<PacketReader, PacketHandler, WriteHandler>
+    From<(TcpStream, PacketReader, PacketHandler, WriteHandler)>
+for TcpHandler<PacketReader, PacketHandler, WriteHandler>
+where PacketReader: MessageReader {
+
+    fn from(
+        (stream, reader, handler, after_write): (TcpStream, PacketReader, PacketHandler, WriteHandler))
+    -> Self {
+        Self {
+            io: TcpIo::new(stream),
+            reader,
+            handler,
+            after_write: after_write,
+        }
+    }
+
+}
+
+impl<PacketReader, PacketHandler, WriteHandler> Wakeable
+for TcpHandler<PacketReader, PacketHandler, WriteHandler> {
     fn init(&mut self, token: mio::Token, poll: &mut mio::Poll) {
         self.io.register_to(token, poll).unwrap();
     }
@@ -310,11 +349,12 @@ for TcpHandler<PacketReader, PacketHandler> {
     }
 }
 
-impl<Inner, PacketReader, PacketHandler> Handler<Inner>
-for TcpHandler<PacketReader, PacketHandler>
+impl<Inner, PacketReader, PacketHandler, WriteHandler> Handler<Inner>
+for TcpHandler<PacketReader, PacketHandler, WriteHandler>
 where
     PacketReader: MessageReader,
-    PacketHandler: MessageHandler<Inner, PacketReader::Message> {
+    PacketHandler: MessageHandler<Inner, PacketReader::Message>,
+    WriteHandler: AfterWrite<Inner> {
 
     type Error = io::Error;
 
@@ -330,13 +370,18 @@ where
         self.on_poll(inner, token)
     }
 
-    fn on_poll(&mut self, inner: &mut Inner, _token: mio::Token) -> Result<(), Self::Error> {
+    fn on_poll(&mut self, inner: &mut Inner, token: mio::Token) -> Result<(), Self::Error> {
         use MessageReaderError::*;
 
         self.io.on_wake();
 
         if self.io.is_polling_write() {
-            self.io.write()?;
+            let wrote = self.io.write()?;
+            let mut writer = TcpWriter {
+                write_buffer: &mut self.io.write_buffer,
+                polling_write: &mut self.io.polling_write,
+            };
+            self.after_write.after_write(&mut writer, inner, token, wrote);
         }
         if self.io.is_polling_read() {
             self.io.read()?;
@@ -377,13 +422,31 @@ where
     }
 }
 
-impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler> {
+impl<PacketReader, PacketHandler, WriteHandler>
+TcpHandler<PacketReader, PacketHandler, WriteHandler> {
+
     pub fn add_writes(&mut self, bytes: &[&[u8]]) {
         self.io.add_bytes_to_write(bytes)
     }
 
     pub fn add_contents(&mut self, contents: EntryContents, extra: &[&[u8]]) {
         self.io.add_contents_to_write(contents, extra)
+    }
+
+    pub fn is_overflowing(&self) -> bool {
+        self.io.is_overflowing()
+    }
+
+    pub fn is_backpressured(&mut self) -> bool {
+        self.io.is_backpressured()
+    }
+
+    pub fn mark_as_backpressured(&mut self) {
+        self.io.mark_as_backpressured()
+    }
+
+    pub fn mark_as_not_backpressured(&mut self) {
+        self.io.mark_as_not_backpressured()
     }
 }
 
@@ -420,6 +483,22 @@ pub trait MessageReader {
             done: false,
         }
     }
+}
+
+///////////////////
+
+pub trait AfterWrite<Inner> {
+    fn after_write(
+        &mut self,
+        io: &mut TcpWriter,
+        inner: &mut Inner,
+        token: mio::Token,
+        wrote: usize
+    );
+}
+
+impl<Inner> AfterWrite<Inner> for () {
+    fn after_write(&mut self, _: &mut TcpWriter, _: &mut Inner, _: mio::Token, _: usize) {}
 }
 
 ///////////////////
@@ -475,6 +554,7 @@ pub struct TcpIo {
 
     is_marked_as_staying_awake: bool,
     writes_backpressure_reads: bool,
+    is_marked_as_backpressured: bool,
 }
 
 impl TcpIo {
@@ -494,6 +574,7 @@ impl TcpIo {
 
             is_marked_as_staying_awake: false,
             writes_backpressure_reads: false,
+            is_marked_as_backpressured: false,
         }
     }
 
@@ -641,8 +722,20 @@ impl TcpIo {
 
     ///////////////////////////////////
 
-    pub fn is_backpressured(&mut self) -> bool {
+    pub fn is_overflowing(&self) -> bool {
         self.write_buffer.has_pending()
+    }
+
+    pub fn is_backpressured(&mut self) -> bool {
+        self.is_marked_as_backpressured || self.write_buffer.has_pending()
+    }
+
+    pub fn mark_as_backpressured(&mut self) {
+        self.is_marked_as_backpressured = true;
+    }
+
+    pub fn mark_as_not_backpressured(&mut self) {
+        self.is_marked_as_backpressured = false;
     }
 
     ///////////////////////////////////
@@ -684,6 +777,10 @@ impl<'s> TcpWriter<'s> {
     pub fn add_contents_to_write(&mut self, contents: EntryContents, extra: &[&[u8]]) {
         *self.polling_write = true;
         self.write_buffer.fill_from_contents(contents, extra);
+    }
+
+    pub fn is_overflowing(&self) -> bool {
+        self.write_buffer.has_pending()
     }
 }
 

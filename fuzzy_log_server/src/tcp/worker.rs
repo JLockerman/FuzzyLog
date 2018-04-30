@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+use std::collections::VecDeque;
 use std::sync::mpsc;
 
 use ::{
@@ -69,6 +70,9 @@ pub struct WorkerInner {
     has_upstream: bool,
     has_downstream: bool,
     //waiting_for_log: usize,
+
+    remove_backpressure: VecDeque<mio::Token>,
+
 
     next_token: usize,
 
@@ -148,6 +152,13 @@ impl Handler<IoState<PerStream>> for WorkerInner {
     fn on_error(&mut self, _: Self::Error, _: &mut mio::Poll) -> ShouldRemove {
         false
     }
+
+    fn after_work(&mut self, inner: &mut IoState<PerStream>) {
+        for token in self.remove_backpressure.drain(..) {
+            inner.get_mut_for(token).map(|s| s.mark_as_not_backpressured());
+            inner.wake(token);
+        }
+    }
 }
 
 impl Worker {
@@ -182,6 +193,8 @@ impl Worker {
 
             next_token: FIRST_CLIENT_TOKEN.0,
 
+            remove_backpressure: Default::default(),
+
             print_data: Default::default(),
         };
         let reactor = Reactor::with_inner(0.into(), inner).unwrap();
@@ -206,7 +219,7 @@ impl WorkerInner {
                 .cloned()
                 .unwrap_or(recv_token);
             trace!("{} from log {} {:?} => {:?}", self.worker_num, src_addr, recv_token, send_token);
-            let (buffer, _) =
+            let (buffer, needs_backpressure) =
                 ::handle_to_worker2(log_work, self.worker_num, continue_replication,
                 |to_send, head_ack, _u| {
                     if head_ack {
@@ -214,16 +227,19 @@ impl WorkerInner {
                     }
                     if continue_replication {
                         // trace!("WORKER {} replicate {:?}", self.inner.worker_num, to_send);
-                        self.send_downsteam(streams, send_token, src_addr, to_send);
+                        self.send_downsteam(streams, send_token, src_addr, to_send)
                     } else {
                         // trace!("WORKER {} ack {:?}", self.inner.worker_num, to_send);
-                        self.send_to_client(streams, send_token, src_addr, to_send);
+                        self.send_to_client(streams, send_token, src_addr, to_send)
                     }
                 }
             );
 
             streams.wake(send_token);
             streams.wake(recv_token);
+            if needs_backpressure {
+                streams.get_mut_for(recv_token).map(|s| s.mark_as_backpressured());
+            }
             //FIXME
             // buffer.map(|b| self.clients.get_mut(&recv_token).map(|c| c.return_buffer(b)));
             //FIXME un-backpressure recv if needed
@@ -237,39 +253,44 @@ impl WorkerInner {
         send_token: mio::Token,
         src_addr: Ipv4SocketAddr,
         to_send: ToSend,
-    ) {
+    ) -> bool {
         match to_send {
-            ToSend::Nothing => return,
+            ToSend::Nothing => return false,
             ToSend::OldReplication(to_replicate, storage_loc) => {
                 let mut storage_log_bytes: [u8; 8] = [0; 8];
                 LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                streams.get_mut_for(send_token).expect("downstream dead 1")
-                    .add_writes(&[to_replicate, &storage_log_bytes, src_addr.bytes()])
+                let s = streams.get_mut_for(send_token).expect("downstream dead 1");
+                s.add_writes(&[to_replicate, &storage_log_bytes, src_addr.bytes()]);
+                s.is_overflowing() && !s.is_backpressured()
             },
 
             ToSend::Contents(to_send) => {
                 let storage_log_bytes: [u8; 8] = [0; 8];
-                streams.get_mut_for(send_token).expect("downstream dead 2")
-                    .add_contents(to_send, &[&storage_log_bytes, src_addr.bytes()])
+                let s = streams.get_mut_for(send_token).expect("downstream dead 2");
+                s.add_contents(to_send, &[&storage_log_bytes, src_addr.bytes()]);
+                s.is_overflowing() && !s.is_backpressured()
             },
 
             ToSend::OldContents(to_send, storage_loc) => {
                 let mut storage_log_bytes: [u8; 8] = [0; 8];
                 LittleEndian::write_u64(&mut storage_log_bytes, storage_loc);
-                streams.get_mut_for(send_token).expect("downstream dead 3")
-                    .add_contents(to_send, &[&storage_log_bytes, src_addr.bytes()])
+                let s = streams.get_mut_for(send_token).expect("downstream dead 3");
+                s.add_contents(to_send, &[&storage_log_bytes, src_addr.bytes()]);
+                s.is_overflowing() && !s.is_backpressured()
             }
 
             ToSend::Slice(to_send) => {
                 let storage_loc_bytes: [u8; 8] = [0; 8];
-                streams.get_mut_for(send_token).expect("downstream dead 4")
-                    .add_writes(&[to_send, &storage_loc_bytes, src_addr.bytes()])
+                let s = streams.get_mut_for(send_token).expect("downstream dead 4");
+                s.add_writes(&[to_send, &storage_loc_bytes, src_addr.bytes()]);
+                s.is_overflowing() && !s.is_backpressured()
             }
 
             ToSend::StaticSlice(to_send) => {
                 let storage_loc_bytes: [u8; 8] = [0; 8];
-                streams.get_mut_for(send_token).expect("downstream dead 5")
-                    .add_writes(&[to_send, &storage_loc_bytes, src_addr.bytes()])
+                let s = streams.get_mut_for(send_token).expect("downstream dead 5");
+                s.add_writes(&[to_send, &storage_loc_bytes, src_addr.bytes()]);
+                s.is_overflowing() && !s.is_backpressured()
             }
 
             ToSend::Read(_to_send) => unreachable!(),
@@ -282,23 +303,36 @@ impl WorkerInner {
         send_token: mio::Token,
         _src_addr: Ipv4SocketAddr,
         to_send: ToSend,
-    ) {
-        match to_send {
-            ToSend::Nothing => return,
+    )  -> bool {
+        let needs_backpressure = match to_send {
+            ToSend::Nothing => return false,
             ToSend::OldReplication(..) => unreachable!(),
 
             ToSend::Contents(to_send) | ToSend::OldContents(to_send, _) =>
-                streams.get_mut_for(send_token).map(|c| c.add_contents(to_send, &[])),
+                streams.get_mut_for(send_token).map(|c| {
+                    c.add_contents(to_send, &[]);
+                    c.is_overflowing() && !c.is_backpressured()
+                }),
 
             ToSend::Slice(to_send) =>
-                streams.get_mut_for(send_token).map(|c| c.add_writes(&[to_send])),
+                streams.get_mut_for(send_token).map(|c| {
+                    c.add_writes(&[to_send]);
+                    c.is_overflowing() && !c.is_backpressured()
+                }),
 
             ToSend::StaticSlice(to_send) =>
-                streams.get_mut_for(send_token).map(|c| c.add_writes(&[to_send])),
+                streams.get_mut_for(send_token).map(|c| {
+                    c.add_writes(&[to_send]);
+                    c.is_overflowing() && !c.is_backpressured()
+                }),
 
             ToSend::Read(to_send) =>
-                streams.get_mut_for(send_token).map(|c| c.add_writes(&[to_send])),
+                streams.get_mut_for(send_token).map(|c| {
+                    c.add_writes(&[to_send]);
+                    c.is_overflowing() && !c.is_backpressured()
+                }),
         };
+        needs_backpressure.unwrap_or_else(|| false)
     }
 
     fn handle_from_dist(&mut self, streams: &mut IoState<PerStream>) {
@@ -310,24 +344,29 @@ impl WorkerInner {
                 Some(DistToWorker::NewClient(tok, upstream, downstream, client_addr)) => {
                     debug_assert!(tok.0 >= FIRST_CLIENT_TOKEN.0);
                     self.print_data.from_dist_N(1);
+                    let upstream_token = next_token(&mut self.next_token).into();
                     let downstream_token = downstream.map(|(_, stream)|{
                         trace!("Worker {} {} got downstream {:?} => {:?}",
                             self.worker_num, self.has_downstream,
                             stream.local_addr(), stream.peer_addr());
                         let token = next_token(&mut self.next_token).into();
-                        let stream = per_socket::new_stream(stream, token, false);
+                        let stream = per_socket::new_stream(
+                            stream, token, false, Some(upstream_token)
+                        );
                         let _ = streams.add_stream(token, stream);
                         token
                     });
                     trace!("Worker {} {} got upstream {:?} => {:?}",
                             self.worker_num, self.has_downstream, upstream.local_addr(), upstream.peer_addr());
-                    let token = next_token(&mut self.next_token).into();
-                    let stream = per_socket::new_stream(upstream, token, self.has_upstream);
-                    let _ = streams.add_stream(token, stream);
+
+                    let stream = per_socket::new_stream(
+                        upstream, upstream_token, self.has_upstream, None
+                    );
+                    let _ = streams.add_stream(upstream_token, stream);
 
                     trace!("WORKER {} recv from dist {:?}.",
                         self.worker_num, (tok, client_addr));
-                    let downstream_token = downstream_token.unwrap_or(token);
+                    let downstream_token = downstream_token.unwrap_or(upstream_token);
                     self.downstream_for_addr.insert(client_addr, downstream_token);
                 },
 
@@ -567,6 +606,9 @@ impl WorkerInner {
         self.to_log.send(to_send).expect("log gone 2");
     }
 
+    pub fn end_backpressure(&mut self, token: mio::Token) {
+        self.remove_backpressure.push_back(token)
+    }
 }
 
 impl DistributeToWorkers<(usize, mio::Token, Ipv4SocketAddr)>
