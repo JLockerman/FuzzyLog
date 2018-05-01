@@ -217,8 +217,8 @@ impl WorkerInner {
             let send_token = self.downstream_for_addr.get(&src_addr)
                 .cloned()
                 .unwrap_or(recv_token);
-            trace!("{} from log {} {:?} => {:?}", self.worker_num, src_addr, recv_token, send_token);
-            let (buffer, needs_backpressure) =
+            // trace!("{} from log {} {:?} => {:?}", self.worker_num, src_addr, recv_token, send_token);
+            let (_buffer, needs_backpressure) =
                 ::handle_to_worker2(log_work, self.worker_num, continue_replication,
                 |to_send, head_ack, _u| {
                     if head_ack {
@@ -241,7 +241,6 @@ impl WorkerInner {
             }
             //FIXME
             // buffer.map(|b| self.clients.get_mut(&recv_token).map(|c| c.return_buffer(b)));
-            //FIXME un-backpressure recv if needed
             continue
         }
     }
@@ -336,9 +335,15 @@ impl WorkerInner {
                     c.add_writes(&[to_send]);
                     c.is_overflowing() && !c.is_backpressured()
                 }),
-        }.expect("client dead");
+        };
         // needs_backpressure.unwrap_or_else(|| false)
-        needs_backpressure
+        match needs_backpressure {
+            Some(nb) => nb,
+            None => {
+                error!("client {:?} dead", _src_addr);
+                false
+            },
+        }
     }
 
     fn handle_from_dist(&mut self, streams: &mut IoState<PerStream>) {
@@ -405,7 +410,8 @@ impl WorkerInner {
         storage_loc: Option<u64>,
     ) -> Result<(), ()> {
         match storage_loc {
-            Some(storage_loc) => self.send_replication_to_log(token, msg, storage_loc, addr),
+            Some(storage_loc) =>
+                self.send_replication_to_log(token, msg, storage_loc, addr),
             None => self.send_to_log(token, msg, addr, socket_state),
         };
         Ok(())

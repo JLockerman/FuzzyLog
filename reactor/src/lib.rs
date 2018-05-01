@@ -2,6 +2,8 @@
 extern crate fuzzy_log_packets;
 extern crate fuzzy_log_util;
 
+#[macro_use] extern crate log;
+
 extern crate mio;
 
 use std::collections::VecDeque;
@@ -435,6 +437,7 @@ where
     }
 
     fn on_error(&mut self, _error: Self::Error, poll: &mut mio::Poll) -> ShouldRemove {
+        error!("tcp error {} @ {:#?}", _error, self.io.stream);
         self.io.on_error(poll)
     }
 }
@@ -706,7 +709,7 @@ impl TcpIo {
     ///////////////////////////////////
 
     pub fn needs_to_mark_as_staying_awake(&mut self) -> bool {
-        (self.is_polling_read() || self.polling_write) && !(self.is_marked_as_staying_awake)
+        (self.is_polling_read() || self.polling_write) && !self.is_marked_as_staying_awake()
     }
 
     pub fn mark_as_staying_awake(&mut self) {

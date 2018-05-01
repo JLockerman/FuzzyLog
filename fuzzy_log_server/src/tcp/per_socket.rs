@@ -60,11 +60,11 @@ impl AfterWrite<WorkerInner> for WriteHandler {
         &mut self,
         io: &mut TcpWriter,
         inner: &mut WorkerInner,
-        token: mio::Token,
+        _token: mio::Token,
         _wrote: usize,
     ) {
         if let (Some(upstream), false) = (self.upstream, io.is_overflowing()) {
-            inner.end_backpressure(token)
+            inner.end_backpressure(upstream)
         }
     }
 }
@@ -74,7 +74,7 @@ pub trait PerSocket {
 }
 
 impl PerSocket for PerStream {
-    fn return_buffer(&mut self, buffer: Buffer) {}
+    fn return_buffer(&mut self, _buffer: Buffer) {}
 }
 
 pub fn add_contents(io: &mut TcpWriter, contents: EntryContents) {
@@ -88,7 +88,7 @@ pub struct PacketReader {
 
 impl MessageReader for PacketReader {
     type Message = (Buffer, Ipv4SocketAddr, Option<u64>);
-    type Error = ();
+    type Error = ErrorKind;
 
     fn deserialize_message(
         &mut self,
@@ -103,7 +103,7 @@ impl MessageReader for PacketReader {
         let size = to_read.map_err(|e| match e {
             WrapErr::NotEnoughBytes(needs) =>
                 NeedMoreBytes(needs + mem::size_of::<Ipv4SocketAddr>() + extra),
-            _ => Other(()),
+            _ => Other(ErrorKind::InvalidInput),
         })?;
 
         if bytes.len() < size + extra + mem::size_of::<Ipv4SocketAddr>() {
