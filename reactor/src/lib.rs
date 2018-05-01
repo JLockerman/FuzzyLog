@@ -740,7 +740,7 @@ impl TcpIo {
     }
 
     pub fn is_polling_read(&mut self) -> bool {
-        self.polling_read && (!self.is_backpressured() || self.ignore_backpressure)
+        self.polling_read && !self.is_backpressured()
     }
 
     pub fn is_polling_write(&mut self) -> bool {
@@ -754,7 +754,8 @@ impl TcpIo {
     }
 
     pub fn is_backpressured(&mut self) -> bool {
-        self.is_marked_as_backpressured || self.write_buffer.has_pending()
+        (self.is_marked_as_backpressured || self.write_buffer.has_pending()) &&
+        !self.ignore_backpressure
     }
 
     pub fn mark_as_backpressured(&mut self) {
