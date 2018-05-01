@@ -706,12 +706,12 @@ where PerServer<S>: Connected,
             else if layout == EntryLayout::Snapshot {
                 if sent.is_multi() {
                     let id = sent.id();
-                    self.sent_writes.insert(id, sent);
+                    self.sent_writes.entry(id).or_insert(sent);
                 }
             }
             else if !sent.is_unlock() {
                 let id = sent.id();
-                self.sent_writes.insert(id, sent);
+                self.sent_writes.entry(id).or_insert(sent);
             }
         }
         true
@@ -735,6 +735,24 @@ where PerServer<S>: Connected,
             per_server.got_new_message = true;
             self.awake_io.push_back(last_server)
         }
+        for sent in per_server.being_sent.drain(..) {
+            let layout = sent.layout();
+            if layout == EntryLayout::Read {
+                let read_loc = sent.read_loc();
+                *self.sent_reads.entry(read_loc).or_insert(0) += 1;
+                self.waiting_buffers.push_back(sent.take())
+            }
+            else if layout == EntryLayout::Snapshot {
+                if sent.is_multi() {
+                    let id = sent.id();
+                    self.sent_writes.entry(id).or_insert(sent);
+                }
+            }
+            else if !sent.is_unlock() {
+                let id = sent.id();
+                self.sent_writes.entry(id).or_insert(sent);
+            }
+        }
         true
     }
 
@@ -753,6 +771,24 @@ where PerServer<S>: Connected,
             if !per_server.got_new_message {
                 per_server.got_new_message = true;
                 self.awake_io.push_back(s)
+            }
+            for sent in per_server.being_sent.drain(..) {
+                let layout = sent.layout();
+                if layout == EntryLayout::Read {
+                    let read_loc = sent.read_loc();
+                    *self.sent_reads.entry(read_loc).or_insert(0) += 1;
+                    self.waiting_buffers.push_back(sent.take())
+                }
+                else if layout == EntryLayout::Snapshot {
+                    if sent.is_multi() {
+                        let id = sent.id();
+                        self.sent_writes.entry(id).or_insert(sent);
+                    }
+                }
+                else if !sent.is_unlock() {
+                    let id = sent.id();
+                    self.sent_writes.entry(id).or_insert(sent);
+                }
             }
         }
     }
@@ -793,6 +829,24 @@ where PerServer<S>: Connected,
                 per_server.got_new_message = true;
                 self.awake_io.push_back(s)
             }
+            for sent in per_server.being_sent.drain(..) {
+                let layout = sent.layout();
+                if layout == EntryLayout::Read {
+                    let read_loc = sent.read_loc();
+                    *self.sent_reads.entry(read_loc).or_insert(0) += 1;
+                    self.waiting_buffers.push_back(sent.take())
+                }
+                else if layout == EntryLayout::Snapshot {
+                    if sent.is_multi() {
+                        let id = sent.id();
+                        self.sent_writes.entry(id).or_insert(sent);
+                    }
+                }
+                else if !sent.is_unlock() {
+                    let id = sent.id();
+                    self.sent_writes.entry(id).or_insert(sent);
+                }
+            }
         }
     }
 
@@ -808,6 +862,24 @@ where PerServer<S>: Connected,
             if !per_server.got_new_message {
                 per_server.got_new_message = true;
                 self.awake_io.push_back(s)
+            }
+            for sent in per_server.being_sent.drain(..) {
+                let layout = sent.layout();
+                if layout == EntryLayout::Read {
+                    let read_loc = sent.read_loc();
+                    *self.sent_reads.entry(read_loc).or_insert(0) += 1;
+                    self.waiting_buffers.push_back(sent.take())
+                }
+                else if layout == EntryLayout::Snapshot {
+                    if sent.is_multi() {
+                        let id = sent.id();
+                        self.sent_writes.entry(id).or_insert(sent);
+                    }
+                }
+                else if !sent.is_unlock() {
+                    let id = sent.id();
+                    self.sent_writes.entry(id).or_insert(sent);
+                }
             }
         }
     }
@@ -847,6 +919,24 @@ where PerServer<S>: Connected,
                 per_server.got_new_message = true;
                 self.awake_io.push_back(s)
             }
+            for sent in per_server.being_sent.drain(..) {
+                let layout = sent.layout();
+                if layout == EntryLayout::Read {
+                    let read_loc = sent.read_loc();
+                    *self.sent_reads.entry(read_loc).or_insert(0) += 1;
+                    self.waiting_buffers.push_back(sent.take())
+                }
+                else if layout == EntryLayout::Snapshot {
+                    if sent.is_multi() {
+                        let id = sent.id();
+                        self.sent_writes.entry(id).or_insert(sent);
+                    }
+                }
+                else if !sent.is_unlock() {
+                    let id = sent.id();
+                    self.sent_writes.entry(id).or_insert(sent);
+                }
+            }
         }
     }
 
@@ -880,6 +970,7 @@ where PerServer<S>: Connected,
         let finished_recv = self.servers[server].recv_packet();
         match finished_recv {
             Err(io_err) => {
+                error!("recv error {:?}", io_err);
                 let e = self.client.on_io_error(io_err, server);
                 if e.is_err() {
                     self.finished = true;
