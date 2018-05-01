@@ -206,8 +206,25 @@ impl<PerStream> IoState<PerStream> {
         self.streams.get(&token)
     }
 
+    #[deprecated]
     pub fn get_mut_for(&mut self, token: mio::Token) -> Option<&mut PerStream> {
         self.streams.get_mut(&token)
+    }
+
+    pub fn mutate<F, T>(&mut self, token: mio::Token, f: F) -> Option<T>
+    where
+        F: FnOnce(&mut PerStream) -> T,
+        PerStream: Wakeable, {
+
+        let awake = &mut self.awake;
+        self.streams.get_mut(&token).map(|stream| {
+            let ret = f(stream);
+            if !stream.is_marked_as_staying_awake(token) {
+                awake.push_back(token);
+                stream.mark_as_staying_awake(token);
+            }
+            ret
+        })
     }
 
     pub fn wake(&mut self, token: mio::Token) -> Option<bool>
@@ -425,6 +442,10 @@ where
 impl<PacketReader, PacketHandler, WriteHandler>
 TcpHandler<PacketReader, PacketHandler, WriteHandler> {
 
+    pub fn ignore_backpressure(&mut self) {
+        self.io.ignore_backpressure();
+    }
+
     pub fn add_writes(&mut self, bytes: &[&[u8]]) {
         self.io.add_bytes_to_write(bytes)
     }
@@ -554,6 +575,7 @@ pub struct TcpIo {
 
     is_marked_as_staying_awake: bool,
     writes_backpressure_reads: bool,
+    ignore_backpressure: bool,
     is_marked_as_backpressured: bool,
 }
 
@@ -574,12 +596,17 @@ impl TcpIo {
 
             is_marked_as_staying_awake: false,
             writes_backpressure_reads: false,
+            ignore_backpressure: false,
             is_marked_as_backpressured: false,
         }
     }
 
     pub fn set_writes_backpressure_reads(&mut self, wbr: bool) {
         self.writes_backpressure_reads = wbr
+    }
+
+    pub fn ignore_backpressure(&mut self) {
+        self.ignore_backpressure = true;
     }
 
     pub fn register_to(&mut self, token: mio::Token, poll: &mut mio::Poll) -> io::Result<()> {
@@ -713,7 +740,7 @@ impl TcpIo {
     }
 
     pub fn is_polling_read(&mut self) -> bool {
-        self.polling_read && !self.is_backpressured()
+        self.polling_read && (!self.is_backpressured() || self.ignore_backpressure)
     }
 
     pub fn is_polling_write(&mut self) -> bool {
