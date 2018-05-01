@@ -300,9 +300,9 @@ impl<Inner> Handler<Inner> for () {
 #[derive(Debug)]
 pub struct TcpHandler<PacketReader, PacketHandler, WriteHandler=()> {
     io: TcpIo,
-    reader: PacketReader,
-    handler: PacketHandler,
-    after_write: WriteHandler
+    pub reader: PacketReader,
+    pub handler: PacketHandler,
+    pub after_write: WriteHandler
 }
 
 impl<PacketReader, PacketHandler> TcpHandler<PacketReader, PacketHandler, ()>
@@ -649,7 +649,7 @@ impl TcpIo {
     pub fn consume_bytes(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes_read, "{} <= {}", bytes, self.bytes_read);
         self.bytes_read -= bytes;
-        self.read_buffer.drain(..bytes);
+        self.read_buffer.drain(..bytes).for_each(|_| {});
         let len = self.read_buffer.len();
         let cap = self.read_buffer.capacity();
         if len < cap {
