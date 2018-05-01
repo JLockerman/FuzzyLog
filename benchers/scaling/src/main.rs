@@ -16,11 +16,13 @@ use std::sync::mpsc;
 use std::thread::{spawn, sleep, yield_now};
 use std::time::{Instant, Duration};
 
-use fuzzy_log_client::fuzzy_log::log_handle::{Uuid, append_message};
+use fuzzy_log_client::fuzzy_log::log_handle::{Uuid, append_message, multiappend_message};
 use fuzzy_log_client::packets::{order, OrderIndex};
 use fuzzy_log_client::store::{AsyncTcpStore, AsyncStoreClient, mio};
 
 use structopt::StructOpt;
+
+use rand::{XorShiftRng as Rand, SeedableRng, Rng};
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "scaling", about = "")]
@@ -45,6 +47,9 @@ struct Args {
 
     #[structopt(short="c", long="corfu", help = "use corfu style appends instead of fuzzylog.")]
     corfu: bool,
+
+    #[structopt(short="t", long="tx_in", help = "transaction rate 1/t.")]
+    tx_in: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -144,9 +149,12 @@ fn measure_corfu(
 
         let record = scope.spawn(move || collector(corfu_writes, done, args));
 
-        let handles: Vec<_> = handles.into_iter().map(move |(sequencer_handle, data_handle, acks)|
+        let handles: Vec<_> = handles.into_iter()
+            .enumerate()
+            .map(move |(i, (sequencer_handle, data_handle, acks))|
             scope.spawn(move ||
                 corfu_append(
+                    i,
                     sequencer_handle,
                     data_handle,
                     acks,
@@ -176,10 +184,18 @@ fn measure_fuzzy_log(data_handles: Vec<(ToStore, RecvAck)>, args: Args) -> usize
 
         let record = scope.spawn(move || collector(reg_writes, done, args));
 
-        let handles: Vec<_> = data_handles.into_iter().enumerate().map(move |(i, (data_handle, acks))|
+        let handles: Vec<_> = data_handles.into_iter()
+            .enumerate()
+            .map(move |(i, (data_handle, acks))|
             scope.spawn(move ||
                 regular_append(
-                    data_handle, acks, &[((args.client_num + i) as u32).into()], reg_writes, done, args
+                    i,
+                    data_handle,
+                    acks,
+                    &[((args.client_num + i) as u32).into()],
+                    reg_writes,
+                    done,
+                    args
                 )
             )
         ).collect();
@@ -221,6 +237,7 @@ fn collector(
 
 #[inline(never)]
 fn corfu_append(
+    i: usize,
     sequencer_handle: ToStore,
     data_handle: ToStore,
     acks: RecvAck,
@@ -233,13 +250,19 @@ fn corfu_append(
 
     let bytes = [0xf; 20];
 
-    let mut outstanding = 0;
+    let mut rand = args.tx_in.map(|tx_in| (create_rand(i as u32, args), tx_in));
 
+    let mut outstanding = 0;
     while !done.load(Ordering::Relaxed) {
 
         for _ in outstanding..args.write_window {
+            let message = if let Some(other_chain) = tx_chain(&mut rand) {
+                multiappend_message(&[sequencer, other_chain], &(), &[])
+            } else {
+                append_message(sequencer, &(), &[])
+            };
             #[allow(deprecated)]
-            let _ = sequencer_handle.send(append_message(sequencer, &(), &[]));
+            let _ = sequencer_handle.send(message);
 
             outstanding += 1;
         }
@@ -248,6 +271,7 @@ fn corfu_append(
             if chain == sequencer {
                 let storage_chain = u32::from(index) as usize % storage_chains.len();
                 let chain = storage_chains[storage_chain];
+                //TODO add other color info to storage?
                 #[allow(deprecated)]
                 let _ = data_handle.send(append_message(chain, &bytes[..], &[]));
             } else {
@@ -277,6 +301,7 @@ fn corfu_append(
 
 #[inline(never)]
 fn regular_append(
+    i: usize,
     data_handle: ToStore,
     acks: RecvAck,
     chains: &[order],
@@ -286,12 +311,18 @@ fn regular_append(
 ) {
     let bytes = [0xf; 20];
 
-    let mut outstanding = 0;
+    let mut rand = args.tx_in.map(|tx_in| (create_rand(i as u32, args), tx_in));
 
+    let mut outstanding = 0;
     while !done.load(Ordering::Relaxed) {
         for _ in outstanding..args.write_window {
+            let message = if let Some(other_chain) = tx_chain(&mut rand) {
+                multiappend_message(&[chains[0], other_chain], &(), &[])
+            } else {
+                append_message(chains[0], &bytes[..], &[])
+            };
             #[allow(deprecated)]
-            let _ = data_handle.send(append_message(chains[0], &bytes[..], &[]));
+            let _ = data_handle.send(message);
 
             outstanding += 1;
         }
@@ -315,6 +346,21 @@ fn regular_append(
         }
     }
 }
+
+/////////////////////////
+
+fn create_rand(i: u32, args: &Args) -> Rand {
+    Rand::from_seed([6329057, 808, args.client_num as u32 + i, 9215])
+}
+
+fn tx_chain(rand: &mut Option<(Rand, u32)>) -> Option<order> {
+    rand.as_mut().and_then(|&mut (ref mut rand, one_in)| {
+        if !rand.gen_weighted_bool(one_in) { return None }
+        let chain = rand.gen_range(10_000, 10_020);
+        Some(chain.into())
+    })
+}
+
 
 /////////////////////////
 
