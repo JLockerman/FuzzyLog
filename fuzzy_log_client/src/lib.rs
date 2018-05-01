@@ -5,6 +5,7 @@ pub extern crate fuzzy_log_packets as packets;
 
 #[macro_use] extern crate log;
 pub extern crate mio;
+extern crate reactor;
 
 use fuzzy_log_util::hash;
 

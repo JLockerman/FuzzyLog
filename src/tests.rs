@@ -1355,17 +1355,15 @@ macro_rules! async_tests {
                         const addr_str1: &'static str = "127.0.0.1:13395";
                         const addr_str2: &'static str = "127.0.0.1:13396";
                         let addrs: (SocketAddr, SocketAddr) = (addr_str1.parse().unwrap(), addr_str2.parse().unwrap());
-                        let mut event_loop = mio::Poll::new().unwrap();
                         trace!("RTCP make store");
                         let (store, to_store) = AsyncTcpStore::replicated_new_tcp(
                             ::fuzzy_log_util::socket_addr::Ipv4SocketAddr::random(),
                             ::std::iter::once::<(SocketAddr, SocketAddr)>(addrs),
                             client,
-                            &mut event_loop
                         ).expect("");
                         *tsm.lock().unwrap() = Some(to_store);
                         trace!("RTCP store setup");
-                        store.run(event_loop)
+                        store.run()
                     });
                     let to_store;
                     loop {

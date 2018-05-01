@@ -79,6 +79,10 @@ where Inner: Handler<IoState<PerStream>> {
         }
         Ok(this)
     }
+
+    pub fn inner(&mut self) -> &mut Inner {
+        &mut self.inner
+    }
 }
 
 impl<PerStream, Inner> Reactor<PerStream, Inner>

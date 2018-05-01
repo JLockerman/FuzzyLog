@@ -47,6 +47,20 @@ impl Buffer {
         Buffer { inner: Vec::new(), start: 0, }
     }
 
+    #[cfg(any(debug_assertions, feature="debug_no_drop"))]
+    pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
+        let cap = inner.len();
+        unsafe { inner.set_len(cap) };
+        Buffer { inner: inner, start: 0, no_drop: false }
+    }
+
+    #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
+    pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
+        let cap = inner.len();
+        unsafe { inner.set_len(cap) };
+        Buffer { inner: inner, start: 0, }
+    }
+
     pub fn clear(&mut self) {
         self.inner = vec![];
         self.start = 0;

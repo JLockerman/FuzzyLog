@@ -121,17 +121,14 @@ impl Builder {
 }
 
 fn make_store(servers: Servers, to_client: mpsc::Sender<Message>) -> store::ToSelf {
-    use mio;
     let (s, r) = mpsc::channel();
     thread::spawn(move || {
-        let mut event_loop = mio::Poll::new().unwrap();
         let (store, to_store) = match servers {
             Servers::Unreplicated(servers) => {
                 store::AsyncTcpStore::new_tcp(
                     ClientAddr::random(),
                     servers.into_iter(),
                     to_client,
-                    &mut event_loop
                 ).expect("could not start store.")
             },
             Servers::Replicated(servers) => {
@@ -139,13 +136,12 @@ fn make_store(servers: Servers, to_client: mpsc::Sender<Message>) -> store::ToSe
                     ClientAddr::random(),
                     servers.into_iter(),
                     to_client,
-                    &mut event_loop
                 ).expect("could not start store.")
             },
         };
         s.send(to_store).unwrap();
         drop(s);
-        store.run(event_loop);
+        store.run();
     });
     r.recv().unwrap()
 }

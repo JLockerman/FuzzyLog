@@ -7,8 +7,6 @@ use std::net::SocketAddr;
 use std::thread;
 use std::sync::{mpsc, Arc, Mutex};
 
-use mio;
-
 use hash::HashMap;
 
 use fuzzy_log::{
@@ -176,19 +174,12 @@ where V: Storeable {
 
         #[inline(never)]
         fn run_store(
-            lock_server: SocketAddr,
-            chain_servers: Vec<SocketAddr>,
-            client: mpsc::Sender<Message>,
-            tsm: Arc<Mutex<Option<store::ToSelf>>>
+            _lock_server: SocketAddr,
+            _chain_servers: Vec<SocketAddr>,
+            _client: mpsc::Sender<Message>,
+            _tsm: Arc<Mutex<Option<store::ToSelf>>>
         ) {
-            let mut event_loop = mio::Poll::new().unwrap();
-            let (store, to_store) = ::store::AsyncTcpStore::tcp(
-                lock_server,
-                chain_servers,
-                client, &mut event_loop
-            ).expect("");
-            *tsm.lock().unwrap() = Some(to_store);
-            store.run(event_loop);
+            unimplemented!()
         }
 
         #[inline(never)]
@@ -279,7 +270,6 @@ where V: Storeable {
             let to_store_m = Arc::new(Mutex::new(None));
             let tsm = to_store_m.clone();
             let _ = thread::spawn(move || {
-                let mut event_loop = mio::Poll::new().unwrap();
                 match servers {
                     Servers::Unreplicated(servers) => {
                         let (mut store, to_store) =
@@ -287,11 +277,10 @@ where V: Storeable {
                                 id.unwrap_or_else(Ipv4SocketAddr::random),
                                 servers.into_iter(),
                                 client,
-                                &mut event_loop
                             ).expect("could not start store.");
                         *tsm.lock().unwrap() = Some(to_store);
                         store.set_reads_my_writes(reads_my_writes);
-                        store.run(event_loop);
+                        store.run();
                     },
                     Servers::Replicated(servers) => {
                         let (mut store, to_store) =
@@ -299,11 +288,10 @@ where V: Storeable {
                                 id.unwrap_or_else(Ipv4SocketAddr::random),
                                 servers.into_iter(),
                                 client,
-                                &mut event_loop
                             ).expect("could not start store.");
                         *tsm.lock().unwrap() = Some(to_store);
                         store.set_reads_my_writes(reads_my_writes);
-                        store.run(event_loop);
+                        store.run();
                     },
                 }
             });
@@ -484,43 +472,14 @@ where V: Storeable {
 
     #[deprecated]
     pub fn tcp_log_with_replication<S, C>(
-        lock_server: Option<SocketAddr>,
-        chain_servers: S,
-        interesting_chains: C
+        _lock_server: Option<SocketAddr>,
+        _chain_servers: S,
+        _interesting_chains: C
     ) -> Self
     where S: IntoIterator<Item=(SocketAddr, SocketAddr)>,
           C: IntoIterator<Item=order>,
     {
-        use std::thread;
-        use std::sync::{Arc, Mutex};
-
-        let chain_servers: Vec<_> = chain_servers.into_iter().collect();
-
-        let make_store = |client| {
-            let to_store_m = Arc::new(Mutex::new(None));
-            let tsm = to_store_m.clone();
-            thread::spawn(move || {
-                let mut event_loop = mio::Poll::new().unwrap();
-                let (store, to_store) = ::store::AsyncTcpStore::replicated_tcp(
-                    lock_server,
-                    chain_servers.into_iter(),
-                    client,
-                    &mut event_loop).expect("could not start store.");
-                    *tsm.lock().unwrap() = Some(to_store);
-                    store.run(event_loop);
-                });
-            let to_store;
-            loop {
-                let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
-                if let Some(s) = ts {
-                    to_store = s;
-                    break
-                }
-            }
-            to_store
-        };
-
-        LogHandle::with_store(interesting_chains, true, make_store)
+        unimplemented!()
     }
 
     /// Spawns a `LogHandle` which connects to TCP servers located at `chain_servers`
@@ -542,15 +501,13 @@ where V: Storeable {
             let to_store_m = Arc::new(Mutex::new(None));
             let tsm = to_store_m.clone();
             thread::spawn(move || {
-                let mut event_loop = mio::Poll::new().unwrap();
                 let (store, to_store) = ::store::AsyncTcpStore::new_tcp(
                     Ipv4SocketAddr::random(),
                     chain_servers.into_iter(),
                     client,
-                    &mut event_loop
                 ).expect("could not start store.");
                 *tsm.lock().unwrap() = Some(to_store);
-                store.run(event_loop);
+                store.run();
             });
             let to_store;
             loop {
@@ -586,15 +543,13 @@ where V: Storeable {
             let to_store_m = Arc::new(Mutex::new(None));
             let tsm = to_store_m.clone();
             thread::spawn(move || {
-                let mut event_loop = mio::Poll::new().unwrap();
                 let (store, to_store) = ::store::AsyncTcpStore::replicated_new_tcp(
                     Ipv4SocketAddr::random(),
                     chain_servers.into_iter(),
                     client,
-                    &mut event_loop
                 ).expect("could not start store.");
                 *tsm.lock().unwrap() = Some(to_store);
-                store.run(event_loop);
+                store.run();
             });
             let to_store;
             loop {
@@ -652,19 +607,12 @@ where V: Storeable {
 
         #[inline(never)]
         fn run_store(
-            lock_server: SocketAddr,
-            chain_servers: Vec<SocketAddr>,
-            client: mpsc::Sender<Message>,
-            tsm: Arc<Mutex<Option<store::ToSelf>>>
+            _lock_server: SocketAddr,
+            _chain_servers: Vec<SocketAddr>,
+            _client: mpsc::Sender<Message>,
+            _tsm: Arc<Mutex<Option<store::ToSelf>>>
         ) {
-            let mut event_loop = mio::Poll::new().unwrap();
-            let (store, to_store) = ::store::AsyncTcpStore::tcp(
-                lock_server,
-                chain_servers,
-                client, &mut event_loop
-            ).expect("");
-            *tsm.lock().unwrap() = Some(to_store);
-            store.run(event_loop)
+            unimplemented!()
         }
 
         #[inline(never)]
