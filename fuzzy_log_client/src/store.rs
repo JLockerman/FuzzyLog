@@ -145,10 +145,11 @@ where C: AsyncStoreClient {
         client: C,
     ) -> Result<(Self, ToSelf), io::Error>
     where I: IntoIterator<Item=SocketAddr> {
-        let servers = chain_servers.into_iter()
+        let servers: Vec<_> = chain_servers.into_iter()
             .map(Self::connect)
             .collect::<Result<_, _>>()?;
-        Self::build(id, servers, client, true)
+        let num_chain_servers = servers.len();
+        Self::build(id, servers, num_chain_servers, client, true)
     }
 
     pub fn replicated_new_tcp<I>(
@@ -160,12 +161,13 @@ where C: AsyncStoreClient {
         let (write_servers, read_servers): (Vec<_>, Vec<_>) =
             chain_servers.into_iter().inspect(|addrs| trace!("{:?}", addrs)).unzip();
 
+        let num_chain_servers = write_servers.len();
         let servers = write_servers
             .into_iter()
             .chain(read_servers.into_iter())
             .map(Self::connect)
             .collect::<Result<_, _>>()?;
-        Self::build(id, servers, client, false)
+        Self::build(id, servers, num_chain_servers, client, false)
     }
 
     pub fn replicated_tcp<I>(
@@ -182,11 +184,11 @@ where C: AsyncStoreClient {
     fn build(
         id: Ipv4SocketAddr,
         mut servers: Vec<TcpStream>,
+        num_chain_servers: usize,
         client: C,
         is_unreplicated: bool
     ) -> Result<(Self, ToSelf), io::Error> {
-
-        let num_chain_servers = servers.len();
+        assert!(num_chain_servers <= servers.len());
         trace!("Client {:?} servers", num_chain_servers);
         {
             for stream in servers.iter_mut().rev() {
@@ -208,9 +210,9 @@ where C: AsyncStoreClient {
             sent_writes: Default::default(),
             sent_reads: Default::default(),
             waiting_buffers: Default::default(),
-            num_chain_servers: num_chain_servers,
-            client: client,
-            from_client: from_client,
+            num_chain_servers,
+            client,
+            from_client,
             is_unreplicated,
             new_multi: true,
             finished: false,
@@ -763,9 +765,9 @@ where C: AsyncStoreClient {
                 // trace!("CLIENT vec len {}, entry len {}", msg.len(), bytes_as_entry(&msg).len());
                 let loc = loc.0;
                 let s = self.read_server_for_chain(loc);
-                self.add_single_server_send(inner, s.into(), msg)
-                    .expect("cannot sent read")
-
+                let sent = self.add_single_server_send(inner, s.into(), msg);
+                sent.unwrap_or_else(||
+                    panic!("cannot sent read to {}, {}", s, self.num_chain_servers))
             }
             EntryLayout::Data => {
                 let loc;
@@ -1260,6 +1262,7 @@ where C: AsyncStoreClient {
     }
 
     fn on_error(&mut self, _: Self::Error, _: &mut mio::Poll) -> ShouldRemove {
+        error!("store inner error");
         false
     }
 
