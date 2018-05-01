@@ -111,21 +111,25 @@ pub enum WriteState {
         Rc<RefCell<HashSet<usize>>>,
         Rc<RefCell<Box<[u64]>>>,
         bool,
+        Rc<RefCell<HashSet<order>>>,
     ),
     Skeens2(
         Rc<RefCell<Vec<u8>>>,
         Rc<RefCell<HashSet<usize>>>,
         u64,
+        Rc<RefCell<HashSet<order>>>,
     ),
     SnapshotSkeens1(
         Rc<RefCell<Vec<u8>>>,
         Rc<RefCell<HashSet<usize>>>,
         Rc<RefCell<Box<[u64]>>>,
+        Rc<RefCell<HashSet<order>>>,
     ),
     SnapshotSkeens2(
         Rc<RefCell<Vec<u8>>>,
         Rc<RefCell<HashSet<usize>>>,
         u64,
+        Rc<RefCell<HashSet<order>>>,
     ),
     GC(Vec<u8>),
 }
@@ -596,7 +600,11 @@ where PerServer<S>: Connected,
             self.finished = true;
             return false
         }
-        let new_msg_kind = bytes_as_entry(&msg).layout();
+        let new_msg_kind = {
+            let e = bytes_as_entry(&msg);
+            // println!("send {:?}", e.id());
+            e.layout()
+        };
         match new_msg_kind {
             EntryLayout::Read => {
                 let loc = bytes_as_entry(&msg).locs()[0];
@@ -711,6 +719,7 @@ where PerServer<S>: Connected,
             }
             else if !sent.is_unlock() {
                 let id = sent.id();
+                // println!("adding {:?}", id);
                 self.sent_writes.entry(id).or_insert(sent);
             }
         }
@@ -750,6 +759,7 @@ where PerServer<S>: Connected,
             }
             else if !sent.is_unlock() {
                 let id = sent.id();
+                // println!("adding {:?}", id);
                 self.sent_writes.entry(id).or_insert(sent);
             }
         }
@@ -787,6 +797,7 @@ where PerServer<S>: Connected,
                 }
                 else if !sent.is_unlock() {
                     let id = sent.id();
+                    // println!("adding {:?}", id);
                     self.sent_writes.entry(id).or_insert(sent);
                 }
             }
@@ -844,6 +855,7 @@ where PerServer<S>: Connected,
                 }
                 else if !sent.is_unlock() {
                     let id = sent.id();
+                    // println!("adding {:?}", id);
                     self.sent_writes.entry(id).or_insert(sent);
                 }
             }
@@ -878,6 +890,7 @@ where PerServer<S>: Connected,
                 }
                 else if !sent.is_unlock() {
                     let id = sent.id();
+                    // println!("adding {:?}", id);
                     self.sent_writes.entry(id).or_insert(sent);
                 }
             }
@@ -934,6 +947,7 @@ where PerServer<S>: Connected,
                 }
                 else if !sent.is_unlock() {
                     let id = sent.id();
+                    // println!("adding {:?}", id);
                     self.sent_writes.entry(id).or_insert(sent);
                 }
             }
@@ -1027,9 +1041,17 @@ where PerServer<S>: Connected,
                 let read_loc = sent.read_loc();
                 *self.sent_reads.entry(read_loc).or_insert(0) += 1;
                 self.waiting_buffers.push_back(sent.take())
-            } else if !sent.is_unlock() {
+            }
+            else if layout == EntryLayout::Snapshot {
+                if sent.is_multi() {
+                    let id = sent.id();
+                    self.sent_writes.entry(id).or_insert(sent);
+                }
+            }
+            else if !sent.is_unlock() {
                 let id = sent.id();
-                self.sent_writes.insert(id, sent);
+                // println!("adding {:?}", id);
+                self.sent_writes.entry(id).or_insert(sent);
             }
         }
 
@@ -1056,6 +1078,7 @@ where PerServer<S>: Connected,
     //TODO I should probably return the buffer on recv_packet, and pass it into here
     fn handle_completed_write(&mut self, token: Token, num_chain_servers: usize,
         packet: &mut Buffer) -> Result<bool, ()> {
+        // println!("handle {:?}", packet.contents().id());
         let (id, kind, flag) = {
             let e = packet.contents();
             (*e.id(), e.kind(), *e.flag())
@@ -1068,9 +1091,11 @@ where PerServer<S>: Connected,
         if let Some(v) = self.sent_writes.remove(&id) {
             trace!("CLIENT write needed completion");
             match v {
-                WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel) => {
+                WriteState::Skeens1(
+                    buf, remaining_servers, timestamps, is_sentinel, remaining_chains
+                ) => {
+                    // println!("handle sk1 {:?}\n\n", packet.contents());
                     if !flag.contains(EntryFlag::Skeens1Queued) {
-                        error!("CLIENT bad skeens1 ack @ {:?}", token);
                         return Err(())
                     }
                     assert!(kind.contains(EntryKind::Multiput));
@@ -1082,6 +1107,7 @@ where PerServer<S>: Connected,
                         &id,
                         num_chain_servers,
                         &remaining_servers,
+                        &remaining_chains,
                         &timestamps,
                         &mut self.max_timestamp_seen,
                         unreplicated
@@ -1094,19 +1120,21 @@ where PerServer<S>: Connected,
                         }
                         None => {
                             self.sent_writes.insert(id,
-                                WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel));
+                                WriteState::Skeens1(buf, remaining_servers, timestamps, is_sentinel, remaining_chains));
                             return Err(())
                         }
                     }
                 }
 
-                WriteState::Skeens2(buf, remaining_servers, max_ts) => {
+                WriteState::Skeens2(buf, remaining_servers, max_ts, remaining_chains) => {
                     assert!(self.new_multi);
                     trace!("CLIENT finished multi sk2 section");
+                    // println!("handle sk2 {:?}\n\n", packet.contents());
                     let ready_to_unlock = {
                         let mut b = buf.borrow_mut();
-                        let mut finished_writes = true;
+                        let finished_writes;
                         {
+                            let mut rem = remaining_chains.borrow_mut();
                             let mut me = bytes_as_entry_mut(&mut *b);
                             let locs = me.locs_mut();
                             let mut contents = packet.contents_mut();
@@ -1117,13 +1145,15 @@ where PerServer<S>: Connected,
                                     if read_server_for_chain(loc.0, self.num_chain_servers, unreplicated) == token.0
                                         && loc.1 != entry::from(0) {
                                         locs[i] = *loc;
+                                        rem.remove(&loc.0);
                                     } else if locs[i].1 == entry::from(0) {
-                                        finished_writes = false
+                                        // finished_writes = false
                                     } else {
                                         *loc = locs[i]
                                     }
                                 }
                             }
+                            finished_writes = rem.is_empty();
                             if finished_writes {
                                 let locs = &*locs;
                                 let from = &*fill_from;
@@ -1179,17 +1209,18 @@ where PerServer<S>: Connected,
                         }
                         None => {
                             self.sent_writes.insert(id,
-                                WriteState::Skeens2(buf, remaining_servers, max_ts));
+                                WriteState::Skeens2(buf, remaining_servers, max_ts, remaining_chains));
                             return Err(())
                         }
                     }
                 }
 
-                WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps) => {
+                WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps, remaining_chains) => {
                     if !flag.contains(EntryFlag::Skeens1Queued) {
                         error!("CLIENT bad skeens1 ack @ {:?}", token);
                         return Err(())
                     }
+                    // println!("handle Si sk1 {:?}\n\n", packet.contents());
                     assert!(kind.contains(EntryKind::Snapshot));
                     assert!(self.new_multi);
                     trace!("CLIENT finished snap sk1 section");
@@ -1199,6 +1230,7 @@ where PerServer<S>: Connected,
                         &id,
                         num_chain_servers,
                         &remaining_servers,
+                        &remaining_chains,
                         &timestamps,
                         &mut self.max_timestamp_seen,
                         unreplicated
@@ -1210,36 +1242,38 @@ where PerServer<S>: Connected,
                         }
                         None => {
                             self.sent_writes.insert(id,
-                                WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps));
+                                WriteState::SnapshotSkeens1(buf, remaining_servers, timestamps, remaining_chains));
                             return Err(())
                         }
                     }
                 }
 
-                WriteState::SnapshotSkeens2(buf, remaining_servers, max_ts) => {
+                WriteState::SnapshotSkeens2(buf, remaining_servers, max_ts, remaining_chains) => {
                     assert!(self.new_multi);
+                    // println!("handle Si sk2 {:?}\n\n", packet.contents());
                     trace!("CLIENT finished snap sk2 section");
                     {
                         let mut b = buf.borrow_mut();
-                        let finished_writes = {
-                            let mut r = remaining_servers.borrow_mut();
-                            r.remove(&token.0);
-                            r.is_empty()
-                        };
+                        let mut finished_writes;
                         {
+                            let mut rem = remaining_chains.borrow_mut();
                             let mut me = bytes_as_entry_mut(&mut *b);
-                            if finished_writes {
-                                me.flag_mut().insert(EntryFlag::ReadSuccess);
-                            }
-                            let locs = me.locs_mut();
-                            let fill_from = packet.contents().locs();
-                            //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
-                            for (i, &loc) in fill_from.into_iter().enumerate() {
-                                if locs[i].0 != order::from(0) {
-                                    if read_server_for_chain(loc.0, self.num_chain_servers, unreplicated) == token.0 {
-                                        locs[i] = loc;
+                            {
+                                let locs = me.locs_mut();
+                                let fill_from = packet.contents().locs();
+                                //trace!("CLIENT filling {:?} from {:?}", locs, fill_from);
+                                for (i, &loc) in fill_from.into_iter().enumerate() {
+                                    if locs[i].0 != order::from(0) {
+                                        if read_server_for_chain(loc.0, self.num_chain_servers, unreplicated) == token.0 {
+                                            locs[i] = loc;
+                                            rem.remove(&loc.0);
+                                        }
                                     }
                                 }
+                            }
+                            finished_writes = rem.is_empty();
+                            if finished_writes {
+                                me.flag_mut().insert(EntryFlag::ReadSuccess);
                             }
                         }
                         if finished_writes {
@@ -1256,18 +1290,21 @@ where PerServer<S>: Connected,
                     };
                     trace!("CLIENT waiting snap sk2 pieces");
                     self.sent_writes.insert(id,
-                        WriteState::SnapshotSkeens2(buf, remaining_servers, max_ts));
+                        WriteState::SnapshotSkeens2(buf, remaining_servers, max_ts, remaining_chains));
                     return Err(())
                 }
 
                 WriteState::SingleServer(mut buf) => {
                     //assert!(token != self.lock_token());
+                    // println!("handle single {:?}\n\n", packet.contents());
                     trace!("CLIENT finished single server");
                     {
                         let contents = packet.contents();
                         //Multi appends go to a single server in the fastpath
                         let filled = fill_locs(&mut buf, contents, token, self.num_chain_servers, unreplicated);
                         if filled < contents.locs().len() {
+                            //FIXME is this right?
+                            self.sent_writes.insert(id, WriteState::SingleServer(buf));
                             return Err(())
                         }
                         let max_ts = contents.lock_num();
@@ -1295,19 +1332,15 @@ where PerServer<S>: Connected,
                 id: &Uuid,
                 num_chain_servers: usize,
                 remaining_servers: &Rc<RefCell<HashSet<usize>>>,
+                remaining_chains: &Rc<RefCell<HashSet<order>>>,
                 timestamps: &Rc<RefCell<Box<[u64]>>>,
                 max_timestamp_seen: &mut HashMap<order, u64>,
                 unreplicated: bool,
             ) -> Option<u64> {
-                let mut r = remaining_servers.borrow_mut();
+                let mut r = remaining_chains.borrow_mut();
                 //FIXME store if from head or tail
                 //FIXME don't return until gotten from tail
-                if !r.remove(&token.0) {
-                    // error!("CLIENT repeat sk1 section");
-                    return None
-                }
-                let finished_writes = r.is_empty();
-                mem::drop(r);
+
 
                 let mut ts = timestamps.borrow_mut();
                 let e = packet.contents();
@@ -1321,10 +1354,11 @@ where PerServer<S>: Connected,
                         ts[i] = u32::from(t) as u64;
                         assert!(ts[i] > 0,
                             "bad timestamp {:?} in {:#?}", oi, e);
+                        r.remove(&oi.0);
                     }
                 }
 
-                if finished_writes {
+                if r.is_empty() {
                     let max_ts = ts.iter().cloned().max().unwrap();
                     for &OrderIndex(o, _) in e.locs() {
                         let mts = max_timestamp_seen.entry(o).or_insert(max_ts);
@@ -1849,11 +1883,15 @@ impl Connected for PerServer<TcpStream> {
         // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
         let is_data;
+        let remaining_chains;
         {
             let mut ts = msg.borrow_mut();
             let send_end = {
                 {
                     let mut e = bytes_as_entry_mut(&mut *ts);
+                    remaining_chains = e.as_ref().locs().iter().map(|&OrderIndex(o, _)| o)
+                        .filter(|&o| o != order::from(0))
+                        .collect();
                     is_data = e.as_ref().locs().into_iter()
                         .take_while(|&&oi| oi != OrderIndex(0.into(), 0.into()))
                         .any(|oi| is_write_server_for(oi.0, self.token, num_servers));
@@ -1882,7 +1920,7 @@ impl Connected for PerServer<TcpStream> {
             debug_assert!(sent);
         }
         self.being_sent.push_back(WriteState::Skeens1(
-            msg, remaining_servers, timestamps, !is_data
+            msg, remaining_servers, timestamps, !is_data, Rc::new(RefCell::new(remaining_chains))
         ))
     }
 
@@ -1896,15 +1934,19 @@ impl Connected for PerServer<TcpStream> {
         self.stay_awake = true;
         // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
+        let remaining_chains;
         {
             let ts = msg.borrow();
+            remaining_chains = bytes_as_entry(&*ts).locs()
+                .iter().map(|&OrderIndex(o, _)| o).filter(|&o| o != order::from(0))
+                .collect();
             debug_assert_eq!(bytes_as_entry(&*ts).lock_num(), max_timestamp);
             let send_end = bytes_as_entry(&*ts).len();
             let sent = self.being_written.fill(&[&ts[..send_end], self.receiver.bytes()]);
             debug_assert!(sent);
         }
         self.being_sent.push_back(WriteState::Skeens2(
-            msg, remaining_servers, max_timestamp
+            msg, remaining_servers, max_timestamp, Rc::new(RefCell::new(remaining_chains))
         ))
     }
 
@@ -1917,8 +1959,12 @@ impl Connected for PerServer<TcpStream> {
         self.stay_awake = true;
         // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
+        let remaining_chains;
         {
             let ts = msg.borrow();
+            remaining_chains = bytes_as_entry(&*ts).locs()
+                .iter().map(|&OrderIndex(o, _)| o).filter(|&o| o != order::from(0))
+                .collect();
             let len = bytes_as_entry(&*ts).len();
             assert_eq!(len, ts.len());
             trace!("{:?}", bytes_as_entry(&*ts));
@@ -1926,7 +1972,7 @@ impl Connected for PerServer<TcpStream> {
             debug_assert!(sent);
         }
         self.being_sent.push_back(WriteState::SnapshotSkeens1(
-            msg, remaining_servers, timestamps
+            msg, remaining_servers, timestamps, Rc::new(RefCell::new(remaining_chains))
         ))
     }
 
@@ -1940,15 +1986,19 @@ impl Connected for PerServer<TcpStream> {
         self.stay_awake = true;
         // let len = msg.borrow().len();
         self.print_data.packets_sending(1);
+        let remaining_chains;
         {
             let ts = msg.borrow();
+            remaining_chains = bytes_as_entry(&*ts).locs()
+                .iter().map(|&OrderIndex(o, _)| o).filter(|&o| o != order::from(0))
+                .collect();
             debug_assert_eq!(bytes_as_entry(&*ts).lock_num(), max_timestamp);
             let send_end = bytes_as_entry(&*ts).len();
             let sent = self.being_written.fill(&[&ts[..send_end], self.receiver.bytes()]);
             debug_assert!(sent);
         }
         self.being_sent.push_back(WriteState::SnapshotSkeens2(
-            msg, remaining_servers, max_timestamp
+            msg, remaining_servers, max_timestamp, Rc::new(RefCell::new(remaining_chains))
         ))
     }
 
@@ -1968,7 +2018,7 @@ impl WriteState {
         match self {
             &SingleServer(ref buf) | &GC(ref buf) => f(&**buf),
 
-            &Skeens1(ref buf, _, _, is_sentinel) => {
+            &Skeens1(ref buf, _, _, is_sentinel, _) => {
                 let mut b = buf.borrow_mut();
                 if is_sentinel { slice_to_sentinel(&mut b[..]); }
                 else { slice_to_multi(&mut b[..]) }
@@ -1976,7 +2026,7 @@ impl WriteState {
             },
 
             &Skeens2(ref buf, ..)
-            | &SnapshotSkeens1(ref buf, _, _) | &SnapshotSkeens2(ref buf, _, _) => {
+            | &SnapshotSkeens1(ref buf, ..) | &SnapshotSkeens2(ref buf, ..) => {
                 let b = buf.borrow();
                 f(&*b)
             },
@@ -1989,7 +2039,7 @@ impl WriteState {
             SingleServer(buf) | GC(buf) => buf,
 
             Skeens1(buf, ..) | Skeens2(buf, ..)
-            | SnapshotSkeens1(buf, _, _) | SnapshotSkeens2(buf, _, _) =>
+            | SnapshotSkeens1(buf, ..) | SnapshotSkeens2(buf, ..) =>
                 Rc::try_unwrap(buf).expect("taking from non unique WriteState")
                     .into_inner()
         }

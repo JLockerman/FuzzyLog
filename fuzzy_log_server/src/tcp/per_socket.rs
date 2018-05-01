@@ -550,8 +550,8 @@ fn recv_packet(
             },
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => return RecvRes::NeedsMore(read),
             Err(ref e) if e.kind() == ErrorKind::Interrupted => return RecvRes::NeedsMore(read),
-            Err(_) => {
-                // error!("recv error {:?}", e);
+            Err(e) => {
+                error!("recv error {:?}", e);
                 return RecvRes::Error
             },
         }

@@ -223,11 +223,14 @@ fn collector(
         throughput.push(write);
     }
 
+    let total_writes = throughput.iter().sum::<usize>();
+    let avg_writes = total_writes / args.num_rounds;
+
+    println!("avg {}", avg_writes);
+
     sleep(Duration::from_secs(1));
     done.store(true, Ordering::Relaxed);
 
-    let total_writes = throughput.iter().sum::<usize>();
-    let avg_writes = total_writes / args.num_rounds;
     avg_writes
 }
 
@@ -287,7 +290,14 @@ fn corfu_append(
     }
 
     if outstanding > 0 {
-        for _ in acks.iter() {
+        //FIXME
+        // for _ in acks.iter() {
+        //     outstanding -= 1;
+        //     if outstanding == 0 {
+        //         break
+        //     }
+        // }
+        while let Ok(..) = acks.recv_timeout(Duration::from_secs(1)) {
             outstanding -= 1;
             if outstanding == 0 {
                 break
@@ -337,14 +347,25 @@ fn regular_append(
         }
     }
 
+    // println!("done {:?}", outstanding);
+
     if outstanding > 0 {
-        for _ in acks.iter() {
+        // for _ in acks.iter() {
+        //     outstanding -= 1;
+        //     println!("ack {:?}", outstanding);
+        //     if outstanding == 0 {
+        //         break
+        //     }
+        // }
+        while let Ok(..) = acks.recv_timeout(Duration::from_secs(1)) {
             outstanding -= 1;
             if outstanding == 0 {
                 break
             }
         }
     }
+
+    println!("outstanding {:?}", outstanding);
 }
 
 /////////////////////////
