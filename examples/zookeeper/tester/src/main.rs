@@ -19,7 +19,7 @@ use rand::{XorShiftRng as Rand, SeedableRng, Rng};
 
 use structopt::StructOpt;
 
-use zipf::ZipfDistribution;
+// use zipf::ZipfDistribution;
 
 use zookeeper::*;
 
@@ -28,7 +28,11 @@ fn main() {
     println!("{:?}", args);
     let client_num = args.client_num as u32;
     ::zookeeper::message::set_client_id(client_num + 1);
-    let color = (client_num % 2 + 1).into();
+    let color = if args.one_chain {
+        (client_num % 2 + 1).into()
+    } else {
+        (client_num + 1).into()
+    };
     // let color = (client_num + 1).into();
     let servers = &*args.servers.0;
     let replicated = servers[0].0 != servers[0].1;
@@ -140,9 +144,9 @@ fn main() {
 
     let window_size = args.window;
 
-    let one_in = args.one_in;
+    let one_in = args.one_in.unwrap_or(0);
 
-    let do_transactions = args.do_transactions;
+    let do_transactions = args.one_in.is_some();
 
     thread::spawn(move || {
         let mut rand = Rand::from_seed([111, 234, client_num, 1010]);
@@ -156,7 +160,7 @@ fn main() {
         // } else {
         //     client_num - 1
         // };
-        let mut dist = ZipfDistribution::new(Rand::from_seed([client_num, 234, client_num, 1010]), num_clients, 1.01).unwrap();
+        // let mut dist = ZipfDistribution::new(Rand::from_seed([client_num, 234, client_num, 1010]), num_clients, 1.01).unwrap();
         'work: while !DONE.load(Relaxed) {
             // let mut print_since_last_stall = false;
             'wait: while window - COMPLETE_WINDOW.load(Relaxed) > window_size {
@@ -286,10 +290,11 @@ struct Args {
 
     window: usize,
 
-    one_in: usize,
-
     #[structopt(short = "t", long = "transactions")]
-    do_transactions: bool,
+    one_in: Option<usize>,
+
+    #[structopt(short = "o", long = "one_chain")]
+    one_chain: bool,
 }
 
 #[derive(Debug, Clone)]
