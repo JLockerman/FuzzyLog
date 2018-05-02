@@ -317,7 +317,7 @@ fn regular_append(
     while !done.load(Ordering::Relaxed) {
         for _ in outstanding..args.write_window {
             let message = if let Some(other_chain) = tx_chain(&mut rand) {
-                multiappend_message(&[chains[0], other_chain], &(), &[])
+                multiappend_message(&[chains[0], other_chain], &bytes[..], &[])
             } else {
                 append_message(chains[0], &bytes[..], &[])
             };
@@ -373,14 +373,13 @@ fn build_store(servers: Vec<(SocketAddr, SocketAddr)>, balance_num: u64, ack_on:
     spawn(move || {
         let replicated = servers[0].0 != servers[0].1;
         let id = balance_num.into();
-        let mut event_loop = mio::Poll::new().unwrap();
         let (store, to_store) = if replicated {
-            AsyncTcpStore::replicated_new_tcp(id, servers, ack_on, &mut event_loop).unwrap()
+            AsyncTcpStore::replicated_new_tcp(id, servers, ack_on).unwrap()
         } else {
-            AsyncTcpStore::new_tcp(id, servers.iter().map(|&(a, _)| a), ack_on, &mut event_loop).unwrap()
+            AsyncTcpStore::new_tcp(id, servers.iter().map(|&(a, _)| a), ack_on).unwrap()
         };
         s.send(to_store).unwrap();
-        store.run(event_loop)
+        store.run()
     });
     r.recv().unwrap()
 }
