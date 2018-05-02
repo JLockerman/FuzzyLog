@@ -46,6 +46,9 @@ impl DoubleBuffer {
     }
 
     pub fn can_hold_bytes(&self, bytes: usize) -> bool {
+        if !self.pending.is_empty() {
+            return false
+        }
         (self.is_filling_first() && buffer_can_hold_bytes(&self.first, bytes))
         || buffer_can_hold_bytes(&self.second, bytes)
     }
