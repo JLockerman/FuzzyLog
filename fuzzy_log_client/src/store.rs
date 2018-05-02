@@ -517,6 +517,8 @@ where C: AsyncStoreClient {
                         //Multi appends go to a single server in the fastpath
                         let filled = fill_locs(&mut buf, contents, token, self.num_chain_servers, unreplicated);
                         if filled < contents.locs().len() {
+                            //FIXME is this right?
+                            self.sent_writes.insert(id, WriteState::SingleServer(buf));
                             return Err(())
                         }
                         let max_ts = contents.lock_num();
