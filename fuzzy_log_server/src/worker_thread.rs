@@ -209,45 +209,12 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 (remaining_places.to_vec(), len)
             };
             let ret = slice::from_raw_parts(multi_storage.as_ptr(), len);
-            //TODO is re right for sentinel only writes?
-            if remaining_senti_places.len() == 0 {
-                let u = if continue_replication {
-                    send(ToSend::OldReplication(ret, ::std::u64::MAX), false, t)
-                } else {
-                    send(ToSend::StaticSlice(ret), false, t)
-                };
-                return (Some(buffer), u)
-                //return ServerResponse::FinishOldMultiappend(buffer, t, ret) //(Some(buffer), ret, t, 0, false)
-            }
-            else {
-                let e = buffer.contents();
-                let len = e.sentinel_entry_size();
-                trace!("place senti_storage @ {:?}, len {}", senti_storage, len);
-                let b = &buffer[..];
-                ptr::copy_nonoverlapping(b.as_ptr(), senti_storage.as_mut_ptr(), len);
-                {
-                    let senti_storage = slice::from_raw_parts_mut(
-                        senti_storage.as_mut_ptr(), len);
-                    slice_to_sentinel(&mut *senti_storage);
-                }
-                for place in remaining_senti_places {
-                    //let trie_entry: *mut AtomicPtr<u8> = mem::transmute(place);
-                    //TODO mem barrier ordering
-                    //(*trie_entry).store(senti_storage, Ordering::Release);
-                    let senti_edge = ValEdge::end_from_ptr(senti_storage.clone().into_ptr());
-                    ValEdge::atomic_store(place, senti_edge, Ordering::Release);
-                }
-            }
-            //TODO is re right for sentinel only writes?
             let u = if continue_replication {
                 send(ToSend::OldReplication(ret, ::std::u64::MAX), false, t)
             } else {
                 send(ToSend::StaticSlice(ret), false, t)
             };
-            mem::drop((multi_storage, senti_storage));
-            (Some(buffer), u)
-            //ServerResponse::FinishOldMultiappend(buffer, t, ret)
-            //(Some(buffer), ret, t, 0, false)
+            return (Some(buffer), u)
         },
 
         MultiFastPath(mut buffer, storage, t) => unsafe {
@@ -296,8 +263,11 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
 
         SingleServerSkeens1(storage, t) => unsafe {
             let (ts, indicies, st0, _pointers) = storage.get_mut();
-            trace!("WORKER {} finish s skeens1 {:?}", worker_num, ts);
+
             let mut c = bytes_as_entry_mut(st0);
+            trace!("WORKER {} finish s skeens1 {:?}, {:?}, {:?}",
+                worker_num, ts, c, indicies
+            );
             c.flag_mut().insert(EntryFlag::ReadSuccess);
             let u;
             if continue_replication {
@@ -323,7 +293,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
         },
 
         Skeens1{mut buffer, storage, t} => unsafe {
-            let (ts, indicies, st0, st1) = storage.get_mut();
+            let (ts, indicies, st0, _st1) = storage.get_mut();
             trace!("WORKER {} finish skeens1 {:?}", worker_num, ts);
             let len = {
                 let mut e = buffer.contents_mut();
@@ -333,11 +303,6 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
             //let num_ts = ts.len();
             st0.copy_from_slice(&buffer[..len]);
             //TODO just copy from sentinel Ref
-            let was_multi = buffer.to_sentinel();
-            if let &mut Some(ref mut st1) = st1 {
-                let len = buffer.contents().len();
-                st1.copy_from_slice(&buffer[..len]);
-            }
             {
                 let mut c = buffer.contents_mut();
                 c.flag_mut().insert(EntryFlag::Skeens1Queued);
@@ -349,7 +314,6 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
             let u = if continue_replication {
                 //FIXME
                 // let _ = (&mut send)(ToSend::Slice(buffer.entry_slice()), true, t.clone());
-                buffer.from_sentinel(was_multi);
                 trace!("WORKER {} skeens1 to rep @ {:?}", worker_num, ts);
                 send(ToSend::Contents(
                     buffer.contents().multi_skeens_to_replication(indicies))
@@ -367,10 +331,12 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
         | Skeens2MultiReplica{loc, trie_slot, storage, timestamp, t} => unsafe {
             trace!("WORKER {} finish skeens2 @ {:?}", worker_num, loc);
             if !{ let (_ts, _indicies, st0, _st1) = storage.get();
+                trace!("sk2 is {:?}", bytes_as_entry(st0));
                 bytes_as_entry(st0).flag().contains(EntryFlag::TakeLock) } {
                 return handle_single_server_skeens_finished(
                     loc, trie_slot, storage, timestamp, t, continue_replication, send)
             }
+
             let chain = loc.0;
             let id;
             {
@@ -420,12 +386,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                     Ok(storage) => {
                         trace!("WORKER {} skeens2 to client @ {:?}", worker_num, loc);
                         let &(_, _, ref st0, ref st1) = &*storage.get();
-                        //ToSend::StaticSlice(if let &Some(st1) = st1 { &*st1 } else { &*st0 })
-                        if st1.is_some() {
-                            send(ToSend::Slice(&*st1.as_ref().unwrap()), false, t)
-                        } else {
-                            send(ToSend::Slice(&*st0), false, t)
-                        }
+                        send(ToSend::Slice(&*st0), false, t)
                     }
                     Err(..) => {
                         trace!("WORKER {} incomplete skeens2 @ {:?}", worker_num, loc);
@@ -440,7 +401,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
             //(None, if st1.len() > 0 { &**st1 } else { &**st0 }, t, 0, false)
         },
 
-        Skeens1Replica{mut buffer, storage, t} => unsafe {
+        Skeens1Replica{buffer, storage, t} => unsafe {
             let (ts, indicies, st0, st1) = storage.get_mut();
             let len = buffer.contents().non_replicated_len();
             st0.copy_from_slice(&buffer[..len]);
@@ -457,25 +418,19 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
             };
             indicies.iter_mut().zip(buffer.contents().queue_nums().iter()).fold((),
                     |(), (q, num)| *q = *num);
-            trace!("WORKER {} finish skeens1 rep {:?}", worker_num, ts);
-            //TODO just copy from sentinel Ref
-            let was_multi = buffer.to_sentinel();
-            if let &mut Some(ref mut st1) = st1 {
-                trace!("WORKER {} finish skeens1 rep sentinel", worker_num);
-                let len = buffer.contents().len();
-                st1.copy_from_slice(&buffer[..len]);
-                slice_to_sentinel(st1);
-                let mut e = bytes_as_entry_mut(st0);
-                e.locs_mut().iter_mut().fold((),
-                    |(), &mut OrderIndex(_, ref mut i)| *i = entry::from(0));
-                e.flag_mut().remove(EntryFlag::Skeens1Queued);
-            }
+            trace!("WORKER {} finish skeens1 rep {:?} {:?}, multiserver {:?}",
+                worker_num, ts, buffer.contents(), is_multi_server);
+
             let u = if continue_replication {
-                buffer.skeens1_rep_from_sentinel(was_multi);
+                // buffer.skeens1_rep_from_sentinel(was_multi);
+                //TODO assert is replication?
+                trace!("continue sk1");
                 send(ToSend::Slice(buffer.entry_slice()) , false, t)
             } else if is_multi_server {
-                send(ToSend::Slice(buffer.entry_slice()), false, t)
+                trace!("ack sk1");
+                send(ToSend::Contents(buffer.contents().to_unreplica()), false, t)
             } else {
+                trace!("sk1 nothing");
                 send(ToSend::Nothing, false, t)
             };
             (Some(buffer), u)
@@ -678,7 +633,14 @@ where SendFn: for<'a> FnOnce(ToSend<'a>, bool, T) -> U {
             loc: &loc,
         }), false, t)
     } else {
-        send(ToSend::Slice(&*to_send), false, t)
+        trace!("to send len {:?}", to_send.len());
+        trace!("WORKER skeens2 fast ack @ {:?}", loc);
+        // trace!("{:?}", bytes_as_entry(&*to_send));
+        // assert_eq!(bytes_as_entry(&*to_send).len(), to_send.len());
+        // trace!("sending fast ack");
+        //FIXME why does this change help?
+        // send(ToSend::Slice(&*to_send), false, t)
+        send(ToSend::Contents(bytes_as_entry(&*to_send)), false, t)
     };
     (None, u)
 }

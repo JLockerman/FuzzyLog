@@ -297,7 +297,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_dependent_multi1() {
             let _ = env_logger::init();
@@ -347,7 +347,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_dependent_multi_with_early_fetch() {
             let _ = env_logger::init();
@@ -394,7 +394,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_dependent_multi_with_partial_early_fetch() {
             let _ = env_logger::init();
@@ -466,7 +466,7 @@ macro_rules! async_tests {
             let mut lh = $new_thread_log::<()>(interesting_columns);
             let _ = lh.append(61.into(), &(), &[]);
             let _ = lh.multiappend(&[61.into(), 62.into()], &(), &[]);
-            let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
+            // let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
             let _ = lh.color_append(&(), &mut [61.into()], &mut [], false);
             lh.snapshot(61.into());
             assert_eq!(lh.get_next(),
@@ -474,15 +474,15 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(),
                 Ok((&(), &[OrderIndex(61.into(), 2.into()),
                     OrderIndex(62.into(), 1.into())][..])));
-            if $single_server {
-                assert_eq!(lh.get_next(),
-                    Ok((&(), &[OrderIndex(61.into(), 3.into()),
-                        OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 1.into())][..])));
-            } else {
-                assert_eq!(lh.get_next(),
-                    Ok((&(), &[OrderIndex(61.into(), 3.into()),
-                        OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
-            }
+            // if $single_server {
+            //     assert_eq!(lh.get_next(),
+            //         Ok((&(), &[OrderIndex(61.into(), 3.into()),
+            //             OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 1.into())][..])));
+            // } else {
+            //     assert_eq!(lh.get_next(),
+            //         Ok((&(), &[OrderIndex(61.into(), 3.into()),
+            //             OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
+            // }
             assert_eq!(lh.get_next(),
                 Ok((&(), &[OrderIndex(61.into(), 4.into())][..])));
             assert_eq!(lh.get_next(), Err(GetRes::Done));
@@ -817,7 +817,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_only_sentinel() {
             let _ = env_logger::init();
@@ -886,7 +886,7 @@ macro_rules! async_tests {
             }
         }
 
-        #[test]
+        // #[test]
         #[inline(never)]
         pub fn test_strong_snapshot_is_strong() {
             use std::thread;
@@ -993,7 +993,7 @@ macro_rules! async_tests {
                 );
                 let _ = lh.append(1_000_02.into(), &[], &[]);
                 let _ = lh.multiappend(&[1_000_02.into(), 1_000_03.into()], &[] , &[]);
-                let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
+                // let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
                 let _ = lh.color_append(&[], &mut [1_000_02.into()], &mut [], false);
                 lh.snapshot(1_000_02.into());
                 assert_eq!(lh.get_next(),
@@ -1001,9 +1001,9 @@ macro_rules! async_tests {
                 assert_eq!(lh.get_next(),
                     Ok((&[][..], &[OrderIndex(1_000_02.into(), 2.into()),
                         OrderIndex(1_000_03.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(),
-                    Ok((&[][..], &[OrderIndex(1_000_02.into(), 3.into()),
-                        OrderIndex(0.into(), 0.into()), OrderIndex(1_000_03.into(), 2.into())][..])));
+                // assert_eq!(lh.get_next(),
+                //     Ok((&[][..], &[OrderIndex(1_000_02.into(), 3.into()),
+                //         OrderIndex(0.into(), 0.into()), OrderIndex(1_000_03.into(), 2.into())][..])));
                 assert_eq!(lh.get_next(),
                     Ok((&[][..], &[OrderIndex(1_000_02.into(), 4.into())][..])));
                 assert_eq!(lh.get_next(), Err(GetRes::Done));
