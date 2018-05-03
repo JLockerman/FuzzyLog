@@ -45,7 +45,7 @@ impl RcSlice {
     }
 
     pub fn into_ptr(self) -> *const u8 {
-        let ptr = self.as_ptr();
+        let ptr = (&*self).as_ptr();
         forget(self);
         ptr
     }
