@@ -485,8 +485,6 @@ where ToWorkers: DistributeToWorkers<T> {
         storage: Troption<SkeensMultiStorage, Box<(RcSlice, RcSlice)>>,
         t: T
     ) {
-        let storage = storage.unwrap_left();
-
         let (mut needs_lock, mut needs_skeens) = (false, false);
         {
             for &OrderIndex(c, _) in buffer.contents().locs() {
@@ -504,11 +502,12 @@ where ToWorkers: DistributeToWorkers<T> {
         }
         debug_assert!(!(needs_lock && needs_skeens));
         if !needs_lock && !needs_skeens {
+            let storage = storage.unwrap_left();
             self.single_server_single_append_fast_path(kind, buffer, storage, t)
-        } else if needs_skeens {
+        } else {
+            let storage = storage.unwrap_left();
+            //FIXME this doesn't work, causes packet corruption?
             self.single_server_local_skeens(kind, buffer, storage, t)
-        } else if needs_lock {
-            self.multi_append_lock_failed(kind, buffer, storage, t)
         }
     }
 
