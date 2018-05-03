@@ -231,9 +231,11 @@ where C: AsyncStoreClient {
 
         for (token, stream) in servers.into_iter().enumerate() {
             let token = token.into();
-            reactor.add_stream(token, TcpHandler::new(stream, PacketReader,
+            let mut per_stream = TcpHandler::new(stream, PacketReader,
                 PacketHandler { token },
-            ));
+            );
+            per_stream.ignore_backpressure();
+            reactor.add_stream(token, per_stream);
         }
 
         Ok((AsyncTcpStore { reactor }, to_store))
@@ -1221,9 +1223,10 @@ impl MessageReader for PacketReader {
             _ => Other(io::ErrorKind::InvalidInput),
         })?;
 
-        if bytes.len() < size {
-            return Err(NeedMoreBytes(size))?
-        }
+        // if bytes.len() < size {
+            // println!("needs more2 {}", needs);
+            // return Err(NeedMoreBytes(size))?
+        // }
 
         let buffer = Buffer::wrap_vec(bytes[..size].to_vec());
         Ok((buffer, size))
@@ -1259,7 +1262,12 @@ where C: AsyncStoreClient {
 
     fn on_poll(&mut self, inner: &mut IoState<PerStream>, _token: mio::Token)
     -> Result<(), Self::Error> {
-        self.handle_new_requests_from_client(inner);
+        for _ in 0..10 {
+            let keep_going = self.handle_new_requests_from_client(inner);
+            if !keep_going {
+                break
+            }
+        }
         Ok(())
     }
 
