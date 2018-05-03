@@ -891,6 +891,14 @@ impl<'a> MutEntry<'a> {
         }
     }
 
+    pub fn to_replicated(&mut self) {
+        unsafe {
+            let mut kind: EntryKind::Kind = mem::transmute::<u8, _>(self.inner[0]);
+            let () = kind.insert(EntryKind::ToReplica);
+            self.inner[0] = mem::transmute::<EntryKind::Kind, u8>(kind);
+        }
+    }
+
     pub fn bytes(&mut self) -> &mut [u8] {
         &mut *self.inner
     }
