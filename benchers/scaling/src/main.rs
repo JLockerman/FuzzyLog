@@ -255,7 +255,7 @@ fn corfu_append(
     let mut outstanding = 0;
     while !done.load(Ordering::Relaxed) {
 
-        for _ in outstanding..args.write_window {
+        for _ in outstanding..(args.write_window*2) {
             let message = if let Some(other_chain) = tx_chain(&mut rand) {
                 multiappend_message(&[sequencer, other_chain], &(), &[])
             } else {
@@ -344,6 +344,10 @@ fn regular_append(
                 break
             }
         }
+    }
+
+    if outstanding > 0 {
+        println!("outstanding {}", outstanding);
     }
 }
 
