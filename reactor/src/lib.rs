@@ -113,6 +113,7 @@ where
 
             self.handle_new_events()?;
 
+            let  mut re_poll = false;
             'work: loop {
                 mem::swap(&mut running, &mut self.io_state.awake);
                 if running.is_empty() { break 'work }
@@ -153,10 +154,14 @@ where
                             self.inner.mark_as_staying_awake(token);
                         }
                     }
-                    self.io_state.poll.poll(&mut self.events, Some(Duration::from_secs(0)))?;
-                    self.handle_new_events()?;
+                    self.inner.after_work(&mut self.io_state);
+                    if re_poll {
+                        self.io_state.poll.poll(
+                            &mut self.events, Some(Duration::from_secs(0)))?;
+                        self.handle_new_events()?;
+                    }
+                    re_poll = !re_poll;
                 }
-                self.inner.after_work(&mut self.io_state);
             }
         }
     }
@@ -411,14 +416,18 @@ where
             let mut used = 0;
             let mut additional_needed = 0;
             {
-                let read_bytes = &self.io.read_buffer[..self.io.bytes_read];
-                let mut writer = TcpWriter {
-                    write_buffer: &mut self.io.write_buffer,
-                    polling_write: &mut self.io.polling_write,
-                };
-                for message in self.reader.deserialize_messages(read_bytes, &mut used) {
+                let (read_bytes, mut writer) = self.io.to_read_and_write_halves();
+                // read_buffer[..self.io.bytes_read];
+                // let mut writer = TcpWriter {
+                //     write_buffer: &mut self.io.write_buffer,
+                //     polling_write: &mut self.io.polling_write,
+                // };
+                'm: for message in self.reader.deserialize_messages(read_bytes, &mut used) {
                     match message {
-                        Err(NeedMoreBytes(more)) => additional_needed += more,
+                        Err(NeedMoreBytes(more)) => {
+                            additional_needed += more;
+                            break 'm
+                        },
                         Err(e) => panic!("{:?}", e),
                         Ok(msg) => {
                             let err = self.handler.handle_message(&mut writer, inner, msg);
@@ -592,7 +601,7 @@ impl TcpIo {
         Self {
             stream,
 
-            read_buffer: vec![0; 128],
+            read_buffer: vec![0; 4096],
             bytes_read: 0,
 
             write_buffer: DoubleBuffer::with_first_buffer_capacity(4096),
@@ -641,20 +650,34 @@ impl TcpIo {
                 self.polling_read = false;
                 Ok(0)
             },
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => Ok(0),
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted =>
+                Ok(0),
             Err(e) => Err(e),
         }
     }
 
     pub fn consume_bytes(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes_read, "{} <= {}", bytes, self.bytes_read);
-        self.bytes_read -= bytes;
-        self.read_buffer.drain(..bytes).for_each(|_| {});
-        let len = self.read_buffer.len();
-        let cap = self.read_buffer.capacity();
-        if len < cap {
-            self.read_buffer.extend((len..cap).map(|_| 0))
+        assert_eq!(self.read_buffer.len(), self.read_buffer.capacity());
+        // let old_len = self.read_buffer.len();
+        // self.read_buffer.drain(..bytes).for_each(|_| {});
+        // assert_eq!(self.read_buffer.len(), old_len - bytes);
+        // self.bytes_read -= bytes;
+        // let len = self.read_buffer.len();
+        // let cap = self.read_buffer.capacity();
+        // if len < cap {
+            //self.read_buffer.extend((len..cap).map(|_| 0))
+            // unsafe { self.read_buffer.set_len(cap) }
+        // }
+        let dst: *mut u8 = self.read_buffer.as_mut_ptr();
+        let len = self.bytes_read - bytes;
+        unsafe {
+            use std::ptr;
+            let src = dst.offset(bytes as _);
+            ptr::copy(src, dst, len)
         }
+        self.bytes_read = len;
+        assert_eq!(self.read_buffer.len(), self.read_buffer.capacity());
     }
 
     pub fn read_additional(&mut self, bytes: usize) {
@@ -664,10 +687,12 @@ impl TcpIo {
         if len < cap {
             self.read_buffer.extend((len..cap).map(|_| 0))
         }
+        assert_eq!(self.read_buffer.len(), self.read_buffer.capacity());
     }
 
     pub fn ensure_additional_read(&mut self, bytes: usize) {
         if bytes <= self.read_buffer[self.bytes_read..].len() {
+            assert_eq!(self.read_buffer.len(), self.read_buffer.capacity());
             return
         }
         let additional_needed = bytes - self.read_buffer[self.bytes_read..].len();
