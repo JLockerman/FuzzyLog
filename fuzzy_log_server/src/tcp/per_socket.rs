@@ -50,7 +50,7 @@ impl MessageHandler<WorkerInner, (Buffer, Ipv4SocketAddr, Option<u64>)> for Pack
         inner: &mut WorkerInner,
         (msg, addr, storage_loc): (Buffer, Ipv4SocketAddr, Option<u64>),
     ) -> Result<(), ()> {
-        trace!("{} {:?}", addr, storage_loc);
+        // trace!("{} {:?}", addr, storage_loc);
         inner.handle_message(io, self.token, msg, addr, storage_loc)
     }
 }

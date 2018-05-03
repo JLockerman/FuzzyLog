@@ -569,10 +569,10 @@ impl<T: Copy> SkeensState<T> {
         self.phase1_queue.get_mut(offset).map(|w|
             w.replicate_max_timetamp(max_timestamp, index, id));
         if offset != self.phase1_queue.start_index() {
-            trace!("SKEENS not ready to flush replica {:?}", self);
+            // trace!("SKEENS not ready to flush replica {:?}", self);
             return
         }
-        trace!("flush {:#?}", self);
+        // trace!("flush {:#?}", self);
         while self.phase1_queue.front().map(|w| w.has_replication()).unwrap_or(false) {
             let replica = self.phase1_queue.pop_front().expect("flushing nothing");
             //let old_start = self.phase1_queue.start_index() - 1;
