@@ -364,7 +364,7 @@ impl WorkerInner {
                         let mut stream = per_socket::new_stream(
                             stream, token, false, Some(upstream_token)
                         );
-                        stream.ignore_backpressure();
+                        // stream.ignore_backpressure();
                         let _ = streams.add_stream(token, stream);
                         token
                     });
@@ -374,7 +374,7 @@ impl WorkerInner {
                     let mut stream = per_socket::new_stream(
                         upstream, upstream_token, self.has_upstream, None
                     );
-                    stream.ignore_backpressure();
+                    // stream.ignore_backpressure();
                     let _ = streams.add_stream(upstream_token, stream);
 
                     trace!("WORKER {} recv from dist {:?}.",
@@ -476,6 +476,7 @@ impl WorkerInner {
                 } else if f.contains(EntryFlag::NewMultiPut) || !f.contains(EntryFlag::TakeLock) {
                     let senti_size = if has_senti { Some(senti_size) } else { None };
                     let mut storage = SkeensMultiStorage::new(num_locs, size, senti_size);
+                    //FIXME is this the bug?
                     if !f.contains(EntryFlag::TakeLock) {
                         storage.fill_from(&mut buffer)
                     }
