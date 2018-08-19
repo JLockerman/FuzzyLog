@@ -28,20 +28,36 @@ fn main() {
     println!("{:?}", args);
     let client_num = args.client_num as u32;
     ::zookeeper::message::set_client_id(client_num + 1);
+    let servers = &*args.servers.0;
     let color = if args.one_chain {
-        (client_num % 2 + 1).into()
+        (client_num % servers.len() as u32 + 1).into()
     } else {
         (client_num + 1).into()
     };
+
+    let num_clients = args.sync_clients;
+
+    let roots = if args.one_chain {
+        (0..num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 % servers.len() as u32 + 1).into()))
+            .collect()
+    } else {
+        (0..num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 + 1).into()))
+            .collect()
+    };
+
+
     // let color = (client_num + 1).into();
-    let servers = &*args.servers.0;
     let replicated = servers[0].0 != servers[0].1;
     let balance_num = if servers.len() > 1 {
         let numbers = [1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6, 13, 7, 14];
         println!("client_num {:?}, balance_num {:?}, color {:?}", client_num, numbers[client_num as usize], color);
         numbers[client_num as usize]
+        // (client_num as u64 + 1)
     } else {
-        (client_num as u64 + 1) * 1
+        // (client_num as u64 + 1) * 1
+        let numbers = [1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6, 13, 7, 14];
+        println!("client_num {:?}, balance_num {:?}, color {:?}", client_num, numbers[client_num as usize], color);
+        numbers[client_num as usize]
     };
     let (mut reader, writer) = if replicated {
             // LogHandle::<[u8]>::replicated_with_servers(&servers[..])
@@ -82,22 +98,18 @@ fn main() {
     //     serialize_cache.clear();
     // }
 
-    {
-        let num_sync_clients = args.sync_clients;
-        ::std::thread::sleep(::std::time::Duration::from_millis(10));
-        writer.async_append(10_001.into(), &[], &[]);
-        let mut clients_started = 0;
-        while clients_started < num_sync_clients {
-            reader.snapshot(10_001.into());
-            while let Ok(..) = reader.get_next() { clients_started += 1 }
-        }
-    }
-
-    let num_clients = args.sync_clients;
+    // {
+    //     let num_sync_clients = args.sync_clients;
+    //     ::std::thread::sleep(::std::time::Duration::from_millis(10));
+    //     writer.async_append(10_001.into(), &[], &[]);
+    //     let mut clients_started = 0;
+    //     while clients_started < num_sync_clients {
+    //         reader.snapshot(10_001.into());
+    //         while let Ok(..) = reader.get_next() { clients_started += 1 }
+    //     }
+    // }
 
     let my_root = format!("/foo{}/", my_dir).into();
-    let roots = (0..num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 % 2 + 1).into()))
-        .collect();
     // let roots = (0..num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 + 1).into()))
     //     .collect();
 
@@ -179,7 +191,7 @@ fn main() {
 
             }
             if /*true*/ /*client_num % 2 == 0 &&*/ do_transactions &&
-                rand.gen_weighted_bool(one_in as _) && rename_num < CREATED.load(Relaxed) {
+                rand.gen_weighted_bool(one_in as _) && rename_num + 100 < CREATED.load(Relaxed) {
                 // let rename_dir = client_num + 1;
                 let mut rename_dir = rand.gen_range(0, num_clients);
                 // let rename_dir = (dist.next_u32() + client_num + 1) as usize % num_clients;
@@ -227,7 +239,7 @@ fn main() {
         return
     });
 
-    let num_rounds = 10;
+    let num_rounds = 11;
     let mut total_completed = 0;
     let mut total_sent = 0;
     let mut total_created = 0;
@@ -236,7 +248,7 @@ fn main() {
     let mut outstanding = vec![0; num_rounds];
     let mut created = vec![0; num_rounds];
     for i in 0..num_rounds {
-        thread::sleep(Duration::from_secs(3));
+        thread::sleep(Duration::from_secs(1));
         let done = RECEIVED.load(Relaxed);
         complete[i] = done - total_completed;
         let send = SENT.load(Relaxed);
@@ -250,13 +262,13 @@ fn main() {
 
         outstanding[i] = total_sent - total_completed;
     }
-    thread::sleep(Duration::from_secs(3));
+    thread::sleep(Duration::from_secs(1));
     DONE.store(true, Relaxed);
-    thread::sleep(Duration::from_secs(3));
+    thread::sleep(Duration::from_secs(1));
 
-    // complete.remove(0);
-    let avg: usize = complete.iter().map(|&c| c / 3).sum();
-    let avg = avg / (complete.len() - 1);
+    complete.remove(0);
+    let avg: usize = complete.iter().sum();
+    let avg = avg / complete.len();
 
     println!("> {}: {:6} Hz\n", client_num, avg);
     println!(

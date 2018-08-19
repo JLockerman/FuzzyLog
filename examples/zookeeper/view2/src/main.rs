@@ -57,12 +57,23 @@ fn run_view(args: Args) {
     let completed_writes = Arc::new(AtomicUsize::new(0));
     let cw = completed_writes.clone();
     let client_num = args.client_num;
-    thread::spawn(|| {
+    let num_servers = args.servers.0.len() as u32;
+    thread::spawn(move || {
         let client_num = args.client_num;
         let color = if args.one_chain {
-            (client_num % 2 + 1).into()
+            (client_num % num_servers + 1).into()
         } else {
             (client_num + 1).into()
+        };
+
+        let roots = if args.one_chain {
+            (0..args.num_clients)
+                .map(|i| (format!("foo{}",i).into(), (i % num_servers  + 1).into()))
+                .collect()
+        } else {
+            (0..args.num_clients)
+                .map(|i| (format!("foo{}",i).into(), (i + 1).into()))
+                .collect()
         };
 
         let balance_num = if args.one_chain {
@@ -74,8 +85,6 @@ fn run_view(args: Args) {
         let my_dir = client_num;
         let my_root = format!("/foo{}/", my_dir);
 
-        let roots = (0..args.num_clients).map(|i| (format!("foo{}",i).into(), (i as u32 % 2 + 1).into()))
-            .collect();
         let view = View::new(
             args.client_num as usize,
             args.num_clients as usize,
@@ -110,6 +119,7 @@ fn run_view(args: Args) {
 }
 
 fn run_reads(args: Args) {
+    return;
     let num_threads = args.num_threads;
 
     let view_addr = args.views.0[(args.client_num % args.num_clients) as usize].0;

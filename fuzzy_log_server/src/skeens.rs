@@ -30,6 +30,7 @@ impl<T: Copy> ::std::fmt::Debug for SkeensState<T> {
     fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
         fmt.debug_struct("SkeensState")
             .field("next_timestamp", &self.next_timestamp)
+            .field("last_flush", &self.last_flush)
             .field("phase1_queue", &self.phase1_queue)
             .field("got_max_timestamp", &self.got_max_timestamp)
             .field("append_status", &self.append_status)
@@ -135,11 +136,21 @@ impl<T: Copy> SkeensState<T> {
 
     pub fn need_single_at(&mut self, timestamp: Time) -> bool {
         let is_empty = self.phase1_queue.is_empty() && self.got_max_timestamp.is_empty();
-        if !is_empty && self.last_flush <= timestamp {
-            return true
+        assert!(self.last_flush < self.next_timestamp);
+        if is_empty || self.last_flush >= timestamp {
+            if self.next_timestamp <= timestamp {
+                self.next_timestamp = timestamp + 1;
+            }
+            false
+        } else {
+            true
         }
+        // if !is_empty && (self.last_flush < timestamp || self.next_timestamp <= timestamp) {
+        //     return true
+        // }
+
         // self.next_timestamp = timestamp + 1;
-        false
+        // false
     }
 
     //AKA skeens1
@@ -2066,7 +2077,7 @@ mod test {
         assert_eq!(skeen.next_timestamp, 2);
         skeen.flush_got_max_timestamp(|g| {v.push(g)});
         assert_eq!(&*v, &[]);
-        assert!(!skeen.need_single_at(0));
+        assert!(!skeen.need_single_at(0), "{:#?}", skeen);
         assert!( skeen.need_single_at(1));
         assert!( skeen.need_single_at(4));
 

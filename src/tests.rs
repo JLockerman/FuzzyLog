@@ -484,7 +484,7 @@ macro_rules! async_tests {
             //             OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
             // }
             assert_eq!(lh.get_next(),
-                Ok((&(), &[OrderIndex(61.into(), 4.into())][..])));
+                Ok((&(), &[OrderIndex(61.into(), 3.into())][..])));
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 

@@ -243,7 +243,7 @@ impl Handler<IoState<()>> for ClientInner {
             for _ in 0..completed {
                 if self.do_transactions
                     && self.rand.gen_weighted_bool(self.one_in as _)
-                    && self.rename_num < self.created_files {
+                    /*&& self.rename_num < self.created_files*/ {
                     let mut rename_dir = self.rand.gen_range(0, self.num_clients);
                     while rename_dir == self.my_dir {
                         rename_dir = self.rand.gen_range(0, self.num_clients)

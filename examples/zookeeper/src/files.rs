@@ -8,7 +8,7 @@ use std::sync::Arc;
 use message::*;
 use super::WhichPath;
 
-use order;
+use order;//
 
 #[derive(Debug)]
 pub struct FileSystem {
@@ -88,12 +88,15 @@ impl PendingRename {
     fn state(&self) -> CommitState {
         use self::CommitState::*;
         match (self.old_exists, self.new_empty, self.check_new) {
-            (old, _, false) => old,
+            (old, _, false) => unreachable!(),
+            (_, Pending, true) => Pending,
+            (Pending, _, _) => Pending,
             (Ok, new, true) => new,
+            // (Abort, Pending, _) => Pending,
+            // (Pending, Abort, _) => Pending,
             (Abort, Ok, _) => Abort,
             (Abort, Abort, _) => Abort,
-            (Pending, _, _) => Pending,
-            (_, Pending, true) => Pending,
+            // (_, Pending, true) => Pending,
         }
     }
 }
@@ -516,9 +519,8 @@ impl FileSystem {
                 //FIXME dummy node to handle nacks?
                 //FIXME Err(line!()) condition
                 None => {
-                    unreachable!("{:?} => {:?} @ {:?}", old_path, new_path, which_path)
-                    // error = true;
-                    // Some(build_nack(true))
+                    error = true;
+                    Some(build_nack(true))
                 },
                 Some(file) => {
                     if file.pending_rename.is_some() {
@@ -538,7 +540,15 @@ impl FileSystem {
                 }
             };
             if error {
-                unreachable!("shold not rename non-existent file {:?} @ {:#?}", old_path, self)
+                let ne = self.num_entries;
+                let mut new_node = FileNode::new(
+                    old_path.clone(),
+                    vec![].into_boxed_slice().into(),
+                    ne,
+                );
+                new_node.pending_rename =
+                    Some(PendingRename::new(id, old_path.clone(), new_path.clone(), check_new).into());
+                self.files.insert(old_path.clone(), new_node);
             }
         }
         if handle_new {
@@ -559,10 +569,6 @@ impl FileSystem {
                     }
                 }
             };
-            if nack && check_new {
-                msg1 = Some(build_nack(false));
-                return (Err(line!()), msg0, msg1);
-            }
             if add_node {
                 let mut new_node = FileNode::new(
                     new_path.clone(),
@@ -575,6 +581,10 @@ impl FileSystem {
                     Some(PendingRename::new(id, old_path.clone(), new_path.clone(), check_new).into());
                 //TODO self.triggerwatches
                 &self.files.insert(new_path.clone(), new_node.into());
+            }
+            if nack {
+                msg1 = Some(build_nack(false));
+                return (Err(line!()), msg0, msg1);
             }
             //TODO unwrap
             match self.files.get(new_path.parent().unwrap()) {
@@ -657,7 +667,7 @@ impl FileSystem {
         }
         if handle_new {
             match self.files.get_mut(&*new_path) {
-                None => unreachable!(),
+                None => unreachable!("{:?}", &*new_path),
                 Some(file) => {
                     let &mut FileNode {
                         ref mut data,
@@ -796,17 +806,16 @@ impl FileSystem {
                         }
                         if due_to_old {
                             pending.old_exists = CommitState::Abort;
-                            pending.new_empty
                         } else {
                             pending.new_empty = CommitState::Abort;
-                            pending.old_exists
                         }
+                        pending.state()
                     };
 
                     old_next = match next {
                         CommitState::Pending => Next::Nothing,
                         CommitState::Abort => Next::Abort(file.pending_rename.take().unwrap()),
-                        CommitState::Ok => Next::Abort(file.pending_rename.take().unwrap()),
+                        CommitState::Ok => unreachable!(),
                     }
                 }
             }
@@ -825,20 +834,18 @@ impl FileSystem {
                         if id != pending.id {
                             unimplemented!() //TODO buffer op?
                         }
-                        pending.new_empty = CommitState::Ok;
                         if due_to_old {
                             pending.old_exists = CommitState::Abort;
-                            pending.new_empty
                         } else {
                             pending.new_empty = CommitState::Abort;
-                            pending.old_exists
                         }
+                        pending.state()
                     };
 
                     new_next = match next {
                         CommitState::Pending => Next::Nothing,
                         CommitState::Abort => Next::Abort(pending_rename.take().unwrap()),
-                        CommitState::Ok => Next::Abort(pending_rename.take().unwrap()),
+                        CommitState::Ok => unreachable!(),
                     }
                 }
             }
@@ -860,6 +867,9 @@ impl FileSystem {
         //TODO remove file here?
         if rename.new_empty != CommitState::Abort {
             self.files.remove(&*rename.new_path);
+        }
+        if rename.old_exists == CommitState::Abort {
+            self.files.remove(&*rename.old_path);
         }
         rename.pending_ops
     }

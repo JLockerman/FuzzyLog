@@ -838,14 +838,14 @@ mod tests {
                 //      so we don't know if it will be ok or not
                 //assert!(!ok, "/abcd/{} => /abcd/{}", i, i - 11);
             }
-            // if i > 0 && i % 11 == 0 {
-            //     let ok = rename(
-            //         &mut client,
-            //         format!("/abcd/Q{}", i - 11).into(),
-            //         format!("/abcd/P{}", i - 11).into(),
-            //     );
-            //     assert!(!ok);
-            // }
+            if i > 0 && i % 11 == 0 {
+                let ok = rename(
+                    &mut client,
+                    format!("/abcd/Q{}", i - 11).into(),
+                    format!("/abcd/P{}", i - 11).into(),
+                );
+                // assert!(!ok);
+            }
         }
         for i in 0..100 {
             let name = format!("/abcd/{}", i);
@@ -867,6 +867,12 @@ mod tests {
                     vec![1, 2, 3, i]
                 };
                 assert_eq!(get_data(&mut client, rename.clone().into()), data);
+            }
+            if i > 0 && i % 11 == 0 {
+                let name = format!("/abcd/Q{}", i - 11);
+                let rename = format!("/abcd/P{}", i - 11);
+                assert!(!exists(&mut client, name.clone().into()), "{}", name);
+                assert!(!exists(&mut client, rename.clone().into()), "{}", rename);
             }
             //TODO P Q
         }

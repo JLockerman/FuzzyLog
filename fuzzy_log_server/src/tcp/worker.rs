@@ -340,7 +340,7 @@ impl WorkerInner {
         match needs_backpressure {
             Some(nb) => nb,
             None => {
-                error!("client {:?} dead", _src_addr);
+                // error!("client {:?} dead", _src_addr);
                 false
             },
         }
