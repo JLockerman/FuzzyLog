@@ -669,7 +669,7 @@ mod tests {
         });
         let max_timestamp = buffer.contents().locs().iter()
         .fold(0, |max_ts, &OrderIndex(_, i)|
-            ::std::cmp::max(max_ts, u32::from(i) as u64)
+            ::std::cmp::max(max_ts, u64::from(i))
         );
         assert!(max_timestamp > 0);
 
@@ -744,7 +744,7 @@ mod tests {
         });
         let max_timestamp = buffer.contents().locs().iter()
         .fold(0, |max_ts, &OrderIndex(_, i)|
-            ::std::cmp::max(max_ts, u32::from(i) as u64)
+            ::std::cmp::max(max_ts, u64::from(i))
         );
         assert!(max_timestamp > 0);
 
@@ -873,7 +873,7 @@ mod tests {
         });
         let max_timestamp = buffer.contents().locs().iter()
         .fold(0, |max_ts, &OrderIndex(_, i)|
-            ::std::cmp::max(max_ts, u32::from(i) as u64)
+            ::std::cmp::max(max_ts, u64::from(i))
         );
         assert!(max_timestamp > 0);
 
@@ -949,7 +949,7 @@ mod tests {
         });
         let max_timestamp = buffer.contents().locs().iter()
         .fold(0, |max_ts, &OrderIndex(_, i)|
-            ::std::cmp::max(max_ts, u32::from(i) as u64)
+            ::std::cmp::max(max_ts, u64::from(i))
         );
         assert!(max_timestamp > 0);
 
@@ -1077,7 +1077,7 @@ mod tests {
         });
         let max_timestamp = buffer.contents().locs().iter()
         .fold(0, |max_ts, &OrderIndex(_, i)|
-            ::std::cmp::max(max_ts, u32::from(i) as u64)
+            ::std::cmp::max(max_ts, u64::from(i))
         );
         assert!(max_timestamp > 0);
 
@@ -1239,7 +1239,7 @@ mod tests {
         });
         let max_timestamp = buffer.contents().locs().iter()
         .fold(0, |max_ts, &OrderIndex(_, i)|
-            ::std::cmp::max(max_ts, u32::from(i) as u64)
+            ::std::cmp::max(max_ts, u64::from(i))
         );
         assert!(max_timestamp > 0);
         buffer.clear_data();

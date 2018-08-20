@@ -93,7 +93,7 @@ pub mod c_binidings {
     use byteorder::{ByteOrder, NativeEndian};
 
     pub type DAG = LogHandle<[u8]>;
-    pub type ColorID = u32;
+    pub type ColorID = u64;
 
     #[repr(C)]
     pub struct ReaderAndWriter {

@@ -616,7 +616,7 @@ impl Trie
     }
 
     #[cfg(FALSE)]
-    fn insert(&mut self, k: u32, v: &[u8]) -> Option<&u8> {
+    fn insert(&mut self, k: u64, v: &[u8]) -> Option<&u8> {
         unsafe {
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
             //assert!(root_index <= 3, "root index: {:?} <= 3", root_index);

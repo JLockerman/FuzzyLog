@@ -15,7 +15,7 @@ typedef struct HashMap_order__entry HashMap_order__entry;
 
 typedef DAG *FL_ptr;
 
-typedef uint32_t ColorID;
+typedef uint64_t ColorID;
 
 typedef struct {
     uintptr_t numcolors;

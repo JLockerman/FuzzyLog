@@ -44,7 +44,7 @@ impl<T: Copy> Chain<T> {
             val.flag_mut().insert(EntryFlag::ReadSuccess);
             //FIXME 64b entries
             //FIXME this should be done on the worker?
-            val.locs_mut()[0].1 = entry::from(index as u32);
+            val.locs_mut()[0].1 = entry::from(index as u64);
             val.as_ref().len()
         };
         trace!("SERVER {:?} Writing entry {:?}", this_server_num, (chain, index));
@@ -53,7 +53,7 @@ impl<T: Copy> Chain<T> {
 
     unsafe fn write_data(&mut self, index: entry, size: usize)
     -> AppendSlot<packets::Entry> {
-        let location = u32::from(index) as u64;
+        let location = u64::from(index);
         if self.trie.len() == location {
             //Do regular append
             return self.trie.partial_append(size).extend_lifetime()
@@ -258,12 +258,12 @@ where ToWorkers: DistributeToWorkers<T> {
                         self.to_workers.send_to_worker(
                             EmptyRead(entry::from(0), buffer, t))
                     }
-                    Some(lg) => match lg.trie.get(u32::from(index) as u64) {
+                    Some(lg) => match lg.trie.get(u64::from(index)) {
                         None => {
                             self.print_data.msgs_sent(1);
                             self.to_workers.send_to_worker(
                             //FIXME needs 64 entries
-                                EmptyRead(entry::from((lg.trie.len() - 1) as u32), buffer, t))
+                                EmptyRead(entry::from((lg.trie.len() - 1) as u64), buffer, t))
                         },
                         Some(packet) => {
                             trace!("SERVER {:?} Read Occupied entry {:?} {:?}",
@@ -392,7 +392,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 }
 
                 let horizon = get_chain(&self.log, o).map(|c| c.trie.horizon()).unwrap_or(0);
-                *i = entry::from(horizon as u32);
+                *i = entry::from(horizon as u64);
             }
         }
 
@@ -541,11 +541,11 @@ where ToWorkers: DistributeToWorkers<T> {
                 if !is_sentinel {
                     let (index, ptr) =
                         self.ensure_chain(*o).trie.prep_append(ValEdge::null());
-                    *i =  entry::from(index as u32);
+                    *i =  entry::from(index as u64);
                     pointers[j] = ptr;
                 } else {
                     let horizon = horizon_or_add_blank(&mut self.ensure_chain(*o).trie, *o);
-                    *i = entry::from(horizon as u32);
+                    *i = entry::from(horizon as u64);
                 }
             }
         }
@@ -596,7 +596,7 @@ where ToWorkers: DistributeToWorkers<T> {
                 }
 
                 if self.ensure_chain(*o).trie.is_locked() {
-                    *i = entry::from(::std::u64::MAX as u32)
+                    *i = entry::from(::std::u64::MAX)
                 }
             }
         }
@@ -711,7 +711,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         print_data.msgs_sent(1);
                         to_workers.send_to_worker(
                             SkeensFinished {
-                                loc: OrderIndex(chain_num, (index as u32).into()),
+                                loc: OrderIndex(chain_num, (index as u64).into()),
                                 trie_slot: trie_slot,
                                 storage: storage,
                                 timestamp: timestamp,
@@ -725,7 +725,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         print_data.msgs_sent(1);
                         to_workers.send_to_worker(
                             SnapSkeensFinished {
-                                loc: OrderIndex(chain_num, (index as u32).into()),
+                                loc: OrderIndex(chain_num, (index as u64).into()),
                                 storage,
                                 timestamp,
                                 t,
@@ -775,8 +775,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         let chain = locs[i].0;
                         if self.stores_chain(chain) {
                             let chain = self.ensure_trie(chain);
-                            all_unlocked &= chain.unlock(u32::from(locs[i].1)
-                                as u64);
+                            all_unlocked &= chain.unlock(u64::from(locs[i].1));
                         }
                     }
                 }
@@ -832,13 +831,13 @@ where ToWorkers: DistributeToWorkers<T> {
                     let next_entry = {
                         let chain = self.ensure_trie(chain);
                         if kind.contains(EntryFlag::TakeLock) {
-                            if chain.cannot_lock(u32::from(locs[i].1) as u64) {
+                            if chain.cannot_lock(u64::from(locs[i].1)) {
                                 //the lock that failed is always the first MAX
                                 trace!("SERVER wrong lock {} @ {:?}",
-                                    u32::from(locs[i].1),
+                                    u64::from(locs[i].1),
                                     chain.lock_pair()
                                 );
-                                locs[i].1 = entry::from(::std::u64::MAX as u32);
+                                locs[i].1 = entry::from(::std::u64::MAX);
                                 lock_failed = true;
                                 break 'update_append_horizon
                             }
@@ -847,7 +846,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     };
                     assert!(next_entry > 0);
                     //FIXME 64b entries
-                    let next_entry = entry::from(next_entry as u32);
+                    let next_entry = entry::from(next_entry as u64);
                     locs[i].1 = next_entry;
                     num_places += 1
                 } else {
@@ -867,12 +866,12 @@ where ToWorkers: DistributeToWorkers<T> {
                         let next_entry = {
                             let chain = self.ensure_trie(chain);
                             if kind.contains(EntryFlag::TakeLock) {
-                                if chain.cannot_lock(u32::from(locs[i].1) as u64) {
+                                if chain.cannot_lock(u64::from(locs[i].1)) {
                                     trace!("SERVER wrong lock {} @ {:?}",
-                                        u32::from(locs[i].1),
+                                        u64::from(locs[i].1),
                                         chain.lock_pair()
                                     );
-                                    locs[i].1 = entry::from(::std::u64::MAX as u32);
+                                    locs[i].1 = entry::from(::std::u64::MAX);
                                     lock_failed = true;
                                     break 'senti_horizon
                                 }
@@ -881,7 +880,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         };
                         assert!(next_entry > 0);
                         //FIXME 64b entries
-                        let next_entry = entry::from(next_entry as u32);
+                        let next_entry = entry::from(next_entry as u64);
                         locs[i].1 = next_entry;
                         num_places += 1
                     } else {
@@ -977,7 +976,7 @@ where ToWorkers: DistributeToWorkers<T> {
     /////////////////////////////////////////////////
 
     fn stores_chain(&self, chain: order) -> bool {
-        chain % self.total_servers == self.this_server_num.into()
+        chain % u64::from(self.total_servers) == u64::from(self.this_server_num).into()
     }
 
     //Safety: since this thread is the only one that mutates the map,
@@ -1018,7 +1017,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     trace!("SERVER {:?} replicating entry {:?}",
                         this_server_num, loc);
                     unsafe {
-                        log.partial_append_at(u32::from(loc.1) as u64,
+                        log.partial_append_at(u64::from(loc.1),
                             storage_loc, size).extend_lifetime()
                     }
                 };
@@ -1073,7 +1072,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     }
                     let c = self.ensure_chain(o);
                     c.skeens.replicate_multi_append_round1(
-                        u32::from(i) as u64,
+                        u64::from(i),
                         node_num,
                         id,
                         storage.clone(),
@@ -1100,7 +1099,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     }
                     let c = self.ensure_chain(o);
                     c.skeens.replicate_snapshot_round1(
-                        u32::from(i) as u64,
+                        u64::from(i),
                         node_num,
                         id,
                         storage.clone(),
@@ -1130,7 +1129,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     let c = ensure_chain(&mut self.log, o);
                     let to_workers = &mut self.to_workers;
                     let print_data = &mut self.print_data;
-                    let index = u32::from(i) as u64;
+                    let index = u64::from(i);
                     let trie = &mut c.trie;
                     c.skeens.replicate_round2(&id, max_timestamp, index, |rep| match rep {
                         Multi{index, storage, max_timestamp, t} => {
@@ -1139,7 +1138,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2MultiReplica {
-                                    loc: OrderIndex(o, (index as u32).into()),
+                                    loc: OrderIndex(o, (index as u64).into()),
                                     trie_slot: slot,
                                     storage: storage,
                                     timestamp: max_timestamp,
@@ -1152,7 +1151,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2MultiReplica {
-                                    loc: OrderIndex(o, (index as u32).into()),
+                                    loc: OrderIndex(o, (index as u64).into()),
                                     trie_slot: ptr::null_mut(),
                                     storage: storage,
                                     timestamp: max_timestamp,
@@ -1165,7 +1164,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             print_data.msgs_sent(1);
                             to_workers.send_to_worker(
                                 Skeens2SnapReplica {
-                                    loc: OrderIndex(o, (index as u32).into()),
+                                    loc: OrderIndex(o, (index as u64).into()),
                                     storage,
                                     timestamp: max_timestamp,
                                     t,
@@ -1252,7 +1251,7 @@ where ToWorkers: DistributeToWorkers<T> {
                         assert!(index != entry::from(0));
                         unsafe {
                             let ptr = self.ensure_trie(chain)
-                                .prep_append_at(u32::from(index) as u64);
+                                .prep_append_at(u64::from(index));
                             *next_ptr_storage = ptr;
                             next_ptr_storage = next_ptr_storage.offset(1);
                         };
@@ -1266,7 +1265,7 @@ where ToWorkers: DistributeToWorkers<T> {
                             assert!(index != entry::from(0));
                             unsafe {
                                 let ptr = self.ensure_trie(chain)
-                                    .prep_append_at(u32::from(index) as u64);
+                                    .prep_append_at(u64::from(index));
                                 *next_ptr_storage = ptr;
                                 next_ptr_storage = next_ptr_storage.offset(1);
                             };
@@ -1323,7 +1322,7 @@ where ToWorkers: DistributeToWorkers<T> {
         {
             let locs = buffer.contents().locs();
             for &OrderIndex(o, i) in locs {
-                let i = u32::from(i) as u64;
+                let i = u64::from(i);
                 get_chain_mut(&mut self.log, o).map(|c| c.trie.set_min(i));
             }
             self.log.set_meta(());
@@ -1364,7 +1363,7 @@ where ToWorkers: DistributeToWorkers<T> {
                     let c = buffer.contents();
                     (*c.id(), c.locs()[0])
                 };
-                let time = u32::from(time) as u64;
+                let time = u64::from(time);
                 let still_there = get_chain(&self.log, chain)
                     .map(|c| c.skeens.check_skeens1(id, time))
                     .unwrap_or(false);

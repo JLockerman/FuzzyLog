@@ -571,7 +571,7 @@ where C: AsyncStoreClient {
                         assert!(ts[i] == 0,
                             "repeat timestamp {:?} in {:#?}", oi, e);
                         let t: entry = oi.1;
-                        ts[i] = u32::from(t) as u64;
+                        ts[i] = u64::from(t);
                         assert!(ts[i] > 0,
                             "bad timestamp {:?} in {:#?}", oi, e);
                     }
@@ -1165,15 +1165,15 @@ where C: AsyncStoreClient {
 }
 
 fn write_server_for_chain(chain: order, num_servers: usize) -> usize {
-    (<u32 as From<order>>::from(chain) % (num_servers as u32)) as usize
+    (<u64 as From<order>>::from(chain) % (num_servers as u64)) as usize
 }
 
 fn read_server_for_chain(chain: order, num_servers: usize, unreplicated: bool) -> usize {
-    //(<u32 as From<order>>::from(chain) as usize % (num_servers)  + 1) * 2
+    //(<u64 as From<order>>::from(chain) as usize % (num_servers)  + 1) * 2
     if unreplicated {
         write_server_for_chain(chain, num_servers)
     } else {
-        <u32 as From<order>>::from(chain) as usize % (num_servers) + num_servers
+        <u64 as From<order>>::from(chain) as usize % (num_servers) + num_servers
     }
 }
 

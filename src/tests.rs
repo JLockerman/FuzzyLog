@@ -61,13 +61,13 @@ macro_rules! async_tests {
                 vec![-1, -2, -9, 16, -108]];
             for (j, col) in cols.iter().enumerate() {
                 for i in col.iter() {
-                    let _ = lh.append(((j + 4) as u32).into(), i, &[]);
+                    let _ = lh.append(((j + 4) as u64).into(), i, &[]);
                 }
             }
             lh.snapshot(4.into());
             lh.snapshot(6.into());
             lh.snapshot(5.into());
-            let mut is = [0u32, 0, 0, 0];
+            let mut is = [0u64, 0, 0, 0];
             let total_len = cols.iter().fold(0, |len, col| len + col.len());
             for _ in 0..total_len {
                 let next = lh.get_next();
@@ -75,9 +75,9 @@ macro_rules! async_tests {
                 let (&n, ois) = next.unwrap();
                 assert_eq!(ois.len(), 1);
                 let OrderIndex(o, i) = ois[0];
-                let off: u32 = (o - 4).into();
+                let off: u64 = (o - 4).into();
                 is[off as usize] = is[off as usize] + 1;
-                let i: u32 = i.into();
+                let i: u64 = i.into();
                 assert_eq!(is[off as usize], i);
                 let c = is[off as usize] - 1;
                 assert_eq!(n, cols[off as usize][c as usize]);
@@ -121,7 +121,7 @@ macro_rules! async_tests {
             }
             lh.snapshot(9.into());
             for i in 0..19i32 {
-                let u = i as u32;
+                let u = i as u64;
                 trace!("LONG read {}", i);
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(9.into(), (u + 1).into())][..])));
             }
@@ -159,19 +159,19 @@ macro_rules! async_tests {
             trace!("TEST append after fetch");
 
             let mut lh = $new_thread_log(vec![21.into()]);
-            for i in 0u32..10 {
+            for i in 0u64..10 {
                 let _ = lh.append(21.into(), &i, &[]);
             }
             lh.snapshot(21.into());
-            for i in 0u32..10 {
+            for i in 0u64..10 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
-            for i in 10u32..21 {
+            for i in 10u64..21 {
                 let _ = lh.append(21.into(), &i, &[]);
             }
             lh.snapshot(21.into());
-            for i in 10u32..21 {
+            for i in 10u64..21 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
@@ -184,19 +184,19 @@ macro_rules! async_tests {
             trace!("TEST append after fetch short");
 
             let mut lh = $new_thread_log(vec![22.into()]);
-            for i in 0u32..2 {
+            for i in 0u64..2 {
                 let _ = lh.append(22.into(), &i, &[]);
             }
             lh.snapshot(22.into());
-            for i in 0u32..2 {
+            for i in 0u64..2 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
-            for i in 2u32..4 {
+            for i in 2u64..4 {
                 let _ = lh.append(22.into(), &i, &[]);
             }
             lh.snapshot(22.into());
-            for i in 2u32..4 {
+            for i in 2u64..4 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
@@ -284,7 +284,7 @@ macro_rules! async_tests {
             trace!("TEST multi deep");
 
             let columns: Vec<_> = (45..49).map(Into::into).collect();
-            let mut lh = $new_thread_log::<u32>(columns.clone());
+            let mut lh = $new_thread_log::<u64>(columns.clone());
             for i in 1..32 {
                 let _ = lh.multiappend(&columns, &i, &[]);
             }
@@ -519,7 +519,7 @@ macro_rules! async_tests {
             let _ = lh.no_remote_multiappend(&columns, &0xbad , &[]);
             let _ = lh.no_remote_multiappend(&columns, &0xcad , &[]);
             let _ = lh.no_remote_multiappend(&columns, &13    , &[]);
-            for col in 64..67u32 {
+            for col in 64..67u64 {
                 let col = col.into();
                 lh.snapshot(col);
                 assert_eq!(
@@ -691,11 +691,11 @@ macro_rules! async_tests {
                 vec![-1, -2, -9, 16, -108]];
             for (j, col) in cols.iter().enumerate() {
                 for i in col.iter() {
-                    let _ = lh.append(((j + 75) as u32).into(), i, &[]);
+                    let _ = lh.append(((j + 75) as u64).into(), i, &[]);
                 }
             }
             lh.snapshot_colors(&[75.into(), 76.into(), 77.into()]);
-            let mut is = [0u32, 0, 0, 0];
+            let mut is = [0u64, 0, 0, 0];
             let total_len = cols.iter().fold(0, |len, col| len + col.len());
             for _ in 0..total_len {
                 let next = lh.get_next();
@@ -703,9 +703,9 @@ macro_rules! async_tests {
                 let (&n, ois) = next.unwrap();
                 assert_eq!(ois.len(), 1);
                 let OrderIndex(o, i) = ois[0];
-                let off: u32 = (o - 75).into();
+                let off: u64 = (o - 75).into();
                 is[off as usize] = is[off as usize] + 1;
-                let i: u32 = i.into();
+                let i: u64 = i.into();
                 assert_eq!(is[off as usize], i);
                 let c = is[off as usize] - 1;
                 assert_eq!(n, cols[off as usize][c as usize]);
@@ -722,9 +722,9 @@ macro_rules! async_tests {
             trace!("TEST test_simple_causal_c");
 
             let h0 = thread::spawn(||{
-                let mut lh = $new_thread_log::<(u32, u32)>(vec![78.into(), 79.into()]);
-                for i in 0..100u32 {
-                    for j in 0..5u32 {
+                let mut lh = $new_thread_log::<(u64, u64)>(vec![78.into(), 79.into()]);
+                for i in 0..100u64 {
+                    for j in 0..5u64 {
                         lh.simple_causal_append(&(i, j), &mut [78.into()], &mut [79.into()]);
                         lh.simple_causal_append(&(i, j), &mut [79.into()], &mut [78.into()]);
                     }
@@ -734,7 +734,7 @@ macro_rules! async_tests {
 
             let h1 = thread::spawn(||{
                 let mut got = vec![];
-                let mut lh = $new_thread_log::<(u32, u32)>(vec![78.into(), 79.into()]);
+                let mut lh = $new_thread_log::<(u64, u64)>(vec![78.into(), 79.into()]);
                 while got.len() < 5 * 2 * 100 {
                     lh.take_snapshot();
                     while let Ok((v, ois)) = lh.get_next() {
@@ -753,13 +753,13 @@ macro_rules! async_tests {
         pub fn test_try_get_next() {
             let _ = env_logger::init();
             trace!("TEST try get next");
-            let mut lh = $new_thread_log::<u32>(vec![80.into()]);
+            let mut lh = $new_thread_log::<u64>(vec![80.into()]);
             let _ = lh.append(80.into(), &1, &[]);
             let _ = lh.append(80.into(), &2, &[]);
             let _ = lh.append(80.into(), &3, &[]);
             let _ = lh.append(80.into(), &4, &[]);
             lh.snapshot(80.into());
-            let mut num_gotten = 0;
+            let mut num_gotten = 0u64;
             loop {
                 let got = lh.try_get_next();
                 match got {

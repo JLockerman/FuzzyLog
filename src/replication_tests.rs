@@ -92,7 +92,7 @@ fn long_deps() {
         if i == 0 {
             remote.append(4.into(), &[i], &[]);
         } else {
-            remote.append(4.into(), &[i], &[OrderIndex(5.into(), (i as u32).into())]);
+            remote.append(4.into(), &[i], &[OrderIndex(5.into(), (i as u64).into())]);
         }
     }
 
@@ -100,7 +100,7 @@ fn long_deps() {
         if i == 0 {
             remote.append(5.into(), &[i], &[]);
         } else {
-            remote.append(5.into(), &[i], &[OrderIndex(4.into(), (i as u32 + 1).into())]);
+            remote.append(5.into(), &[i], &[OrderIndex(4.into(), (i as u64 + 1).into())]);
         }
     }
 

@@ -135,7 +135,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 {
                     let locs = e.locs_mut();
                     color = locs[0].0;
-                    locs[0].1 = entry::from(index as u32);
+                    locs[0].1 = entry::from(index as u64);
                 }
                 // assert!(timestamp >= 1);
                 *e.lock_mut() = timestamp;
@@ -143,7 +143,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 e.as_ref().len()
             };
             trace!("WORKER {} finish delayed single @ {:?}",
-                worker_num, OrderIndex(color, entry::from(index as u32)));
+                worker_num, OrderIndex(color, entry::from(index as u64)));
             //let trie_entry: *mut AtomicPtr<u8> = trie_slot as *mut _;
             //(*trie_entry).store(storage as *mut u8, Ordering::Release);
             ValEdge::atomic_store(trie_slot, storage, Ordering::Release);
@@ -152,7 +152,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 send(ToSend::Contents(EntryContents::Skeens2ToReplica{
                     id: e.id(),
                     lock: &timestamp,
-                    loc: &OrderIndex(color, entry::from(index as u32)),
+                    loc: &OrderIndex(color, entry::from(index as u64)),
                 }), false, t)
             } else {
                 let ret = slice::from_raw_parts(storage.ptr(), len);
@@ -275,7 +275,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                     c.flag_mut().insert(EntryFlag::Skeens1Queued);
                     let locs = c.locs_mut();
                     for i in 0..locs.len() {
-                        locs[i].1 = entry::from(ts[i] as u32)
+                        locs[i].1 = entry::from(ts[i] as u64)
                     }
                 }
                 u = send(ToSend::Contents(c.as_ref().multi_skeens_to_replication(indicies)), false, t);
@@ -308,7 +308,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 c.flag_mut().insert(EntryFlag::Skeens1Queued);
                 let locs = c.locs_mut();
                 for i in 0..locs.len() {
-                    locs[i].1 = entry::from(ts[i] as u32)
+                    locs[i].1 = entry::from(ts[i] as u64)
                 }
             }
             let u = if continue_replication {
@@ -410,7 +410,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 let mut e = bytes_as_entry_mut(st0);
                 e.locs_mut().iter_mut().enumerate().fold((),
                     |(), (j, &mut OrderIndex(_, ref mut i))| {
-                        ts[j] = u32::from(*i) as u64;
+                        ts[j] = u64::from(*i) as u64;
                         *i = entry::from(0);
                 });
                 e.flag_mut().remove(EntryFlag::Skeens1Queued);
@@ -451,7 +451,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
                 c.flag_mut().insert(EntryFlag::Skeens1Queued);
                 let locs = c.locs_mut();
                 for i in 0..locs.len() {
-                    locs[i].1 = entry::from(ts[i] as u32)
+                    locs[i].1 = entry::from(ts[i] as u64)
                 }
             }
             trace!("WORKER {} snap skeens1 @ {:?}", worker_num, ts);
@@ -470,7 +470,7 @@ where SendFn: for<'a> FnMut(ToSend<'a>, bool, T) -> U {
             {
                 let c = buffer.contents();
                 ts.iter_mut().zip(c.locs().iter()).fold((),
-                    |(), (l, loc)| *l = u32::from(loc.1) as u64);
+                    |(), (l, loc)| *l = u64::from(loc.1));
                 indicies.iter_mut().zip(c.queue_nums().iter()).fold((),
                     |(), (q, num)| *q = *num);
             }
@@ -653,7 +653,7 @@ where SendFn: for<'a> FnMut(Result<&'a [u8], EntryContents<'a>>) -> U {
     debug_assert!(index > entry::from(0)); //TODO return error on index < GC
     let res = chains.get_and(&chain, |logs| {
         let log = unsafe {&*UnsafeCell::get(&logs[0])};
-        match log.trie.atomic_get(u32::from(index) as u64) {
+        match log.trie.atomic_get(u64::from(index)) {
             Some(packet) => {
                 trace!("WORKER {:?} read occupied entry {:?} {:?}",
                     worker_num, (chain, index), packet.contents().id());
@@ -674,8 +674,8 @@ where SendFn: for<'a> FnMut(Result<&'a [u8], EntryContents<'a>>) -> U {
                 (e.id().clone(), e.locs()[0])
             };
             let chain: order = old_loc.0;
-            let max = entry::from(valid_locs.end.saturating_sub(1) as u32);
-            let min = entry::from(valid_locs.start as u32);
+            let max = entry::from(valid_locs.end.saturating_sub(1) as u64);
+            let min = entry::from(valid_locs.start as u64);
             send(Err(EntryContents::Read{
                 id: &old_id,
                 flags: &EntryFlag::Nothing,

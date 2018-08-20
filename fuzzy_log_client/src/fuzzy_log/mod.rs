@@ -6,7 +6,7 @@ use std::collections::hash_map;
 use std::io;
 use std::sync::mpsc;
 use std::rc::Rc;
-use std::u32;
+use std::u64;
 
 use packets::*;
 use store::AsyncStoreClient;
@@ -24,7 +24,7 @@ mod per_color;
 mod range_tree;
 
 // const MAX_PREFETCH: u32 = 40;
-const MAX_PREFETCH: u32 = 1;
+const MAX_PREFETCH: u32 = 40;
 
 type ChainEntry = Rc<Vec<u8>>;
 
@@ -58,6 +58,7 @@ pub struct ThreadLog<FinshedReadQueue, FinshedWriteQueue> {
     finished: bool,
 
     print_data: PrintData,
+    prefetch : u32,
 }
 
 pub struct ThreadLogBuilder<FinshedReadQueue, FinshedWriteQueue=()> {
@@ -192,6 +193,7 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
             ack_writes,
             return_snapshots,
             no_remote_style,
+            prefetch: 1,
         }
     }
 }
@@ -337,7 +339,7 @@ where
                 self.num_snapshots = self.num_snapshots.saturating_add(1);
                 trace!("FUZZY snapshot {:?}: {:?}", chain, self.num_snapshots);
                 //FIXME
-                if chain != 0.into() {
+                if chain != 0u64.into() {
                     self.fetch_snapshot(chain);
                     self.prefetch(chain);
                 }
@@ -460,7 +462,7 @@ where
 
     fn fetch_snapshot(&mut self, chain: order) {
         //XXX outstanding_snapshots is incremented in prefetch
-        let packet = self.make_read_packet(chain, u32::MAX.into());
+        let packet = self.make_read_packet(chain, u64::MAX.into());
         self.to_store.send(packet).expect("store hung up")
     }
 
@@ -488,11 +490,15 @@ where
             let pc = &mut self.per_chains.get_mut(&chain).expect("boring server read");
             pc.increment_outstanding_snapshots(&self.chains_currently_being_read);
             let next = pc.next_range_to_fetch();
+            let max_prefetch = self.prefetch;
+            // let max_prefetch = (MAX_PREFETCH).saturating_sub(self.blockers.len() as u64) + 1;
+            // let max_prefetch = MAX_PREFETCH;
             match next {
                 NextToFetch::None => None,
                 NextToFetch::AboveHorizon(low, high) => {
                     let num_to_fetch = (high - low) + 1;
-                    let num_to_fetch = std::cmp::min(num_to_fetch, MAX_PREFETCH);
+
+                    let num_to_fetch = std::cmp::min(num_to_fetch, max_prefetch.into());
                     let currently_buffering = pc.currently_buffering();
                     if num_to_fetch == 0 {
                         None
@@ -504,7 +510,7 @@ where
                 },
                 NextToFetch::BelowHorizon(low, high) => {
                     let num_to_fetch = (high - low) + 1;
-                    let num_to_fetch = std::cmp::max(num_to_fetch, MAX_PREFETCH);
+                    let num_to_fetch = std::cmp::max(num_to_fetch, max_prefetch.into());
                     let currently_buffering = pc.currently_buffering();
                     if num_to_fetch == 0 {
                         None
@@ -555,7 +561,7 @@ where
                 trace!("FUZZY read has no data");
                 debug_assert!(!flag.contains(EntryFlag::ReadSuccess));
                 debug_assert!(bytes_as_entry(&msg).locs()[0] == read_loc);
-                if read_loc.1 < u32::MAX.into() {
+                if read_loc.1 < u64::MAX.into() {
                     trace!("FUZZY overread at {:?}", read_loc);
                     //TODO would be nice to handle ooo reads better...
                     //     we can probably do it by checking (chain, read_loc - 1)
@@ -568,14 +574,21 @@ where
                 }
                 else {
                     //due to non-atomic snapshot
-                    let unblocked = self.per_chains.get_mut(&read_loc.0).and_then(|s| {
-                        let e = bytes_as_entry(&msg);
-                        assert_eq!(e.locs()[0].1, u32::MAX.into());
-                        debug_assert!(!e.flag().contains(EntryFlag::ReadSuccess));
-                        let new_horizon = e.horizon().1;
-                        trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
-                        s.give_new_snapshot(new_horizon)
-                    });
+                    let unblocked = {
+                        let prefetch = &mut self.prefetch;
+
+                        self.per_chains.get_mut(&read_loc.0).and_then(|s| {
+                            let e = bytes_as_entry(&msg);
+                            assert_eq!(e.locs()[0].1, u64::MAX.into());
+                            debug_assert!(!e.flag().contains(EntryFlag::ReadSuccess));
+                            let new_horizon = e.horizon().1;
+                            let old_horizon = s.current_snap();
+                            let needs_fetch = (u64::from(new_horizon)).saturating_sub(u64::from(old_horizon));
+                            *prefetch = (needs_fetch / 3 + (2 * *prefetch as u64) / 3) as u32;
+                            trace!("FUZZY try update horizon to {:?}", (read_loc.0, new_horizon));
+                            s.give_new_snapshot(new_horizon)
+                        })
+                    };
                     if let Some(val) = unblocked {
                         let locs = self.return_entry(val);
                         if let Some(locs) = locs { self.stop_blocking_on(locs) }
@@ -609,7 +622,7 @@ where
                 // println!("FUZZY read is atom {:?} {:?}", read_loc, bytes_as_entry(&*msg).id());
                 //FIXME handle all locs
                 let needed = self.per_chains.get_mut(&read_loc.0).map(|s|
-                    if read_loc.1 == entry::from(0) {
+                    if read_loc.1 == entry::from(0u64) {
                         // panic!("{:?}", bytes_as_entry(&*msg))
                         false //TODO
                     } else {
@@ -727,7 +740,7 @@ where
         let mut needed = false;
         let mut try_ret = false;
         for &loc in locs {
-            if loc.0 == order::from(0) { continue }
+            if loc.0 == order::from(0u64) { continue }
             let (is_next_in_chain, needs_to_be_returned);
             {
                 let (is_next, ntbr) = self.per_chains.get(&loc.0).map(|pc| {
@@ -808,7 +821,7 @@ where
         let entr = bytes_as_entry(packet);
         let locs = entr.locs();
         let mut is_blocked = false;
-        for &loc in locs.iter().skip_while(|&&OrderIndex(o, _)| o != order::from(0)).skip(1) {
+        for &loc in locs.iter().skip_while(|&&OrderIndex(o, _)| o != order::from(0u64)).skip(1) {
             let block = self.per_chains.get(&loc.0).map(|pc| !pc.has_returned(loc.1))
                 .unwrap_or(/*TODO*/ false);
             is_blocked |= block;
@@ -880,7 +893,7 @@ where
     fn stop_blocking_on<I>(&mut self, locs: I)
     where I: IntoIterator<Item=OrderIndex> {
         for loc in locs {
-            if loc.0 == order::from(0) { continue }
+            if loc.0 == order::from(0u64) { continue }
             trace!("FUZZY unblocking reads after {:?}", loc);
             self.try_return_blocked_by(loc);
         }
@@ -953,7 +966,7 @@ where
                 if !pc.is_within_snapshot(read_loc.1) {
                     //FIXME this occasionally breaks things
                     if bytes_as_entry(&mut msg).locs().iter()
-                        .all(|&OrderIndex(o, i)| o == order::from(0) || i != entry::from(0)) {
+                        .all(|&OrderIndex(o, i)| o == order::from(0u64) || i != entry::from(0u64)) {
                         return MultiSearch::Finished(msg)
                     }
                     trace!("FUZZY read multi too early @ {:?}", read_loc);
@@ -975,7 +988,7 @@ where
                 let mut entr = bytes_as_entry_mut(&mut msg);
                 let fastpath = !entr.flag_mut().contains(EntryFlag::TakeLock);
                 for &mut OrderIndex(o, ref mut i) in entr.locs_mut() {
-                    if o == order::from(0) {
+                    if o == order::from(0u64) {
                         is_sentinel = true;
                         continue
                     }
@@ -987,9 +1000,9 @@ where
                         let early_sentinel = self.fetch_multi_parts(&id, o, *i, is_multi_server);
                         if let Some(loc) = early_sentinel {
                             trace!("FUZZY no fetch @ {:?} sentinel already found", (o, *i));
-                            assert!(loc != entry::from(0));
+                            assert!(loc != entry::from(0u64));
                             *i = loc;
-                        } else if *i != entry::from(0) {
+                        } else if *i != entry::from(0u64) {
                             trace!("FUZZY multi shortcircuit @ {:?}", (o, *i));
                             if is_sentinel {
                                 if fastpath {
@@ -1056,12 +1069,12 @@ where
                     let mut is_sentinel = false;
                     for (my_loc, new_loc) in locs {
                         assert_eq!(my_loc.0, new_loc.0);
-                        if my_loc.0 == order::from(0) {
+                        if my_loc.0 == order::from(0u64) {
                             is_sentinel = true;
                             continue
                         }
 
-                        if my_loc.1 == entry::from(0) && new_loc.1 != entry::from(0) {
+                        if my_loc.1 == entry::from(0u64) && new_loc.1 != entry::from(0u64) {
                             trace!("FUZZY finished blind seach for {:?}", new_loc);
                             *my_loc = *new_loc;
                             let pc = self.per_chains.entry(new_loc.0)
@@ -1072,7 +1085,7 @@ where
                             } else {
                                 pc.mark_as_skippable(new_loc.1);
                             }
-                        } else if my_loc.1 != entry::from(0) && new_loc.1!= entry::from(0) {
+                        } else if my_loc.1 != entry::from(0u64) && new_loc.1!= entry::from(0u64) {
                             debug_assert_eq!(*my_loc, *new_loc);
                             if is_sentinel {
                                 self.per_chains.get_mut(&new_loc.0)
@@ -1080,7 +1093,7 @@ where
                             }
                         }
 
-                        finished &= my_loc.1 != entry::from(0);
+                        finished &= my_loc.1 != entry::from(0u64);
                     }
                 }
                 trace!("FUZZY multi pieces remaining {:?}", my_locs);
@@ -1130,7 +1143,7 @@ where
             //     based on the lock number should be balid, if a bit conservative
             //     this would require some way to fall back to a blind read,
             //     if the horizon was reached before the multi found
-            if index != entry::from(0) /* && !pc.is_within_snapshot(index) */ {
+            if index != entry::from(0u64) /* && !pc.is_within_snapshot(index) */ {
                 trace!("RRRRR non-blind search {:?} {:?}", chain, index);
                 let unblocked = pc.update_horizon(potential_new_horizon);
                 //TODO with opt, only for non-sentinels
@@ -1246,7 +1259,7 @@ where
             }
 
             trace!("QQQQQ setting returned {:?}", (o, i));
-            assert!(i > entry::from(0));
+            assert!(i > entry::from(0u64));
             pc.set_returned(i);
             pc.is_interesting
         };
@@ -1276,7 +1289,7 @@ where
                 trace!("FUZZY trying to return read from {:?}", locs);
                 let mut checking_sentinels = false;
                 for &OrderIndex(o, i) in locs.into_iter() {
-                    if o == order::from(0) {
+                    if o == order::from(0u64) {
                         checking_sentinels = true;
                         continue
                     }
@@ -1322,7 +1335,7 @@ where
             let no_remote = e.flag().contains(EntryFlag::NoRemote);
             let locs = e.locs();
             for &OrderIndex(o, i) in locs.into_iter() {
-                if o == order::from(0) { break }
+                if o == order::from(0u64) { break }
                 match (self.per_chains.get_mut(&o), no_remote) {
                     (None, _) => {}
                     //(None, false) => panic!("trying to return boring chain {:?}", o),
@@ -1350,7 +1363,7 @@ where
         Some(locs)
     }
 
-    fn fetch_next(&mut self, chain: order, low: u32, high: u32) {
+    fn fetch_next(&mut self, chain: order, low: u64, high: u64) {
         {
             let per_chain = &mut self.per_chains.get_mut(&chain)
                 .expect("fetching uninteresting chain");
@@ -1483,7 +1496,7 @@ impl AsyncStoreClient for mpsc::Sender<Message> {
     fn on_finished_read(&mut self, read_loc: OrderIndex, read_packet: Vec<u8>)
     -> Result<(), ()> {
         if bytes_as_entry(&*read_packet).locs().len() > 1 {
-            // FIXME assert!(read_loc.1 != entry::from(0), "read {:?}", bytes_as_entry(&*read_packet));
+            // FIXME assert!(read_loc.1 != entry::from(0u64), "read {:?}", bytes_as_entry(&*read_packet));
         }
         self.send(Message::FromStore(ReadComplete(read_loc, read_packet)))
             .map(|_| ()).map_err(|_| ())

@@ -844,13 +844,13 @@ mod tests {
         });
     }
 
-    fn make_read_packet(chain: u32, index: u32) -> Vec<u8> {
+    fn make_read_packet(chain: u64, index: u64) -> Vec<u8> {
         let mut buffer = vec![];
         read_packet!(chain, index).fill_vec(&mut buffer);
         buffer
     }
 
-    // fn make_read_response(chain: u32, index: u32) -> Vec<u8> {
+    // fn make_read_response(chain: u64, index: u64) -> Vec<u8> {
     //     let mut buffer = vec![];
     //     read_packet!(chain, index).fill_vec(&mut buffer);
     //     buffer

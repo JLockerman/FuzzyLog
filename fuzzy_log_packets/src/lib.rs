@@ -32,31 +32,15 @@ pub mod storeables;
 pub mod double_buffer;
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeBitAnd(u32), NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeBitAnd(u64), NewtypeAdd(u64), NewtypeSub(u64), NewtypeMul(u64), NewtypeRem(u64))]
     #[allow(non_camel_case_types)]
-    pub struct order(u32);
+    pub struct order(u64);
 }
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u64), NewtypeSub(u64), NewtypeMul(u64), NewtypeRem(u64))]
     #[allow(non_camel_case_types)]
-    pub struct entry(u32);
-}
-
-pub fn order_index_to_u64(o: OrderIndex) -> u64 {
-    let hig: u32 = o.0.into();
-    let low: u32 = o.1.into();
-    let hig = (hig as u64) << 32;
-    let low = low as u64;
-    hig | low
-}
-
-pub fn u64_to_order_index(u: u64) -> OrderIndex {
-    let ord = (u & 0xFFFFFFFF00000000) >> 32;
-    let ent = u & 0x00000000FFFFFFFF;
-    let ord: u32 = ord as u32;
-    let ent: u32 = ent as u32;
-    OrderIndex(ord.into(), ent.into())
+    pub struct entry(u64);
 }
 
 //pub type OrderIndex = (order, entry);
@@ -64,8 +48,8 @@ pub fn u64_to_order_index(u: u64) -> OrderIndex {
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone, Hash, Default)]
 pub struct OrderIndex(pub order, pub entry);
 
-impl From<(u32, u32)> for OrderIndex {
-    fn from((o, e): (u32, u32)) -> Self {
+impl From<(u64, u64)> for OrderIndex {
+    fn from((o, e): (u64, u64)) -> Self {
         OrderIndex(o.into(), e.into())
     }
 }
@@ -938,7 +922,7 @@ impl<'a, V:'a> SingletonBuilder<'a, V> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
                 timestamp: &0, //FIXME
@@ -954,7 +938,7 @@ impl<'a, V:'a> SingletonBuilder<'a, V> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
                 timestamp: &0, //FIXME
@@ -973,7 +957,7 @@ impl<'a, V:'a> SingletonBuilder<'a, [V]> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
                 timestamp: &0, //FIXME
@@ -989,7 +973,7 @@ impl<'a, V:'a> SingletonBuilder<'a, [V]> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
                 timestamp: &0, //FIXME
@@ -1072,7 +1056,7 @@ mod test {
     //     let b = Packet::Ref::Single {
     //         id: &Uuid::nil(),
     //         flags: &EntryFlag::Nothing,
-    //         loc: &OrderIndex(0.into(), 0.into()),
+    //         loc: &OrderIndex(0u64.into(), 0u64.into()),
     //         deps: &[],
     //         data: &[],
     //     }.len();
@@ -1101,7 +1085,7 @@ mod test {
         let id = Uuid::new_v4();
         let flag = EntryFlag::ReadSuccess;
         let data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 99, 10];
-        // let deps = [OrderIndex(1.into(), 1.into()), OrderIndex(2.into(), 1.into()), OrderIndex(3.into(), 3.into())];
+        // let deps = [OrderIndex(1u64.into(), 1u64.into()), OrderIndex(2u64.into(), 1u64.into()), OrderIndex(3u64.into(), 3u64.into())];
 
         let timestamp = 0xdeadbeef;
         let contents = EntryContents::Single {
@@ -1109,7 +1093,7 @@ mod test {
             flags: &flag,
             timestamp: &timestamp,
             deps: &[],
-            loc: &(1, 13).into(),
+            loc: &(1u64, 13).into(),
             data: &data,
         };
         let mut bytes = vec![];
@@ -1124,9 +1108,9 @@ mod test {
         let id = Uuid::new_v4();
         let flag = EntryFlag::ReadSuccess;
         let data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 99, 10];
-        let deps = [OrderIndex(1.into(), 1.into()), OrderIndex(2.into(), 1.into()), OrderIndex(3.into(), 3.into())];
-        let locs = [OrderIndex(5.into(), 55.into()), OrderIndex(37.into(), 8.into()),
-            OrderIndex(1000000000.into(), 0xffffffff.into())];
+        let deps = [OrderIndex(1u64.into(), 1u64.into()), OrderIndex(2u64.into(), 1u64.into()), OrderIndex(3u64.into(), 3u64.into())];
+        let locs = [OrderIndex(5u64.into(), 55u64.into()), OrderIndex(37u64.into(), 8u64.into()),
+            OrderIndex(1000000000u64.into(), 0xffffffffu64.into())];
         let lock = 0xdeadbeef;
         let mut bytes = Vec::new();
         EntryContents::Multi {
@@ -1238,22 +1222,22 @@ mod test {
     #[test]
     fn multiput_entry_convert() {
         use std::fmt::Debug;
-        //test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+        //test_(1231123, &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into())], &[]);
         //test_(3334, &[], &[]);
-        //test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+        //test_(1231123u64, &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into())], &[]);
         //test_(3334u64, &[], &[]);
-        //test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+        //test_(3334u64, &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into())], &[]);
         //test_((3334u64, 1231123), &[], &[]);
-        //test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+        //test_((3334u64, 1231123), &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into())], &[]);
 
-        test_(1231123, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(3334, &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(1231123u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(3334u64, &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(3334u64, &[OrderIndex(01.into(), 10.into())], &[OrderIndex(02.into(), 9.into()), OrderIndex(201.into(), 0.into()), OrderIndex(02.into(), 57.into()), OrderIndex(201.into(), 0xffffffff.into()), OrderIndex(02.into(), 0xdeadbeef.into()), OrderIndex(201.into(), 2.into()), OrderIndex(02.into(), 6.into()), OrderIndex(201.into(), 201.into())]);
-        test_(3334u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_((3334u64, 1231123), &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_((3334u64, 1231123), &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_(1231123, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(3334, &[], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(1231123u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(3334u64, &[], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(3334u64, &[OrderIndex(01u64.into(), 10u64.into())], &[OrderIndex(02u64.into(), 9u64.into()), OrderIndex(201u64.into(), 0u64.into()), OrderIndex(02u64.into(), 57u64.into()), OrderIndex(201u64.into(), 0xffffffffu64.into()), OrderIndex(02u64.into(), 0xdeadbeefu64.into()), OrderIndex(201u64.into(), 2u64.into()), OrderIndex(02u64.into(), 6u64.into()), OrderIndex(201u64.into(), 201u64.into())]);
+        test_(3334u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_((3334u64, 1231123), &[], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_((3334u64, 1231123), &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex], cols: &[OrderIndex]) {
             let id = Uuid::new_v4();
@@ -1273,13 +1257,13 @@ mod test {
     #[test]
     fn data_entry_convert() {
         use std::fmt::Debug;
-        test_(1231123, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())]);
+        test_(1231123, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
         test_(3334, &[]);
-        test_(1231123u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())]);
+        test_(1231123u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
         test_(3334u64, &[]);
-        test_(3334u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())]);
+        test_(3334u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
         test_((3334u64, 1231123), &[]);
-        test_((3334u64, 1231123), &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())]);
+        test_((3334u64, 1231123), &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex]) {
             let ent1 = EntryContents::Data(&data, &deps);
@@ -1294,13 +1278,13 @@ mod test {
     fn new_packets_multi() {
         test_(
             &[12, 31,123],
-            &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())],
-            &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]
+            &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())],
+            &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]
         );
         test_(
             &[33,34],
             &[],
-            &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]
+            &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]
         );
         fn test_(data0: &[u8], deps0: &[OrderIndex], cols0: &[OrderIndex]) {
             let id0 = Uuid::new_v4();

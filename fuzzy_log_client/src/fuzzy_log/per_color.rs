@@ -62,8 +62,8 @@ pub struct ReadHandle;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NextToFetch {
     None,
-    BelowHorizon(u32, u32),
-    AboveHorizon(u32, u32),
+    BelowHorizon(u64, u64),
+    AboveHorizon(u64, u64),
 }
 
 impl PerColor {
@@ -330,13 +330,13 @@ impl PerColor {
         //FIXME the longer the allowed pipeline depth the better throughput,
         //      but the more memory is wasted, anyway current scheme is suboptimal,
         //      see TODO above
-        const MAX_PIPELINED: u32 = 20000;
+        const MAX_PIPELINED: u64 = 20000;
         //TODO switch to saturating sub?
         //assert!(self.last_returned_to_client <= self.last_snapshot,
         //    "FUZZY returned value early. {:?} should be less than {:?}",
         //    self.last_returned_to_client, self.last_snapshot);
 
-        let outstanding_reads = self.read_status.num_outstanding() as u32;
+        let outstanding_reads = self.read_status.num_outstanding() as u64;
         if outstanding_reads >= MAX_PIPELINED {
             return NextToFetch::None
         }
@@ -346,7 +346,7 @@ impl PerColor {
             return NextToFetch::AboveHorizon(first_needed, last_needed)
         }
 
-        let last_needed = min(last_needed, u32::from(self.last_snapshot));
+        let last_needed = min(last_needed, u64::from(self.last_snapshot));
         let last_needed = min(
             last_needed,
             first_needed + (MAX_PIPELINED - outstanding_reads)
@@ -367,19 +367,18 @@ impl PerColor {
     pub fn has_more_multi_search_than_outstanding_reads(&self) -> bool {
         let outstanding_reads = self.read_status.num_outstanding();
         let chain = self.chain;
-        let num_required_no_remotes = self.required_no_remotes.len() as u32;
+        let num_required_no_remotes = self.required_no_remotes.len() as u64;
         let need_due_to_no_remote = num_required_no_remotes > 0;
         self.is_being_read.as_ref().map_or(need_due_to_no_remote, |r| {
-            debug_assert!(!(r.num_multiappends_searching_for > (outstanding_reads + 1)
-                as u32));
+            debug_assert!(!(r.num_multiappends_searching_for > (outstanding_reads + 1) as u32));
             trace!("QQQQQ {:?} num multi > out? {:?} > {:?}?",
                 chain, r.num_multiappends_searching_for, outstanding_reads);
-            r.num_multiappends_searching_for + num_required_no_remotes > outstanding_reads as u32
+            r.num_multiappends_searching_for as u64 + num_required_no_remotes > outstanding_reads as u64
         })
     }
 
-    pub fn currently_buffering(&self) -> u32 {
-        self.read_status.num_buffered() as u32
+    pub fn currently_buffering(&self) -> u64 {
+        self.read_status.num_buffered() as u64
     }
 
     pub fn add_early_sentinel(&mut self, id: Uuid, index: entry) {
@@ -441,5 +440,9 @@ impl PerColor {
             self.last_snapshot,
             self.read_status,
         )
+    }
+
+    pub fn current_snap(&self) -> entry {
+        self.last_snapshot
     }
 }
