@@ -81,6 +81,7 @@ pub mod c_binidings {
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
 
+    use std::collections::HashMap;
     use std::ffi::{CStr, CString};
     use std::net::SocketAddr;
     use std::os::raw::c_char;
@@ -146,6 +147,55 @@ pub mod c_binidings {
         fn nil() -> Self {
             WriteId::from_uuid(Uuid::nil())
         }
+    }
+
+    type snapBody = HashMap<order, entry>;
+    type snapId = *mut snapBody;
+    pub type FL_ptr = *mut DAG;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_append(
+        handle: FL_ptr,
+        buf: *const u8,
+        bufsize: usize,
+        nodecolors: *mut colors,
+    ) -> i32 {
+        assert!(bufsize == 0 || buf != ptr::null());
+        assert!(nodecolors != ptr::null_mut());
+        assert!(colors_valid(nodecolors));
+
+        let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
+        let data = slice::from_raw_parts(buf, bufsize);
+        let nodecolors = slice::from_raw_parts_mut((*nodecolors).mycolors as *mut order, (*nodecolors).numcolors);
+
+        handle.simpler_causal_append(data, nodecolors);
+        1
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_sync(
+        handle: FL_ptr, callback: fn(*const u8, usize) -> (),
+    ) -> snapId {
+
+        let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
+        handle.take_snapshot();
+        let mut entries_seen = HashMap::default();
+        //TODO server death
+        while let Ok((data, locations)) = handle.get_next() {
+            callback(data.as_ptr(), data.len());
+            for &OrderIndex(o, i) in locations {
+                let last = entries_seen.entry(o).or_insert(i);
+                if *last <= i {
+                    *last = i
+                }
+            }
+        }
+        Box::into_raw(entries_seen.into())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_trim(handle: FL_ptr, snap: snapId) {
+        unimplemented!()
     }
 
     #[no_mangle]
@@ -900,35 +950,4 @@ pub mod c_binidings {
         };
         (lock_server_str, chain_server_strings, csst)
     }
-
-    ////////////////////////////////////
-    //    Old fuzzy log C bindings    //
-    ////////////////////////////////////
-
-    type Log = ();
-
-    #[no_mangle]
-    pub extern "C" fn fuzzy_log_new(_server_addr: *const c_char, _relevent_chains: *const u32,
-        _num_relevent_chains: u16, _callback: extern fn(*const u8, u16) -> u8) -> Box<Log> {
-        unimplemented!()
-    }
-
-    #[no_mangle]
-    pub extern "C" fn fuzzy_log_append(_log: &mut Log,
-        _chain: u32, _val: *const u8, _len: u16, _deps: *const OrderIndex, _num_deps: u16) -> OrderIndex {
-        unimplemented!()
-    }
-
-    #[no_mangle]
-    pub extern "C" fn fuzzy_log_multiappend(_log: &mut Log,
-        _chains: *mut OrderIndex, _num_chains: u16,
-        _val: *const u8, _len: u16, _deps: *const OrderIndex, _num_deps: u16) {
-        unimplemented!()
-    }
-
-    #[no_mangle]
-    pub extern "C" fn fuzzy_log_play_forward(_log: &mut Log, _chain: u32) -> OrderIndex {
-        unimplemented!()
-    }
-
 }

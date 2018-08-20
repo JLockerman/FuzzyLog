@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::thread;
 use std::sync::{mpsc, Arc, Mutex};
 
-use hash::HashMap;
+use hash::{HashMap, HashSet};
 
 use fuzzy_log::{
     self,
@@ -47,6 +47,7 @@ pub struct LogHandle<V: ?Sized> {
     //TODO finished_writes: ..
     curr_entry: Vec<u8>,
     last_seen_entries: HashMap<order, entry>,
+    my_colors_chains: HashSet<order>,
     num_errors: u64,
 }
 
@@ -651,6 +652,7 @@ where V: Storeable {
             num_snapshots: 0,
             num_async_writes: 0,
             last_seen_entries: Default::default(),
+            my_colors_chains: Default::default(),
             num_errors: 0,
         }
     }
@@ -726,10 +728,13 @@ where V: Storeable {
             let e = bytes_as_entry(&self.curr_entry);
             (slice_to_data(e.data()), e.locs())
         };
+        let check_color = self.my_colors_chains.is_empty();
         for &OrderIndex(o, i) in locs {
-            let e = self.last_seen_entries.entry(o).or_insert(0.into());
-            if *e < i {
-                *e = i
+            if !check_color || self.my_colors_chains.contains(&o) {
+                let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                if *e < i {
+                    *e = i
+                }
             }
         }
         Ok((val, locs))
@@ -775,10 +780,13 @@ where V: Storeable {
             let e = bytes_as_entry(&self.curr_entry);
             (slice_to_data(e.data()), e.locs())
         };
+        let check_color = self.my_colors_chains.is_empty();
         for &OrderIndex(o, i) in locs {
-            let e = self.last_seen_entries.entry(o).or_insert(0.into());
-            if *e < i {
-                *e = i
+            if !check_color || self.my_colors_chains.contains(&o) {
+                let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                if *e < i {
+                    *e = i
+                }
             }
         }
         Ok((val, locs))
@@ -823,10 +831,13 @@ where V: Storeable {
             let e = bytes_as_entry(&self.curr_entry);
             (slice_to_data(e.data()), e.locs(), e.id())
         };
+        let check_color = self.my_colors_chains.is_empty();
         for &OrderIndex(o, i) in locs {
-            let e = self.last_seen_entries.entry(o).or_insert(0.into());
-            if *e < i {
-                *e = i
+            if !check_color || self.my_colors_chains.contains(&o) {
+                let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                if *e < i {
+                    *e = i
+                }
             }
         }
         Ok((val, locs, id))
@@ -959,11 +970,35 @@ where V: Storeable {
         let mut happens_after_entries = Vec::with_capacity(happens_after.len());
 
         for o in happens_after {
-            let horizon = self.last_seen_entries.get(o).cloned().unwrap_or(0.into());
+            let horizon = self.last_seen_entries.remove(o).unwrap_or(0.into());
             if horizon > entry::from(0) && inhabits.binary_search(o).is_err() {
                 happens_after_entries.push(OrderIndex(*o, horizon));
             }
         }
+
+        self.causal_color_append(data, inhabits, &mut [], &mut happens_after_entries)
+    }
+
+    pub fn simpler_causal_append(
+        &mut self,
+        data: &V,
+        inhabits: &mut [order],
+    ) -> Uuid {
+        if inhabits.len() == 0 {
+            return Uuid::nil()
+        }
+
+        inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
+
+        let mut happens_after_entries: Vec<_> = self.last_seen_entries
+            .drain()
+            .filter(|oi| inhabits.binary_search(&oi.0).is_err())
+            .map(OrderIndex::from)
+            .collect();
 
         self.causal_color_append(data, inhabits, &mut [], &mut happens_after_entries)
     }
@@ -1171,10 +1206,13 @@ impl<V: ?Sized> LogHandle<V> {
                 ));
             if let Ok(&(_, ref locs)) = ret.as_ref() {
                 self.num_async_writes -= 1;
+                let check_color = self.my_colors_chains.is_empty();
                 for &OrderIndex(o, i) in locs {
-                    let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                    if *e < i {
-                        *e = i
+                    if !check_color || self.my_colors_chains.contains(&o) {
+                        let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                        if *e < i {
+                            *e = i
+                        }
                     }
                 }
             }
@@ -1189,15 +1227,19 @@ impl<V: ?Sized> LogHandle<V> {
         let mut flushed = 0;
         if self.num_async_writes > 0 {
             let last_seen_entries = &mut self.last_seen_entries;
+            let check_color = self.my_colors_chains.is_empty();
+            let my_colors_chains = &mut self.my_colors_chains;
             for res in self.finished_writes.try_iter() {
                 flushed += 1;
                 match res {
                     Ok((_, locs)) => {
                         self.num_async_writes -= 1;
                         for &OrderIndex(o, i) in &locs {
-                            let e = last_seen_entries.entry(o).or_insert(0.into());
-                            if *e < i {
-                                *e = i
+                            if !check_color || my_colors_chains.contains(&o) {
+                                let e = last_seen_entries.entry(o).or_insert(0.into());
+                                if *e < i {
+                                    *e = i
+                                }
                             }
                         }
                     },
@@ -1227,10 +1269,13 @@ impl<V: ?Sized> LogHandle<V> {
     fn recv_write(&mut self)
     -> Result<Result<(Uuid, Vec<OrderIndex>), fuzzy_log::Error>, ::std::sync::mpsc::RecvError> {
         self.finished_writes.recv().map(|res| res.map(|(id, locs)| {
+            let check_color = self.my_colors_chains.is_empty();
             for &OrderIndex(o, i) in &locs {
-                let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                if *e < i {
-                    *e = i
+                if !check_color || self.my_colors_chains.contains(&o) {
+                    let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                    if *e < i {
+                        *e = i
+                    }
                 }
             }
             (id, locs)
