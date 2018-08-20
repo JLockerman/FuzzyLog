@@ -14,17 +14,17 @@ def run(transaction_in=0, two_replica_sets=True, one_chain=False):
 
         ips = '172.31.5.245#172.31.0.84#172.31.3.165^172.31.6.77#172.31.4.131#172.31.9.164'
 
-        server_hostnames = 'ec2-34-228-14-122.compute-1.amazonaws.com,ec2-34-227-224-125.compute-1.amazonaws.com,ec2-54-88-64-195.compute-1.amazonaws.com,ec2-34-224-79-70.compute-1.amazonaws.com,ec2-54-89-161-227.compute-1.amazonaws.com,ec2-54-172-185-64.compute-1.amazonaws.com'
+        server_hostnames = 'ec2-34-227-59-97.compute-1.amazonaws.com,ec2-54-164-153-29.compute-1.amazonaws.com,ec2-52-200-149-228.compute-1.amazonaws.com,ec2-54-144-230-60.compute-1.amazonaws.com,ec2-54-89-227-88.compute-1.amazonaws.com,ec2-34-228-61-79.compute-1.amazonaws.com'
 
     else:
         server_ip = '172.31.5.245:13289#172.31.3.165:13289'
 
         ips = '172.31.5.245#172.31.0.84#172.31.3.165'
 
-        server_hostnames = 'ec2-34-228-14-122.compute-1.amazonaws.com,ec2-34-227-224-125.compute-1.amazonaws.com,ec2-54-88-64-195.compute-1.amazonaws.com'
+        server_hostnames = 'ec2-34-227-59-97.compute-1.amazonaws.com,ec2-54-164-153-29.compute-1.amazonaws.com,ec2-52-200-149-228.compute-1.amazonaws.com'
 
 
-    client_hostnames = ['ec2-184-72-213-25.compute-1.amazonaws.com', 'ec2-35-172-227-169.compute-1.amazonaws.com', 'ec2-54-237-239-69.compute-1.amazonaws.com', 'ec2-54-227-174-2.compute-1.amazonaws.com', 'ec2-54-210-156-124.compute-1.amazonaws.com', 'ec2-34-224-78-12.compute-1.amazonaws.com', 'ec2-54-237-200-96.compute-1.amazonaws.com', 'ec2-34-204-13-172.compute-1.amazonaws.com', 'ec2-54-145-208-251.compute-1.amazonaws.com', 'ec2-52-207-144-1.compute-1.amazonaws.com', 'ec2-34-207-116-198.compute-1.amazonaws.com', 'ec2-34-227-75-240.compute-1.amazonaws.com', 'ec2-34-234-95-38.compute-1.amazonaws.com', 'ec2-52-54-136-50.compute-1.amazonaws.com']
+    client_hostnames = ['ec2-54-221-13-117.compute-1.amazonaws.com', 'ec2-54-165-98-109.compute-1.amazonaws.com', 'ec2-54-210-182-177.compute-1.amazonaws.com', 'ec2-54-88-115-132.compute-1.amazonaws.com', 'ec2-54-175-66-27.compute-1.amazonaws.com', 'ec2-75-101-219-163.compute-1.amazonaws.com', 'ec2-34-207-59-99.compute-1.amazonaws.com', 'ec2-35-173-248-72.compute-1.amazonaws.com', 'ec2-34-229-218-220.compute-1.amazonaws.com', 'ec2-54-209-50-54.compute-1.amazonaws.com', 'ec2-34-234-77-217.compute-1.amazonaws.com', 'ec2-54-197-0-246.compute-1.amazonaws.com', 'ec2-54-164-4-121.compute-1.amazonaws.com', 'ec2-52-90-95-241.compute-1.amazonaws.com']
 
     print(len(client_hostnames))
 
@@ -32,7 +32,7 @@ def run(transaction_in=0, two_replica_sets=True, one_chain=False):
     for client in client_hostnames[1:]:
         clients += ',' + client
 
-    for i in [12]:
+    for i in [8]:
         print("run " + str(i))
 
         command = "run_chain:chain_hosts=" + ips
@@ -49,7 +49,7 @@ def run(transaction_in=0, two_replica_sets=True, one_chain=False):
             ' ' + server_ip + \
             ' #server_num' + \
             ' ' + str(i) + \
-            ' ' + str(1000)
+            ' ' + str(750)
 
         if transaction_in != 0:
             command += ' -t ' + str(transaction_in)
@@ -110,10 +110,10 @@ def run(transaction_in=0, two_replica_sets=True, one_chain=False):
 
 os.chdir('../../..')
 
-run(10, True, False)
-exit(0)
+# run(0, False, True)
+# exit(0)
 
-for one_chain in [False, True]:
+for one_chain in [False, True]: #
     if one_chain:
         print("> color per server")
     else:
