@@ -1,0 +1,23 @@
+[package]
+name = "delos_tcp_server"
+version = "0.1.0"
+authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
+
+[dependencies]
+env_logger = "0.3"
+log = "0.3.2"
+tokio_server = {path = "../../tokio_server"}
+
+[profile.release]
+opt-level = 3
+debug = true
+# debug = false
+rpath = false
+lto = false
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+
+[features]
+# print_stats = ["fuzzy_log_server/print_stats"]
+# no_trace = ["log/max_level_info", "fuzzy_log_server/no_trace"]

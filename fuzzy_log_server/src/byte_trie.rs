@@ -31,7 +31,22 @@ type L1Edge = Option<Box<[L2Edge; ARRAY_SIZE]>>;
 type L2Edge = Option<Box<[L3Edge; ARRAY_SIZE]>>;
 type L3Edge = Option<Box<[L4Edge; ARRAY_SIZE]>>;
 type L4Edge = Option<Box<[ValEdge; ARRAY_SIZE]>>;
-type ValEdge = Option<Box<[u8; LEVEL_BYTES]>>;
+type ValEdge = Option<Box<Val>>;
+
+struct Val([u8; LEVEL_BYTES], [&'static u8; 0]);
+
+impl ::std::ops::Deref for Val {
+    type Target = [u8; LEVEL_BYTES];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ::std::ops::DerefMut for Val {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 pub const LEVEL_BYTES: usize = 8192;
 const ARRAY_SIZE: usize = 8192 / 8;
@@ -356,8 +371,8 @@ fn alloc_level() -> Box<[u8; LEVEL_BYTES]> {
     unsafe { Box::new(mem::zeroed()) }
 }
 
-fn alloc_val_level() -> Box<[u8; LEVEL_BYTES]> {
-    unsafe { Box::new(mem::uninitialized()) }
+fn alloc_val_level() -> Box<Val> {
+    unsafe { Box::new(mem::zeroed()) }
 }
 
 #[cfg(test)]

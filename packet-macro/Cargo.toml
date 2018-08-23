@@ -1,6 +1,0 @@
-[package]
-name = "packet-macro"
-version = "0.1.0"
-authors = ["JLockerman <joshua@lockerman.info>"]
-
-[dependencies]

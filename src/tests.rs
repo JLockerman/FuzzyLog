@@ -61,13 +61,13 @@ macro_rules! async_tests {
                 vec![-1, -2, -9, 16, -108]];
             for (j, col) in cols.iter().enumerate() {
                 for i in col.iter() {
-                    let _ = lh.append(((j + 4) as u32).into(), i, &[]);
+                    let _ = lh.append(((j + 4) as u64).into(), i, &[]);
                 }
             }
             lh.snapshot(4.into());
             lh.snapshot(6.into());
             lh.snapshot(5.into());
-            let mut is = [0u32, 0, 0, 0];
+            let mut is = [0u64, 0, 0, 0];
             let total_len = cols.iter().fold(0, |len, col| len + col.len());
             for _ in 0..total_len {
                 let next = lh.get_next();
@@ -75,9 +75,9 @@ macro_rules! async_tests {
                 let (&n, ois) = next.unwrap();
                 assert_eq!(ois.len(), 1);
                 let OrderIndex(o, i) = ois[0];
-                let off: u32 = (o - 4).into();
+                let off: u64 = (o - 4).into();
                 is[off as usize] = is[off as usize] + 1;
-                let i: u32 = i.into();
+                let i: u64 = i.into();
                 assert_eq!(is[off as usize], i);
                 let c = is[off as usize] - 1;
                 assert_eq!(n, cols[off as usize][c as usize]);
@@ -121,7 +121,7 @@ macro_rules! async_tests {
             }
             lh.snapshot(9.into());
             for i in 0..19i32 {
-                let u = i as u32;
+                let u = i as u64;
                 trace!("LONG read {}", i);
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(9.into(), (u + 1).into())][..])));
             }
@@ -159,19 +159,19 @@ macro_rules! async_tests {
             trace!("TEST append after fetch");
 
             let mut lh = $new_thread_log(vec![21.into()]);
-            for i in 0u32..10 {
+            for i in 0u64..10 {
                 let _ = lh.append(21.into(), &i, &[]);
             }
             lh.snapshot(21.into());
-            for i in 0u32..10 {
+            for i in 0u64..10 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
-            for i in 10u32..21 {
+            for i in 10u64..21 {
                 let _ = lh.append(21.into(), &i, &[]);
             }
             lh.snapshot(21.into());
-            for i in 10u32..21 {
+            for i in 10u64..21 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(21.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
@@ -184,19 +184,19 @@ macro_rules! async_tests {
             trace!("TEST append after fetch short");
 
             let mut lh = $new_thread_log(vec![22.into()]);
-            for i in 0u32..2 {
+            for i in 0u64..2 {
                 let _ = lh.append(22.into(), &i, &[]);
             }
             lh.snapshot(22.into());
-            for i in 0u32..2 {
+            for i in 0u64..2 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
-            for i in 2u32..4 {
+            for i in 2u64..4 {
                 let _ = lh.append(22.into(), &i, &[]);
             }
             lh.snapshot(22.into());
-            for i in 2u32..4 {
+            for i in 2u64..4 {
                 assert_eq!(lh.get_next(), Ok((&i,  &[OrderIndex(22.into(), (i + 1).into())][..])));
             }
             assert_eq!(lh.get_next(), Err(GetRes::Done));
@@ -284,7 +284,7 @@ macro_rules! async_tests {
             trace!("TEST multi deep");
 
             let columns: Vec<_> = (45..49).map(Into::into).collect();
-            let mut lh = $new_thread_log::<u32>(columns.clone());
+            let mut lh = $new_thread_log::<u64>(columns.clone());
             for i in 1..32 {
                 let _ = lh.multiappend(&columns, &i, &[]);
             }
@@ -297,7 +297,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_dependent_multi1() {
             let _ = env_logger::init();
@@ -347,7 +347,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_dependent_multi_with_early_fetch() {
             let _ = env_logger::init();
@@ -394,7 +394,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_dependent_multi_with_partial_early_fetch() {
             let _ = env_logger::init();
@@ -466,7 +466,7 @@ macro_rules! async_tests {
             let mut lh = $new_thread_log::<()>(interesting_columns);
             let _ = lh.append(61.into(), &(), &[]);
             let _ = lh.multiappend(&[61.into(), 62.into()], &(), &[]);
-            let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
+            // let _ = lh.dependent_multiappend(&[61.into()], &[62.into()], &(), &[]);
             let _ = lh.color_append(&(), &mut [61.into()], &mut [], false);
             lh.snapshot(61.into());
             assert_eq!(lh.get_next(),
@@ -474,17 +474,17 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(),
                 Ok((&(), &[OrderIndex(61.into(), 2.into()),
                     OrderIndex(62.into(), 1.into())][..])));
-            if $single_server {
-                assert_eq!(lh.get_next(),
-                    Ok((&(), &[OrderIndex(61.into(), 3.into()),
-                        OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 1.into())][..])));
-            } else {
-                assert_eq!(lh.get_next(),
-                    Ok((&(), &[OrderIndex(61.into(), 3.into()),
-                        OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
-            }
+            // if $single_server {
+            //     assert_eq!(lh.get_next(),
+            //         Ok((&(), &[OrderIndex(61.into(), 3.into()),
+            //             OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 1.into())][..])));
+            // } else {
+            //     assert_eq!(lh.get_next(),
+            //         Ok((&(), &[OrderIndex(61.into(), 3.into()),
+            //             OrderIndex(0.into(), 0.into()), OrderIndex(62.into(), 2.into())][..])));
+            // }
             assert_eq!(lh.get_next(),
-                Ok((&(), &[OrderIndex(61.into(), 4.into())][..])));
+                Ok((&(), &[OrderIndex(61.into(), 3.into())][..])));
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
@@ -519,7 +519,7 @@ macro_rules! async_tests {
             let _ = lh.no_remote_multiappend(&columns, &0xbad , &[]);
             let _ = lh.no_remote_multiappend(&columns, &0xcad , &[]);
             let _ = lh.no_remote_multiappend(&columns, &13    , &[]);
-            for col in 64..67u32 {
+            for col in 64..67u64 {
                 let col = col.into();
                 lh.snapshot(col);
                 assert_eq!(
@@ -625,6 +625,7 @@ macro_rules! async_tests {
 
         #[test]
         #[inline(never)]
+        //FIXME append not getting ACKs
         pub fn test_multi_and_single() {
             use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT, Ordering};
             use std::thread;
@@ -669,6 +670,7 @@ macro_rules! async_tests {
             lh.snapshot(73.into());
             let num_appends = NUM_APPENDS.load(Ordering::Acquire);
             for i in 0..num_appends {
+                println!("get {:?}", i);
                 assert!(lh.get_next().is_ok(),
                     "got {:?} out of {:?} appends",
                     i, num_appends
@@ -689,11 +691,11 @@ macro_rules! async_tests {
                 vec![-1, -2, -9, 16, -108]];
             for (j, col) in cols.iter().enumerate() {
                 for i in col.iter() {
-                    let _ = lh.append(((j + 75) as u32).into(), i, &[]);
+                    let _ = lh.append(((j + 75) as u64).into(), i, &[]);
                 }
             }
             lh.snapshot_colors(&[75.into(), 76.into(), 77.into()]);
-            let mut is = [0u32, 0, 0, 0];
+            let mut is = [0u64, 0, 0, 0];
             let total_len = cols.iter().fold(0, |len, col| len + col.len());
             for _ in 0..total_len {
                 let next = lh.get_next();
@@ -701,9 +703,9 @@ macro_rules! async_tests {
                 let (&n, ois) = next.unwrap();
                 assert_eq!(ois.len(), 1);
                 let OrderIndex(o, i) = ois[0];
-                let off: u32 = (o - 75).into();
+                let off: u64 = (o - 75).into();
                 is[off as usize] = is[off as usize] + 1;
-                let i: u32 = i.into();
+                let i: u64 = i.into();
                 assert_eq!(is[off as usize], i);
                 let c = is[off as usize] - 1;
                 assert_eq!(n, cols[off as usize][c as usize]);
@@ -720,9 +722,9 @@ macro_rules! async_tests {
             trace!("TEST test_simple_causal_c");
 
             let h0 = thread::spawn(||{
-                let mut lh = $new_thread_log::<(u32, u32)>(vec![78.into(), 79.into()]);
-                for i in 0..100u32 {
-                    for j in 0..5u32 {
+                let mut lh = $new_thread_log::<(u64, u64)>(vec![78.into(), 79.into()]);
+                for i in 0..100u64 {
+                    for j in 0..5u64 {
                         lh.simple_causal_append(&(i, j), &mut [78.into()], &mut [79.into()]);
                         lh.simple_causal_append(&(i, j), &mut [79.into()], &mut [78.into()]);
                     }
@@ -732,7 +734,7 @@ macro_rules! async_tests {
 
             let h1 = thread::spawn(||{
                 let mut got = vec![];
-                let mut lh = $new_thread_log::<(u32, u32)>(vec![78.into(), 79.into()]);
+                let mut lh = $new_thread_log::<(u64, u64)>(vec![78.into(), 79.into()]);
                 while got.len() < 5 * 2 * 100 {
                     lh.take_snapshot();
                     while let Ok((v, ois)) = lh.get_next() {
@@ -751,13 +753,13 @@ macro_rules! async_tests {
         pub fn test_try_get_next() {
             let _ = env_logger::init();
             trace!("TEST try get next");
-            let mut lh = $new_thread_log::<u32>(vec![80.into()]);
+            let mut lh = $new_thread_log::<u64>(vec![80.into()]);
             let _ = lh.append(80.into(), &1, &[]);
             let _ = lh.append(80.into(), &2, &[]);
             let _ = lh.append(80.into(), &3, &[]);
             let _ = lh.append(80.into(), &4, &[]);
             lh.snapshot(80.into());
-            let mut num_gotten = 0;
+            let mut num_gotten = 0u64;
             loop {
                 let got = lh.try_get_next();
                 match got {
@@ -815,7 +817,7 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
-        #[test]
+        #[allow(dead_code)]
         #[inline(never)]
         pub fn test_only_sentinel() {
             let _ = env_logger::init();
@@ -831,15 +833,119 @@ macro_rules! async_tests {
             assert_eq!(lh.get_next(), Err(GetRes::Done));
         }
 
+        #[test]
+        #[should_panic]
+        #[inline(never)]
+        pub fn test_weak_snapshot_is_weak() {
+            use std::thread;
+            use std::sync::atomic::{AtomicBool, Ordering, ATOMIC_BOOL_INIT};
+
+            struct TrueOnDrop<'a>(&'a AtomicBool);
+
+            impl<'a> Drop for TrueOnDrop<'a> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed)
+                }
+            }
+
+            static DONE: AtomicBool = ATOMIC_BOOL_INIT;
+
+            let _ = env_logger::init();
+            trace!("TEST weak_snapshot_is_weak");
+
+            let _guard = TrueOnDrop(&DONE);
+            let columns = vec![85.into(), 86.into()];
+            let mut lh = $new_thread_log::<()>(columns.clone());
+            thread::spawn(move || {
+                let _guard = TrueOnDrop(&DONE);
+                while !DONE.load(Ordering::Relaxed) {
+                    lh.append(85.into(), &(), &[]);
+                    thread::yield_now();
+                    lh.append(86.into(), &(), &[]);
+                }
+            });
+            let mut lh = $new_thread_log::<()>(columns);
+            while !DONE.load(Ordering::Relaxed) {
+                lh.snapshot(86.into());
+                // thread::yield_now();
+                lh.snapshot(85.into());
+                let mut max_85 = 0;
+                let mut max_86 = 0;
+                loop {
+                    match lh.get_next() {
+                        Ok((_, locs)) => if locs[0].0 == order::from(85) {
+                            max_85 += 1;
+                        } else if locs[0].0 == order::from(86) {
+                            max_86 += 1;
+                        },
+                        Err(GetRes::Done) => break,
+                        Err(e) => panic!(),
+                    }
+                }
+                assert!(max_85 >= max_86);
+            }
+        }
+
+        // #[test]
+        #[inline(never)]
+        pub fn test_strong_snapshot_is_strong() {
+            use std::thread;
+            use std::sync::atomic::{AtomicBool, Ordering, ATOMIC_BOOL_INIT};
+
+            struct TrueOnDrop<'a>(&'a AtomicBool);
+
+            impl<'a> Drop for TrueOnDrop<'a> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed)
+                }
+            }
+
+            static DONE: AtomicBool = ATOMIC_BOOL_INIT;
+
+            let _ = env_logger::init();
+            trace!("TEST strong_snapshot_is_strong");
+
+            let _guard = TrueOnDrop(&DONE);
+            let columns = vec![85.into(), 86.into()];
+            let mut lh = $new_thread_log::<()>(columns.clone());
+            thread::spawn(move || {
+                let _guard = TrueOnDrop(&DONE);
+                while !DONE.load(Ordering::Relaxed) {
+                    lh.append(85.into(), &(), &[]);
+                    thread::yield_now();
+                    lh.append(86.into(), &(), &[]);
+                }
+            });
+            let mut lh = $new_thread_log::<()>(columns);
+            let mut max_85 = 0;
+            let mut max_86 = 0;
+            for _ in 0..10 {
+                thread::yield_now();
+                lh.strong_snapshot(&[86.into(), 85.into()]);
+                loop {
+                    match lh.get_next() {
+                        Ok((_, locs)) => if locs[0].0 == order::from(85) {
+                            max_85 += 1;
+                        } else if locs[0].0 == order::from(86) {
+                            max_86 += 1;
+                        },
+                        Err(GetRes::Done) => break,
+                        Err(e) => panic!(),
+                    }
+                }
+                assert!(max_85 >= max_86, "{:?} <= {:?}", max_85, max_86);
+            }
+        }
+
         //TODO test append after prefetch but before read
     );
     () => {
-        async_tests!(tcp);
+        // async_tests!(tcp);
         // async_tests!(udp);
         async_tests!(stcp);
         async_tests!(rtcp);
-
         async_tests!(rstcp);
+        async_tests!(r3tcp);
     };
     (tcp) => (
         mod ptcp {
@@ -887,7 +993,7 @@ macro_rules! async_tests {
                 );
                 let _ = lh.append(1_000_02.into(), &[], &[]);
                 let _ = lh.multiappend(&[1_000_02.into(), 1_000_03.into()], &[] , &[]);
-                let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
+                // let _ = lh.dependent_multiappend(&[1_000_02.into()], &[1_000_03.into()], &[] , &[]);
                 let _ = lh.color_append(&[], &mut [1_000_02.into()], &mut [], false);
                 lh.snapshot(1_000_02.into());
                 assert_eq!(lh.get_next(),
@@ -895,9 +1001,9 @@ macro_rules! async_tests {
                 assert_eq!(lh.get_next(),
                     Ok((&[][..], &[OrderIndex(1_000_02.into(), 2.into()),
                         OrderIndex(1_000_03.into(), 1.into())][..])));
-                assert_eq!(lh.get_next(),
-                    Ok((&[][..], &[OrderIndex(1_000_02.into(), 3.into()),
-                        OrderIndex(0.into(), 0.into()), OrderIndex(1_000_03.into(), 2.into())][..])));
+                // assert_eq!(lh.get_next(),
+                //     Ok((&[][..], &[OrderIndex(1_000_02.into(), 3.into()),
+                //         OrderIndex(0.into(), 0.into()), OrderIndex(1_000_03.into(), 2.into())][..])));
                 assert_eq!(lh.get_next(),
                     Ok((&[][..], &[OrderIndex(1_000_02.into(), 4.into())][..])));
                 assert_eq!(lh.get_next(), Err(GetRes::Done));
@@ -1133,6 +1239,96 @@ macro_rules! async_tests {
             }
         }
     };
+    (r3tcp) => {
+        mod r3tcp {
+            use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+            use std::{thread, iter};
+            use std::net::{SocketAddr, Ipv4Addr, IpAddr};
+
+            use mio;
+
+            async_tests!(test new_thread_log);
+
+            const SERVER1_ADDRS: &'static [&'static str] = &["0.0.0.0:13790", "0.0.0.0:13791", "0.0.0.0:13792"];
+            const SERVER2_ADDRS: &'static [&'static str] = &["0.0.0.0:13890", "0.0.0.0:13891", "0.0.0.0:13892"];
+
+            fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                let addrs = iter::once((SERVER1_ADDRS.first().unwrap(), SERVER1_ADDRS.last().unwrap()))
+                    .chain(iter::once((SERVER2_ADDRS.first().unwrap(), SERVER2_ADDRS.last().unwrap())))
+                    .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+                LogHandle::replicated_with_servers(addrs)
+                    .chains(interesting_chains)
+                    .fetch_boring_multis()
+                    .build()
+            }
+
+
+            fn start_tcp_servers()
+            {
+                static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
+                static SERVER_STARTING: AtomicUsize = ATOMIC_USIZE_INIT;
+
+                if SERVER_STARTING.swap(2, Ordering::SeqCst) == 0 {
+
+                    let local_host = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+                    let server1s = [
+                        ("0.0.0.0:13790".parse().unwrap(), None, Some(local_host)),
+                        ("0.0.0.0:13791".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13790))),
+                            Some(local_host)),
+                        ("0.0.0.0:13792".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13791))),
+                            None),
+                    ];
+
+                    let server2s = [
+                        ("0.0.0.0:13890".parse().unwrap(), None, Some(local_host)),
+                        ("0.0.0.0:13891".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13890))),
+                            Some(local_host)),
+                        ("0.0.0.0:13892".parse().unwrap(),
+                            Some(SocketAddr::from((local_host, 13891))),
+                            None),
+                    ];
+
+                    for &(addr, prev, next) in server1s.iter() {
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        let acceptor = acceptor.unwrap();
+                        thread::spawn(move || {
+                            // trace!("starting replica server {:?}", (0, i));
+                            ::servers2::tcp::run_with_replication(
+                                acceptor, 0, 2,
+                                prev,
+                                next,
+                                3,
+                                &SERVERS_READY
+                            )
+                        });
+                    }
+
+                    for &(addr, prev, next) in server2s.iter() {
+                        let acceptor = mio::tcp::TcpListener::bind(&addr);
+                        let acceptor = acceptor.unwrap();
+                        thread::spawn(move || {
+                            // trace!("starting replica server {:?}", (1, i));
+                            ::servers2::tcp::run_with_replication(
+                                acceptor, 1, 2,
+                                prev,
+                                next,
+                                3,
+                                &SERVERS_READY
+                            )
+                        });
+                    }
+                }
+
+                while SERVERS_READY.load(Ordering::Acquire) < SERVER1_ADDRS.len() + SERVER2_ADDRS.len() {}
+            }
+        }
+    };
     (rtcp) => {
         mod rtcp {
             use std::sync::{Arc, Mutex};
@@ -1159,16 +1355,15 @@ macro_rules! async_tests {
                         const addr_str1: &'static str = "127.0.0.1:13395";
                         const addr_str2: &'static str = "127.0.0.1:13396";
                         let addrs: (SocketAddr, SocketAddr) = (addr_str1.parse().unwrap(), addr_str2.parse().unwrap());
-                        let mut event_loop = mio::Poll::new().unwrap();
                         trace!("RTCP make store");
-                        let (store, to_store) = AsyncTcpStore::replicated_tcp(
-                            None::<SocketAddr>,
+                        let (store, to_store) = AsyncTcpStore::replicated_new_tcp(
+                            ::fuzzy_log_util::socket_addr::Ipv4SocketAddr::random(),
                             ::std::iter::once::<(SocketAddr, SocketAddr)>(addrs),
-                            client, &mut event_loop
+                            client,
                         ).expect("");
                         *tsm.lock().unwrap() = Some(to_store);
                         trace!("RTCP store setup");
-                        store.run(event_loop)
+                        store.run()
                     });
                     let to_store;
                     loop {
@@ -1190,123 +1385,80 @@ macro_rules! async_tests {
 
                 static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
                 let local_host = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-                for i in 0..addr_strs.len() {
-                    let prev_server: Option<SocketAddr> =
-                        if i > 0 { Some(addr_strs[i-1]) } else { None }
-                        .map(|s| s.parse().unwrap());
-                    let prev_server = prev_server.map(|mut s| {s.set_ip(local_host); s});
-                    let next_server: Option<SocketAddr> = addr_strs.get(i+1)
-                        .map(|s| s.parse().unwrap());
-                    let next_server = next_server.map(|mut s| {s.set_ip(local_host); s});
-                    let next_server = next_server.map(|s| s.ip());
-                    let addr = addr_strs[i].parse().unwrap();
-                    let acceptor = mio::tcp::TcpListener::bind(&addr);
-                    if let Ok(acceptor) = acceptor {
+
+                let head_acceptor = mio::tcp::TcpListener::bind(
+                    &addr_strs[0].parse().unwrap()
+                );
+
+                match head_acceptor {
+                    Err(e) => trace!("head server error {:?} @ {}", e, addr_strs[0]),
+                    Ok(head) => {
                         thread::spawn(move || {
-                            trace!("starting replica server {}", i);
-                            ::servers2::tcp::run_with_replication(acceptor, 0, 1,
-                                prev_server, next_server,
-                                2, &SERVERS_READY)
+                            trace!("starting replica server head");
+                            ::servers2::tcp::run_with_replication(
+                                head, 0, 1,
+                                None,
+                                Some(local_host),
+                                2,
+                                &SERVERS_READY
+                            );
                         });
-                    }
-                    else {
-                        trace!("server already started @ {}", addr_strs[i]);
-                    }
+                    },
+
                 }
+
+                let tail_acceptor = mio::tcp::TcpListener::bind(
+                    &addr_strs[1].parse().unwrap()
+                );
+
+                match tail_acceptor {
+                    Err(e) => trace!("tail server error {:?} @ {}", e, addr_strs[0]),
+                    Ok(tail) => {
+                        thread::spawn(move || {
+                            let mut prev_addr: SocketAddr = addr_strs[0].parse().unwrap();
+                            prev_addr.set_ip(local_host);
+                            trace!("starting replica server tail");
+                            ::servers2::tcp::run_with_replication(
+                                tail, 0, 1,
+                                Some(prev_addr),
+                                None,
+                                2,
+                                &SERVERS_READY
+                            );
+                        });
+                    },
+
+                }
+
+                // for i in 0..addr_strs.len() {
+                //     let prev_server: Option<SocketAddr> =
+                //         if i > 0 { Some(addr_strs[i-1]) } else { None }
+                //         .map(|s| s.parse().unwrap());
+                //     let prev_server = prev_server.map(|mut s| {s.set_ip(local_host); s});
+                //     let next_server: Option<SocketAddr> = addr_strs.get(i+1)
+                //         .map(|s| s.parse().unwrap());
+                //     let next_server = next_server.map(|mut s| {s.set_ip(local_host); s});
+                //     let next_server = next_server.map(|s| s.ip());
+                //     let addr = addr_strs[i].parse().unwrap();
+                //     let acceptor = mio::tcp::TcpListener::bind(&addr);
+                //     if let Ok(acceptor) = acceptor {
+                //         thread::spawn(move || {
+                //             trace!("starting replica server {}", i);
+                //             ::servers2::tcp::run_with_replication(acceptor, 0, 1,
+                //                 prev_server, next_server,
+                //                 2, &SERVERS_READY)
+                //         });
+                //     }
+                //     else {
+                //         trace!("server already started @ {}", addr_strs[i]);
+                //     }
+                // }
 
                 while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() {}
                 thread::sleep(Duration::from_millis(100));
             }
         }
     };
-    (udp) => (
-        mod udp {
-            use std::sync::{Arc, Mutex};
-            use std::thread;
-            use async::store::AsyncTcpStore;
-            use std::sync::mpsc;
-            use std::mem;
-
-            use mio;
-
-            async_tests!(test new_thread_log);
-
-            //TODO make UDP server multi server aware
-            //#[allow(non_upper_case_globals)]
-            //const lock_str: &'static str = "0.0.0.0:13393";
-            //#[allow(non_upper_case_globals)]
-            //const addr_strs: &'static [&'static str] = &["0.0.0.0:13394", "0.0.0.0:13395"];
-            #[allow(non_upper_case_globals)]
-            const addr_str: &'static str = "0.0.0.0:13393";
-
-            fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
-                use std::iter;
-                start_udp_servers();
-
-                let to_store_m = Arc::new(Mutex::new(None));
-                let tsm = to_store_m.clone();
-                let (to_log, from_outside) = mpsc::channel();
-                let client = to_log.clone();
-                let (ready_reads_s, ready_reads_r) = mpsc::channel();
-                let (finished_writes_s, finished_writes_r) = mpsc::channel();
-                thread::spawn(move || {
-                    let mut event_loop = mio::Poll::new().unwrap();
-                    let (store, to_store) = AsyncTcpStore::udp(addr_str.parse().unwrap(),
-                        iter::once(addr_str).map(|s| s.parse().unwrap()),
-                        client, &mut event_loop).expect("");
-                    *tsm.lock().unwrap() = Some(to_store);
-                    store.run(event_loop);
-                });
-                let to_store;
-                loop {
-                    let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
-                    if let Some(s) = ts {
-                        to_store = s;
-                        break
-                    }
-                }
-                thread::spawn(move || {
-                    let log = ThreadLog::new(to_store, from_outside, ready_reads_s, finished_writes_s,
-                        interesting_chains.into_iter());
-                    log.run()
-                });
-
-                LogHandle::new(to_log, ready_reads_r, finished_writes_r)
-            }
-
-
-            fn start_udp_servers()
-            {
-                use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
-                use std::thread;
-
-                use servers::udp::Server;
-
-                static SERVERS_READY: AtomicUsize = ATOMIC_USIZE_INIT;
-
-                {
-                    let handle = thread::spawn(move || {
-
-                        let addr = addr_str.parse().expect("invalid inet address");
-                        //let mut event_loop = EventLoop::new().unwrap();
-                        let server = Server::new(&addr);
-                        if let Ok(mut server) = server {
-                            trace!("starting server");
-                            //event_loop.run(&mut server).expect("server should never stop");
-                            server.run(&SERVERS_READY)
-                        }
-                        trace!("server already started");
-                        return;
-                    });
-                    mem::forget(handle);
-                }
-
-                //while SERVERS_READY.load(Ordering::Acquire) < addr_strs.len() + 1 {}
-                while SERVERS_READY.load(Ordering::Acquire) < 1 {}
-                trace!("server started, client starting");
-            }
-        }
-    );
 }
 
 async_tests!();

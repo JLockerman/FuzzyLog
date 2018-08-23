@@ -28,7 +28,7 @@ impl<V> VecDequeMap<V> {
     pub fn push_back(&mut self, val: V) -> u64 {
         let key = self.data.len();
         self.data.push_back(Some(val));
-        key as u64
+        self.start + key as u64
     }
 
     pub fn pop_front(&mut self) -> Option<V> {
@@ -46,10 +46,16 @@ impl<V> VecDequeMap<V> {
             let index = (key - self.start) as usize;
             if index >= self.data.len() {
                 let additional = (index - self.data.len()) + 1;
-                self.data.reserve_exact(additional);
+                if index >= self.data.capacity() {
+                    debug_assert!(self.data.get(index).is_none());
+                    let additional = (index - self.data.capacity()) + 1;
+                    self.data.reserve(additional);
+                    debug_assert!(self.data.get(index).is_none());
+                }
                 self.data.extend((0..additional).map(|_| None));
-            }
+                debug_assert!(self.data[index].is_none());
 
+            }
             mem::replace(&mut self.data[index], Some(val))
         } else {
             let additional = (key - self.start) as usize;
@@ -57,18 +63,22 @@ impl<V> VecDequeMap<V> {
             for _ in 0..additional {
                 self.data.push_front(None)
             }
+            self.start = key;
 
             mem::replace(&mut self.data[0], Some(val))
         }
     }
 
     pub fn get(&self, key: u64) -> Option<&V> {
-        if key < self.start || self.data.is_empty() {
+        if key < self.start {
             return None
         }
 
         let index = (key - self.start) as usize;
-        self.data[index].as_ref()
+        match self.data.get(index) {
+            None => None,
+            Some(v) => v.as_ref()
+        }
     }
 
     pub fn get_mut(&mut self, key: u64) -> Option<&mut V> {
@@ -77,7 +87,10 @@ impl<V> VecDequeMap<V> {
         }
 
         let index = (key - self.start) as usize;
-        self.data[index].as_mut()
+        match self.data.get_mut(index) {
+            None => None,
+            Some(v) => v.as_mut()
+        }
     }
 
     pub fn front(&self) -> Option<&V> {
@@ -129,8 +142,10 @@ impl<A> IndexMut<u64> for VecDequeMap<A> {
 impl<V: fmt::Debug> fmt::Debug for VecDequeMap<V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map()
-        .entries(self.data.iter().enumerate().map(|(i, v)|
-            ((i as u64 + self.start), v.as_ref().unwrap())))
+        .entries(self.data.iter().enumerate().filter_map(|(i, v)| match v {
+            &None => None,
+            &Some(ref v) => Some(((i as u64 + self.start), v)),
+        }))
         .finish()
     }
 }
@@ -202,6 +217,21 @@ mod test {
         assert!(m.is_empty());
     }
 
+    #[test]
+    fn big_map() {
+        //bad insert key: 512, start: 63, old_len: 449, new_len: 450, index: 449
+        let mut m = VecDequeMap::new();
+        for i in 0..512 {
+            assert_eq!(m.insert(i, i), None);
+        }
+        for i in 0..63 {
+            assert_eq!(m.pop_front(), Some(i));
+        }
+        assert_eq!(m.start_index(), 63);
+        assert_eq!(m.push_index(), 512);
+        assert_eq!(m.insert(512, 512), None);
+    }
+
     mod from_vec_map {
         //from contain-rs/vec-map
         use super::super::VecDequeMap;
@@ -249,5 +279,16 @@ mod test {
 
             map[4];
         }
+    }
+
+    #[test]
+    fn test_insert() {
+        let mut m = VecDequeMap::new();
+        assert_eq!(m.insert(2, 2), None);
+        assert_eq!(m.insert(2, 3), Some(2));
+        assert_eq!(m.insert(2, 4), Some(3));
+        assert_eq!(m.insert(1, 1), None);
+        assert_eq!(m.insert(2, 5), Some(4));
+        assert_eq!(m.insert(1, 2), Some(1));
     }
 }

@@ -8,6 +8,8 @@
 extern crate rustc_serialize;
 extern crate uuid;
 
+#[cfg(test)] extern crate byteorder;
+
 
 use std::fmt;
 use std::mem;
@@ -27,39 +29,36 @@ use self::EntryFlag::Flag;
 pub mod buffer;
 pub mod buffer2;
 pub mod storeables;
+pub mod double_buffer;
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeBitAnd(u32), NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeBitAnd(u64), NewtypeAdd(u64), NewtypeSub(u64), NewtypeMul(u64), NewtypeRem(u64))]
     #[allow(non_camel_case_types)]
-    pub struct order(u32);
+    pub struct order(u64);
 }
 
 custom_derive! {
-    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u32), NewtypeSub(u32), NewtypeMul(u32), NewtypeRem(u32))]
+    #[derive(Debug, Hash, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Default, RustcDecodable, RustcEncodable, NewtypeFrom, NewtypeAdd(u64), NewtypeSub(u64), NewtypeMul(u64), NewtypeRem(u64))]
     #[allow(non_camel_case_types)]
-    pub struct entry(u32);
-}
-
-pub fn order_index_to_u64(o: OrderIndex) -> u64 {
-    let hig: u32 = o.0.into();
-    let low: u32 = o.1.into();
-    let hig = (hig as u64) << 32;
-    let low = low as u64;
-    hig | low
-}
-
-pub fn u64_to_order_index(u: u64) -> OrderIndex {
-    let ord = (u & 0xFFFFFFFF00000000) >> 32;
-    let ent = u & 0x00000000FFFFFFFF;
-    let ord: u32 = ord as u32;
-    let ent: u32 = ent as u32;
-    OrderIndex(ord.into(), ent.into())
+    pub struct entry(u64);
 }
 
 //pub type OrderIndex = (order, entry);
 #[repr(C)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone, Hash, Default)]
 pub struct OrderIndex(pub order, pub entry);
+
+impl From<(u64, u64)> for OrderIndex {
+    fn from((o, e): (u64, u64)) -> Self {
+        OrderIndex(o.into(), e.into())
+    }
+}
+
+impl From<(order, entry)> for OrderIndex {
+    fn from((o, e): (order, entry)) -> Self {
+        OrderIndex(o, e)
+    }
+}
 
 ///////////////////////////////////////
 ///////////////////////////////////////
@@ -93,13 +92,19 @@ pub mod EntryKind {
             const Sentinel = 0x6,
             const Skeens2ToReplica = 0x8,
 
-            const GC = 0x10,
-
             const SingleToReplica = Data.bits | ToReplica.bits,
             const MultiputToReplica = Multiput.bits | ToReplica.bits,
             const SentinelToReplica = Sentinel.bits | ToReplica.bits,
 
-            const ToReplica = 0x80,
+            const ToReplica = 0x10,
+
+            const FenceClient = 0x20,
+            const UpdateRecovery = 0x30,
+            const CheckSkeens1 = 0x40,
+            const GC = 0x50,
+
+            const Snapshot = 0x60,
+            const SnapshotToReplica = 0x70,
         }
     }
 
@@ -111,6 +116,7 @@ pub mod EntryKind {
         Sentinel,
         Read,
         GC,
+        Snapshot,
     }
 
     impl EntryLayout {
@@ -122,6 +128,7 @@ pub mod EntryKind {
                 &EntryLayout::Sentinel => Sentinel,
                 &EntryLayout::Read => Read,
                 &EntryLayout::GC => GC,
+                &EntryLayout::Snapshot => Snapshot,
             }
         }
 
@@ -142,6 +149,7 @@ pub mod EntryKind {
                 Lock => EntryLayout::Lock,
                 Read => EntryLayout::Read,
                 GC => EntryLayout::GC,
+                Snapshot => EntryLayout::Snapshot,
                 Invalid => panic!("Empty Layout"),
                 _ => unreachable!("no layout {:x}", self.bits()),
             }
@@ -156,12 +164,12 @@ pub mod EntryFlag {
         flags Flag: u8 {
             const Nothing = 0x0,
             const ReadSuccess = 0x1,
-            const NewMultiPut = 0x2,
+            const NewMultiPut = 0x2, //TODO this flag should always be on, remove?
             const Skeens1Queued = 0x4,
             const TakeLock = 0x8,
             const Unlock = 0x10,
             const NoRemote = 0x20,
-            const LockServer = 0x40,
+            const DirectWrite = 0x40,
             const SnapshotAndFetch = 0x80,
         }
     }
@@ -193,6 +201,7 @@ define_packet!{
             loc: OrderIndex,
             deps: [OrderIndex | num_deps],
             data: [u8 | data_bytes],
+            timestamp: u64,
         },
         Multi: EntryKind::Multiput => {
             id: Uuid,
@@ -257,11 +266,63 @@ define_packet!{
             loc: OrderIndex,
         },
 
+
         GC: EntryKind::GC => {
             id: Uuid,
             flags: EntryFlag::Flag,
             cols: u16,
             locs: [OrderIndex | cols],
+        },
+        FenceClient: EntryKind::FenceClient => {
+            fencing_write: Uuid,
+            client_to_fence: Uuid,
+            fencing_client: Uuid,
+        },
+
+        /*?
+        TakeOverRecovery: EntryKind::FenceClient => {
+            fencing_write: Uuid,
+            flags: EntryFlag,
+            old_recoverer: Uuid,
+            new_recoverer: Uuid,
+        }
+        */
+
+        UpdateRecovery: EntryKind::UpdateRecovery => {
+            old_recoverer: Uuid,
+            write_id: Uuid,
+            flags: EntryFlag::Flag,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+        },
+
+        CheckSkeens1: EntryKind::CheckSkeens1 => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u16,
+            dependency_bytes: u16,
+            loc: OrderIndex,
+        },
+
+        Snapshot: EntryKind::Snapshot => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+        },
+        SnapshotToReplica: EntryKind::SnapshotToReplica => {
+            id: Uuid,
+            flags: EntryFlag::Flag,
+            data_bytes: u32,
+            num_deps: u16,
+            cols: u16,
+            lock: u64,
+            locs: [OrderIndex | cols],
+            queue_nums: [u64 | cols],
         },
     }
 }
@@ -290,8 +351,15 @@ impl<'a> Packet::Ref<'a> {
             | Single{flags, ..} | SingleToReplica{flags, ..}
             | Multi{flags, ..} | MultiToReplica{flags, ..}
             | Senti{flags, ..} | SentiToReplica{flags, ..}
-            | GC{flags, ..} =>
+            | GC{flags, ..}
+            | UpdateRecovery{flags, ..} | CheckSkeens1{flags, ..}
+            | Snapshot{flags, ..} | SnapshotToReplica{flags, ..} =>
                 flags,
+
+            FenceClient{..} => {
+                static NO_FLAG: EntryFlag::Flag = EntryFlag::Nothing;
+                &NO_FLAG
+            },
 
             Skeens2ToReplica{..} => unreachable!(),
         }
@@ -309,6 +377,11 @@ impl<'a> Packet::Ref<'a> {
             SentiToReplica{..} => EntryKind::SentinelToReplica,
             Skeens2ToReplica{..} => EntryKind::Skeens2ToReplica,
             GC{..} => EntryKind::GC,
+            UpdateRecovery{..} => EntryKind::UpdateRecovery,
+            FenceClient{..} => EntryKind::FenceClient,
+            CheckSkeens1{..} => EntryKind::CheckSkeens1,
+            Snapshot{..} => EntryKind::Snapshot,
+            SnapshotToReplica{..} => EntryKind::SnapshotToReplica,
         }
     }
 
@@ -323,19 +396,32 @@ impl<'a> Packet::Ref<'a> {
             | SingleToReplica{id, ..}
             | MultiToReplica{id, ..} | SentiToReplica{id, ..}
             | Skeens2ToReplica{id, ..}
-            | GC{id, ..} => id,
+            | GC{id, ..}
+            | CheckSkeens1{id, ..} => id,
+
+            UpdateRecovery{write_id, ..} => write_id,
+            FenceClient{fencing_write, ..} => fencing_write,
+
+            Snapshot{id, ..} | SnapshotToReplica{id, ..} => id
         }
     }
 
     pub fn locs(self) -> &'a [OrderIndex] {
         use self::Packet::Ref::*;
         match self {
-            Read{loc, ..} | Single{loc, ..} | SingleToReplica{loc, ..} | Skeens2ToReplica{loc, ..} => unsafe {
+            Read{loc, ..} | Single{loc, ..} | SingleToReplica{loc, ..}
+            | Skeens2ToReplica{loc, ..} | CheckSkeens1{loc, ..} => unsafe {
                 slice::from_raw_parts(loc, 1)
             },
+
             Multi{locs, ..} | Senti{locs, ..}
             | MultiToReplica{locs, ..} | SentiToReplica{locs, ..}
-            | GC{locs, ..} => locs,
+            | GC{locs, ..}
+            | UpdateRecovery{locs, ..}
+            | Snapshot{locs, ..}
+            | SnapshotToReplica{locs, ..} => locs,
+
+            FenceClient{..} => unreachable!(),
         }
     }
 
@@ -349,12 +435,15 @@ impl<'a> Packet::Ref<'a> {
                 )
             },
 
-            MultiToReplica{locs, queue_nums, ..} | SentiToReplica{locs, queue_nums, ..}  => {
+            MultiToReplica{locs, queue_nums, ..} | SentiToReplica{locs, queue_nums, ..}
+            | SnapshotToReplica{locs, queue_nums, ..}  => {
                 locs.iter().zip(queue_nums.iter())
             },
 
             Read{..} | Single{..} | Multi{..} | Senti{..} | Skeens2ToReplica{..}
-            | GC{..} => unreachable!(),
+            | GC{..}
+            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..}
+            | Snapshot{..}  => unreachable!(),
         }
     }
 
@@ -365,7 +454,10 @@ impl<'a> Packet::Ref<'a> {
             | MultiToReplica{data, ..} | SingleToReplica{data, ..} => data,
 
             Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
-            | GC{..} => unreachable!(),
+            | GC{..}
+            | UpdateRecovery{..} | FenceClient{..}
+            | CheckSkeens1{..}
+            | Snapshot{..} | SnapshotToReplica{..} => unreachable!(),
         }
     }
 
@@ -390,7 +482,9 @@ impl<'a> Packet::Ref<'a> {
             s @ Senti{..} => s.len(),
 
             Read{..} | Single{..} | SingleToReplica{..} | Skeens2ToReplica{..}
-            | GC{..} => unreachable!(),
+            | GC{..}
+            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..}
+            |Snapshot{..} | SnapshotToReplica{..} => unreachable!(),
         }
     }
 
@@ -400,10 +494,15 @@ impl<'a> Packet::Ref<'a> {
             Multi{lock, ..} | Senti{lock, ..}
             | MultiToReplica{lock, ..}
             | SentiToReplica{lock, ..}
-            | Skeens2ToReplica{lock, ..} => *lock,
+            | Skeens2ToReplica{lock, ..}
+            | UpdateRecovery{lock, ..}
+            | Snapshot{lock, ..} | SnapshotToReplica{lock, ..}  => *lock,
+            SingleToReplica{timestamp, ..}| Single{timestamp, ..} => *timestamp,
 
-            Read{..} | Single{..} | SingleToReplica{..}
-            | GC{..} => unreachable!(),
+            Read{..} => 0,
+
+            GC{..}
+            | FenceClient{..} | CheckSkeens1{..}  => unreachable!(),
         }
     }
 
@@ -412,7 +511,9 @@ impl<'a> Packet::Ref<'a> {
         use self::Packet::Ref::*;
         match self {
             Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
-            | GC{..} => unreachable!(),
+            | GC{..}
+            | UpdateRecovery{..} | FenceClient{..} | CheckSkeens1{..}
+            | Snapshot{..} | SnapshotToReplica{..} => unreachable!(),
 
             SingleToReplica{deps, data, ..}
             | MultiToReplica{deps, data, ..}
@@ -430,7 +531,11 @@ impl<'a> Packet::Ref<'a> {
             Single{deps, ..} | Multi{deps, ..} | Senti{deps, ..}
             | SingleToReplica{deps, ..} | MultiToReplica{deps, ..} | SentiToReplica{deps, ..} =>
                 deps,
-            Read{..} | Skeens2ToReplica{..}| GC{..} => unreachable!(),
+
+            Read{..} | Skeens2ToReplica{..}| GC{..} | UpdateRecovery{..} | FenceClient{..}
+            |CheckSkeens1{..}
+            | Snapshot{..} | SnapshotToReplica{..} =>
+                unreachable!(),
         }
     }
 
@@ -439,7 +544,10 @@ impl<'a> Packet::Ref<'a> {
         match self {
             Single{..} | Multi{..} | Senti{..}
             | SingleToReplica{..} | MultiToReplica{..} | SentiToReplica{..}
-            | Skeens2ToReplica{..} | GC{..} =>
+            | Skeens2ToReplica{..} | GC{..}
+            | UpdateRecovery{..} | FenceClient{..}
+            | CheckSkeens1{..}
+            | Snapshot{..} | SnapshotToReplica{..} =>
                 unreachable!(),
             Read{horizon, ..} => *horizon,
         }
@@ -448,11 +556,12 @@ impl<'a> Packet::Ref<'a> {
     pub fn non_replicated_len(self) -> usize {
         use self::Packet::Ref::*;
         match self {
-            c @ Read {..} | c @ Single {..} | c @ Multi{..} | c @Senti{..} | c @ GC{..} =>
-                c.len(),
+            c @ Read {..} | c @ Single {..} | c @ Multi{..} | c @Senti{..} | c @ GC{..}
+            | c @ UpdateRecovery{..} | c @ CheckSkeens1{..}
+            | c @ Snapshot{..} | c @ SnapshotToReplica{..} => c.len(),
 
-            SingleToReplica{ id, flags, loc, deps, data, ..} =>
-                Single{id: id, flags: flags, loc: loc, deps: deps, data: data}.len(),
+            SingleToReplica{ id, flags, loc, deps, data, timestamp, ..} =>
+                Single{id: id, flags: flags, loc: loc, deps: deps, data: data, timestamp}.len(),
 
             MultiToReplica{ id, flags, lock, locs, deps, data, ..} =>
                 Multi{
@@ -465,13 +574,14 @@ impl<'a> Packet::Ref<'a> {
                 }.len(),
 
             Skeens2ToReplica{..} => unreachable!(),
+            FenceClient{..} => unreachable!(),
         }
     }
 
     pub fn single_skeens_to_replication(self, time: &'a u64, queue_num: &'a u64) -> Self {
         use self::Packet::Ref::*;
         match self {
-            Single{id, flags, loc, deps, data} => {
+            Single{id, flags, loc, deps, data, ..} => {
                 SingleToReplica{
                     id: id,
                     flags: flags,
@@ -514,6 +624,41 @@ impl<'a> Packet::Ref<'a> {
                 }
             }
 
+            Snapshot{id, flags, data_bytes, num_deps, lock, locs} => {
+                SnapshotToReplica{
+                    id,
+                    flags,
+                    data_bytes,
+                    num_deps,
+                    lock,
+                    locs,
+                    queue_nums,
+                }
+            }
+
+            o => panic!("tried to turn {:?} into a skeens replica.", o),
+        }
+    }
+
+    pub fn to_unreplica(self) -> Self {
+        use self::Packet::Ref::*;
+        match self {
+            MultiToReplica{id, flags, lock, locs, deps, data, ..} => {
+                Multi{ id, flags, lock, locs, deps, data }
+            }
+
+            SentiToReplica{ id, flags, data_bytes, lock, locs, deps, ..} => {
+                Senti{ id, flags, data_bytes, lock, locs, deps }
+            }
+
+            SnapshotToReplica{id, flags, data_bytes, num_deps, lock, locs, ..} => {
+                Snapshot{ id, flags, data_bytes, num_deps, lock, locs }
+            }
+
+            SingleToReplica{id, flags, loc, deps, data, timestamp, ..} => {
+                Single{id, flags, loc, deps, data, timestamp }
+            },
+
             o => panic!("tried to turn {:?} into a singleton skeens replica.", o),
         }
     }
@@ -521,7 +666,9 @@ impl<'a> Packet::Ref<'a> {
     pub fn queue_nums(self) -> &'a [u64] {
         use self::Packet::Ref::*;
         match self {
-            MultiToReplica{queue_nums, ..} | SentiToReplica{queue_nums, ..} =>
+            MultiToReplica{queue_nums, ..}
+            | SentiToReplica{queue_nums, ..}
+            | SnapshotToReplica{queue_nums, ..} =>
                 queue_nums,
 
             o => panic!("tried to get queue_nums from {:?}.", o),
@@ -532,6 +679,16 @@ impl<'a> Packet::Ref<'a> {
         let mut v = Vec::new();
         self.fill_vec(&mut v);
         v
+    }
+
+    pub fn write_id_and_old_recoverer(self) -> (&'a Uuid, &'a Uuid) {
+        use self::Packet::Ref::*;
+        match self {
+            UpdateRecovery{write_id, old_recoverer, ..} =>
+                (write_id, old_recoverer),
+
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -546,10 +703,14 @@ impl<'a> Packet::Mut<'a> {
             | &mut SingleToReplica{ref mut flags, ..}
             | &mut MultiToReplica{ref mut flags, ..}
             | &mut SentiToReplica{ref mut flags, ..}
-            | &mut GC{ref mut flags, ..} =>
+            | &mut GC{ref mut flags, ..}
+            | &mut UpdateRecovery{ref mut flags, ..}
+            | &mut CheckSkeens1{ref mut flags, ..}
+            | &mut Snapshot{ref mut flags, ..}
+            | &mut SnapshotToReplica{ref mut flags, ..} =>
                 &mut **flags,
 
-            &mut Skeens2ToReplica{..} => unreachable!(),
+            &mut Skeens2ToReplica{..} | &mut FenceClient{..} => unreachable!(),
         }
     }
 
@@ -563,10 +724,14 @@ impl<'a> Packet::Mut<'a> {
             | &mut SingleToReplica{ref mut flags, ..}
             | &mut MultiToReplica{ref mut flags, ..}
             | &mut SentiToReplica{ref mut flags, ..}
-            | &mut GC{ref mut flags, ..} =>
+            | &mut GC{ref mut flags, ..}
+            | &mut UpdateRecovery{ref mut flags, ..}
+            | &mut CheckSkeens1{ref mut flags, ..}
+            | &mut Snapshot{ref mut flags, ..}
+            | &mut SnapshotToReplica{ref mut flags, ..} =>
                 &mut **flags,
 
-            &mut Skeens2ToReplica{..} => unreachable!(),
+            &mut Skeens2ToReplica{..} | &mut FenceClient{..} => unreachable!(),
         }
     }
 
@@ -576,7 +741,8 @@ impl<'a> Packet::Mut<'a> {
             &mut Read{ref mut loc, ..}
             | &mut Single{ref mut loc, ..}
             | &mut SingleToReplica{ref mut loc, ..}
-            | &mut Skeens2ToReplica{ref mut loc, ..} => unsafe {
+            | &mut Skeens2ToReplica{ref mut loc, ..}
+            | &mut CheckSkeens1{ref mut loc, ..} => unsafe {
                 slice::from_raw_parts_mut(&mut **loc, 1)
             },
 
@@ -584,7 +750,12 @@ impl<'a> Packet::Mut<'a> {
             | &mut Senti{ref mut locs, ..}
             | &mut MultiToReplica{ref mut locs, ..}
             | &mut SentiToReplica{ref mut locs, ..}
-            | &mut GC{ref mut locs, ..} => &mut *locs,
+            | &mut GC{ref mut locs, ..}
+            | &mut UpdateRecovery{ref mut locs, ..}
+            | &mut Snapshot{ref mut locs, ..}
+            | &mut SnapshotToReplica{ref mut locs, ..} => &mut *locs,
+
+            &mut FenceClient{..} => unreachable!(),
         }
     }
 
@@ -594,11 +765,26 @@ impl<'a> Packet::Mut<'a> {
             &mut Multi{ref mut lock, ..} | &mut Senti{ref mut lock, ..}
             | &mut Skeens2ToReplica {ref mut lock, .. } => &mut *lock,
 
-            &mut MultiToReplica{ref mut lock, ..} | &mut SentiToReplica{ref mut lock, ..} =>
-                &mut *lock,
+            &mut MultiToReplica{ref mut lock, ..} | &mut SentiToReplica{ref mut lock, ..}
+            |&mut UpdateRecovery{ref mut lock, ..} => &mut *lock,
 
-            &mut Read{..} | &mut Single{..} | &mut SingleToReplica{..}
-            | &mut GC{..} => unreachable!(),
+            &mut Snapshot{ref mut lock, ..}
+            | &mut SnapshotToReplica{ref mut lock, ..} => &mut *lock,
+
+            &mut Single{ref mut timestamp, ..} | &mut SingleToReplica{ref mut timestamp, ..} => &mut *timestamp,
+
+            &mut Read{..}
+            | &mut GC{..}
+            | &mut FenceClient{..}
+            | &mut CheckSkeens1{..} => unreachable!(),
+        }
+    }
+
+    pub fn recoverer_is(&mut self, id: Uuid) {
+        use self::Packet::Mut::*;
+        match self {
+            &mut UpdateRecovery{ref mut old_recoverer, ..} => **old_recoverer = id,
+            _ => unreachable!(),
         }
     }
 }
@@ -689,6 +875,14 @@ impl<'a> MutEntry<'a> {
         }
     }
 
+    pub fn to_replicated(&mut self) {
+        unsafe {
+            let mut kind: EntryKind::Kind = mem::transmute::<u8, _>(self.inner[0]);
+            let () = kind.insert(EntryKind::ToReplica);
+            self.inner[0] = mem::transmute::<EntryKind::Kind, u8>(kind);
+        }
+    }
+
     pub fn bytes(&mut self) -> &mut [u8] {
         &mut *self.inner
     }
@@ -728,9 +922,10 @@ impl<'a, V:'a> SingletonBuilder<'a, V> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
         buffer
@@ -743,9 +938,10 @@ impl<'a, V:'a> SingletonBuilder<'a, V> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
     }
@@ -761,9 +957,10 @@ impl<'a, V:'a> SingletonBuilder<'a, [V]> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
         buffer
@@ -776,9 +973,10 @@ impl<'a, V:'a> SingletonBuilder<'a, [V]> {
             EntryContents::Single{
                 id: &Uuid::new_v4(),
                 flags: &EntryFlag::Nothing,
-                loc: &OrderIndex(0.into(), 0.into()),
+                loc: &OrderIndex(0u64.into(), 0u64.into()),
                 deps: deps,
                 data: daya,
+                timestamp: &0, //FIXME
             }
         );
     }
@@ -808,10 +1006,12 @@ pub unsafe fn data_bytes(bytes: &[u8]) -> &[u8] {
     use self::Packet::Ref::*;
     match bytes_as_entry(bytes) {
         Read{..} | Senti{..} | SentiToReplica{..} | Skeens2ToReplica{..}
-        | GC{..} => unreachable!(),
+        | GC{..}
+        | FenceClient{..} | UpdateRecovery{..} | CheckSkeens1{..}
+        | Snapshot{..}  | SnapshotToReplica{..} => unreachable!(),
 
         Single{data, ..} | Multi{data, ..}
-        | SingleToReplica{data, ..} | MultiToReplica{data, ..}=> data,
+        | SingleToReplica{data, ..} | MultiToReplica{data, ..} => data,
     }
 }
 
@@ -852,32 +1052,55 @@ mod test {
     //use std::marker::PhantomData;
 
     //#[test]
-    fn packet_size_check() {
-        let b = Packet::Ref::Single {
-            id: &Uuid::nil(),
-            flags: &EntryFlag::Nothing,
-            loc: &OrderIndex(0.into(), 0.into()),
+    // fn packet_size_check() {
+    //     let b = Packet::Ref::Single {
+    //         id: &Uuid::nil(),
+    //         flags: &EntryFlag::Nothing,
+    //         loc: &OrderIndex(0u64.into(), 0u64.into()),
+    //         deps: &[],
+    //         data: &[],
+    //     }.len();
+    //     assert!(
+    //         Packet::min_len() >= b,
+    //         "{} >= {}",
+    //         Packet::min_len(), b,
+    //     );
+    //     /*let b = Packet::Ref::Multi {
+    //         id: &Uuid::nil(),
+    //         flags: &EntryFlag::Nothing,
+    //         lock: &0,
+    //         locs: &[],
+    //         deps: &[],
+    //         data: &[],
+    //     }.len();
+    //     assert!(
+    //         Packet::min_len() >= b,
+    //         "{} >= {}",
+    //         Packet::min_len(), b,
+    //     );*/
+    // }
+
+    #[test]
+    fn round_trip() {
+        let id = Uuid::new_v4();
+        let flag = EntryFlag::ReadSuccess;
+        let data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 99, 10];
+        // let deps = [OrderIndex(1u64.into(), 1u64.into()), OrderIndex(2u64.into(), 1u64.into()), OrderIndex(3u64.into(), 3u64.into())];
+
+        let timestamp = 0xdeadbeef;
+        let contents = EntryContents::Single {
+            id: &id,
+            flags: &flag,
+            timestamp: &timestamp,
             deps: &[],
-            data: &[],
-        }.len();
-        assert!(
-            Packet::min_len() >= b,
-            "{} >= {}",
-            Packet::min_len(), b,
-        );
-        /*let b = Packet::Ref::Multi {
-            id: &Uuid::nil(),
-            flags: &EntryFlag::Nothing,
-            lock: &0,
-            locs: &[],
-            deps: &[],
-            data: &[],
-        }.len();
-        assert!(
-            Packet::min_len() >= b,
-            "{} >= {}",
-            Packet::min_len(), b,
-        );*/
+            loc: &(1u64, 13).into(),
+            data: &data,
+        };
+        let mut bytes = vec![];
+        contents.fill_vec(&mut bytes);
+        assert_eq!(bytes.len(), contents.len());
+        assert_eq!(bytes_as_entry(&bytes), contents);
+        assert_eq!(bytes_as_entry_mut(&mut bytes).as_ref(), contents);
     }
 
     #[test]
@@ -885,9 +1108,9 @@ mod test {
         let id = Uuid::new_v4();
         let flag = EntryFlag::ReadSuccess;
         let data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 99, 10];
-        let deps = [OrderIndex(1.into(), 1.into()), OrderIndex(2.into(), 1.into()), OrderIndex(3.into(), 3.into())];
-        let locs = [OrderIndex(5.into(), 55.into()), OrderIndex(37.into(), 8.into()),
-            OrderIndex(1000000000.into(), 0xffffffff.into())];
+        let deps = [OrderIndex(1u64.into(), 1u64.into()), OrderIndex(2u64.into(), 1u64.into()), OrderIndex(3u64.into(), 3u64.into())];
+        let locs = [OrderIndex(5u64.into(), 55u64.into()), OrderIndex(37u64.into(), 8u64.into()),
+            OrderIndex(1000000000u64.into(), 0xffffffffu64.into())];
         let lock = 0xdeadbeef;
         let mut bytes = Vec::new();
         EntryContents::Multi {
@@ -999,22 +1222,22 @@ mod test {
     #[test]
     fn multiput_entry_convert() {
         use std::fmt::Debug;
-        //test_(1231123, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+        //test_(1231123, &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into())], &[]);
         //test_(3334, &[], &[]);
-        //test_(1231123u64, &[(01.into(), 10.into()), (02.into(), 201.into())], &[]);
+        //test_(1231123u64, &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into())], &[]);
         //test_(3334u64, &[], &[]);
-        //test_(3334u64, &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+        //test_(3334u64, &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into())], &[]);
         //test_((3334u64, 1231123), &[], &[]);
-        //test_((3334u64, 1231123), &[(01.into(), 10.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into()), (02.into(), 201.into())], &[]);
+        //test_((3334u64, 1231123), &[(01u64.into(), 10u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into()), (02u64.into(), 201u64.into())], &[]);
 
-        test_(1231123, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(3334, &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(1231123u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(3334u64, &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_(3334u64, &[OrderIndex(01.into(), 10.into())], &[OrderIndex(02.into(), 9.into()), OrderIndex(201.into(), 0.into()), OrderIndex(02.into(), 57.into()), OrderIndex(201.into(), 0xffffffff.into()), OrderIndex(02.into(), 0xdeadbeef.into()), OrderIndex(201.into(), 2.into()), OrderIndex(02.into(), 6.into()), OrderIndex(201.into(), 201.into())]);
-        test_(3334u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_((3334u64, 1231123), &[], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
-        test_((3334u64, 1231123), &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())], &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]);
+        test_(1231123, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(3334, &[], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(1231123u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(3334u64, &[], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_(3334u64, &[OrderIndex(01u64.into(), 10u64.into())], &[OrderIndex(02u64.into(), 9u64.into()), OrderIndex(201u64.into(), 0u64.into()), OrderIndex(02u64.into(), 57u64.into()), OrderIndex(201u64.into(), 0xffffffffu64.into()), OrderIndex(02u64.into(), 0xdeadbeefu64.into()), OrderIndex(201u64.into(), 2u64.into()), OrderIndex(02u64.into(), 6u64.into()), OrderIndex(201u64.into(), 201u64.into())]);
+        test_(3334u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_((3334u64, 1231123), &[], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
+        test_((3334u64, 1231123), &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())], &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]);
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex], cols: &[OrderIndex]) {
             let id = Uuid::new_v4();
@@ -1034,13 +1257,13 @@ mod test {
     #[test]
     fn data_entry_convert() {
         use std::fmt::Debug;
-        test_(1231123, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())]);
+        test_(1231123, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
         test_(3334, &[]);
-        test_(1231123u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())]);
+        test_(1231123u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
         test_(3334u64, &[]);
-        test_(3334u64, &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())]);
+        test_(3334u64, &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
         test_((3334u64, 1231123), &[]);
-        test_((3334u64, 1231123), &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into()), OrderIndex(02.into(), 201.into())]);
+        test_((3334u64, 1231123), &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into()), OrderIndex(02u64.into(), 201u64.into())]);
 
         fn test_<T: Clone + Debug + Eq>(data: T, deps: &[OrderIndex]) {
             let ent1 = EntryContents::Data(&data, &deps);
@@ -1055,13 +1278,13 @@ mod test {
     fn new_packets_multi() {
         test_(
             &[12, 31,123],
-            &[OrderIndex(01.into(), 10.into()), OrderIndex(02.into(), 201.into())],
-            &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]
+            &[OrderIndex(01u64.into(), 10u64.into()), OrderIndex(02u64.into(), 201u64.into())],
+            &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]
         );
         test_(
             &[33,34],
             &[],
-            &[OrderIndex(32.into(), 0.into()), OrderIndex(402.into(), 5.into())]
+            &[OrderIndex(32u64.into(), 0u64.into()), OrderIndex(402u64.into(), 5u64.into())]
         );
         fn test_(data0: &[u8], deps0: &[OrderIndex], cols0: &[OrderIndex]) {
             let id0 = Uuid::new_v4();

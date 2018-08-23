@@ -309,7 +309,7 @@ macro_rules! atomic_index {
     // };
 // }
 
-
+#[allow(unused_macros)]
 macro_rules! entry {
     ($array:ident, $k:expr, $depth:expr, $constructor:ident) => {
         {
@@ -347,6 +347,7 @@ impl<'a> AppendSlot<Packet<'a>> {
         let storage_size = bytes.len();
         assert_eq!(data_size, storage_size);
         ptr::copy_nonoverlapping::<u8>(bytes.as_ptr(), data_ptr.ptr(), storage_size);
+
         //*trie_entry = data_ptr;
         //let trie_entry: *mut AtomicPtr<u8> =
         //    mem::transmute::<*mut ValEdge, *mut AtomicPtr<u8>>(trie_entry);
@@ -354,7 +355,9 @@ impl<'a> AppendSlot<Packet<'a>> {
         //(*trie_entry).store(data_ptr, Ordering::Release);
         ValEdge::atomic_store(trie_entry, data_ptr, Ordering::Release);
         //Packet::wrap_slice(slice::from_raw_parts(data_ptr, storage_size))
-        data_ptr.to_sized_packet(data_size)
+        let written = data_ptr.to_sized_packet(data_size);
+        debug_assert_eq!(written.contents(), data.contents());
+        written
     }
 
     pub unsafe fn finish_append_with_contents(self, data: EntryContents) {
@@ -613,7 +616,7 @@ impl Trie
     }
 
     #[cfg(FALSE)]
-    fn insert(&mut self, k: u32, v: &[u8]) -> Option<&u8> {
+    fn insert(&mut self, k: u64, v: &[u8]) -> Option<&u8> {
         unsafe {
             let root_index = ((k >> ROOT_SHIFT) & MASK) as usize;
             //assert!(root_index <= 3, "root index: {:?} <= 3", root_index);
@@ -1192,9 +1195,9 @@ pub mod test {
         let mut p = Data(&0u8, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p);
+            Data(&(i as u8), &[OrderIndex(5.into(), (i as u64).into())]).fill_entry(&mut p);
             assert_eq!(p.contents().into_singleton_builder(),
-                Data(&i, &[OrderIndex(5.into(), (i as u32).into())]));
+                Data(&i, &[OrderIndex(5.into(), (i as u64).into())]));
             assert_eq!(m.append(p.entry()), i as u64);
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
@@ -1202,7 +1205,7 @@ pub mod test {
             for j in 0..i + 1 {
                 let r = m.get(j as u64);
                 assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
-                    Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
+                    Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u64).into())])));
             }
 
             for j in i + 1..255 {
@@ -1214,12 +1217,12 @@ pub mod test {
 
     #[test]
     pub fn insert() {
-        let mut p = Data(&0u32, &[OrderIndex(7.into(), 11.into())]).clone_entry();
+        let mut p = Data(&0u64, &[OrderIndex(7.into(), 11.into())]).clone_entry();
         let mut m = Trie::new();
             let mut storage_loc = 0;
         for i in 0..255u8 {
             unsafe {
-                Data(&(i as u32), &[OrderIndex(7.into(), (i as u32).into())])
+                Data(&(i as u64), &[OrderIndex(7.into(), (i as u64).into())])
                     .fill_entry(&mut p);
                 let size = p.entry_size();
                 assert_eq!(storage_loc / 8192, (storage_loc + size as u64) / 8192);
@@ -1238,7 +1241,7 @@ pub mod test {
             for j in 0..i + 1 {
                 let r = m.get(j as u64);
                 assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
-                    Some(Data(&(j as u32), &[OrderIndex(7.into(), (j as u32).into())])));
+                    Some(Data(&(j as u64), &[OrderIndex(7.into(), (j as u64).into())])));
             }
 
             for j in i + 1..255 {
@@ -1293,22 +1296,22 @@ pub mod test {
                 Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&1i64, &[OrderIndex(5.into(), (7 as u32).into())]).fill_entry(&mut p);
+            Data(&1i64, &[OrderIndex(5.into(), (7 as u64).into())]).fill_entry(&mut p);
             slot0.finish_append(p.entry());
             assert_eq!(t.get(0).map(|e| e.contents().into_singleton_builder()),
-                Some(Data(&1i64, &[OrderIndex(5.into(), (7 as u32).into())])));
+                Some(Data(&1i64, &[OrderIndex(5.into(), (7 as u64).into())])));
             assert_eq!(t.get(1).map(|e| e.contents().into_singleton_builder()),
                 Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert!(t.get(2).is_none());
             assert_eq!(t.len(), 3);
-            Data(&-7i64, &[OrderIndex(5.into(), (92 as u32).into())]).fill_entry(&mut p);
+            Data(&-7i64, &[OrderIndex(5.into(), (92 as u64).into())]).fill_entry(&mut p);
             slot2.finish_append(p.entry());
             assert_eq!(t.get(0).map(|e| e.contents().into_singleton_builder()),
-                Some(Data(&1i64, &[OrderIndex(5.into(), (7 as u32).into())])));
+                Some(Data(&1i64, &[OrderIndex(5.into(), (7 as u64).into())])));
             assert_eq!(t.get(1).map(|e| e.contents().into_singleton_builder()),
                 Some(Data(&32i64, &[OrderIndex(5.into(), 6.into())])));
             assert_eq!(t.get(2).map(|e| e.contents().into_singleton_builder()),
-                Some(Data(&-7i64, &[OrderIndex(5.into(), (92 as u32).into())])));
+                Some(Data(&-7i64, &[OrderIndex(5.into(), (92 as u64).into())])));
             assert_eq!(t.len(), 3);
         }
     }
@@ -1319,24 +1322,24 @@ pub mod test {
         let mut m = Trie::new();
         for i in 0..0x18000u64 {
             assert_eq!(m.len(), i);
-            Data(&i, &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p);
+            Data(&i, &[OrderIndex(5.into(), (i as u64).into())]).fill_entry(&mut p);
             assert_eq!(m.append(p.entry()), i);
             //println!("{:#?}", m);
             //println!("{:#?}", i);
             if i > 0 {
                 assert_eq!(m.get(i - 1).map(|e| e.contents().into_singleton_builder()),
-                    Some(Data(&(i - 1), &[OrderIndex(5.into(), ((i-1) as u32).into())])));
+                    Some(Data(&(i - 1), &[OrderIndex(5.into(), ((i-1) as u64).into())])));
             }
             if i >= 3 {
                 assert_eq!(m.get(i - 3).map(|e| e.contents().into_singleton_builder()),
-                    Some(Data(&(i - 3), &[OrderIndex(5.into(), ((i-3) as u32).into())])));
+                    Some(Data(&(i - 3), &[OrderIndex(5.into(), ((i-3) as u64).into())])));
             }
             if i >= 1000 {
                 assert_eq!(m.get(i - 1000).map(|e| e.contents().into_singleton_builder()),
-                    Some(Data(&(i - 1000), &[OrderIndex(5.into(), ((i-1000) as u32).into())])));
+                    Some(Data(&(i - 1000), &[OrderIndex(5.into(), ((i-1000) as u64).into())])));
             }
             assert_eq!(m.get(i).map(|e| e.contents().into_singleton_builder()),
-                Some(Data(&i, &[OrderIndex(5.into(), (i as u32).into())])));
+                Some(Data(&i, &[OrderIndex(5.into(), (i as u64).into())])));
             assert!(m.get(i + 1).is_none());
             assert_eq!(m.len(), i + 1);
         }
@@ -1345,7 +1348,7 @@ pub mod test {
 
         for j in 0..0x18000u64 {
             assert_eq!(m.get(j).map(|e| e.contents().into_singleton_builder()),
-                Some(Data(&j, &[OrderIndex(5.into(), (j as u32).into())])));
+                Some(Data(&j, &[OrderIndex(5.into(), (j as u64).into())])));
         }
 
         assert_eq!(m.len(), 0x18000u64);
@@ -1360,9 +1363,9 @@ pub mod test {
         let mut p = Data(&0u8, &[OrderIndex(5.into(), 6.into())]).clone_entry();
         let mut m = Trie::new();
         for i in 0..255u8 {
-            Data(&(i as u8), &[OrderIndex(5.into(), (i as u32).into())]).fill_entry(&mut p);
+            Data(&(i as u8), &[OrderIndex(5.into(), (i as u64).into())]).fill_entry(&mut p);
             assert_eq!(p.contents().into_singleton_builder(),
-                Data(&i, &[OrderIndex(5.into(), (i as u32).into())]));
+                Data(&i, &[OrderIndex(5.into(), (i as u64).into())]));
             assert_eq!(m.append(p.entry()), i as u64);
             // println!("{:#?}", m);
             // assert_eq!(m.get(&i).unwrap(), &i);
@@ -1370,7 +1373,7 @@ pub mod test {
             for j in 0..i + 1 {
                 let r = m.get(j as u64);
                 assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
-                    Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
+                    Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u64).into())])));
             }
 
             for j in i + 1..255 {
@@ -1389,7 +1392,7 @@ pub mod test {
         for j in 128..255 {
             let r = m.atomic_get(j as u64);
             assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
-                Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
+                Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u64).into())])));
         }
 
         m.delete_free();
@@ -1401,7 +1404,7 @@ pub mod test {
         for j in 128..255 {
             let r = m.atomic_get(j as u64);
             assert_eq!(r.map(|e| e.contents().into_singleton_builder()),
-                Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u32).into())])));
+                Some(Data(&(j as u8), &[OrderIndex(5.into(), (j as u64).into())])));
         }
     }
 

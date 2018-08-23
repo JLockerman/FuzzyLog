@@ -1,0 +1,10 @@
+[package]
+name = "reactor"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+fuzzy_log_util = {path = "../fuzzy_log_util"}
+fuzzy_log_packets = {path = "../fuzzy_log_packets"}
+log = "0.3"
+mio = "0.6.6"

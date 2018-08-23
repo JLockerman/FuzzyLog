@@ -1,0 +1,86 @@
+
+#elapsed Duration { secs: 567, nanos: 860557800 }
+num_appends = [1, 4, 10, 20, 40, 80, 160]
+t1 = [271623, 658478, 1362838, 2548240, 4982693, 9810440, 19752026]
+t4 = [273364, 252747, 476687, 711941, 1207377, 2408472, 4862822]
+t10 = [281215, 250638, 264131, 403338, 655413, 1207597, 2333962]
+avg_regular_latencies = [156576, 148465, 171192, 204823, 235646, 316640, 453450]
+
+=======================================
+=======================================
+=======================================
+=======================================
+
+#Args { servers: ServerAddrs([V4(172.31.15.138:13289), V4(172.31.4.131:13289)]), num_rounds: 10000 }
+t1: 1  274777ns
+t4: 1  272015ns
+t10: 1  271750ns
+r: 1 155251ns
+t1: 4  653553ns
+t4: 4  301615ns
+t10: 4  297641ns
+r: 4 146127ns
+t1: 10  1398009ns
+t4: 10  505195ns
+t10: 10  294681ns
+r: 10 186132ns
+t1: 20  2591003ns
+t4: 20  739090ns
+t10: 20  417361ns
+r: 20 223363ns
+t1: 40  5067497ns
+t4: 40  1245306ns
+t10: 40  751101ns
+r: 40 259871ns
+t1: 80  10088297ns
+t4: 80  2465846ns
+t10: 80  1251402ns
+r: 80 348993ns
+t1: 160  19902211ns
+t4: 160  4924758ns
+t10: 160  2319455ns
+r: 160 462078ns
+#elapsed Duration { secs: 579, nanos: 341479821 }
+num_appends = [1, 4, 10, 20, 40, 80, 160]
+t1 = [274777, 653553, 1398009, 2591003, 5067497, 10088297, 19902211]
+t4 = [272015, 301615, 505195, 739090, 1245306, 2465846, 4924758]
+t10 = [271750, 297641, 294681, 417361, 751101, 1251402, 2319455]
+avg_regular_latencies = [155251, 146127, 186132, 223363, 259871, 348993, 462078]
+
+=======================================
+=======================================
+=======================================
+=======================================
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+t1 = [271623, 658478, 1362838, 2548240, 4982693, 9810440, 19752026]
+t1 = map(lambda x: x/1000, t1)
+
+t4 = [273364, 252747, 476687, 711941, 1207377, 2408472, 4862822]
+t4 = map(lambda x: x/1000, t4)
+
+t10 = [281215, 250638, 264131, 403338, 655413, 1207597, 2333962]
+t10 = map(lambda x: x/1000, t10)
+
+avg_regular_latencies = [156576, 148465, 171192, 204823, 235646, 316640, 453450]
+avg_regular_latencies = map(lambda x: x/1000, avg_regular_latencies)
+
+x_tics = [1, 10, 20, 40, 80, 160]
+
+plt.figure(num=None, figsize=(6, 3), dpi=80, facecolor='w', edgecolor='k')
+#plt.plot(t1, marker="h", linestyle="-", color='lightblue')
+plt.plot(t4, marker="o", linestyle="-", color='darkblue')
+plt.plot(t10, marker="D", linestyle="-", color='blue')
+plt.plot(avg_regular_latencies, marker="x", linestyle="--", color='darkred')
+#plt.yscale('log')
+plt.xticks([0, 1, 2, 3, 4, 5], x_tics)
+plt.ylabel("Latency (microseconds)")
+plt.xlabel("Events Fetched")
+#plt.legend(["1 backpointer", "4 backpointers", "10 backpointer", "direct"], loc=2)
+plt.legend(["4 backpointers", "10 backpointer", "direct"], loc=2)
+pp = PdfPages('a.pdf')
+pp.savefig(bbox_inches='tight')
+pp.close()
+plt.show()

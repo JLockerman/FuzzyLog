@@ -1,0 +1,31 @@
+[package]
+name = "zk_view"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+bincode = "0.8.0"
+mio = "0.6.6"
+serde = "1"
+serde_derive = "1"
+structopt = "0.0.5"
+structopt-derive = "0.0.5"
+zookeeper = {path = ".."}
+reactor = {path = "../../../reactor"}
+
+[dev-dependencies]
+fuzzy_log_server = {path = "../../../fuzzy_log_server"}
+
+[features]
+print_stats = ["zookeeper/print_stats"]
+
+[profile.release]
+opt-level = 3
+# debug = true
+debug = false
+rpath = false
+lto = false
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+# panic = "unwind"

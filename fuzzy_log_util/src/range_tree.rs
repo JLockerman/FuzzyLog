@@ -8,15 +8,24 @@ use std::u64;
 use std::collections::btree_map::Iter;
 use std::collections::btree_map::Entry::Occupied;
 
+use std::rc::Rc;
+
 #[derive(Debug)]
 pub struct RangeTree<V> {
     inner: BTreeMap<Range, V>,
 }
 
-pub trait Mergeable: Sized {
-    fn is_prior_to(&self, other: &Self) -> bool;
-    fn can_merge_with_prior(self, other: &Self) -> Result<Self, Self>;
-    fn can_merge_with_next(self, other: &Self) -> Result<Self, Self>;
+pub trait Mergeable: Sized + Eq {
+    #[allow(unused_variables)]
+    fn can_be_replaced_with(&self, other: &Self) -> bool { true }
+
+    fn can_merge_with_prior(self, other: &Self) -> Result<Self, Self> {
+        if &self == other { Ok(self) } else { Err(self) }
+    }
+
+    fn can_merge_with_next(self, other: &Self) -> Result<Self, Self> {
+        self.can_merge_with_prior(other)
+    }
 }
 
 impl<V> RangeTree<V> {
@@ -28,8 +37,8 @@ impl<V> RangeTree<V> {
         }
     }
 
-    pub fn get(&self, point: u64) -> Option<&V> {
-        self.inner.get(&Range::point(point))
+    pub fn get(&self, point: u64) -> &V {
+        self.inner.get(&Range::point(point)).unwrap()
     }
 
     pub fn iter(&self) -> Iter<Range, V> {
@@ -38,12 +47,17 @@ impl<V> RangeTree<V> {
 }
 
 impl<V: Mergeable + Eq + Clone> RangeTree<V> {
-    fn set_point_as(&mut self, point: u64, new_kind: V) -> bool {
-        let (old_range, old_kind) = remove_from_map(&mut self.inner, Range::point(point));
-        if !old_kind.is_prior_to(&new_kind) {
-            self.inner.insert(old_range, old_kind);
-            return false
-        }
+
+    //FIXME merge logic is wrong for constraints other than equals
+    pub fn set_point_as(&mut self, point: u64, new_kind: V) -> bool {
+        //let (old_range, old_kind) = remove_from_map(&mut self.inner, Range::point(point));
+        let old = remove_from_map_if(
+            &mut self.inner, Range::point(point),
+            |_, old_kind| old_kind != &new_kind && old_kind.can_be_replaced_with(&new_kind)
+        );
+        let (old_range, old_kind) = match old {
+            Some(old) => old, None => return false,
+        };
 
         match old_range.split_at(point) {
             (Some(pre), Some(post)) => {
@@ -81,41 +95,92 @@ impl<V: Mergeable + Eq + Clone> RangeTree<V> {
         true
     }
 
+    //FIXME merge logic is wrong for constraints other than equals
     pub fn set_range_as(&mut self, low: u64, high: u64, new_kind: V) {
         debug_assert!(self.tree_invariant(), "invariant failed");
         let new_range = Range::new(low, high);
-        let (old_range, old_kind) = remove_from_map(&mut self.inner, Range::point(low));
-        assert!(old_range.spans(&new_range));
+        let old = remove_from_map_if(
+            &mut self.inner, Range::point(low),
+            |old_range, old_kind|
+                !(old_range.spans(&new_range) && old_kind == &new_kind)
+                && old_kind.can_be_replaced_with(&new_kind)
+        );
+        let (mut old_range, mut old_kind) = match old {
+            Some(old) => old, None => return,
+        };
+        if old_range.spans(&new_range) {
+            match old_range.remove(&new_range) {
+                (Some(pre), Some(post)) => {
+                    self.inner.insert(new_range, new_kind);
+                    self.inner.insert(pre, old_kind.clone());
+                    self.inner.insert(post, old_kind);
+                },
 
-        match old_range.remove(&new_range) {
-            (Some(pre), Some(post)) => {
-                self.inner.insert(new_range, new_kind);
-                self.inner.insert(pre, old_kind.clone());
-                self.inner.insert(post, old_kind);
-            },
+                (Some(pre), None) => {
+                    self.inner.insert(pre, old_kind);
+                    let (new_range, new_kind) =
+                        try_merge_with_next(&mut self.inner, new_range, new_kind);
+                    self.inner.insert(new_range, new_kind);
+                },
 
-            (Some(pre), None) => {
-                self.inner.insert(pre, old_kind);
-                let (new_range, new_kind) =
-                    try_merge_with_next(&mut self.inner, new_range, new_kind);
-                self.inner.insert(new_range, new_kind);
-            },
+                (None, Some(post)) => {
+                    self.inner.insert(post, old_kind);
+                    let (new_range, new_kind) =
+                        try_merge_with_prior(&mut self.inner, new_range, new_kind);
+                    self.inner.insert(new_range, new_kind);
+                },
 
-            (None, Some(post)) => {
-                self.inner.insert(post, old_kind);
-                let (new_range, new_kind) =
-                    try_merge_with_prior(&mut self.inner, new_range, new_kind);
-                self.inner.insert(new_range, new_kind);
-            },
+                (None, None) => {
+                    let (new_range, new_kind) =
+                        try_merge_with_next(&mut self.inner, new_range, new_kind);
+                    let (new_range, new_kind) =
+                        try_merge_with_prior(&mut self.inner, new_range, new_kind);
+                    self.inner.insert(new_range, new_kind);
+                },
+            }
+        } else {
+            let mut accumulator = Range::point(low);
+            loop {
+                if old_kind == new_kind {
+                    accumulator = accumulator.merge_with(old_range);
+                } else {
+                    match old_range.trim_out(&new_range) {
+                        (None, range, None) => accumulator = accumulator.merge_with(range),
+                        (Some(prior), range, None) => {
+                            self.inner.insert(prior, old_kind);
+                            accumulator = accumulator.merge_with(range)
+                        },
+                        (prior, range, Some(post)) => {
+                            if let Some(prior) = prior {
+                                self.inner.insert(prior, old_kind.clone());
+                            }
+                            accumulator = accumulator.merge_with(range);
+                            self.inner.insert(post, old_kind);
+                            break
+                        },
+                    }
+                }
 
-            (None, None) => {
-                let (new_range, new_kind) =
-                    try_merge_with_next(&mut self.inner, new_range, new_kind);
-                let (new_range, new_kind) =
-                    try_merge_with_prior(&mut self.inner, new_range, new_kind);
-                self.inner.insert(new_range, new_kind);
-            },
+                if accumulator.last() >= high {
+                    break
+                }
+
+                let (or, ok) = remove_from_map(
+                    &mut self.inner, Range::point(accumulator.last() + 1)
+                );
+                old_range = or;
+                old_kind = ok;
+            }
+
+            let new_range = accumulator;
+            let (new_range, new_kind) =
+                try_merge_with_next(&mut self.inner, new_range, new_kind);
+            let (new_range, new_kind) =
+                try_merge_with_prior(&mut self.inner, new_range, new_kind);
+            self.inner.insert(new_range, new_kind);
         }
+
+
         debug_assert!(self.tree_invariant(), "invariant failed");
     }
 
@@ -149,6 +214,21 @@ fn remove_from_map<V>(map: &mut BTreeMap<Range, V>, key: Range) -> (Range, V) {
         Occupied(o) => Some(o.remove_entry()),
         _ => None,
     }.unwrap_or_else(|| panic!("Tried to remove bad range {:?}", key))
+}
+
+fn remove_from_map_if<V, If>(map: &mut BTreeMap<Range, V>, key: Range, f: If)
+-> Option<(Range, V)>
+where If: FnOnce(&Range, &V) -> bool {
+    match map.entry(key.clone()) {
+        Occupied(o) => {
+            if f(o.key(), o.get()) {
+                Some(o.remove_entry())
+            } else {
+                None
+            }
+        },
+        _ => panic!("Tried to remove bad range {:?}", key),
+    }
 }
 
 fn try_merge_with_next<V: Mergeable>(
@@ -222,6 +302,46 @@ impl Range {
         Range(first, last)
     }
 
+    fn merge_with(self, other: Range) -> Range {
+        let Range(my_first, my_last) = self;
+        let Range(other_first, other_last) = other;
+
+        match (my_first.cmp(&other_first), my_last.cmp(&other_last)) {
+            // [{a ... b}]
+            (Equal, Equal) => Range(my_first, my_last),
+
+            // [a ... {b ... c}] => [a ... c]
+            (Less, Equal) => Range(my_first, my_last),
+
+            // {[a ... b]... c} => [a ... c]
+            (Equal, Less) => Range(my_first, other_last),
+
+            // {a ... [b ... c]} => [a ... c]
+            (Greater, Equal) => Range(other_first, my_last),
+
+            // [{a ... b} ... c] => [a ... c]
+            (Equal, Greater) => Range(my_first, my_last),
+
+            // [a ... {b ... c} ... d] => [a ... d]
+            (Less, Greater) => Range(my_first, my_last),
+
+            // [a ... {b ... c] ... d} => [a ... d]
+            (Less, Less) => {
+                assert!(other_first <= my_last + 1); // ! [a ... b] ... {c ... d}
+                Range(my_first, other_last)
+            },
+
+            // {a ... [b ... c} ... d] => [a ... d]
+            (Greater, Greater) => {
+                assert!(my_first <= other_last + 1);// ! {a ... b} ... [c ... d]
+                Range(other_first, my_last)
+            },
+
+            // {a ... [b ... c] ... d} => [a ... d]
+            (Greater, Less) => Range(other_first, other_last)
+        }
+    }
+
     /*
     fn extend_end(&mut self, amount: u64) {
         let &mut Range(_, ref mut last) = self;
@@ -247,6 +367,7 @@ impl Range {
         }
     }
 
+    //TODO replace with trim?
     fn remove(self, other: &Range) -> (Option<Range>, Option<Range>) {
         let Range(my_first, my_last) = self;
         let &Range(ref other_first, ref other_last) = other;
@@ -261,23 +382,76 @@ impl Range {
         }
     }
 
+    // given ranges with partial overlap [a ... {b ... c] ... d} divides into two ranges
+    // [a...b-1] {b...c}
+    // given a range covered by this one, [a ... {b ... c} ... d] divides into three
+    // [a...b-1] {b...c} [c+1...d]
+    fn trim_out(self, other: &Range)  -> (Option<Range>, Range, Option<Range>) {
+        let Range(my_first, my_last) = self;
+        let &Range(other_first, other_last) = other;
+        match (my_first.cmp(&other_first), my_last.cmp(&other_last)) {
+            (Equal, Equal) => (None, Range(my_first, my_last), None),
+
+            // [a ... {b ... c}] => [a ... b-1] {b ... c}
+            (Less, Equal) =>
+                (Some(Range(my_first, other_first - 1)), Range(other_first, my_last), None),
+
+            // {[a ... b]... c} => {a ... b}
+            (Equal, Less) => (None, Range(my_first, my_last), None),
+
+            // {a ... [b ... c]} => {b ... c}
+            (Greater, Equal) => (None, Range(my_first, my_last), None),
+
+            // [{a ... b} ... c] => {a ... b} [b+1 ... c]
+            (Equal, Greater) =>
+                (None,
+                    Range(other_first, other_last),
+                    Some(Range(other_last + 1, my_last))),
+
+            // [a ... {b ... c} ... d] => [a ... b-1] {b ... c} [c+1 ... d]
+            (Less, Greater) =>
+                (Some(Range(my_first, other_first - 1)),
+                    Range(other_first, other_last),
+                    Some(Range(other_first + 1, my_last))),
+
+            // [a ... {b ... c] ... d} => [a ... b-1] {b ... c}
+            (Less, Less) => {
+                assert!(other_first <= my_last); // ! [a ... b]{b+1 ... d}
+                (Some(Range(my_first, other_first - 1)),
+                    Range(other_first, my_last),
+                    None)
+            },
+
+            // {a ... [b ... c} ... d] => {b ... c} [c+1 ... d]
+            (Greater, Greater) => {
+                assert!(my_first <= other_last);// ! {a ... b}[b+1 ... d]
+                (None,
+                    Range(my_first, other_last),
+                    Some(Range(other_last+1, my_last)))
+            },
+
+            // {a ... [b ... c] ... d} => {b ... c}
+            (Greater, Less) => (None, Range(my_first, my_last), None),
+        }
+    }
+
     fn spans(&self, other: &Range) -> bool {
         let &Range(ref my_first, ref my_last) = self;
         let &Range(ref other_first, ref other_last) = other;
         my_first <= other_first && other_last <= my_last
     }
 
-    fn first(&self) -> u64 {
+    pub fn first(&self) -> u64 {
         let &Range(first, _) = self;
         first
     }
 
-    fn last(&self) -> u64 {
+    pub fn last(&self) -> u64 {
         let &Range(_, last) = self;
         last
     }
 
-    fn len(&self) -> u64 {
+    pub fn len(&self) -> u64 {
         let &Range(first, last) = self;
         (last - first) + 1
     }
@@ -307,8 +481,134 @@ impl PartialEq for Range {
     }
 }
 
+macro_rules! impl_mergeable {
+    ($($type:path),* $(,)*) => (
+        $(
+            impl Mergeable for $type {}
+        )*
+    )
+}
+
+impl_mergeable!(bool, i8, u8, i16, u16, i32, u32, i64, u64);
+
+impl Mergeable for Vec<u8> {}
+
+impl<T> Mergeable for Rc<T>
+where T: Eq {
+    fn can_merge_with_prior(self, other: &Self) -> Result<Self, Self> {
+        if Rc::ptr_eq(&self, other) {
+            return Ok(self)
+        }
+        if &self == other {
+            if Rc::strong_count(&self) >= Rc::strong_count(other) {
+                Ok(self)
+            } else {
+                Ok(other.clone())
+            }
+        } else {
+            Err(self)
+        }
+    }
+
+    fn can_merge_with_next(self, other: &Self) -> Result<Self, Self> {
+        self.can_merge_with_prior(other)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_range_trim() {
+    // [a ... {b ... c} ... d] => [a ... b-1] {b ... c} [c+1 ... d]
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(150, 175)),
+        (Some(Range(100, 149)), Range(150, 175), Some(Range(176, 200)))
+    );
+
+    // [a ... {b ... c}] => [a ... b-1] {b ... c}
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(150, 200)),
+        (Some(Range(100, 149)), Range(150, 200), None)
+    );
+
+    // {[a ... b]... c} => {a ... b}
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(100, 300)),
+        (None, Range(100, 200), None)
+    );
+
+    // {a ... [b ... c]} => {b ... c}
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(50, 200)),
+        (None, Range(100, 200), None)
+    );
+
+    // [{a ... b} ... c] => {a ... b} [b+1 ... c]
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(100, 150)),
+        (None, Range(100, 150), Some(Range(151, 200)))
+    );
+
+    // [a ... {b ... c] ... d} => [a ... b-1] {b ... c}
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(150, 300)),
+        (Some(Range(100, 149)), Range(150, 200), None)
+    );
+
+    // {a ... [b ... c} ... d] => {b ... c} [c+1 ... d]
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(50, 150)),
+        (None, Range(100, 150), Some(Range(151, 200)))
+    );
+
+    // {a ... [b ... c] ... d} => {b ... c}
+    assert_eq!(
+        Range(100, 200).trim_out(&Range(50, 300)),
+        (None, Range(100, 200), None)
+    );
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
+    #[test]
+    fn basic() {
+        let mut tree = RangeTree::with_default_val(false);
+        println!("{:?}", tree);
+        {
+            let mut iter = tree.iter();
+            assert_eq!(iter.next(), Some((&Range::new(0, u64::MAX), &false)));
+            assert_eq!(iter.next(), None);
+        }
+        assert_eq!(tree.get(0), &false);
+        assert_eq!(tree.get(200), &false);
+        assert_eq!(tree.get(201), &false);
+
+        tree.set_point_as(200, true);
+
+        println!("{:?}", tree);
+
+        assert_eq!(tree.get(0), &false);
+        assert_eq!(tree.get(200), &true);
+        assert_eq!(tree.get(201), &false);
+        {
+            let mut iter = tree.iter();
+            assert_eq!(iter.next(), Some((&Range::new(0, 199), &false)));
+            assert_eq!(iter.next(), Some((&Range::new(200, 200), &true)));
+            assert_eq!(iter.next(), Some((&Range::new(201, u64::MAX), &false)));
+            assert_eq!(iter.next(), None);
+        }
+
+        tree.set_range_as(100, 300, true);
+
+        for i in 0..400 {
+            if i < 100 || i > 300 {
+                assert_eq!(tree.get(i), &false, "{}", i);
+            } else {
+                assert_eq!(tree.get(i), &true);
+            }
+        }
+
+        println!("{:?}", tree);
+    }
 }

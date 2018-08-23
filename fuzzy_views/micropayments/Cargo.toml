@@ -1,0 +1,27 @@
+[package]
+name = "micropayments_bench"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+crossbeam = "0.2.10"
+env_logger = "0.3"
+fuzzy_log = {path = "../.."}
+log = "0.3"
+mio = "0.6.6"
+rand = "0.3"
+structopt = "0.0.5"
+structopt-derive = "0.0.5"
+
+[profile.release]
+opt-level = 3
+debug = true
+rpath = false
+#lto = true
+lto = false
+debug-assertions = false
+codegen-units = 1
+panic = 'abort'
+
+[features]
+#default = ["fuzzy_log/no_trace", "log/max_level_info"]

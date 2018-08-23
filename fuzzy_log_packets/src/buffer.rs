@@ -68,7 +68,9 @@ impl Buffer {
         contents.fill_vec(&mut self.inner);
         if self.inner.len() < self.inner.capacity() {
             let cap = self.inner.capacity();
-            unsafe { self.inner.set_len(cap) }
+            // unsafe { self.inner.set_len(cap) }
+            let need = self.inner.capacity() - self.inner.len();
+            self.inner.extend((0..need).map(|_| 0));
         }
         self.entry_mut()
     }
@@ -78,10 +80,13 @@ impl Buffer {
         if self.inner.capacity() < capacity {
             let curr_cap = self.inner.capacity();
             self.inner.reserve_exact(capacity - curr_cap);
-            unsafe { self.inner.set_len(capacity) }
+            // unsafe { self.inner.set_len(capacity) }
+            self.inner.extend((0..(capacity - curr_cap)).map(|_| 0));
         }
         else if self.inner.len() < capacity {
-            unsafe { self.inner.set_len(capacity) }
+            // unsafe { self.inner.set_len(capacity) }
+            let need = capacity - self.inner.len();
+            self.inner.extend((0..need).map(|_| 0));
         }
     }
 

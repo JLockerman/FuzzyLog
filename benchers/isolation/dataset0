@@ -1,0 +1,47 @@
+#Args { servers: ServerAddrs([(V4(172.31.15.138:13289), V4(172.31.2.64:13289)), (V4(172.31.6.234:13289), V4(172.31.4.131:13289))]), handles: 2, num_rounds: 5, ms_per_round: 2000, write_window: 1000, percent_multiappends: 1 }
+#2 servers
+#client 0 single
+#client 1 multi
+#throughput [[1099579, 1153664, 1147453, 1128815, 1139042], [618777, 591838, 593777, 602661, 599210]]
+#writes [AtomicUsize(1138347), AtomicUsize(580643)]
+#total_writes = [6807400, 3587417]
+#elapsed Duration { secs: 14, nanos: 6031206 }
+appends/s @ 1% = [566855, 300626]
+
+---------------------------------------
+                    single,  multi
+appends/s @   1% = [566855, 300626]
+appends/s @   5% = [558325, 276568]
+appends/s @  10% = [444179, 258893]
+appends/s @  20% = [467545, 241557]
+appends/s @  30% = [504574, 249388]
+appends/s @  40% = [525912, 213872]
+appends/s @  50% = [560073, 194425]
+appends/s @ 100% = [549803, 177344]
+
+=======================================
+=======================================
+=======================================
+=======================================
+
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+only_singles = [566855, 558325, 444179, 467545, 504574, 525912, 560073, 549803]
+also_multies = [300626 ,276568 ,258893 ,241557 ,249388 ,213872 ,194425 ,177344]
+
+x_tics = ["1%", "5%", "10%", "20%", "30%", "40%", "50%", "100%"]
+#x_tics = [1, 5, 10, 20, "30%", "40%", "50%", "100%"]
+
+plt.figure(num=None, figsize=(6, 3), dpi=80, facecolor='w', edgecolor='k')
+plt.plot(only_singles, marker="o", linestyle="-", color='darkblue')
+plt.plot(also_multies, marker="x", linestyle="--", color='darkred')
+plt.xticks([0, 1, 2, 3, 4, 5, 6, 7], x_tics)
+plt.ylabel("Appends/s")
+plt.xlabel("Percent multiappends")
+plt.legend(["only single", "also multi"], loc=5)
+pp = PdfPages('a.pdf')
+pp.savefig(bbox_inches='tight')
+pp.close()
+plt.show()

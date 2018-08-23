@@ -1,5 +1,5 @@
 //use storeables::Storeable;
-use super::EntryContents;
+use super::{EntryContents, EntryContentsMut};
 use super::Packet::WrapErr;
 
 #[must_use]
@@ -45,6 +45,20 @@ impl Buffer {
     #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
     pub fn empty() -> Self {
         Buffer { inner: Vec::new(), start: 0, }
+    }
+
+    #[cfg(any(debug_assertions, feature="debug_no_drop"))]
+    pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
+        let cap = inner.len();
+        unsafe { inner.set_len(cap) };
+        Buffer { inner: inner, start: 0, no_drop: false }
+    }
+
+    #[cfg(not(any(debug_assertions, feature="debug_no_drop")))]
+    pub fn wrap_vec(mut inner: Vec<u8>) -> Self {
+        let cap = inner.len();
+        unsafe { inner.set_len(cap) };
+        Buffer { inner: inner, start: 0, }
     }
 
     pub fn clear(&mut self) {
@@ -102,15 +116,27 @@ impl Buffer {
     }*/
 
     pub fn try_contents_until(&self, len: usize) -> Result<(EntryContents, &[u8]), WrapErr> {
+        debug_assert!(self.start <= self.inner.len());
         unsafe { EntryContents::try_ref(&self.inner[self.start..len]) }
+    }
+
+    pub fn try_contents_mut_until(&mut self, len: usize) -> Result<(EntryContentsMut, &mut [u8]), WrapErr> {
+        debug_assert!(self.start <= self.inner.len());
+        unsafe { EntryContentsMut::try_mut(&mut self.inner[self.start..len]) }
     }
 
     pub fn try_contents(&self) -> Result<(EntryContents, &[u8]), WrapErr> {
         self.try_contents_until(self.inner.len())
     }
 
+    pub fn try_contents_mut(&mut self) -> Result<(EntryContentsMut, &mut [u8]), WrapErr> {
+        let len = self.inner.len();
+        self.try_contents_mut_until(len)
+    }
+
     pub fn entry_slice(&self) -> &[u8] {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
+        debug_assert!(self.start <= self.inner.len());
         let size = self.entry_size();
         &self.inner[self.start..self.start+size]
     }
@@ -119,12 +145,17 @@ impl Buffer {
         self.try_contents().unwrap().0
     }
 
+    pub fn contents_mut(&mut self) -> EntryContentsMut {
+        self.try_contents_mut().unwrap().0
+    }
+
     pub fn entry_size(&self) -> usize {
         debug_assert_eq!(self.inner.len(), self.inner.capacity());
         self.contents().len()
     }
 
     pub fn ensure_capacity(&mut self, capacity: usize) -> usize {
+        debug_assert!(self.start <= self.inner.len());
         let effective_cap = self.inner.len() - self.start;
         if effective_cap >= capacity {
             return 0
@@ -136,7 +167,7 @@ impl Buffer {
 
         if self.inner.capacity() < capacity {
             let curr_cap = self.inner.capacity();
-            self.inner.reserve_exact(capacity - curr_cap);
+            self.inner.reserve_exact(capacity.checked_sub(curr_cap).unwrap());
             unsafe { self.inner.set_len(capacity) }
         } else {
             let cap = self.inner.capacity();
@@ -147,7 +178,9 @@ impl Buffer {
     }
 
     pub fn finished_entry(&mut self) {
-        self.start += self.entry_size()
+        debug_assert!(self.start <= self.inner.len());
+        self.start += self.entry_size();
+        debug_assert!(self.start <= self.inner.len());
     }
 
     /*

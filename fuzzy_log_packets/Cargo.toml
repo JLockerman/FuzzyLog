@@ -11,3 +11,6 @@ packet-macro2 = {path = "../packet-macro2"}
 packet-macro-impl = {path = "../packet-macro2/packet-macro-impl"}
 uuid = { version = "0.4", features = ["v4"] }
 rustc-serialize = "0.3"
+
+[dev-dependencies]
+byteorder = "1"

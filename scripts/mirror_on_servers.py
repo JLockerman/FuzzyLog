@@ -25,13 +25,46 @@ def sync():
     #local("rsync --filter=':- .gitignore' -P -avz ./ " + env.host_string + ":~/" + dirname)
     rsync_project(remote_dir="~/", exclude=[".*",".*/"], extra_opts="--filter=':- .gitignore'")
 
+@parallel
+def clean():
+    mirror("./cleaner.sh")
+
+@parallel
+def update_rust():
+    mirror('rustup override remove')
+    run('rustup toolchain uninstall 1.21.0')
+    run('rustup toolchain uninstall 1.19.0')
+    run('rustup toolchain uninstall 1.18.0')
+    # run('rustup toolchain uninstall nightly')
+    run('rustup toolchain uninstall stable')
+    run('rustup default nightly') #rustup toolchain list
+    # run('rustup update')
+
 def export(dir):
-    run("echo DELOS_RUST_LOC=" + dir + " >> ~/.bashrc")
+    run("echo 'export DELOS_RUST_LOC=" + dir + "' >> ~/.bashrc")
+
+
+@parallel
+def zookeeper():
+    server_num = str(index_of_host() + 1)
+    with cd("~/zookeeper-3.4.10"):
+        run("sudo mkdir /mnt/ramdisk && sudo mount -t tmpfs -o size=1G tmpfs /mnt/ramdisk && mkdir /mnt/ramdisk/zookeeper")
+        run("rm -rf /mnt/ramdisk/zookeeper/version-2/")
+        run("echo " + server_num +  " > /mnt/ramdisk/zookeeper/myid")
+        run("./bin/zkServer.sh start-foreground")
+
+@parallel
+def try_ex(cmd=''):
+    fuzzy_log_dir = os.path.basename(os.getcwd())
+    with settings(hide('warnings'), warn_only=True):
+        with cd(fuzzy_log_dir):
+            run(cmd, pty=False)
 
 
 @parallel
 def mirror(cmd=''):
     sync()
+    cmd = str.replace(cmd, '#server_num', str(index_of_host()))
     fuzzy_log_dir = os.path.basename(os.getcwd())
     with cd(fuzzy_log_dir):
         run(cmd, pty=False)
@@ -45,36 +78,61 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
     with settings(hide('warnings'), warn_only=True):
         run("pkill delos_tcp_serve")
         run("pkill delos_tcp_server")
+        run("pkill gdb")
     host_index = index_of_host()
     #cmd = "cd servers/tcp_server && "
     cmd = ""
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
-    cmd += "RUST_BACKTRACE=1 cargo run "
+    #cmd += "RUST_BACKTRACE=short RUSTFLAGS='-Z sanitizer=memory' cargo run --target x86_64-unknown-linux-gnu "
+    # cmd += "RUST_BACKTRACE=short RUSTFLAGS=\"-Z sanitizer=memory -C target-cpu=native\" ASAN_OPTIONS=detect_odr_violation=0 cargo run --target x86_64-unknown-linux-gnu "
+    # cmd += "RUST_BACKTRACE=short RUSTFLAGS=\"-Z sanitizer=thread\" ASAN_OPTIONS=detect_odr_violation=0 cargo run --target x86_64-unknown-linux-gnu "
+    #MSAN_options='suppressions=san_blacklist.txt'
+    # cmd += "RUST_BACKTRACE=short cargo run --target x86_64-unknown-linux-gnu "
+    cmd += "RUST_BACKTRACE=short cargo run "
+    # cmd += "cargo build "
     if debug == "":
         cmd += "--release "
     if stats != "":
-        cmd += "--features \"print_stats fuzzy_log/debug_no_drop\" "
-    if nt != "":
-        cmd += "--features \"fuzzy_log/no_trace\" "
+        cmd += "--features \"no_trace print_stats\" " # fuzzy_log/debug_no_drop
+    else:
+        if nt != "":
+            cmd += "--features \"no_trace\" "
+    # cmd += "&& gdb -ex=run --args ./target/release/delos_tcp_server " + port
     cmd += "-- " + port
 
-    if chain_hosts == "":
-        chain_hosts = env.all_hosts
-    else:
-        chain_hosts = chain_hosts.split("^")
-    if host_index > 0:
-        #prev_host = network.normalize(env.all_hosts[host_index-1])[1]
-        prev_host = chain_hosts[host_index-1]
+    # cmd = "cargo build --release && perf record --quiet --call-graph dwarf -o perf.data -- ./target/release/delos_tcp_server " + port + " ""
+
+    my_chain = []
+    index_in_chain = 0
+    my_chain_num = 0
+    num_chains = 0
+    if chain_hosts != "":
+        chains = chain_hosts.split("^")
+        num_chains = len(chains)
+        chain_len = len(chains[0].split("#"))
+        my_chain_num = host_index / chain_len
+        index_in_chain = host_index % chain_len
+        i = 0
+        for chain in chains:
+            servers = chain.split("#")
+            assert(len(servers) == chain_len)
+            if i == my_chain_num:
+                my_chain = servers
+            i += 1
+
+    if index_in_chain > 0:
+        prev_host = my_chain[index_in_chain-1]
         cmd += " -up " + prev_host + ":" + port
-        #cmd = "RUST_LOG=fuzzy_log " + cmd
-    if host_index + 1 < len(env.all_hosts):
-        #next_host = network.normalize(env.all_hosts[host_index+1])[1]
-        next_host = chain_hosts[host_index+1]
+    if index_in_chain + 1 < len(my_chain):
+        next_host = my_chain[index_in_chain+1]
         cmd += " -dwn " + next_host
     if workers != "":
         cmd += " -w " + workers
+    if num_chains > 1:
+        cmd += " -ig " + str(my_chain_num) + ":" + str(num_chains)
     cmd = "cd servers/tcp_server && " + cmd
+    # print(cmd)
     mirror(cmd)
 
 @parallel
@@ -95,9 +153,9 @@ def run_clients(num_clients, servers, jobsize="1000", num_writes="100000", trace
     if trace != "":
         cmd += "RUST_LOG=" + trace + " "
     if debug == "":
-        cmd += "RUST_BACKTRACE=1 cargo run --release "
+        cmd += "RUST_BACKTRACE=1 RUSTFLAGS=\"-C target-cpu=native\" cargo run --release "
     else:
-        cmd += "cargo run "
+        cmd += "RUSTFLAGS=\"-C target-cpu=native\" cargo run "
     if trace != "":
         cmd += "--no-default-features "
     if stats != "":

@@ -4,14 +4,12 @@ extern crate log;
 
 extern crate env_logger;
 extern crate num_cpus;
-extern crate fuzzy_log;
+extern crate fuzzy_log_server as servers2;
 extern crate mio;
 
 use std::env;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::atomic::AtomicUsize;
-
-use fuzzy_log::servers2;
 
 pub fn main() {
     let _ = env_logger::init();

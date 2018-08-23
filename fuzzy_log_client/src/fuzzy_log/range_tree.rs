@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::cmp::{Ord, PartialOrd, PartialEq, Ordering};
 use std::cmp::Ordering::*;
 
-use std::u32;
+use std::u64;
 
 use std::collections::btree_map::Iter;
 use std::collections::btree_map::Entry::Occupied;
@@ -45,7 +45,7 @@ impl RangeTree {
     pub fn new() -> Self {
         let mut map = BTreeMap::new();
         map.insert(Range::new(0.into(), 0.into()), Kind::ReturnedToClient);
-        map.insert(Range::new(1.into(), u32::MAX.into()), Kind::None);
+        map.insert(Range::new(1.into(), u64::MAX.into()), Kind::None);
         RangeTree {
             inner: map,
             num_outstanding: 0,
@@ -182,6 +182,22 @@ impl RangeTree {
         debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
     }
 
+    pub fn set_above_as_none(&mut self, low: entry) {
+        debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
+        let new_range = Range::new(low, u64::MAX.into());
+        let (old_range, old_kind) = remove_from_map(&mut self.inner, Range::point(low));
+        let mut lowish = old_range.1;
+        while lowish < u64::MAX.into() {
+            lowish = (remove_from_map(&mut self.inner, Range::point(lowish + 1)).0).1;
+        }
+        let (old, _) = old_range.split_at(low);
+        if let Some(range) = old {
+            self.inner.insert(range, old_kind);
+        }
+        self.inner.insert(new_range, Kind::None);
+        debug_assert!(self.tree_invariant(), "invariant failed @ {:#?}", self);
+    }
+
     pub fn is_returned(&self, point: entry) -> bool {
         match self.inner.get(&Range::point(point)) {
             Some(&Kind::ReturnedToClient) => true,
@@ -224,7 +240,7 @@ impl RangeTree {
             .map(|(r, _)| r.last())
     }
 
-    pub fn min_range_to_fetch(&self) -> (u32, u32) {
+    pub fn min_range_to_fetch(&self) -> (u64, u64) {
         self.iter().filter(|&(_, &k)| k == Kind::None)
             .map(|(r, _)| (r.first().into(), r.last().into()))
             .next().unwrap_or((0, 0))
@@ -309,7 +325,7 @@ fn try_merge_with_next(
     inner: &mut BTreeMap<Range, Kind>, current: Range, our_kind: Kind
 ) -> (Range, Kind) {
     use self::Kind::*;
-    if current.last() >= u32::MAX.into() {
+    if current.last() >= u64::MAX.into() {
         return (current, our_kind)
     }
 
@@ -391,12 +407,12 @@ impl Range {
     }
 
     /*
-    fn extend_end(&mut self, amount: u32) {
+    fn extend_end(&mut self, amount: u64) {
         let &mut Range(_, ref mut last) = self;
         *last = *last + amount;
     }
 
-    fn extend_beginning(&mut self, amount: u32) {
+    fn extend_beginning(&mut self, amount: u64) {
         let &mut Range(ref mut first, _) = self;
         *first = *first - amount;
     }*/
@@ -447,7 +463,7 @@ impl Range {
 
     fn len(&self) -> usize {
         let &Range(first, last) = self;
-        u32::from(last - first.into() + 1) as usize
+        u64::from(last - first.into() + 1) as usize
     }
 }
 

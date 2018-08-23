@@ -1,0 +1,23 @@
+[package]
+name = "isol"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
+crossbeam = "0.2.10"
+env_logger = "0.3"
+fuzzy_log_client = {path = "../../fuzzy_log_client"}
+log = "0.3"
+rand = "0.3"
+structopt = "0.0.5"
+structopt-derive = "0.0.5"
+
+[profile.release]
+opt-level = 3
+#debug = true
+debug = false
+rpath = false
+lto = false
+debug-assertions = false
+codegen-units = 1
+panic = 'abort'

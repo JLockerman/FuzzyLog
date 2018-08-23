@@ -8,6 +8,7 @@ extern crate evmap;
 extern crate lazycell;
 extern crate mio;
 extern crate uuid;
+extern crate reactor;
 
 extern crate fuzzy_log_packets;
 #[macro_use] extern crate fuzzy_log_util;
@@ -73,20 +74,20 @@ mod tests;
 pub type ChainStore<T> = WriteHandle<order, TrivialEqArc<Chain<T>>>;
 pub type ChainReader<T> = ReadHandle<order, TrivialEqArc<Chain<T>>>;
 
-struct ServerLog<T: Send + Sync + Copy, ToWorkers>
+pub struct ServerLog<T: Send + Sync + Copy, ToWorkers>
 where ToWorkers: DistributeToWorkers<T> {
     log: ChainStore<T>,
     //TODO per chain locks...
     total_servers: u32,
     this_server_num: u32,
-    //_seen_ids: HashSet<Uuid>,
-    to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
+    // seen_ids: hash::UuidHashSet,
+    pub to_workers: ToWorkers, //spmc::Sender<ToWorker<T>>,
     _pd: PhantomData<T>,
 
     print_data: LogData,
 }
 
-fn new_chain_store_and_reader<T: Copy>() -> (ChainStore<T>, ChainReader<T>) {
+pub fn new_chain_store_and_reader<T: Copy>() -> (ChainStore<T>, ChainReader<T>) {
     let (read, write) = ::evmap::new();
     (write, read)
 }
@@ -151,6 +152,25 @@ pub enum ToWorker<T: Send + Sync> {
         t: T,
     },
 
+    SnapSkeensFinished {
+        loc: OrderIndex,
+        storage: SkeensMultiStorage,
+        timestamp: u64,
+        t: T,
+    },
+
+    SnapshotSkeens1 {
+        buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
+    SnapshotSkeens1Replica {
+        buffer: BufferSlice,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
     SingleServerSkeens1(SkeensMultiStorage, T),
 
     //FIXME this is getting too big...
@@ -168,6 +188,7 @@ pub enum ToWorker<T: Send + Sync> {
         index: u64,
         trie_slot: *mut ValEdge,
         storage: ValEdge,
+        timestamp: u64,
         t: T,
     },
 
@@ -185,6 +206,13 @@ pub enum ToWorker<T: Send + Sync> {
         t: T,
     },
 
+    Skeens2SnapReplica {
+        loc: OrderIndex,
+        timestamp: u64,
+        storage: SkeensMultiStorage,
+        t: T,
+    },
+
     Skeens1SingleReplica {
         buffer: BufferSlice,
         storage: ValEdge,
@@ -196,6 +224,7 @@ pub enum ToWorker<T: Send + Sync> {
         index: u64,
         trie_slot: *mut ValEdge,
         storage: ValEdge,
+        timestamp: u64,
         t: T,
     },
 
@@ -204,6 +233,12 @@ pub enum ToWorker<T: Send + Sync> {
     EmptyRead(entry, BufferSlice, T),
     Reply(BufferSlice, T),
     ReturnBuffer(BufferSlice, T),
+
+    GotRecovery(BufferSlice, T),
+    DidntGetRecovery(BufferSlice, Uuid, T),
+
+    ContinueRecovery(Buffer, T),
+    EndRecovery(Buffer, T),
 }
 
 #[derive(Clone, Debug)]
@@ -214,7 +249,7 @@ pub struct SkeensMultiStorage(
 unsafe impl Send for SkeensMultiStorage {}
 
 impl SkeensMultiStorage {
-    fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
+    pub fn new(num_locs: usize, entry_size: usize, sentinel_size: Option<usize>) -> Self {
             let timestamps = vec![0; num_locs];
             let queue_indicies = vec![0; num_locs];
             let data = RcSlice::with_len(entry_size);
@@ -250,7 +285,7 @@ impl SkeensMultiStorage {
         &*(self.0)
     }
 
-    fn fill_from(&mut self, buffer: &mut Buffer) {
+    pub fn fill_from(&mut self, buffer: &mut Buffer) {
         let (_ts, _indicies, st0, st1) = unsafe { self.get_mut() };
         let len = {
             let mut e = buffer.contents_mut();
@@ -260,12 +295,12 @@ impl SkeensMultiStorage {
         //let num_ts = ts.len();
         st0.copy_from_slice(&buffer[..len]);
         //TODO just copy from sentinel Ref
-        let was_multi = buffer.to_sentinel();
         if let Some(st1) = st1.as_mut() {
+            let was_multi = buffer.to_sentinel();
             let len = buffer.contents().len();
             st1.copy_from_slice(&buffer[..len]);
+            buffer.from_sentinel(was_multi);
         }
-        buffer.from_sentinel(was_multi);
     }
 }
 
@@ -284,7 +319,16 @@ where T: Send + Sync {
             | &mut Skeens1Replica {ref mut t, ..}
             | &mut Skeens2MultiReplica {ref mut t,..}
             | &mut Skeens2SingleReplica {ref mut t,..}
-            | &mut Skeens1SingleReplica {ref mut t,..}=> f(t),
+            | &mut Skeens1SingleReplica {ref mut t,..}
+            | &mut SnapshotSkeens1{ref mut t, ..}
+            | &mut SnapSkeensFinished{ref mut t, ..}
+            | &mut SnapshotSkeens1Replica{ref mut t, ..}
+            | &mut Skeens2SnapReplica{ref mut t, ..} => f(t),
+
+            &mut GotRecovery(_, ref mut t)
+            | &mut DidntGetRecovery(_, _, ref mut t)
+            | &mut ContinueRecovery(_, ref mut t)
+            | &mut EndRecovery(_, ref mut t) => f(t),
 
             &mut SingleServerSkeens1(_, ref mut t) => f(t),
 
@@ -297,7 +341,7 @@ impl<T> ToWorker<T>
 where T: Copy + Send + Sync {
 
     #[inline(always)]
-    fn get_associated_data(&self) -> T {
+    pub fn get_associated_data(&self) -> T {
         match self {
             &Write(_, _, t) | &Read(_, _, t) | &EmptyRead(_, _, t) | &Reply(_, t) => t,
             &MultiFastPath(_, _, t) => t,
@@ -307,10 +351,18 @@ where T: Copy + Send + Sync {
             &Skeens1SingleReplica {t, ..} => t,
             &ReturnBuffer(_, t) => t,
             &SingleServerSkeens1(_, t) => t,
+            &SnapshotSkeens1{t, ..} | &SnapSkeensFinished{t, ..} => t,
 
             &Skeens1Replica {t, ..}
             | &Skeens2MultiReplica {t,..}
-            | &Skeens2SingleReplica {t,..} => t,
+            | &Skeens2SnapReplica{t, ..}
+            | &Skeens2SingleReplica {t,..}
+            | &SnapshotSkeens1Replica{t, ..} => t,
+
+            &GotRecovery(_, t)
+            | &DidntGetRecovery(_, _, t)
+            | &ContinueRecovery(_, t)
+            | &EndRecovery(_, t) => t,
         }
     }
 }
@@ -327,11 +379,20 @@ pub enum ToReplicate {
     Skeens1(BufferSlice, SkeensMultiStorage),
     SingleSkeens1(BufferSlice, StorageLoc),
 
+    SnapshotSkeens1(BufferSlice, SkeensMultiStorage),
+
     Skeens2(BufferSlice),
 
     UnLock(BufferSlice),
 
     GC(BufferSlice),
+
+    TasRecoverer(BufferSlice, Box<(Uuid, Box<[OrderIndex]>)>),
+}
+
+pub enum Recovery {
+    TasRecoverer(BufferSlice, Box<(Uuid, Box<[OrderIndex]>)>),
+    CheckSkeens1(BufferSlice),
 }
 
 #[derive(Debug, PartialEq, Eq)]
