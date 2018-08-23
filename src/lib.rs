@@ -76,12 +76,11 @@ pub mod c_binidings {
     use packets::*;
     //use tcp_store::TcpStore;
     // use multitcp_store::TcpStore;
-    use async::fuzzy_log::log_handle::{LogHandle, ReadHandle, WriteHandle, GetRes, TryWaitRes};
+    use async::fuzzy_log::log_handle::{HashMap, LogHandle, ReadHandle, WriteHandle, GetRes, TryWaitRes};
 
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
 
-    pub use std::collections::HashMap;
     use std::ffi::{CStr, CString};
     use std::net::SocketAddr;
     use std::os::raw::c_char;
@@ -221,7 +220,7 @@ pub mod c_binidings {
     #[no_mangle]
     pub unsafe extern "C" fn fuzzylog_append(
         handle: FLPtr,
-        buf: *const u8,
+        buf: *const c_char,
         bufsize: usize,
         nodecolors: *mut colors,
     ) -> i32 {
@@ -230,7 +229,7 @@ pub mod c_binidings {
         assert!(colors_valid(nodecolors));
 
         let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
-        let data = slice::from_raw_parts(buf, bufsize);
+        let data = slice::from_raw_parts(buf as *const u8, bufsize);
         let nodecolors = slice::from_raw_parts_mut((*nodecolors).mycolors as *mut order, (*nodecolors).numcolors);
 
         handle.simpler_causal_append(data, nodecolors);
@@ -239,23 +238,15 @@ pub mod c_binidings {
 
     #[no_mangle]
     pub unsafe extern "C" fn fuzzylog_sync(
-        handle: FLPtr, callback: fn(*const u8, usize) -> (),
+        handle: FLPtr, callback: fn(*const c_char, usize) -> (),
     ) -> SnapId {
-
         let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
-        handle.take_snapshot();
-        let mut entries_seen = HashMap::default();
-        //TODO server death
-        while let Ok((data, locations)) = handle.get_next() {
-            callback(data.as_ptr(), data.len());
-            for &OrderIndex(o, i) in locations {
-                let last = entries_seen.entry(o).or_insert(i);
-                if *last <= i {
-                    *last = i
-                }
-            }
+        let entries_seen =
+            handle.sync(|data, _, _| callback(data.as_ptr() as *const i8, data.len()));
+        match entries_seen {
+            Ok(entries) => Box::into_raw(entries.into()),
+            Err(..) => ptr::null_mut(),
         }
-        Box::into_raw(entries_seen.into())
     }
 
     #[no_mangle]

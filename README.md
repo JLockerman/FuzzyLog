@@ -3,8 +3,6 @@ _This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAwar
 
 # delos-rust
 
-[![Build Status](https://travis-ci.com/ProjectDelos/delos-rust.svg?token=RaEyYb9eyzdWqhSpjYxi&branch=mahesh_look_at_this)](https://travis-ci.com/ProjectDelos/delos-rust)
-
 This repository contains the unified code for the clients and servers for the FuzzyLog project;
 an experiment in partially ordered SMR.
 
