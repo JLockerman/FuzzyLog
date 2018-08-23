@@ -5,6 +5,7 @@ _This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAwar
 
 This repository contains the unified code for the clients and servers for the FuzzyLog project;
 an experiment in partially ordered SMR.
+A [companion repository](https://github.com/JLockerman/delos-apps) contains the remaining benchmark code.
 
 ## To Build
 Download and install [rust](https://www.rust-lang.org) (easiest way is `curl https://sh.rustup.rs -sSf | sh`).  
