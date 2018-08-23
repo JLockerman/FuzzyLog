@@ -47,13 +47,13 @@ typedef struct {
 void delete_snap_id(SnapId snap);
 
 int32_t fuzzylog_append(FLPtr handle,
-                        const uint8_t *buf,
+                        const char *buf,
                         uintptr_t bufsize,
                         colors *nodecolors);
 
 void fuzzylog_close(FLPtr handle);
 
-SnapId fuzzylog_sync(FLPtr handle, void (*callback)(const uint8_t*, uintptr_t));
+SnapId fuzzylog_sync(FLPtr handle, void (*callback)(const char*, uintptr_t));
 
 void fuzzylog_trim(FLPtr handle, SnapId snap);
 

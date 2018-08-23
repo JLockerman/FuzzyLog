@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 use std::thread;
 use std::sync::{mpsc, Arc, Mutex};
 
-use hash::{HashMap, HashSet};
+pub use hash::HashMap;
+use hash::HashSet;
 
 use fuzzy_log::{
     self,
@@ -703,6 +704,11 @@ where V: Storeable {
     /// Wait until an event is ready, then returns the contents.
     pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {
+        self.get_next2().map(|(v, l, _)| (v, l))
+    }
+
+    pub fn get_next2(&mut self) -> Result<(&V, &[OrderIndex], &Uuid), GetRes>
+    where V: UnStoreable {
         if self.num_snapshots == 0 {
             trace!("HANDLE read with no snap.");
             return Err(GetRes::Done)
@@ -735,9 +741,9 @@ where V: Storeable {
         }
 
         trace!("HANDLE got val.");
-        let (val, locs) = {
+        let (val, locs, id) = {
             let e = bytes_as_entry(&self.curr_entry);
-            (slice_to_data(e.data()), e.locs())
+            (slice_to_data(e.data()), e.locs(), e.id())
         };
         let check_color = self.my_colors_chains.is_empty();
         for &OrderIndex(o, i) in locs {
@@ -748,7 +754,30 @@ where V: Storeable {
                 }
             }
         }
-        Ok((val, locs))
+        Ok((val, locs, id))
+    }
+
+    pub fn sync<F>(&mut self, mut per_event: F)
+        -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: FnMut(&V, &[OrderIndex], &Uuid) {
+        self.take_snapshot();
+        let mut entries_seen = HashMap::default();
+        loop {
+            match self.get_next2() {
+                Ok((v, locs, id)) => {
+                    for &OrderIndex(o, i) in locs {
+                        let last = entries_seen.entry(o).or_insert(i);
+                        if *last <= i {
+                            *last = i
+                        }
+                    }
+                    per_event(v, locs, id);
+                },
+                Err(GetRes::Done) => return Ok(entries_seen),
+                Err(e) => return Err(e),
+            }
+
+        }
     }
 
     /// Returns an event if one is ready.
