@@ -202,7 +202,7 @@ where V: Storeable {
             log.run()
         }
 
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r, Default::default())
     }
 }
 
@@ -214,6 +214,7 @@ pub struct LogBuilder<V: ?Sized> {
     fetch_boring_multis: bool,
     id: Option<Ipv4SocketAddr>,
     ack_writes: bool,
+    my_colors_chains: Option<HashSet<order>>,
     _pd: PhantomData<Box<V>>,
 }
 
@@ -234,6 +235,7 @@ where V: Storeable {
             fetch_boring_multis: false,
             id: None,
             ack_writes: true,
+            my_colors_chains: None,
             _pd: PhantomData,
         }
     }
@@ -262,9 +264,14 @@ where V: Storeable {
         LogBuilder{ id: Some(Ipv4SocketAddr::from_u64(id)), .. self }
     }
 
+    pub fn my_colors_chains(self, chains: HashSet<order>) -> Self {
+        let builder = self.chains(chains.iter().cloned());
+        LogBuilder{ my_colors_chains: Some(chains), .. builder }
+    }
+
     pub fn build(self) -> LogHandle<V> {
         let LogBuilder {
-            servers, chains, reads_my_writes, fetch_boring_multis, ack_writes, id, _pd,
+            servers, chains, reads_my_writes, fetch_boring_multis, ack_writes, id, my_colors_chains, _pd,
         } = self;
 
         let make_store = |client| {
@@ -307,7 +314,9 @@ where V: Storeable {
             to_store
         };
 
-        LogHandle::build_with_store(chains, fetch_boring_multis, ack_writes, make_store)
+        let mcc = my_colors_chains.unwrap_or_else(Default::default);
+
+        LogHandle::build_with_store(chains, fetch_boring_multis, ack_writes, mcc, make_store)
     }
 
     pub fn build_handles(mut self) -> (ReadHandle<V>, AtomicWriteHandle<V>) {
@@ -416,6 +425,7 @@ where V: Storeable {
         interesting_chains: C,
         fetch_boring_multis: bool,
         ack_writes: bool,
+        my_colors_chains: HashSet<order>,
         store_builder: F,
     ) -> Self
     where C: IntoIterator<Item=order>,
@@ -439,7 +449,7 @@ where V: Storeable {
             ).run()
         });
 
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r, my_colors_chains)
     }
 
     pub fn with_store<C, F>(
@@ -468,7 +478,7 @@ where V: Storeable {
             ).run()
         });
 
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r, Default::default())
     }
 
     #[deprecated]
@@ -635,13 +645,14 @@ where V: Storeable {
             log.run()
         }
 
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r)
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r, Default::default())
     }
 
     pub fn new(
         to_log: mpsc::Sender<Message>,
         ready_reads: FinshedReadRecv,
         finished_writes: FinshedWriteRecv,
+        my_colors_chains: HashSet<order>,
     ) -> Self {
         LogHandle {
             to_log: to_log,
@@ -652,7 +663,7 @@ where V: Storeable {
             num_snapshots: 0,
             num_async_writes: 0,
             last_seen_entries: Default::default(),
-            my_colors_chains: Default::default(),
+            my_colors_chains,
             num_errors: 0,
         }
     }

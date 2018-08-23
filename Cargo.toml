@@ -5,7 +5,7 @@ authors = ["J <joshua.lockerman@yale.edu>"]
 build = "build.rs"
 
 [build-dependencies]
-cbindgen = "0.6.1"
+cbindgen = "0.6.2"
 
 [dependencies]
 byteorder = "1"

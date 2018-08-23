@@ -21,8 +21,7 @@ exclude = [
     "start_servers_from_config", "try_wait_for_any_append",
     "try_wait_for_any_append_and_location", "wait_for_a_specific_append",
     "wait_for_a_specific_append_and_locations", "wait_for_all_appends",
-    "wait_for_any_append"]
-
+    "wait_for_any_append", "close_dag_handle"]
 
 [fn]
 args = "Auto"

@@ -81,7 +81,7 @@ pub mod c_binidings {
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
 
-    use std::collections::HashMap;
+    pub use std::collections::HashMap;
     use std::ffi::{CStr, CString};
     use std::net::SocketAddr;
     use std::os::raw::c_char;
@@ -149,13 +149,78 @@ pub mod c_binidings {
         }
     }
 
-    type snapBody = HashMap<order, entry>;
-    type snapId = *mut snapBody;
-    pub type FL_ptr = *mut DAG;
+    #[repr(C)]
+    pub struct ColorSpec {
+        color: u64,
+        numchains: usize,
+        chains: *const u64,
+    }
+
+    impl ColorSpec {
+        fn is_valid(&self) -> bool {
+            self.numchains == 0 || self.chains != ptr::null()
+        }
+    }
+
+    /// The specification for a static FuzzyLog server configuration.
+    /// Since we're using chain-replication the client needs to know of both the
+    /// head and tail of each replication chain. Each element of an ip array
+    /// should be in the form `<ip-addr>:<port>`. Currently only ipv4 is supported.
+    #[repr(C)]
+    pub struct ServerSpec {
+        num_ips: usize,
+        head_ips: *const *const c_char,
+        tail_ips: *const *const c_char,
+    }
+
+    impl ServerSpec {
+        fn is_valid(&self) -> bool {
+            self.num_ips != 0 && self.head_ips != ptr::null() && self.tail_ips != ptr::null()
+        }
+    }
+
+    pub type SnapBody = HashMap<order, entry>;
+
+    pub type SnapId = *mut SnapBody;
+    pub type FLPtr = *mut DAG;
+
+    /// This should really take in a single color name, and detect chains from the system.
+    /// However, since we're only statically allocating chains atm, we'll just pass them in.
+    #[no_mangle]
+    pub unsafe extern "C" fn new_fuzzylog_instance(
+        servers: ServerSpec, color: ColorSpec, snap: SnapId) -> FLPtr {
+        assert!(servers.is_valid());
+        assert!(color.is_valid());
+
+        let parse_ip = |&s: &*const c_char| CStr::from_ptr(s)
+            .to_str()
+            .expect("invalid IP string")
+            .parse()
+            .expect("invalid IP addr");
+
+        let chains = slice::from_raw_parts(color.chains, color.numchains);
+        let chains = chains.iter().map(|&c| order::from(c)).collect();
+
+        let ServerSpec{ num_ips, head_ips, tail_ips } = servers;
+        let heads = slice::from_raw_parts(head_ips, num_ips).into_iter().map(parse_ip);
+        let tails = slice::from_raw_parts(tail_ips, num_ips).into_iter().map(parse_ip);
+
+        let mut handle = LogHandle::replicated_with_servers(heads.zip(tails))
+            .my_colors_chains(chains)
+            .build();
+
+        if snap != ptr::null_mut() {
+            for (&o, &i) in &*snap {
+                handle.fastforward((o, i).into())
+            }
+        }
+
+        Box::into_raw(handle.into())
+    }
 
     #[no_mangle]
     pub unsafe extern "C" fn fuzzylog_append(
-        handle: FL_ptr,
+        handle: FLPtr,
         buf: *const u8,
         bufsize: usize,
         nodecolors: *mut colors,
@@ -174,8 +239,8 @@ pub mod c_binidings {
 
     #[no_mangle]
     pub unsafe extern "C" fn fuzzylog_sync(
-        handle: FL_ptr, callback: fn(*const u8, usize) -> (),
-    ) -> snapId {
+        handle: FLPtr, callback: fn(*const u8, usize) -> (),
+    ) -> SnapId {
 
         let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
         handle.take_snapshot();
@@ -194,8 +259,18 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn fuzzylog_trim(handle: FL_ptr, snap: snapId) {
+    pub unsafe extern "C" fn fuzzylog_trim(handle: FLPtr, snap: SnapId) {
         unimplemented!()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_close(handle: FLPtr) {
+        close_dag_handle(handle)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn delete_snap_id(snap: SnapId) {
+        let _ = Box::from_raw(snap);
     }
 
     #[no_mangle]
