@@ -4,7 +4,7 @@ _This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAwar
 # delos-rust
 
 This repository contains the unified code for the clients and servers for the
-Fuzzy Log project; and experiment in partially ordered SMR.
+FuzzyLog project; an experiment in partially ordered SMR.
 
 ## To Build
 Download and install [rust](https://www.rust-lang.org) (easiest way is `curl https://sh.rustup.rs -sSf | sh`).  
@@ -18,7 +18,7 @@ as it needs to download dependencies.
 
 ## Servers
 
-A CLI binding for starting Fuzzy Log servers can be found in [servers/tcp_server](servers/tcp_server).
+A CLI binding for starting FuzzyLog servers can be found in [servers/tcp_server](servers/tcp_server).
 
 ## C Bindings
 

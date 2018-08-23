@@ -1,7 +1,7 @@
 # TCP Server
-CLI bindings to the Fuzzy Log TCP server.  
-The Fuzzy Log shards its partial order into an number of
-total orders wich are distributed across the Fuzzy Log servers
+CLI bindings to the FuzzyLog TCP server.  
+The FuzzyLog shards its partial order into an number of
+total orders wich are distributed across the FuzzyLog servers
 in a server-group. These servers decided amongst themselves
 where in the partial order new entries are placed.
 
@@ -12,7 +12,7 @@ To run use
 it will accept requests for any IP address on port `<server port>`.  
 By default the server will start up a number of worker threads
 such that the server is running 1 thread per core.  
-Fuzzy Log servers use chain replication for reliability. Each server
+FuzzyLog servers use chain replication for reliability. Each server
 in a replication chain needs to know of the previous and next servers
 in its chain, if they exist. The servers connect to each other from
 the tail of the replication chain to the head,

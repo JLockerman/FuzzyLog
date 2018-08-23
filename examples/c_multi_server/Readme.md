@@ -15,7 +15,7 @@ and the delos-rust library.
 
 ## Config File
 
-Fuzzy Log servers are replicated using chain replication for
+FuzzyLog servers are replicated using chain replication for
 reliability.
 The function `new_dag_handle_from_config` can start a dag handle
 for a server-group from a config file with the format

@@ -1,6 +1,6 @@
 # C Linking Example
 This directory contains a header file [`fuzzy_log.h`](fuzzy_log.h)
-which can be used to link C programs to the Fuzzy Log client API,
+which can be used to link C programs to the FuzzyLog client API,
 along with an example of such a program, and a Makefile which
 hopefully makes such linking simple.  
 
@@ -17,7 +17,7 @@ If you wish to run this example on mac you must first replace
 
 Run `make` this will ouput the example binary in `./out/start`.  
 This binary is standalone, it starts up its own instance of the
-Fuzzy Log server at `127.0.0.1:13229` to run against,
+FuzzyLog server at `127.0.0.1:13229` to run against,
 starts a client, performs some appends and reads them back.
 
 ## Starting you own project
