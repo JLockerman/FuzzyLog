@@ -13,7 +13,7 @@ use store::AsyncStoreClient;
 use self::FromStore::*;
 use self::FromClient::*;
 
-use hash::{HashMap, UuidHashMap};
+use hash::{HashMap, HashSet, UuidHashMap};
 
 use self::per_color::{PerColor, IsRead, ReadHandle, NextToFetch};
 
@@ -59,6 +59,9 @@ pub struct ThreadLog<FinshedReadQueue, FinshedWriteQueue> {
 
     print_data: PrintData,
     prefetch : u32,
+
+    last_seen_entries: HashMap<order, entry>,
+    my_colors_chains: HashSet<order>,
 }
 
 pub struct ThreadLogBuilder<FinshedReadQueue, FinshedWriteQueue=()> {
@@ -72,6 +75,8 @@ pub struct ThreadLogBuilder<FinshedReadQueue, FinshedWriteQueue=()> {
     per_chains: HashMap<order, PerColor>,
     fetch_boring_multis: bool,
     no_remote_style: NoRemoteStyle,
+
+    my_colors_chains: Option<HashSet<order>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -100,6 +105,8 @@ impl<FinshedReadQueue> ThreadLogBuilder<FinshedReadQueue, ()> {
 
             //TODO what's the default?
             no_remote_style: NoRemoteStyle::NoConnection,
+
+            my_colors_chains: None,
         }
     }
 }
@@ -121,7 +128,8 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
             return_snapshots,
             per_chains,
             fetch_boring_multis,
-            no_remote_style
+            no_remote_style,
+            my_colors_chains,
         } = self;
         ThreadLogBuilder{
             to_store,
@@ -133,6 +141,7 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
             no_remote_style,
             ack_writes: true,
             finished_writes: to,
+            my_colors_chains,
         }
     }
 
@@ -148,6 +157,10 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
         ThreadLogBuilder{ fetch_boring_multis: true, .. self}
     }
 
+    pub fn set_fetch_boring_multis(self, fetch_boring_multis: bool) -> Self {
+        ThreadLogBuilder{ fetch_boring_multis, .. self}
+    }
+
     #[allow(non_snake_case)]
     pub fn ensure__no_remote__read(self) -> Self {
         ThreadLogBuilder{ no_remote_style: NoRemoteStyle::EnsureRead, .. self}
@@ -156,6 +169,11 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
     #[allow(non_snake_case)]
     pub fn atomic__no_remotes(self) -> Self {
         ThreadLogBuilder{ no_remote_style: NoRemoteStyle::Atomic, .. self}
+    }
+
+    pub fn my_colors_chains(self, chains: HashSet<order>) -> Self {
+        let builder = self.chains(chains.iter().cloned());
+        ThreadLogBuilder{ my_colors_chains: Some(chains), .. builder }
     }
 
     pub fn build(self) -> ThreadLog<FinshedReadQueue, FinshedWriteQueue>
@@ -172,6 +190,7 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
             per_chains,
             fetch_boring_multis,
             no_remote_style,
+            my_colors_chains,
         } = self;
         ThreadLog {
             to_store,
@@ -194,6 +213,8 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
             return_snapshots,
             no_remote_style,
             prefetch: 1,
+            last_seen_entries: Default::default(),
+            my_colors_chains: my_colors_chains.unwrap_or_default(),
         }
     }
 }
@@ -249,6 +270,7 @@ pub enum FromClient {
     ReadUntil(OrderIndex),
     Fastforward(OrderIndex),
     Rewind(OrderIndex),
+    StopAckingWrites,
     Shutdown,
 }
 
@@ -374,9 +396,25 @@ where
                 }
                 true
             },
-            PerformAppend(msg) => {
+            PerformAppend(mut msg) => {
                 self.print_data.append(1);
-                {
+
+                if !self.my_colors_chains.is_empty() {
+                    msg = {
+
+                        let contents = bytes_as_entry(&msg);
+                        let locs = contents.locs();
+
+                        let mut happens_after_entries: Vec<_> = self.last_seen_entries
+                            .drain()
+                            //We don't want a dep if we're in the chain, it's redundant
+                            .filter(|oi| locs.binary_search(&(oi.0, 0.into()).into()).is_err())
+                            .map(OrderIndex::from)
+                            .collect();
+
+                        contents.with_deps(&happens_after_entries).to_vec()
+                    };
+                } else {
                     let layout = bytes_as_entry(&msg).layout();
                     assert!(layout == EntryLayout::Data || layout == EntryLayout::Multiput);
                 }
@@ -417,6 +455,10 @@ where
                 pc.rewind_to(loc.1);
                 true
             }
+            StopAckingWrites => {
+                self.ack_writes = false;
+                true
+            }
             Shutdown => {
                 self.print_data.shut(1);
                 self.finished = true;
@@ -430,6 +472,13 @@ where
         match msg {
             WriteComplete(id, locs) => {
                 self.print_data.write_done(1);
+                let check_color = !self.my_colors_chains.is_empty();
+                for &OrderIndex(o, i) in locs.iter() {
+                    if check_color && self.my_colors_chains.contains(&o) {
+                        let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                        if *e < i { *e = i }
+                    }
+                }
                 if self.ack_writes && self.finished_writes.send(Ok((id, locs))).is_err() {
                     self.finished = true;
                 }
@@ -1263,6 +1312,13 @@ where
             pc.set_returned(i);
             pc.is_interesting
         };
+        if is_interesting && !self.my_colors_chains.is_empty() {
+            let OrderIndex(o, i) = loc;
+            if self.my_colors_chains.contains(&o) {
+                let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                if *e < i { *e = i }
+            }
+        }
         trace!("FUZZY returning read @ {:?}", loc);
         if is_interesting {
             //FIXME first_buffered?
@@ -1345,6 +1401,13 @@ where
                         pc.set_returned(i);
                         is_interesting |= pc.is_interesting;
                     },
+                }
+            }
+            let check_color = !self.my_colors_chains.is_empty();
+            for &OrderIndex(o, i) in locs.into_iter() {
+                if is_interesting && check_color && self.my_colors_chains.contains(&o) {
+                    let e = self.last_seen_entries.entry(o).or_insert(0.into());
+                    if *e < i { *e = i }
                 }
             }
             //TODO no-alloc

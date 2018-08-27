@@ -72,11 +72,15 @@ pub fn run_server(
 
 pub mod c_binidings {
 
-    // use prelude::*;
     use packets::*;
-    //use tcp_store::TcpStore;
-    // use multitcp_store::TcpStore;
-    use async::fuzzy_log::log_handle::{HashMap, LogHandle, ReadHandle, WriteHandle, GetRes, TryWaitRes};
+    use async::fuzzy_log::log_handle::{
+        HashMap,
+        LogHandle,
+        ReadHandle,
+        AtomicWriteHandle as WriteHandle,
+        GetRes,
+        TryWaitRes
+    };
 
     //use std::collections::HashMap;
     use std::{mem, ptr, slice};
@@ -852,18 +856,18 @@ pub mod c_binidings {
         WriteId::from_uuid(id)
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn wh_flush_completed_appends(dag: *mut WriteHandle<[u8]>) {
-        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        dag.flush_completed_appends().unwrap();
-    }
+    // #[no_mangle]
+    // pub unsafe extern "C" fn wh_flush_completed_appends(dag: *mut WriteHandle<[u8]>) {
+    //     let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+    //     dag.flush_completed_appends().unwrap();
+    // }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn wh_wait_for_any_append(dag: *mut WriteHandle<[u8]>) -> WriteId {
-        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
-        let id = dag.wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
-        WriteId::from_uuid(id)
-    }
+    // #[no_mangle]
+    // pub unsafe extern "C" fn wh_wait_for_any_append(dag: *mut WriteHandle<[u8]>) -> WriteId {
+    //     let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+    //     let id = dag.wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
+    //     WriteId::from_uuid(id)
+    // }
 
     #[no_mangle]
     pub extern "C" fn rh_snapshot(dag: *mut ReadHandle<[u8]>) {

@@ -39,22 +39,15 @@ use packets::{
 };
 
 pub struct LogHandle<V: ?Sized> {
-    _pd: PhantomData<Box<V>>,
-    num_snapshots: usize,
-    num_async_writes: usize,
-    to_log: mpsc::Sender<Message>,
-    ready_reads: FinshedReadRecv,
+    read_handle: ReadHandle<V>,
+    write_handle: AtomicWriteHandle<V>,
     finished_writes: FinshedWriteRecv,
-    //TODO finished_writes: ..
-    curr_entry: Vec<u8>,
-    last_seen_entries: HashMap<order, entry>,
-    my_colors_chains: HashSet<order>,
-    num_errors: u64,
+    num_async_writes: Option<usize>,
 }
 
 impl<V: ?Sized> Drop for LogHandle<V> {
     fn drop(&mut self) {
-        let _ = self.to_log.send(Message::FromClient(Shutdown));
+        let _ = self.read_handle.to_log.send(Message::FromClient(Shutdown));
     }
 }
 
@@ -68,15 +61,6 @@ pub struct ReadHandle<V: ?Sized> {
     last_dropped: Arc<()>,
 }
 
-pub struct WriteHandle<V: ?Sized> {
-    _pd: PhantomData<Box<V>>,
-    num_async_writes: usize,
-    to_log: mpsc::Sender<Message>,
-    finished_writes: FinshedWriteRecv,
-    num_errors: u64,
-    last_dropped: Arc<()>,
-}
-
 pub struct AtomicWriteHandle<V: ?Sized> {
     _pd: PhantomData<Box<V>>,
     to_log: mpsc::Sender<Message>,
@@ -84,14 +68,6 @@ pub struct AtomicWriteHandle<V: ?Sized> {
 }
 
 impl<V: ?Sized> Drop for ReadHandle<V> {
-    fn drop(&mut self) {
-        if let Some(..) = Arc::get_mut(&mut self.last_dropped) {
-            let _ = self.to_log.send(Message::FromClient(Shutdown));
-        }
-    }
-}
-
-impl<V: ?Sized> Drop for WriteHandle<V> {
     fn drop(&mut self) {
         if let Some(..) = Arc::get_mut(&mut self.last_dropped) {
             let _ = self.to_log.send(Message::FromClient(Shutdown));
@@ -203,7 +179,7 @@ where V: Storeable {
             log.run()
         }
 
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r, Default::default())
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r, true)
     }
 }
 
@@ -270,6 +246,10 @@ where V: Storeable {
         LogBuilder{ my_colors_chains: Some(chains), .. builder }
     }
 
+    pub fn do_not_ack_writes(self) -> Self {
+        LogBuilder{ack_writes: false, ..self}
+    }
+
     pub fn build(self) -> LogHandle<V> {
         let LogBuilder {
             servers, chains, reads_my_writes, fetch_boring_multis, ack_writes, id, my_colors_chains, _pd,
@@ -315,14 +295,17 @@ where V: Storeable {
             to_store
         };
 
-        let mcc = my_colors_chains.unwrap_or_else(Default::default);
-
-        LogHandle::build_with_store(chains, fetch_boring_multis, ack_writes, mcc, make_store)
+        LogHandle::build_with_store(
+            chains,
+            fetch_boring_multis,
+            ack_writes,
+            my_colors_chains,
+            make_store
+        )
     }
 
-    pub fn build_handles(mut self) -> (ReadHandle<V>, AtomicWriteHandle<V>) {
-        self.ack_writes = false;
-        let handle = self.build();
+    pub fn build_handles(self) -> (ReadHandle<V>, AtomicWriteHandle<V>) {
+        let handle = self.do_not_ack_writes().build();
         handle.split_atomic()
     }
 }
@@ -333,41 +316,6 @@ where V: Storeable {
 //     over different writers very easily
 impl<V: ?Sized> LogHandle<V>
 where V: Storeable {
-
-    pub fn split(mut self) -> (ReadHandle<V>, WriteHandle<V>) {
-        macro_rules! move_fields {
-            ($($field:ident),* $(,)*; $_self:ident) => (
-                $(
-                    let $field = mem::replace(&mut $_self.$field, mem::uninitialized());
-                )*
-                mem::forget(self);
-            );
-        }
-        unsafe {
-            move_fields!(
-                _pd,
-                num_snapshots,
-                num_async_writes,
-                to_log,
-                ready_reads,
-                finished_writes,
-                curr_entry,
-                last_seen_entries,
-                num_errors;
-                self
-            );
-            let last_dropped = Arc::new(());
-            let reader = ReadHandle {
-                _pd, num_snapshots, ready_reads, curr_entry, num_errors,
-                to_log: to_log.clone(), last_dropped: last_dropped.clone(),
-            };
-            let writer = WriteHandle {
-                _pd, num_async_writes, to_log, finished_writes, num_errors, last_dropped,
-            };
-            drop(last_seen_entries);
-            (reader, writer)
-        }
-    }
 
     fn split_atomic(mut self) -> (ReadHandle<V>, AtomicWriteHandle<V>) {
         macro_rules! move_fields {
@@ -380,30 +328,18 @@ where V: Storeable {
         }
         unsafe {
             move_fields!(
-                _pd,
-                num_snapshots,
-                num_async_writes,
-                to_log,
-                ready_reads,
-                finished_writes,
-                curr_entry,
-                last_seen_entries,
-                num_errors;
+                read_handle,
+                write_handle;
                 self
             );
-            drop(finished_writes);
-            let _ = num_async_writes;
-            let last_dropped = Arc::new(());
-            let reader = ReadHandle {
-                _pd, num_snapshots, ready_reads, curr_entry, num_errors,
-                to_log: to_log.clone(), last_dropped: last_dropped.clone(),
-            };
-            let writer = AtomicWriteHandle {
-                _pd, to_log, last_dropped,
-            };
-            drop(last_seen_entries);
-            (reader, writer)
+            (read_handle, write_handle)
         }
+    }
+
+    pub fn split(mut self) -> (ReadHandle<V>, AtomicWriteHandle<V>) {
+        let _ = self.read_handle.to_log.send(Message::FromClient(StopAckingWrites));
+        let _ = self.flush_completed_appends();
+        self.split_atomic()
     }
 
     pub fn unreplicated_with_servers<S, A>(servers: S) -> LogBuilder<V>
@@ -426,7 +362,7 @@ where V: Storeable {
         interesting_chains: C,
         fetch_boring_multis: bool,
         ack_writes: bool,
-        my_colors_chains: HashSet<order>,
+        my_colors_chains: Option<HashSet<order>>,
         store_builder: F,
     ) -> Self
     where C: IntoIterator<Item=order>,
@@ -439,18 +375,21 @@ where V: Storeable {
             .inspect(|c| assert!(c != &0.into(), "Don't register interest in color 0."))
             .collect();
         let (finished_writes_s, finished_writes_r) = mpsc::channel();
-        ::std::thread::spawn(move || {
-            ThreadLog::new(
-                to_store, from_outside,
-                ready_reads_s,
-                finished_writes_s,
-                fetch_boring_multis,
-                ack_writes,
-                interesting_chains
-            ).run()
+        thread::spawn(move || {
+            let builder = ThreadLog::builder(to_store, from_outside, ready_reads_s)
+                .set_fetch_boring_multis(fetch_boring_multis)
+                .chains(interesting_chains);
+            let builder = match my_colors_chains {
+                Some(my_colors_chains) => builder.my_colors_chains(my_colors_chains),
+                None => builder,
+            };
+            match ack_writes {
+                true => builder.ack_writes(finished_writes_s).build().run(),
+                false => builder.build().run(),
+            };
         });
 
-        LogHandle::new(to_log, ready_reads_r, finished_writes_r, my_colors_chains)
+        LogHandle::new(to_log, ready_reads_r, finished_writes_r, ack_writes)
     }
 
     pub fn with_store<C, F>(
@@ -468,7 +407,7 @@ where V: Storeable {
             .inspect(|c| assert!(c != &0.into(), "Don't register interest in color 0."))
             .collect();
         let (finished_writes_s, finished_writes_r) = mpsc::channel();
-        ::std::thread::spawn(move || {
+        thread::spawn(move || {
             ThreadLog::new(
                 to_store, from_outside,
                 ready_reads_s,
@@ -653,234 +592,69 @@ where V: Storeable {
         to_log: mpsc::Sender<Message>,
         ready_reads: FinshedReadRecv,
         finished_writes: FinshedWriteRecv,
-        my_colors_chains: HashSet<order>,
+        ack_writes: bool,
     ) -> Self {
+        let last_dropped = Arc::new(());
         LogHandle {
-            to_log: to_log,
-            ready_reads: ready_reads,
+            read_handle: ReadHandle::new(to_log.clone(), ready_reads, last_dropped.clone()),
+            write_handle: AtomicWriteHandle::new(to_log, last_dropped),
             finished_writes: finished_writes,
-            _pd: Default::default(),
-            curr_entry: Default::default(),
-            num_snapshots: 0,
-            num_async_writes: 0,
-            last_seen_entries: Default::default(),
-            my_colors_chains,
-            num_errors: 0,
+            num_async_writes: if ack_writes { Some(0) } else { None },
         }
     }
 
     /// Take a snapshot of a supplied interesting color and start prefetching.
     pub fn snapshot(&mut self, chain: order) {
-        self.num_snapshots = self.num_snapshots.saturating_add(1);
-        self.to_log.send(Message::FromClient(SnapshotAndPrefetch(chain)))
-            .unwrap();
+        self.read_handle.snapshot(chain)
     }
 
     /// Take a snapshot of a set of interesting colors and start prefetching.
     pub fn snapshot_colors(&mut self, colors: &[order]) {
-        trace!("HANDLE send snap {:?}.", colors);
-        let colors = colors.to_vec();
-        self.num_snapshots = self.num_snapshots.saturating_add(1);
-        self.to_log.send(Message::FromClient(MultiSnapshotAndPrefetch(colors))).unwrap();
+        self.read_handle.snapshot_colors(colors)
     }
 
     /// Take a linearizable snapshot of a set of interesting colors and start prefetching.
     pub fn strong_snapshot(&mut self, colors: &[order]) {
-        trace!("HANDLE send snap {:?}.", colors);
-        let mut c = Vec::with_capacity(colors.len());
-        c.extend(colors.into_iter().map(|&o| OrderIndex(o, entry::from(0))));
-        self.num_snapshots = self.num_snapshots.saturating_add(1);
-        self.to_log.send(Message::FromClient(StrongSnapshotAndPrefetch(c))).unwrap();
+        self.read_handle.strong_snapshot(colors)
     }
 
     /// Take a snapshot of all interesting colors and start prefetching.
     pub fn take_snapshot(&mut self) {
-        trace!("HANDLE send all snap.");
-        self.num_snapshots = self.num_snapshots.saturating_add(1);
-        self.to_log.send(Message::FromClient(SnapshotAndPrefetch(0.into())))
-            .unwrap();
+        self.read_handle.take_snapshot()
     }
 
     /// Wait until an event is ready, then returns the contents.
     pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {
-        self.get_next2().map(|(v, l, _)| (v, l))
+        self.read_handle.get_next()
     }
 
     pub fn get_next2(&mut self) -> Result<(&V, &[OrderIndex], &Uuid), GetRes>
     where V: UnStoreable {
-        if self.num_snapshots == 0 {
-            trace!("HANDLE read with no snap.");
-            return Err(GetRes::Done)
-        }
-
-        'recv: loop {
-            //TODO use recv_timeout in real version
-            let read = self.ready_reads.recv().expect("log hung up");
-            let read = match read.map_err(|e| self.make_read_error(e)) {
-                Ok(v) => v,
-                //TODO Gc err
-                Err(Some(e)) => return Err(e),
-                Err(None) => continue 'recv,
-            };
-            let old = mem::replace(&mut self.curr_entry, read);
-            if old.capacity() > 0 {
-                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
-            }
-            if self.curr_entry.len() != 0 {
-                break 'recv
-            }
-
-            trace!("HANDLE finished snap.");
-            assert!(self.num_snapshots > 0);
-            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
-            if self.num_snapshots == 0 {
-                trace!("HANDLE finished all snaps.");
-                return Err(GetRes::Done)
-            }
-        }
-
-        trace!("HANDLE got val.");
-        let (val, locs, id) = {
-            let e = bytes_as_entry(&self.curr_entry);
-            (slice_to_data(e.data()), e.locs(), e.id())
-        };
-        let check_color = self.my_colors_chains.is_empty();
-        for &OrderIndex(o, i) in locs {
-            if !check_color || self.my_colors_chains.contains(&o) {
-                let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                if *e < i {
-                    *e = i
-                }
-            }
-        }
-        Ok((val, locs, id))
+        self.read_handle.get_next2()
     }
 
-    pub fn sync<F>(&mut self, mut per_event: F)
-        -> Result<HashMap<order, entry>, GetRes>
+    pub fn sync<F>(&mut self, per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
     where V: UnStoreable, F: FnMut(&V, &[OrderIndex], &Uuid) {
-        self.take_snapshot();
-        let mut entries_seen = HashMap::default();
-        loop {
-            match self.get_next2() {
-                Ok((v, locs, id)) => {
-                    for &OrderIndex(o, i) in locs {
-                        let last = entries_seen.entry(o).or_insert(i);
-                        if *last <= i {
-                            *last = i
-                        }
-                    }
-                    per_event(v, locs, id);
-                },
-                Err(GetRes::Done) => return Ok(entries_seen),
-                Err(e) => return Err(e),
-            }
+        self.read_handle.sync(per_event)
+    }
 
-        }
+    pub fn sync_chain<F>(&mut self, chain: order, per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: FnMut(&V, &[OrderIndex], &Uuid) {
+        self.read_handle.sync_chain(chain, per_event)
     }
 
     /// Returns an event if one is ready.
     pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
     where V: UnStoreable {
-        if self.num_snapshots == 0 {
-            trace!("HANDLE read with no snap.");
-            return Err(GetRes::Done)
-        }
-
-        'recv: loop {
-            //TODO use recv_timeout in real version
-            let read = self.ready_reads.try_recv()
-                .or_else(|_| Err(GetRes::NothingReady))?;
-            let read = match read.map_err(|e| self.make_read_error(e)) {
-                Ok(v) => v,
-                //TODO Gc err
-                Err(Some(e)) => return Err(e),
-                Err(None) => continue 'recv,
-            };
-            let old = mem::replace(&mut self.curr_entry, read);
-            if old.capacity() > 0 {
-                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
-            }
-            if self.curr_entry.len() != 0 {
-                break 'recv
-            }
-
-            trace!("HANDLE finished snap.");
-            assert!(self.num_snapshots > 0);
-            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
-            if self.num_snapshots == 0 {
-                trace!("HANDLE finished all snaps.");
-                return Err(GetRes::Done)
-            }
-        }
-
-        trace!("HANDLE got val.");
-        let (val, locs) = {
-            let e = bytes_as_entry(&self.curr_entry);
-            (slice_to_data(e.data()), e.locs())
-        };
-        let check_color = self.my_colors_chains.is_empty();
-        for &OrderIndex(o, i) in locs {
-            if !check_color || self.my_colors_chains.contains(&o) {
-                let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                if *e < i {
-                    *e = i
-                }
-            }
-        }
-        Ok((val, locs))
+        self.read_handle.try_get_next()
     }
 
     pub fn try_get_next2(&mut self) -> Result<(&V, &[OrderIndex], &Uuid), GetRes>
     where V: UnStoreable {
-        if self.num_snapshots == 0 {
-            trace!("HANDLE read with no snap.");
-            return Err(GetRes::Done)
-        }
-
-        'recv: loop {
-            //TODO use recv_timeout in real version
-            let read = self.ready_reads.try_recv()
-                .or_else(|_| Err(GetRes::NothingReady))?;
-            let read = match read.map_err(|e| self.make_read_error(e)) {
-                Ok(v) => v,
-                //TODO Gc err
-                Err(Some(e)) => return Err(e),
-                Err(None) => continue 'recv,
-            };
-            let old = mem::replace(&mut self.curr_entry, read);
-            if old.capacity() > 0 {
-                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
-            }
-            if self.curr_entry.len() != 0 {
-                break 'recv
-            }
-
-            trace!("HANDLE finished snap.");
-            assert!(self.num_snapshots > 0);
-            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
-            if self.num_snapshots == 0 {
-                trace!("HANDLE finished all snaps.");
-                return Err(GetRes::Done)
-            }
-        }
-
-        trace!("HANDLE got val.");
-        let (val, locs, id) = {
-            let e = bytes_as_entry(&self.curr_entry);
-            (slice_to_data(e.data()), e.locs(), e.id())
-        };
-        let check_color = self.my_colors_chains.is_empty();
-        for &OrderIndex(o, i) in locs {
-            if !check_color || self.my_colors_chains.contains(&o) {
-                let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                if *e < i {
-                    *e = i
-                }
-            }
-        }
-        Ok((val, locs, id))
+        self.read_handle.try_get_next2()
     }
 
     pub fn color_append(
@@ -995,7 +769,7 @@ where V: Storeable {
         &mut self,
         data: &V,
         inhabits: &mut [order],
-        happens_after: &mut [order],
+        _happens_after: &mut [order],
     ) -> Uuid {
         if inhabits.len() == 0 {
             return Uuid::nil()
@@ -1007,16 +781,7 @@ where V: Storeable {
             "color 0 should not be used;it is special cased for legacy reasons."
         );
 
-        let mut happens_after_entries = Vec::with_capacity(happens_after.len());
-
-        for o in happens_after {
-            let horizon = self.last_seen_entries.remove(o).unwrap_or(0.into());
-            if horizon > entry::from(0) && inhabits.binary_search(o).is_err() {
-                happens_after_entries.push(OrderIndex(*o, horizon));
-            }
-        }
-
-        self.causal_color_append(data, inhabits, &mut [], &mut happens_after_entries)
+        self.causal_color_append(data, inhabits, &mut [], &mut [])
     }
 
     pub fn simpler_causal_append(
@@ -1034,13 +799,7 @@ where V: Storeable {
             "color 0 should not be used;it is special cased for legacy reasons."
         );
 
-        let mut happens_after_entries: Vec<_> = self.last_seen_entries
-            .drain()
-            .filter(|oi| inhabits.binary_search(&oi.0).is_err())
-            .map(OrderIndex::from)
-            .collect();
-
-        self.causal_color_append(data, inhabits, &mut [], &mut happens_after_entries)
+        self.causal_color_append(data, inhabits, &mut [], &mut [])
     }
 
     //TODO add wait_and_snapshot(..)
@@ -1053,19 +812,8 @@ where V: Storeable {
     }
 
     pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
-        //TODO no-alloc?
-        let id = Uuid::new_v4();
-        let mut buffer = Vec::new();
-        EntryContents::Single {
-            id: &id,
-            flags: &EntryFlag::Nothing,
-            loc: &OrderIndex(chain, 0.into()),
-            deps: deps,
-            data: data_to_slice(data),
-            timestamp: &0, //TODO
-        }.fill_vec(&mut buffer);
-        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.num_async_writes += 1;
+        let id = self.write_handle.async_append(chain, data, deps);
+        self.num_async_writes.as_mut().map(|n| *n += 1);
         id
     }
 
@@ -1078,23 +826,8 @@ where V: Storeable {
 
     pub fn async_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
     -> Uuid {
-        //TODO no-alloc?
-        assert!(chains.len() > 1);
-        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
-        locs.sort();
-        locs.dedup();
-        let id = Uuid::new_v4();
-        let mut buffer = Vec::new();
-        EntryContents::Multi {
-            id: &id,
-            flags: &EntryFlag::Nothing,
-            lock: &0,
-            locs: &locs,
-            deps: deps,
-            data: data_to_slice(data),
-        }.fill_vec(&mut buffer);
-        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.num_async_writes += 1;
+        let id = self.write_handle.async_multiappend(chains, data, deps);
+        self.num_async_writes.as_mut().map(|n| *n += 1);
         id
     }
 
@@ -1108,23 +841,8 @@ where V: Storeable {
 
     pub fn async_no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
     -> Uuid {
-        //TODO no-alloc?
-        assert!(chains.len() > 1);
-        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
-        locs.sort();
-        locs.dedup();
-        let id = Uuid::new_v4();
-        let mut buffer = Vec::new();
-        EntryContents::Multi {
-            id: &id,
-            flags: &EntryFlag::NoRemote,
-            lock: &0,
-            locs: &locs,
-            deps: deps,
-            data: data_to_slice(data),
-        }.fill_vec(&mut buffer);
-        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.num_async_writes += 1;
+        let id = self.write_handle.async_no_remote_multiappend(chains, data, deps);
+        self.num_async_writes.as_mut().map(|n| *n += 1);
         id
     }
 
@@ -1146,57 +864,20 @@ where V: Storeable {
         data: &V,
         deps: &[OrderIndex])
     -> Uuid {
-        assert!(depends_on.len() > 0);
-        let mut mchains: Vec<_> = chains.into_iter()
-            .map(|&c| OrderIndex(c, 0.into()))
-            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
-            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
-            .collect();
-        {
-
-            let (chains, deps) = mchains.split_at_mut(chains.len());
-            chains.sort();
-            deps[1..].sort();
-        }
-        //FIXME ensure there are no chains which are also in depends_on
-        mchains.dedup();
-        assert!(mchains[chains.len()] == OrderIndex(0.into(), 0.into()));
-        debug_assert!(mchains[..chains.len()].iter()
-            .all(|&OrderIndex(o, _)| chains.contains(&o)));
-        debug_assert!(mchains[(chains.len() + 1)..]
-            .iter().all(|&OrderIndex(o, _)| depends_on.contains(&o)));
-        let id = Uuid::new_v4();
-        let mut buffer = Vec::new();
-        EntryContents::Multi {
-            id: &id,
-            flags: &EntryFlag::Nothing,
-            lock: &0,
-            locs: &mchains,
-            deps: deps,
-            data: data_to_slice(data),
-        }.fill_vec(&mut buffer);
-        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.num_async_writes += 1;
+        let id = self.write_handle.async_dependent_multiappend(chains, depends_on, data, deps);
+        self.num_async_writes.as_mut().map(|n| *n += 1);
         id
-    }
-
-    fn make_read_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
-    -> Option<GetRes> {
-        if self.num_errors < error_num {
-            assert!(self.num_errors + 1 == error_num);
-            self.num_errors += 1;
-            Some(GetRes::IoErr(error, server))
-        } else {
-            None
-        }
     }
 }
 
 impl<V: ?Sized> LogHandle<V> {
 
+    //FIXME better error checking is no waiting is possible
+
     pub fn wait_for_all_appends(&mut self) -> Result<(), TryWaitRes> {
-        trace!("HANDLE waiting for {} appends", self.num_async_writes);
-        for _ in 0..self.num_async_writes {
+        trace!("HANDLE waiting for {:?} appends", self.num_async_writes);
+        for _ in 0..self.num_async_writes
+            .expect("cannot wait for everything with multiple write handles") {
             self.wait_for_any_append()?;
         }
         Ok(())
@@ -1204,7 +885,8 @@ impl<V: ?Sized> LogHandle<V> {
 
     pub fn wait_for_a_specific_append(&mut self, write_id: Uuid)
     -> Result<Vec<OrderIndex>, TryWaitRes> {
-        for _ in 0..self.num_async_writes {
+        for _ in 0..self.num_async_writes
+            .expect("cannot wait for a specific append with multiple write handles") {
             let (id, locs) = self.wait_for_any_append()?;
             if id == write_id {
                 return Ok(locs)
@@ -1215,91 +897,80 @@ impl<V: ?Sized> LogHandle<V> {
 
     pub fn wait_for_any_append(&mut self) -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
         //FIXME need to know the number of lost writes so we don't freeze?
-        if self.num_async_writes > 0 {
-            //TODO return buffers here and cache them?
-            loop {
-                let res = self.recv_write().unwrap();
-                match res {
-                    Ok(write) => {
-                        self.num_async_writes -= 1;
-                        return Ok(write)
-                    },
-                    Err(err) => if let Some(err) = self.to_wait_error(err) {
-                        return Err(err)
-                    },
+        match self.num_async_writes {
+            Some(0) => return Err(TryWaitRes::NothingReady),
+            None => self.try_wait_for_any_append(),
+            Some(_) => {
+                //TODO return buffers here and cache them?
+                loop {
+                    let res = self.recv_write().unwrap();
+                    match res {
+                        Ok(write) => {
+                            self.num_async_writes.as_mut().map(|n| *n -= 1);
+                            return Ok(write)
+                        },
+                        Err(err) => if let Some(err) = self.to_wait_error(err) {
+                            return Err(err)
+                        },
+                    }
                 }
-            }
+            },
         }
-        Err(TryWaitRes::NothingReady)
     }
 
     pub fn try_wait_for_any_append(&mut self)
     -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
-        if self.num_async_writes > 0 {
-            let ret = self.finished_writes.try_recv()
-                .or_else(|_| Err(TryWaitRes::NothingReady))
-                .and_then(|res| res.map_err(|err|
-                    match self.to_wait_error(err) {
-                        Some(err) => err,
-                        None => TryWaitRes::NothingReady,
-                    }
-                ));
-            if let Ok(&(_, ref locs)) = ret.as_ref() {
-                self.num_async_writes -= 1;
-                let check_color = self.my_colors_chains.is_empty();
-                for &OrderIndex(o, i) in locs {
-                    if !check_color || self.my_colors_chains.contains(&o) {
-                        let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                        if *e < i {
-                            *e = i
+        match self.num_async_writes {
+            Some(0) => return Err(TryWaitRes::NothingReady),
+            _ => {
+                let ret = self.finished_writes.try_recv()
+                    .or_else(|_| Err(TryWaitRes::NothingReady))
+                    .and_then(|res| res.map_err(|err|
+                        match self.to_wait_error(err) {
+                            Some(err) => err,
+                            None => TryWaitRes::NothingReady,
                         }
-                    }
+                    ));
+                if ret.is_ok() {
+                    self.num_async_writes.as_mut().map(|n| *n -= 1);
                 }
+                //TODO return buffers here and cache them?
+                ret
             }
-            //TODO return buffers here and cache them?
-            ret
-        } else {
-            Err(TryWaitRes::NothingReady)
         }
     }
 
     pub fn flush_completed_appends(&mut self) -> Result<usize, (io::ErrorKind, usize)> {
-        let mut flushed = 0;
-        if self.num_async_writes > 0 {
-            let last_seen_entries = &mut self.last_seen_entries;
-            let check_color = self.my_colors_chains.is_empty();
-            let my_colors_chains = &mut self.my_colors_chains;
-            for res in self.finished_writes.try_iter() {
-                flushed += 1;
-                match res {
-                    Ok((_, locs)) => {
-                        self.num_async_writes -= 1;
-                        for &OrderIndex(o, i) in &locs {
-                            if !check_color || my_colors_chains.contains(&o) {
-                                let e = last_seen_entries.entry(o).or_insert(0.into());
-                                if *e < i {
-                                    *e = i
-                                }
-                            }
-                        }
-                    },
-                    Err(fuzzy_log::Error{server, error_num, error}) =>
-                        if self.num_errors < error_num {
-                            assert!(self.num_errors + 1 == error_num);
-                            self.num_errors += 1;
-                            return Err((error, server))
+        match self.num_async_writes {
+            Some(0) => return Ok(0),
+            _ => {
+                let num_errors = &mut self.read_handle.num_errors;
+                let mut flushed = 0;
+                for res in self.finished_writes.try_iter() {
+                    match res {
+                        Ok(..) => {
+                            flushed += 1;
+                            self.num_async_writes.as_mut().map(|n| *n -= 1);
                         },
+                        Err(fuzzy_log::Error{server, error_num, error}) =>
+                            //TODO return incremental count
+                            if *num_errors < error_num {
+                                assert!(*num_errors + 1 == error_num);
+                                *num_errors += 1;
+                                return Err((error, server));
+                            },
+                    }
                 }
-            }
+                Ok(flushed)
+            },
         }
-        Ok(flushed)
     }
 
     fn to_wait_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
     -> Option<TryWaitRes> {
-        if self.num_errors < error_num {
-            assert!(self.num_errors + 1 == error_num);
-            self.num_errors += 1;
+        if self.read_handle.num_errors < error_num {
+            assert!(self.read_handle.num_errors + 1 == error_num);
+            self.read_handle.num_errors += 1;
             Some(TryWaitRes::IoErr(error, server))
         } else {
             None
@@ -1309,34 +980,41 @@ impl<V: ?Sized> LogHandle<V> {
     fn recv_write(&mut self)
     -> Result<Result<(Uuid, Vec<OrderIndex>), fuzzy_log::Error>, ::std::sync::mpsc::RecvError> {
         self.finished_writes.recv().map(|res| res.map(|(id, locs)| {
-            let check_color = self.my_colors_chains.is_empty();
-            for &OrderIndex(o, i) in &locs {
-                if !check_color || self.my_colors_chains.contains(&o) {
-                    let e = self.last_seen_entries.entry(o).or_insert(0.into());
-                    if *e < i {
-                        *e = i
-                    }
-                }
-            }
             (id, locs)
         }))
     }
 
     pub fn read_until(&mut self, loc: OrderIndex) {
-        self.to_log.send(Message::FromClient(ReadUntil(loc))).unwrap();
-        self.num_snapshots = self.num_snapshots.saturating_add(1);
+        self.read_handle.read_until(loc)
     }
 
     pub fn fastforward(&mut self, loc: OrderIndex) {
-        self.to_log.send(Message::FromClient(Fastforward(loc))).unwrap();
+        self.read_handle.fastforward(loc)
     }
 
     pub fn rewind(&mut self, loc: OrderIndex) {
-        self.to_log.send(Message::FromClient(Rewind(loc))).unwrap();
+        self.read_handle.rewind(loc)
     }
 }
 
 impl<V: ?Sized> ReadHandle<V> {
+
+    fn new(
+        to_log: mpsc::Sender<Message>,
+        ready_reads: FinshedReadRecv,
+        last_dropped: Arc<()>,
+    ) -> Self {
+        Self {
+            _pd: Default::default(),
+            to_log,
+            ready_reads,
+            curr_entry: Default::default(),
+            num_snapshots: 0,
+            num_errors: 0,
+            last_dropped,
+        }
+    }
+
     /// Take a snapshot of a supplied interesting color and start prefetching.
     pub fn snapshot(&mut self, chain: order) {
         self.num_snapshots = self.num_snapshots.saturating_add(1);
@@ -1367,6 +1045,48 @@ impl<V: ?Sized> ReadHandle<V> {
         self.num_snapshots = self.num_snapshots.saturating_add(1);
         self.to_log.send(Message::FromClient(SnapshotAndPrefetch(0.into())))
             .unwrap();
+    }
+
+    pub fn sync<F>(&mut self, per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: FnMut(&V, &[OrderIndex], &Uuid) {
+        self.take_snapshot();
+        self.do_sync(per_event)
+    }
+
+    pub fn sync_chain<F>(&mut self, chain: order, per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: FnMut(&V, &[OrderIndex], &Uuid) {
+        self.snapshot(chain);
+        self.do_sync(per_event)
+    }
+
+    fn do_sync<F>(&mut self, mut per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: FnMut(&V, &[OrderIndex], &Uuid) {
+        let mut entries_seen = HashMap::default();
+        loop {
+            match self.get_next2() {
+                Ok((v, locs, id)) => {
+                    for &OrderIndex(o, i) in locs {
+                        let last = entries_seen.entry(o).or_insert(i);
+                        if *last <= i {
+                            *last = i
+                        }
+                    }
+                    per_event(v, locs, id);
+                },
+                Err(GetRes::Done) => return Ok(entries_seen),
+                Err(e) => return Err(e),
+            }
+
+        }
+    }
+
+    /// Wait until an event is ready, then returns the contents.
+    pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
+    where V: UnStoreable {
+        self.get_next2().map(|(v, l, _)| (v, l))
     }
 
     pub fn get_next2(&mut self) -> Result<(&V, &[OrderIndex], &Uuid), GetRes>
@@ -1410,49 +1130,13 @@ impl<V: ?Sized> ReadHandle<V> {
         Ok((val, locs, id))
     }
 
-    /// Wait until an event is ready, then returns the contents.
-    pub fn get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
-    where V: UnStoreable {
-        if self.num_snapshots == 0 {
-            trace!("HANDLE read with no snap.");
-            return Err(GetRes::Done)
-        }
-
-        'recv: loop {
-            //TODO use recv_timeout in real version
-            let read = self.ready_reads.recv().expect("log hung up");
-            let read = match read.map_err(|e| self.make_read_error(e)) {
-                Ok(v) => v,
-                //TODO Gc err
-                Err(Some(e)) => return Err(e),
-                Err(None) => continue 'recv,
-            };
-            let old = mem::replace(&mut self.curr_entry, read);
-            if old.capacity() > 0 {
-                self.to_log.send(Message::FromClient(ReturnBuffer(old))).expect("cannot send");
-            }
-            if self.curr_entry.len() != 0 {
-                break 'recv
-            }
-
-            trace!("HANDLE finished snap.");
-            assert!(self.num_snapshots > 0);
-            self.num_snapshots = self.num_snapshots.checked_sub(1).unwrap();
-            if self.num_snapshots == 0 {
-                trace!("HANDLE finished all snaps.");
-                return Err(GetRes::Done)
-            }
-        }
-
-        trace!("HANDLE got val.");
-        let (val, locs) = {
-            let e = bytes_as_entry(&self.curr_entry);
-            (slice_to_data(e.data()), e.locs())
-        };
-        Ok((val, locs))
-    }
 
     pub fn try_get_next(&mut self) -> Result<(&V, &[OrderIndex]), GetRes>
+    where V: UnStoreable {
+        self.try_get_next2().map(|(v, l, _)| (v, l))
+    }
+
+    pub fn try_get_next2(&mut self) -> Result<(&V, &[OrderIndex], &Uuid), GetRes>
     where V: UnStoreable {
         if self.num_snapshots == 0 {
             trace!("HANDLE read with no snap.");
@@ -1487,11 +1171,11 @@ impl<V: ?Sized> ReadHandle<V> {
         }
 
         trace!("HANDLE got val.");
-        let (val, locs) = {
+        let (val, locs, id) = {
             let e = bytes_as_entry(&self.curr_entry);
-            (slice_to_data(e.data()), e.locs())
+            (slice_to_data(e.data()), e.locs(), e.id())
         };
-        Ok((val, locs))
+        Ok((val, locs, id))
     }
 
     fn make_read_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
@@ -1509,172 +1193,33 @@ impl<V: ?Sized> ReadHandle<V> {
         self.to_log.send(Message::FromClient(ReadUntil(loc))).unwrap();
         self.num_snapshots = self.num_snapshots.saturating_add(1);
     }
-}
 
-impl<V: ?Sized> WriteHandle<V>
-where V: Storeable {
-
-    pub fn async_append(&mut self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
-        //TODO no-alloc?
-        let id = Uuid::new_v4();
-        let mut buffer = Vec::new();
-        EntryContents::Single {
-            id: &id,
-            flags: &EntryFlag::Nothing,
-            loc: &OrderIndex(chain, 0.into()),
-            deps: deps,
-            data: data_to_slice(data),
-            timestamp: &0, //TODO
-        }.fill_vec(&mut buffer);
-        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.num_async_writes += 1;
-        id
+    pub fn fastforward(&mut self, loc: OrderIndex) {
+        self.to_log.send(Message::FromClient(Fastforward(loc))).unwrap();
     }
 
-    pub fn async_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
-    -> Uuid {
-        //TODO no-alloc?
-        assert!(chains.len() > 1);
-        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
-        locs.sort();
-        locs.dedup();
-        let id = Uuid::new_v4();
-        let mut buffer = Vec::new();
-        EntryContents::Multi {
-            id: &id,
-            flags: &EntryFlag::Nothing,
-            lock: &0,
-            locs: &locs,
-            deps: deps,
-            data: data_to_slice(data),
-        }.fill_vec(&mut buffer);
-        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.num_async_writes += 1;
-        id
-    }
-
-    pub fn async_no_remote_multiappend(&mut self, chains: &[order], data: &V, deps: &[OrderIndex])
-    -> Uuid {
-        //TODO no-alloc?
-        assert!(chains.len() > 1);
-        let mut locs: Vec<_> = chains.into_iter().map(|&o| OrderIndex(o, 0.into())).collect();
-        locs.sort();
-        locs.dedup();
-        let id = Uuid::new_v4();
-        let mut buffer = Vec::new();
-        EntryContents::Multi {
-            id: &id,
-            flags: &EntryFlag::NoRemote,
-            lock: &0,
-            locs: &locs,
-            deps: deps,
-            data: data_to_slice(data),
-        }.fill_vec(&mut buffer);
-        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
-        self.num_async_writes += 1;
-        id
-    }
-
-    pub fn wait_for_all_appends(&mut self) -> Result<(), TryWaitRes> {
-        trace!("HANDLE waiting for {} appends", self.num_async_writes);
-        for _ in 0..self.num_async_writes {
-            self.wait_for_any_append()?;
-        }
-        Ok(())
-    }
-
-    pub fn wait_for_a_specific_append(&mut self, write_id: Uuid)
-    -> Result<Vec<OrderIndex>, TryWaitRes> {
-        for _ in 0..self.num_async_writes {
-            let (id, locs) = self.wait_for_any_append()?;
-            if id == write_id {
-                return Ok(locs)
-            }
-        }
-        Err(TryWaitRes::NothingReady)
-    }
-
-    pub fn wait_for_any_append(&mut self) -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
-        //FIXME need to know the number of lost writes so we don't freeze?
-        if self.num_async_writes > 0 {
-            //TODO return buffers here and cache them?
-            loop {
-                let res = self.recv_write().unwrap();
-                match res {
-                    Ok(write) => {
-                        self.num_async_writes -= 1;
-                        return Ok(write)
-                    },
-                    Err(err) => if let Some(err) = self.to_wait_error(err) {
-                        return Err(err)
-                    },
-                }
-            }
-        }
-        Err(TryWaitRes::NothingReady)
-    }
-
-    pub fn try_wait_for_any_append(&mut self)
-    -> Result<(Uuid, Vec<OrderIndex>), TryWaitRes> {
-        if self.num_async_writes > 0 {
-            let ret = self.finished_writes.try_recv()
-                .or_else(|_| Err(TryWaitRes::NothingReady))
-                .and_then(|res| res.map_err(|err|
-                    match self.to_wait_error(err) {
-                        Some(err) => err,
-                        None => TryWaitRes::NothingReady,
-                    }
-                ));
-            if let Ok(..) = ret.as_ref() {
-                self.num_async_writes -= 1;
-            }
-            //TODO return buffers here and cache them?
-            ret
-        } else {
-            Err(TryWaitRes::NothingReady)
-        }
-    }
-
-    pub fn flush_completed_appends(&mut self) -> Result<usize, (io::ErrorKind, usize)> {
-        let mut flushed = 0;
-        if self.num_async_writes > 0 {
-            for res in self.finished_writes.try_iter() {
-                flushed += 1;
-                match res {
-                    Ok((_, _)) => {
-                        self.num_async_writes -= 1;
-                    },
-                    Err(fuzzy_log::Error{server, error_num, error}) =>
-                        if self.num_errors < error_num {
-                            assert!(self.num_errors + 1 == error_num);
-                            self.num_errors += 1;
-                            return Err((error, server))
-                        },
-                }
-            }
-        }
-        Ok(flushed)
-    }
-
-    fn recv_write(&mut self)
-    -> Result<Result<(Uuid, Vec<OrderIndex>), fuzzy_log::Error>, ::std::sync::mpsc::RecvError> {
-        self.finished_writes.recv()
-    }
-
-    fn to_wait_error(&mut self, fuzzy_log::Error{server, error_num, error}: fuzzy_log::Error)
-    -> Option<TryWaitRes> {
-        if self.num_errors < error_num {
-            assert!(self.num_errors + 1 == error_num);
-            self.num_errors += 1;
-            Some(TryWaitRes::IoErr(error, server))
-        } else {
-            None
-        }
+    pub fn rewind(&mut self, loc: OrderIndex) {
+        self.to_log.send(Message::FromClient(Rewind(loc))).unwrap();
     }
 }
 
 impl<V: ?Sized> AtomicWriteHandle<V>
 where V: Storeable {
+
+    fn new(to_log: mpsc::Sender<Message>, last_dropped: Arc<()>) -> Self {
+        Self { to_log, last_dropped, _pd: Default::default() }
+    }
+
+    pub fn simple_async_append(&self, data: &V, inhabits: &[order]) -> Uuid {
+        if inhabits.len() == 1 {
+            trace!("causal single append");
+            self.async_append(inhabits[0].into(), data, &[])
+        }
+        else {
+            trace!("causal multi append");
+            self.async_multiappend(&*inhabits, data, &[])
+        }
+    }
 
     pub fn async_append(&self, chain: order, data: &V, deps: &[OrderIndex]) -> Uuid {
         //TODO no-alloc?
@@ -1735,6 +1280,45 @@ where V: Storeable {
             flags: &EntryFlag::NoRemote,
             lock: &0,
             locs: &locs,
+            deps: deps,
+            data: data_to_slice(data),
+        }.fill_vec(&mut buffer);
+        self.to_log.send(Message::FromClient(PerformAppend(buffer))).unwrap();
+        id
+    }
+
+    pub fn async_dependent_multiappend(&mut self,
+        chains: &[order],
+        depends_on: &[order],
+        data: &V,
+        deps: &[OrderIndex])
+    -> Uuid {
+        assert!(depends_on.len() > 0);
+        let mut mchains: Vec<_> = chains.into_iter()
+            .map(|&c| OrderIndex(c, 0.into()))
+            .chain(::std::iter::once(OrderIndex(0.into(), 0.into())))
+            .chain(depends_on.iter().map(|&c| OrderIndex(c, 0.into())))
+            .collect();
+        {
+
+            let (chains, deps) = mchains.split_at_mut(chains.len());
+            chains.sort();
+            deps[1..].sort();
+        }
+        //FIXME ensure there are no chains which are also in depends_on
+        mchains.dedup();
+        assert!(mchains[chains.len()] == OrderIndex(0.into(), 0.into()));
+        debug_assert!(mchains[..chains.len()].iter()
+            .all(|&OrderIndex(o, _)| chains.contains(&o)));
+        debug_assert!(mchains[(chains.len() + 1)..]
+            .iter().all(|&OrderIndex(o, _)| depends_on.contains(&o)));
+        let id = Uuid::new_v4();
+        let mut buffer = Vec::new();
+        EntryContents::Multi {
+            id: &id,
+            flags: &EntryFlag::Nothing,
+            lock: &0,
+            locs: &mchains,
             deps: deps,
             data: data_to_slice(data),
         }.fill_vec(&mut buffer);

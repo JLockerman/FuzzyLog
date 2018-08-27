@@ -578,6 +578,28 @@ impl<'a> Packet::Ref<'a> {
         }
     }
 
+    pub fn with_deps<'b>(self, new: &'b [OrderIndex]) -> Packet::Ref<'b>
+    where 'a: 'b {
+        use self::Packet::Ref::*;
+        match self {
+            Single{id, flags, loc, deps: _, data, timestamp} =>
+                Single{id, flags, loc, deps: new, data, timestamp, },
+            Multi{id, flags, lock, locs, deps: _, data} =>
+                Multi{id, flags, lock, locs, deps: new, data},
+            Senti{id, flags, data_bytes, lock, locs, deps: _, } =>
+                Senti{id, flags, data_bytes, lock, locs, deps: new, },
+            SingleToReplica{id, flags, loc, deps: _, data, timestamp, queue_num} =>
+                SingleToReplica{id, flags, loc, deps: new, data, timestamp, queue_num},
+            MultiToReplica{id, flags, lock, locs, deps: _, data, queue_nums, } =>
+                MultiToReplica{id, flags, lock, locs, deps: new, data, queue_nums, },
+            SentiToReplica{id, flags, data_bytes, lock, locs, deps: _, queue_nums, } =>
+                SentiToReplica{id, flags, data_bytes, lock, locs, deps: new, queue_nums, },
+
+            p @ Read{..} | p @ Skeens2ToReplica{..} | p @ GC{..} | p @ FenceClient{..} | p @ UpdateRecovery{..} | p @ CheckSkeens1{..} | p @ Snapshot{..} | p @ SnapshotToReplica{..} =>
+                    unreachable!("{:?}", p),
+        }
+    }
+
     pub fn single_skeens_to_replication(self, time: &'a u64, queue_num: &'a u64) -> Self {
         use self::Packet::Ref::*;
         match self {

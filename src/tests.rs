@@ -1,9 +1,17 @@
 
 macro_rules! async_tests {
-    (test $new_thread_log:ident) => (
-        async_tests!(test $new_thread_log, false);
+    () => {
+        // async_tests!(tcp);
+        // async_tests!(udp);
+        async_tests!(pstcp);
+        async_tests!(rtcp);
+        async_tests!(rstcp);
+        async_tests!(r3tcp);
+    };
+    (test $new_thread_log:ident, $ntl_with_boring:ident, $ntl_with_simple:ident) => (
+        async_tests!(test $new_thread_log, $ntl_with_boring, $ntl_with_simple, false);
     );
-    (test $new_thread_log:ident, $single_server:expr) => (
+    (test $new_thread_log:ident, $ntl_with_boring:ident, $ntl_with_simple:ident, $single_server:expr) => (
 
         use packets::*;
         use async::fuzzy_log::*;
@@ -440,7 +448,7 @@ macro_rules! async_tests {
 
             let _columns = &[order::from(58), order::from(59), order::from(60)];
             let interesting_columns = vec![58.into(), 59.into()];
-            let mut lh = $new_thread_log::<i64>(interesting_columns);
+            let mut lh = $ntl_with_boring::<i64>(interesting_columns);
             //1. even if one of the columns is boring we can still read the multi
             let _ = lh.multiappend(&[58.into(), 60.into()], &0xfeed, &[]);
             //2. transitives are obeyed beyond boring columns
@@ -556,8 +564,8 @@ macro_rules! async_tests {
             let _ = env_logger::init();
             trace!("TEST simple causal 1");
 
-            let mut lh = $new_thread_log::<i32>(vec![67.into(), 68.into(), 69.into()]);
-            let mut lh2 = $new_thread_log::<i32>(vec![67.into(), 68.into(), 69.into()]);
+            let mut lh = $ntl_with_simple::<i32>(vec![67.into(), 68.into(), 69.into()]);
+            let mut lh2 = $ntl_with_simple::<i32>(vec![67.into(), 68.into(), 69.into()]);
 
             let _ = lh.append(67.into(), &63,  &[]);
             let _ = lh.append(68.into(), &-2,  &[]);
@@ -595,7 +603,7 @@ macro_rules! async_tests {
             let _ = env_logger::init();
             trace!("TEST simple causal 2");
 
-            let mut lh = $new_thread_log::<i32>(vec![70.into(), 71.into(), 72.into()]);
+            let mut lh = $ntl_with_simple::<i32>(vec![70.into(), 71.into(), 72.into()]);
 
             let _ = lh.append(70.into(), &63,  &[]);
             let _ = lh.append(71.into(), &-2,  &[]);
@@ -939,14 +947,6 @@ macro_rules! async_tests {
 
         //TODO test append after prefetch but before read
     );
-    () => {
-        // async_tests!(tcp);
-        // async_tests!(udp);
-        async_tests!(stcp);
-        async_tests!(rtcp);
-        async_tests!(rstcp);
-        async_tests!(r3tcp);
-    };
     (tcp) => (
         mod ptcp {
             async_tests!(test new_thread_log);
@@ -1058,9 +1058,9 @@ macro_rules! async_tests {
             }
         }
     );
-    (stcp) => {
+    (pstcp) => {
         mod pstcp {
-            async_tests!(test new_thread_log);
+            async_tests!(test new_thread_log, ntl_with_boring, ntl_with_simple);
 
             #[allow(non_upper_case_globals)]
             const addr_strs: &'static [&'static str] = &["0.0.0.0:13490", "0.0.0.0:13491"];
@@ -1106,10 +1106,29 @@ macro_rules! async_tests {
             fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
                 start_tcp_servers();
 
-                LogHandle::new_tcp_log(
-                    addr_strs.into_iter().map(|s| s.parse().unwrap()),
-                    interesting_chains.into_iter(),
-                )
+                LogHandle::unreplicated_with_servers::<_, ::std::net::SocketAddr>(
+                    addr_strs.into_iter().map(|s| s.parse().unwrap())
+                ).chains(interesting_chains.into_iter())
+                    .build()
+            }
+
+            fn ntl_with_boring<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                LogHandle::unreplicated_with_servers::<_, ::std::net::SocketAddr>(
+                    addr_strs.into_iter().map(|s| s.parse().unwrap())
+                ).chains(interesting_chains.into_iter())
+                    .fetch_boring_multis()
+                    .build()
+            }
+
+            fn ntl_with_simple<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                LogHandle::unreplicated_with_servers::<_, ::std::net::SocketAddr>(
+                    addr_strs.into_iter().map(|s| s.parse().unwrap())
+                ).my_colors_chains(interesting_chains.into_iter().collect())
+                    .build()
             }
 
 
@@ -1154,7 +1173,7 @@ macro_rules! async_tests {
 
             use mio;
 
-            async_tests!(test new_thread_log);
+            async_tests!(test new_thread_log, ntl_with_boring, ntl_with_simple);
 
             const SERVER1_ADDRS: &'static [&'static str] = &["0.0.0.0:13590", "0.0.0.0:13591"];
             const SERVER2_ADDRS: &'static [&'static str] = &["0.0.0.0:13690", "0.0.0.0:13691"];
@@ -1165,10 +1184,35 @@ macro_rules! async_tests {
                 let addrs = iter::once((SERVER1_ADDRS[0], SERVER1_ADDRS[1]))
                     .chain(iter::once((SERVER2_ADDRS[0], SERVER2_ADDRS[1])))
                     .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
-                LogHandle::new_tcp_log_with_replication(
-                    addrs,
-                    interesting_chains.into_iter(),
-                )
+
+                LogHandle::replicated_with_servers(addrs)
+                    .chains(interesting_chains.into_iter())
+                    .build()
+            }
+
+            fn ntl_with_boring<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                let addrs = iter::once((SERVER1_ADDRS[0], SERVER1_ADDRS[1]))
+                    .chain(iter::once((SERVER2_ADDRS[0], SERVER2_ADDRS[1])))
+                    .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+
+                LogHandle::replicated_with_servers(addrs)
+                    .chains(interesting_chains.into_iter())
+                    .fetch_boring_multis()
+                    .build()
+            }
+
+            fn ntl_with_simple<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                let addrs = iter::once((SERVER1_ADDRS[0], SERVER1_ADDRS[1]))
+                    .chain(iter::once((SERVER2_ADDRS[0], SERVER2_ADDRS[1])))
+                    .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+
+                LogHandle::replicated_with_servers(addrs)
+                    .my_colors_chains(interesting_chains.into_iter().collect())
+                    .build()
             }
 
 
@@ -1247,7 +1291,7 @@ macro_rules! async_tests {
 
             use mio;
 
-            async_tests!(test new_thread_log);
+            async_tests!(test new_thread_log, ntl_with_boring, ntl_with_simple);
 
             const SERVER1_ADDRS: &'static [&'static str] = &["0.0.0.0:13790", "0.0.0.0:13791", "0.0.0.0:13792"];
             const SERVER2_ADDRS: &'static [&'static str] = &["0.0.0.0:13890", "0.0.0.0:13891", "0.0.0.0:13892"];
@@ -1258,9 +1302,34 @@ macro_rules! async_tests {
                 let addrs = iter::once((SERVER1_ADDRS.first().unwrap(), SERVER1_ADDRS.last().unwrap()))
                     .chain(iter::once((SERVER2_ADDRS.first().unwrap(), SERVER2_ADDRS.last().unwrap())))
                     .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+
+                LogHandle::replicated_with_servers(addrs)
+                    .chains(interesting_chains)
+                    .build()
+            }
+
+            fn ntl_with_boring<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                let addrs = iter::once((SERVER1_ADDRS.first().unwrap(), SERVER1_ADDRS.last().unwrap()))
+                    .chain(iter::once((SERVER2_ADDRS.first().unwrap(), SERVER2_ADDRS.last().unwrap())))
+                    .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+
                 LogHandle::replicated_with_servers(addrs)
                     .chains(interesting_chains)
                     .fetch_boring_multis()
+                    .build()
+            }
+
+            fn ntl_with_simple<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                start_tcp_servers();
+
+                let addrs = iter::once((SERVER1_ADDRS.first().unwrap(), SERVER1_ADDRS.last().unwrap()))
+                    .chain(iter::once((SERVER2_ADDRS.first().unwrap(), SERVER2_ADDRS.last().unwrap())))
+                    .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
+
+                LogHandle::replicated_with_servers(addrs)
+                    .my_colors_chains(interesting_chains.into_iter().collect())
                     .build()
             }
 
@@ -1341,40 +1410,36 @@ macro_rules! async_tests {
 
             use mio;
 
-            async_tests!(test new_thread_log, true);
+            async_tests!(test new_thread_log, ntl_with_boring, ntl_with_simple);
+
+            const ADDR_STR1: &'static str = "127.0.0.1:13395";
+            const ADDR_STR2: &'static str = "127.0.0.1:13396";
 
             fn new_thread_log<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
                 start_tcp_servers();
 
-                LogHandle::with_store(interesting_chains.into_iter(), true, |client| {
-                    let client: mpsc::Sender<Message> = client;
-                    let to_store_m = Arc::new(Mutex::new(None));
-                    let tsm = to_store_m.clone();
-                    #[allow(non_upper_case_globals)]
-                    thread::spawn(move || {
-                        const addr_str1: &'static str = "127.0.0.1:13395";
-                        const addr_str2: &'static str = "127.0.0.1:13396";
-                        let addrs: (SocketAddr, SocketAddr) = (addr_str1.parse().unwrap(), addr_str2.parse().unwrap());
-                        trace!("RTCP make store");
-                        let (store, to_store) = AsyncTcpStore::replicated_new_tcp(
-                            ::fuzzy_log_util::socket_addr::Ipv4SocketAddr::random(),
-                            ::std::iter::once::<(SocketAddr, SocketAddr)>(addrs),
-                            client,
-                        ).expect("");
-                        *tsm.lock().unwrap() = Some(to_store);
-                        trace!("RTCP store setup");
-                        store.run()
-                    });
-                    let to_store;
-                    loop {
-                        let ts = mem::replace(&mut *to_store_m.lock().unwrap(), None);
-                        if let Some(s) = ts {
-                            to_store = s;
-                            break
-                        }
-                    }
-                    to_store
-                })
+                let addrs: (SocketAddr, SocketAddr) = (ADDR_STR1.parse().unwrap(), ADDR_STR2.parse().unwrap());
+
+                LogHandle::replicated_with_servers([addrs].into_iter().cloned())
+                    .chains(interesting_chains)
+                    .build()
+            }
+
+            fn ntl_with_boring<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                let addrs: (SocketAddr, SocketAddr) = (ADDR_STR1.parse().unwrap(), ADDR_STR2.parse().unwrap());
+
+                LogHandle::replicated_with_servers([addrs].into_iter().cloned())
+                    .chains(interesting_chains)
+                    .fetch_boring_multis()
+                    .build()
+            }
+
+            fn ntl_with_simple<V>(interesting_chains: Vec<order>) -> LogHandle<V> {
+                let addrs: (SocketAddr, SocketAddr) = (ADDR_STR1.parse().unwrap(), ADDR_STR2.parse().unwrap());
+
+                LogHandle::replicated_with_servers([addrs].into_iter().cloned())
+                    .my_colors_chains(interesting_chains.into_iter().collect())
+                    .build()
             }
 
             fn start_tcp_servers() {

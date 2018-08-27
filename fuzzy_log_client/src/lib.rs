@@ -7,7 +7,7 @@ pub extern crate fuzzy_log_packets as packets;
 pub extern crate mio;
 extern crate reactor;
 
-use fuzzy_log_util::hash;
+pub use fuzzy_log_util::hash;
 
 pub mod fuzzy_log;
 pub mod colors;
