@@ -7,6 +7,10 @@ This repository contains the unified code for the clients and servers for the Fu
 an experiment in partially ordered SMR.
 A [companion repository](https://github.com/JLockerman/delos-apps) contains the remaining benchmark code.
 
+## C Bindings
+
+C bindings and documentation are currently located in [`fuzzy_log.h`](fuzzy_log.h).  
+
 ## To Build
 Download and install [rust](https://www.rust-lang.org) (easiest way is `curl https://sh.rustup.rs -sSf | sh`).  
 Clone this repository.  
@@ -21,14 +25,9 @@ as it needs to download dependencies.
 
 A CLI binding for starting FuzzyLog servers can be found in [servers/tcp_server](servers/tcp_server).
 
-## C Bindings
-
-C bindings and documentation are currently located in [`fuzzy_log.h`](fuzzy_log.h).  
-
 ## Directory Outline
 [src](src) fuzzy log library.  
 [examples](examples) sample code which uses the client library to perform vaious tasks of note is.  
-[examples/c_linking](examples/c_linking) shows how to use the C API to interface with the fuzzy log client library.  
 [servers/tcp_server](servers/tcp_server) a TCP based fuzzy log sever.  
 [clients](clients) various DPDK based clients for use in testing (obsolescent).  
 [fuzzy_log_server](fuzzy_log_server) the fuzzy log server implementation library.  
