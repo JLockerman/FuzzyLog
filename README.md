@@ -1,7 +1,7 @@
 _This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAward?AWD_ID=1637385)_. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the National Science Foundation.
 
 
-# delos-rust
+# FuzzyLog
 
 This repository contains the unified code for the clients and servers for the FuzzyLog project;
 an experiment in partially ordered SMR.
