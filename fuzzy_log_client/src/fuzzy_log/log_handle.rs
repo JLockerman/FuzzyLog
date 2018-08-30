@@ -675,6 +675,18 @@ where V: Storeable {
         self.read_handle.sync_chain(chain, per_event)
     }
 
+    pub fn sync_events<F>(&mut self, per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: for<'e> FnMut(Event<'e, V>) {
+        self.read_handle.sync_events(per_event)
+    }
+
+    pub fn sync_events_for_chain<F>(&mut self, chain: order, per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: for<'e> FnMut(Event<'e, V>) {
+        self.read_handle.sync_events_for_chain(chain, per_event)
+    }
+
     pub fn sync_and<F>(&mut self, per_event: F)
     -> Result<HashMap<order, entry>, GetRes>
     where V: UnStoreable, F: for<'e> FnMut(&mut WriteHandle<V>, Event<'e, V>) {
@@ -728,7 +740,7 @@ where V: Storeable {
         }
         else {
             trace!("multi  append");
-            self.async_multiappend(&*inhabits, data, &[])
+            self.async_no_remote_multiappend(&*inhabits, data, &[])
         };
         let res = if !async {
             self.wait_for_a_specific_append(id).map(|_| ())
@@ -1004,6 +1016,13 @@ impl<V: ?Sized> ReadHandle<V> {
         self.do_sync_with(&mut (), |&mut (), e| per_event(e))
     }
 
+    pub fn sync_events_for_chain<F>(&mut self, chain: order, mut per_event: F)
+    -> Result<HashMap<order, entry>, GetRes>
+    where V: UnStoreable, F: for<'e> FnMut(Event<'e, V>) {
+        self.snapshot(chain);
+        self.do_sync_with(&mut (), |&mut (), e| per_event(e))
+    }
+
     fn do_sync_with<W, F>(&mut self, write_handle: &mut W, mut per_event: F)
     -> Result<HashMap<order, entry>, GetRes>
     where V: UnStoreable, F: for<'e> FnMut(&mut W, Event<'e, V>) {
@@ -1161,6 +1180,25 @@ impl<V: ?Sized> ReadHandle<V> {
 
 impl<V: ?Sized> WriteHandle<V>
 where V: Storeable {
+
+    pub fn simple_append(
+        &mut self,
+        data: &V,
+        inhabits: &mut [order],
+    ) -> Uuid {
+        inhabits.sort();
+        assert!(
+            inhabits.binary_search(&order::from(0)).is_err(),
+            "color 0 should not be used;it is special cased for legacy reasons."
+        );
+
+        match inhabits {
+            [] => panic!("inhabits must not be empty"),
+            [chain] => self.async_append(*chain, data, &[]),
+            chains => self.async_no_remote_multiappend(chains, data, &[]),
+        }
+    }
+
     pub fn append(&mut self, chain: order, data: &V, deps: &[OrderIndex])
     -> Vec<OrderIndex> {
         let id = self.async_append(chain, data, deps);
