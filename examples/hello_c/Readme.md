@@ -8,7 +8,7 @@ with a Makefile which hopefully makes building such projects simple.
 Make sure you have `rust` intalled (run `curl https://sh.rustup.rs -sSf | sh` if not)
 and `make`.
 
-Running `make` this will output the example binary in `./out/start`.  
+Running `make` this will output the example binary in `./out/hello`.  
 This binary is standalone. It starts up its own instance of the
 FuzzyLog server at `127.0.0.1:13229` to run against,
 starts a client, performs some appends and reads them back.

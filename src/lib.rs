@@ -223,6 +223,8 @@ pub mod c_binidings {
         assert!(servers.is_valid());
         assert!(color.is_valid());
 
+        let _ = ::env_logger::init();
+
         let parse_ip = |&s: &*mut c_char| {
             let ip_string = CStr::from_ptr(s).to_str().expect("invalid IP string") ;
             let ip_parse = ip_string.parse();

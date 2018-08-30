@@ -1,6 +1,6 @@
 #USAGE
 #
-# make [all]        builds and links example, placing it in ./out/start
+# make [all]        builds and links example, placing it in ./out/hello
 #
 # make rust_code    builds the FuzzyLog library in $(FUZZYLOG_SRC_LOC)/target/debug/
 #
@@ -14,7 +14,7 @@
 #        this relies on the environment variable FUZZYLOG_SRC_LOC being set to the
 #        location of a local copy of the FuzzyLog repository.
 
-C_SRC := start.c
+C_SRC := main.c
 
 FUZZYLOG_SRC_LOC ?= $(realpath ../..)
 
@@ -29,15 +29,15 @@ else ifeq ($(UNAME_S),Darwin)
 endif
 
 CFLAGS += -O2 -std=gnu11 -I$(FUZZYLOG_SRC_LOC)
-WFLAGS += -Wall -Wextra -Wpointer-arith -Wundef -Wformat=2 -Wnested-externs
+WFLAGS += -Wall -Wextra -Wpointer-arith -Wundef -Wformat=2 -Wnested-externs -Wno-unused-parameter
 
 .PHONY: all rust_code clean mostlyclean rust_clean new_dir
 
-all: out/start
+all: out/hello
 
-out/start: rust_code $(C_SRC)
+out/hello: rust_code $(C_SRC)
 	@mkdir -p ./out
-	$(CC) start.c -o ./out/start $(CFLAGS) $(WFLAGS) $(LINK_FLAGS)
+	$(CC) main.c -o ./out/hello $(CFLAGS) $(WFLAGS) $(LINK_FLAGS)
 
 rust_code: $(FUZZYLOG_SRC_LOC)/target/debug/libc_link.a
 

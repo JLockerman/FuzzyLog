@@ -412,6 +412,8 @@ where
                             .map(OrderIndex::from)
                             .collect();
 
+                        happens_after_entries.sort_unstable_by_key(|oi| u64::from(oi.0));
+
                         contents.with_deps(&happens_after_entries).to_vec()
                     };
                 } else {
