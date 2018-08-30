@@ -1,6 +1,6 @@
 # Rust Hello World Example
 
-This directory contains a simple example of running the FuzzyLog client from rust.
+This directory contains a simple example of running the FuzzyLog client from rust.  
 For the C equivalent see [examples/hello_c](../hello_c).
 
 ## Building the Example
