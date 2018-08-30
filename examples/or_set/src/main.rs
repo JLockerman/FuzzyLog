@@ -145,7 +145,7 @@ impl Args {
 
     fn build_log_handle(&self) -> LogHandle<[u8]> {
         self.log_handle_builder()
-            .my_colors_chains(self.chains().collect())
+            .my_colors_chains(self.chains())
             .reads_my_writes() //TODO
             .build()
     }
@@ -177,7 +177,7 @@ impl Args {
     fn wait_signal(&self) {
         let mut handle = self.log_handle_builder()
             .reads_my_writes()
-            .my_colors_chains(Some(self.sig_color()).into_iter().collect())
+            .my_colors_chains(Some(self.sig_color()).into_iter())
             .build();
         handle.simpler_causal_append(&[], &mut []);
         let mut num_received = 0;

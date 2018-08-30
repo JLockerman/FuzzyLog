@@ -203,7 +203,7 @@ pub struct LogBuilder<V: ?Sized> {
     fetch_boring_multis: bool,
     id: Option<Ipv4SocketAddr>,
     ack_writes: bool,
-    my_colors_chains: Option<HashSet<order>>,
+    my_colors_chains: Option<Vec<order>>,
     _pd: PhantomData<Box<V>>,
 }
 
@@ -253,7 +253,8 @@ where V: Storeable {
         LogBuilder{ id: Some(Ipv4SocketAddr::from_u64(id)), .. self }
     }
 
-    pub fn my_colors_chains(self, chains: HashSet<order>) -> Self {
+    pub fn my_colors_chains(self, chains: impl IntoIterator<Item=order>) -> Self {
+        let chains: Vec<_> = chains.into_iter().collect();
         let builder = self.chains(chains.iter().cloned());
         LogBuilder{ my_colors_chains: Some(chains), .. builder }
     }
@@ -393,7 +394,7 @@ where V: Storeable {
         interesting_chains: C,
         fetch_boring_multis: bool,
         ack_writes: bool,
-        my_colors_chains: Option<HashSet<order>>,
+        my_colors_chains: Option<Vec<order>>,
         store_builder: F,
     ) -> Self
     where C: IntoIterator<Item=order>,
@@ -833,6 +834,24 @@ where V: Storeable {
     }
 
     pub fn simpler_causal_append(
+        &mut self,
+        data: &V,
+        inhabits: &mut [order],
+    ) -> Uuid {
+        self.simple_append(data, inhabits)
+    }
+
+    pub fn simple_append(
+        &mut self,
+        data: &V,
+        inhabits: &mut [order],
+    ) -> Uuid {
+        let id = self.simple_async_append(data, inhabits);
+        let _ = self.wait_for_a_specific_append(id);
+        id
+    }
+
+    pub fn simple_async_append(
         &mut self,
         data: &V,
         inhabits: &mut [order],

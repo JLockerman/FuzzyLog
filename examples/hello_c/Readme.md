@@ -1,7 +1,8 @@
 # C Hello World Example
 
 This directory contains an example of running the FuzzyLog client from C, along
-with a Makefile which hopefully makes building such projects simple. 
+with a Makefile which hopefully makes building such projects simple. For the
+rust equivalent see [examples/hello_rust](../hello_rust).
 
 ## Building the Example
 

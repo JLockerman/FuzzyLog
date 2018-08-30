@@ -129,14 +129,12 @@ main(int argc, char *argv[argc])
 		fuzzylog_append(log, (char *)&data, sizeof(data), &my_color, 1);
 	}
 
-	printf("clients can see them in that order with respect to the second clients appends.\n");
-	for(int i = 0; i < 1; i++) {
-		FLPtr reader = new_fuzzylog_instance(servers, my_color, NULL);
-		for(events_seen = 0; events_seen < 9;) {
-			fuzzylog_sync(reader, print_events, &events_seen);
-		}
-		fuzzylog_close(reader);
+	printf("clients can see them in any order with respect to the second clients appends.\n");
+	FLPtr reader = new_fuzzylog_instance(servers, my_color, NULL);
+	for(events_seen = 0; events_seen < 9;) {
+		fuzzylog_sync(reader, print_events, &events_seen);
 	}
+	fuzzylog_close(reader);
 
 	fuzzylog_close(log);
 

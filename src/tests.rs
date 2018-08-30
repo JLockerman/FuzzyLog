@@ -1127,7 +1127,7 @@ macro_rules! async_tests {
 
                 LogHandle::unreplicated_with_servers::<_, ::std::net::SocketAddr>(
                     addr_strs.into_iter().map(|s| s.parse().unwrap())
-                ).my_colors_chains(interesting_chains.into_iter().collect())
+                ).my_colors_chains(interesting_chains)
                     .build()
             }
 
@@ -1211,7 +1211,7 @@ macro_rules! async_tests {
                     .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
 
                 LogHandle::replicated_with_servers(addrs)
-                    .my_colors_chains(interesting_chains.into_iter().collect())
+                    .my_colors_chains(interesting_chains)
                     .build()
             }
 
@@ -1329,7 +1329,7 @@ macro_rules! async_tests {
                     .map(|(s1, s2)| (s1.parse().unwrap(), s2.parse().unwrap()));
 
                 LogHandle::replicated_with_servers(addrs)
-                    .my_colors_chains(interesting_chains.into_iter().collect())
+                    .my_colors_chains(interesting_chains)
                     .build()
             }
 
@@ -1438,7 +1438,7 @@ macro_rules! async_tests {
                 let addrs: (SocketAddr, SocketAddr) = (ADDR_STR1.parse().unwrap(), ADDR_STR2.parse().unwrap());
 
                 LogHandle::replicated_with_servers([addrs].into_iter().cloned())
-                    .my_colors_chains(interesting_chains.into_iter().collect())
+                    .my_colors_chains(interesting_chains)
                     .build()
             }
 

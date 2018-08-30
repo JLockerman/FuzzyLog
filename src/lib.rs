@@ -29,7 +29,7 @@ pub use packets::{order, entry, OrderIndex};
 
 /// The fuzzy log client.
 pub use fuzzy_log_client as async;
-pub use async::fuzzy_log::log_handle::LogHandle;
+pub use async::fuzzy_log::log_handle::{LogHandle, LogBuilder};
 
 #[cfg(test)] mod tests;
 #[cfg(test)] mod replication_tests;
@@ -68,6 +68,27 @@ pub fn run_server(
     servers2::tcp::run_with_replication(
         acceptor, server_num, group_size, prev_server, next_server, num_worker_threads, started
     )
+}
+
+pub fn start_server_thread(server_ip: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let server_started = AtomicUsize::new(0);
+    let started = unsafe {
+        //This should be safe since the while loop at the of the function
+        //prevents it from exiting until the server is started and
+        //server_started is no longer used
+        (extend_lifetime(&server_started))
+    };
+
+    let addr = server_ip.parse().unwrap();
+    ::std::thread::spawn(move || {
+        run_server(addr, 0, 1, None, None, 1, &started)
+    });
+    while !server_started.load(Ordering::SeqCst) < 1 {}
+
+    unsafe fn extend_lifetime<'a, 'b, T>(r: &'a T) -> &'b T {
+        ::std::mem::transmute(r)
+    }
 }
 
 pub mod c_binidings {
@@ -239,8 +260,7 @@ pub mod c_binidings {
             slice::from_raw_parts(color.remote_chains, color.num_remote_chains);
         let chains = remote_chains.iter()
             .map(|&c| order::from(c))
-            .chain(Some(order::from(color.local_chain)))
-            .collect();
+            .chain(Some(order::from(color.local_chain)));
 
         let ServerSpec{ num_ips, head_ips, tail_ips } = servers;
         let heads: &[*mut c_char] = slice::from_raw_parts(head_ips, num_ips);

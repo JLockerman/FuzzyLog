@@ -171,7 +171,8 @@ impl<FinshedReadQueue, FinshedWriteQueue> ThreadLogBuilder<FinshedReadQueue, Fin
         ThreadLogBuilder{ no_remote_style: NoRemoteStyle::Atomic, .. self}
     }
 
-    pub fn my_colors_chains(self, chains: HashSet<order>) -> Self {
+    pub fn my_colors_chains(self, chains: impl IntoIterator<Item=order>) -> Self {
+        let chains: HashSet<_> = chains.into_iter().collect();
         let builder = self.chains(chains.iter().cloned());
         ThreadLogBuilder{ my_colors_chains: Some(chains), .. builder }
     }
