@@ -27,7 +27,8 @@ A CLI binding for starting FuzzyLog servers can be found in [servers/tcp_server]
 
 ## Directory Outline
 [src](src) fuzzy log library.  
-[examples](examples) sample code which uses the client library to perform vaious tasks of note is.  
+[examples](examples) sample code which uses the client library to perform vaious tasks, of note are:  
+[examples/hello_c](examples/hello_c) a C helloworld example.
 [servers/tcp_server](servers/tcp_server) a TCP based fuzzy log sever.  
 [clients](clients) various DPDK based clients for use in testing (obsolescent).  
 [fuzzy_log_server](fuzzy_log_server) the fuzzy log server implementation library.  
