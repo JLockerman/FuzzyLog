@@ -19,50 +19,97 @@ typedef SnapBody *SnapId;
 
 typedef DAG *FLPtr;
 
-typedef uint64_t ColorID;
-
+/*
+ * A `ColorSpec` describes the layout of a color.
+ *
+ * members:
+ * local_chain: the local chain for this color
+ * num_remote_chains: The number of remote chains which make up the color
+ * retmote_chains: an array of size `numchains` consisting of the chains for a
+ * color.
+ *
+ * NOTE `local_chain` _may_ be included in `remote_chains` as well,
+ * though it is not necessary to do so.
+ */
 typedef struct {
-    uintptr_t numcolors;
-    ColorID *mycolors;
-} colors;
+    uint64_t local_chain;
+    uintptr_t num_remote_chains;
+    const uint64_t *remote_chains;
+} ColorSpec;
 
 /*
  * The specification for a static FuzzyLog server configuration.
- * Since we're using chain-replication the client needs to know of both the
- * head and tail of each replication chain. Each element of an ip array
- * should be in the form `<ip-addr>:<port>`. Currently only ipv4 is supported.
+ * Since we're using chain-replication, in a replicated setup the client
+ * needs to know of both the head and tail of each replication chain. In an
+ * non-replicated setup tail_ips should be NULL. Each element of an ip
+ * array should be in the form `<ip-addr>:<port>`. Currently only ipv4 is
+ * supported.
+ *
+ * members:
+ * num_ips: the number of IP addresses in each array
+ * head_ips: an array of `"<ip-addr>:<port>"` describing the heads of the
+ * FuzzyLog replication chain.
+ * tail_ips: an array of `"<ip-addr>:<port>"` describing the heads of the
+ * FuzzyLog replication chain, or `NULL` if the FuzzyLog is not
+ * replicated/
  */
 typedef struct {
     uintptr_t num_ips;
-    const char *const *head_ips;
-    const char *const *tail_ips;
+    char **head_ips;
+    char **tail_ips;
 } ServerSpec;
-
-typedef struct {
-    uint64_t color;
-    uintptr_t numchains;
-    const uint64_t *chains;
-} ColorSpec;
 
 void delete_snap_id(SnapId snap);
 
+/*
+ * Append a node to the FuzzyLog
+ *
+ * args:
+ * handle: the client handle which will perform the append
+ *
+ * data: the data to be contained in the new node
+ * data_size: the number of bytes in `data`
+ *
+ * colors: the colors the new node should inhabit. Note that only
+ * `local_color` will be read from these colors.
+ * num_colors: the number of colors in `colors`
+ */
 int32_t fuzzylog_append(FLPtr handle,
-                        const char *buf,
-                        uintptr_t bufsize,
-                        colors *nodecolors);
+                        const char *data,
+                        uintptr_t data_size,
+                        const ColorSpec *colors,
+                        uintptr_t num_colors);
 
 void fuzzylog_close(FLPtr handle);
 
-SnapId fuzzylog_sync(FLPtr handle, void (*callback)(const char*, uintptr_t));
+/*
+ * Sync a local view with the FuzzyLog.
+ *
+ * args:
+ * handle: the client handle which will perform the sync
+ * callback: a callback which will be called on every new event.
+ * args are: the passed in `callback_state`, the event's `data`,
+ * the events `data_size`
+ * callback_state: a pointer passed as the first argument to callback.
+ * May be `NULL`.
+ */
+SnapId fuzzylog_sync(FLPtr handle,
+                     void (*callback)(void*, const char*, uintptr_t),
+                     void *callback_state);
 
 void fuzzylog_trim(FLPtr handle, SnapId snap);
 
 /*
- * This should really take in a single color name, and detect chains from the system.
- * However, since we're only statically allocating chains atm, we'll just pass them in.
+ * Start a new FuzzyLog client instance, and connect it so the supplied
+ * server(s).
+ *
+ * args:
+ * servers: a `ServerSpec` describing the servers to connect to.
+ * color: a `ColorSpec` for the color this client reads.
+ * snap: a SnapId that the client should start `sync`ing from,
+ * or NULL if the client should start from the beginning of its
+ * color
  */
-FLPtr new_fuzzylog_instance(ServerSpec servers,
-                            ColorSpec color,
-                            SnapId snap);
+FLPtr new_fuzzylog_instance(ServerSpec servers, ColorSpec color, SnapId snap);
 
 #endif /* FuzzyLog_C_bindings_h */

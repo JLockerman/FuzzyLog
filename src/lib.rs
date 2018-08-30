@@ -87,7 +87,7 @@ pub mod c_binidings {
 
     use std::ffi::{CStr, CString};
     use std::net::SocketAddr;
-    use std::os::raw::c_char;
+    use std::os::raw::{c_char, c_void};
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -152,33 +152,54 @@ pub mod c_binidings {
         }
     }
 
+
+    /// A `ColorSpec` describes the layout of a color.
+    ///
+    /// members:
+    ///   local_chain: the local chain for this color
+    ///   num_remote_chains: The number of remote chains which make up the color
+    ///   retmote_chains: an array of size `numchains` consisting of the chains for a
+    ///           color.
+    ///
+    ///   NOTE `local_chain` _may_ be included in `remote_chains` as well,
+    ///   though it is not necessary to do so.
     #[repr(C)]
     pub struct ColorSpec {
-        color: u64,
-        numchains: usize,
-        chains: *const u64,
+        local_chain: u64,
+        num_remote_chains: usize,
+        remote_chains: *const u64,
     }
 
     impl ColorSpec {
         fn is_valid(&self) -> bool {
-            self.numchains == 0 || self.chains != ptr::null()
+            self.num_remote_chains == 0 || !self.remote_chains.is_null()
         }
     }
 
     /// The specification for a static FuzzyLog server configuration.
-    /// Since we're using chain-replication the client needs to know of both the
-    /// head and tail of each replication chain. Each element of an ip array
-    /// should be in the form `<ip-addr>:<port>`. Currently only ipv4 is supported.
+    /// Since we're using chain-replication, in a replicated setup the client
+    /// needs to know of both the head and tail of each replication chain. In an
+    /// non-replicated setup tail_ips should be NULL. Each element of an ip
+    /// array should be in the form `<ip-addr>:<port>`. Currently only ipv4 is
+    /// supported.
+    ///
+    /// members:
+    ///   num_ips: the number of IP addresses in each array
+    ///   head_ips: an array of `"<ip-addr>:<port>"` describing the heads of the
+    ///             FuzzyLog replication chain.
+    ///   tail_ips: an array of `"<ip-addr>:<port>"` describing the heads of the
+    ///             FuzzyLog replication chain, or `NULL` if the FuzzyLog is not
+    ///             replicated/
     #[repr(C)]
     pub struct ServerSpec {
         num_ips: usize,
-        head_ips: *const *const c_char,
-        tail_ips: *const *const c_char,
+        head_ips: *mut *mut c_char,
+        tail_ips: *mut *mut c_char,
     }
 
     impl ServerSpec {
         fn is_valid(&self) -> bool {
-            self.num_ips != 0 && self.head_ips != ptr::null() && self.tail_ips != ptr::null()
+            self.num_ips != 0 && !self.head_ips.is_null()
         }
     }
 
@@ -187,32 +208,54 @@ pub mod c_binidings {
     pub type SnapId = *mut SnapBody;
     pub type FLPtr = *mut DAG;
 
-    /// This should really take in a single color name, and detect chains from the system.
-    /// However, since we're only statically allocating chains atm, we'll just pass them in.
+    /// Start a new FuzzyLog client instance, and connect it so the supplied
+    /// server(s).
+    ///
+    /// args:
+    ///   servers: a `ServerSpec` describing the servers to connect to.
+    ///   color: a `ColorSpec` for the color this client reads.
+    ///   snap: a SnapId that the client should start `sync`ing from,
+    ///         or NULL if the client should start from the beginning of its
+    ///         color
     #[no_mangle]
     pub unsafe extern "C" fn new_fuzzylog_instance(
         servers: ServerSpec, color: ColorSpec, snap: SnapId) -> FLPtr {
         assert!(servers.is_valid());
         assert!(color.is_valid());
 
-        let parse_ip = |&s: &*const c_char| CStr::from_ptr(s)
-            .to_str()
-            .expect("invalid IP string")
-            .parse()
-            .expect("invalid IP addr");
+        let parse_ip = |&s: &*mut c_char| {
+            let ip_string = CStr::from_ptr(s).to_str().expect("invalid IP string") ;
+            let ip_parse = ip_string.parse();
+            match ip_parse {
+                Err(e) => panic!("invalid IP addr \"{}\": {}", ip_string, e),
+                Ok(addr) => addr,
 
-        let chains = slice::from_raw_parts(color.chains, color.numchains);
-        let chains = chains.iter().map(|&c| order::from(c)).collect();
+            }
+        };
+
+        let remote_chains =
+            slice::from_raw_parts(color.remote_chains, color.num_remote_chains);
+        let chains = remote_chains.iter()
+            .map(|&c| order::from(c))
+            .chain(Some(order::from(color.local_chain)))
+            .collect();
 
         let ServerSpec{ num_ips, head_ips, tail_ips } = servers;
-        let heads = slice::from_raw_parts(head_ips, num_ips).into_iter().map(parse_ip);
-        let tails = slice::from_raw_parts(tail_ips, num_ips).into_iter().map(parse_ip);
+        let heads: &[*mut c_char] = slice::from_raw_parts(head_ips, num_ips);
+        let heads = heads.into_iter().map(parse_ip);
 
-        let mut handle = LogHandle::replicated_with_servers(heads.zip(tails))
+        let builder = if tail_ips.is_null() {
+            LogHandle::unreplicated_with_servers(heads)
+        } else {
+            let tails = slice::from_raw_parts(tail_ips, num_ips).into_iter().map(parse_ip);
+            LogHandle::replicated_with_servers(heads.zip(tails))
+        };
+
+        let mut handle = builder
             .my_colors_chains(chains)
             .build();
 
-        if snap != ptr::null_mut() {
+        if !snap.is_null() {
             for (&o, &i) in &*snap {
                 handle.fastforward((o, i).into())
             }
@@ -221,32 +264,67 @@ pub mod c_binidings {
         Box::into_raw(handle.into())
     }
 
+    /// Append a node to the FuzzyLog
+    ///
+    /// args:
+    ///   handle: the client handle which will perform the append
+    ///
+    ///   data: the data to be contained in the new node
+    ///   data_size: the number of bytes in `data`
+    ///
+    ///   colors: the colors the new node should inhabit. Note that only
+    ///           `local_color` will be read from these colors.
+    ///   num_colors: the number of colors in `colors`
     #[no_mangle]
     pub unsafe extern "C" fn fuzzylog_append(
         handle: FLPtr,
-        buf: *const c_char,
-        bufsize: usize,
-        nodecolors: *mut colors,
+        data: *const c_char,
+        data_size: usize,
+        colors: *const ColorSpec,
+        num_colors: usize,
     ) -> i32 {
-        assert!(bufsize == 0 || buf != ptr::null());
-        assert!(nodecolors != ptr::null_mut());
-        assert!(colors_valid(nodecolors));
+        assert!(
+            !data.is_null() || data_size == 0
+            "args: data = {:?}, data_size = {} is not valid\nEither data = NULL or data_size > 0"
+        );
+        assert!(!colors.is_null());
+        assert!((&*colors).is_valid());
 
         let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
-        let data = slice::from_raw_parts(buf as *const u8, bufsize);
-        let nodecolors = slice::from_raw_parts_mut((*nodecolors).mycolors as *mut order, (*nodecolors).numcolors);
+        let data = slice::from_raw_parts(data as *const u8, data_size);
+        let colors = slice::from_raw_parts(colors, num_colors);
 
-        handle.simpler_causal_append(data, nodecolors);
+        let mut colors: Vec<_> = (&*colors).iter()
+            .map(|c| order::from(c.local_chain))
+            .collect();
+
+        let id = handle.simpler_causal_append(data, &mut colors);
+        handle.wait_for_a_specific_append(id);
         1
     }
 
+    /// Sync a local view with the FuzzyLog.
+    ///
+    /// args:
+    ///   handle: the client handle which will perform the sync
+    ///   callback: a callback which will be called on every new event.
+    ///   args are: the passed in `callback_state`, the event's `data`,
+    ///             the events `data_size`
+    ///   callback_state: a pointer passed as the first argument to callback.
+    ///                   May be `NULL`.
     #[no_mangle]
     pub unsafe extern "C" fn fuzzylog_sync(
-        handle: FLPtr, callback: fn(*const c_char, usize) -> (),
+        handle: FLPtr,
+        callback: fn(*mut c_void, *const c_char, usize) -> (),
+        callback_state: *mut c_void,
     ) -> SnapId {
         let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
         let entries_seen =
-            handle.sync(|data, _, _| callback(data.as_ptr() as *const i8, data.len()));
+            handle.sync(|data, _, _| callback(
+                callback_state,
+                data.as_ptr() as *const i8,
+                data.len()
+            ));
         match entries_seen {
             Ok(entries) => Box::into_raw(entries.into()),
             Err(..) => ptr::null_mut(),

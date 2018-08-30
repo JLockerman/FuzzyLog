@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["J <joshua.lockerman@yale.edu>"]
 build = "build.rs"
 
+[lib]
+crate-type = ["lib", "staticlib"]
+
 [build-dependencies]
 cbindgen = "0.6.2"
 
@@ -26,13 +29,14 @@ no_trace = ["log/max_level_info"]
 print_stats = ["fuzzy_log_client/print_stats", "fuzzy_log_server/print_stats"]
 debug_no_drop = []
 
+[profile.dev]
+panic = 'abort'
+
 [profile.release]
 opt-level = 3
 debug = false
 rpath = false
-lto = true
 debug-assertions = false
-codegen-units = 1
 panic = 'abort'
 
 [workspace]

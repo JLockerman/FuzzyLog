@@ -6,7 +6,8 @@ use std::env;
 fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
 
-    cbindgen::generate(crate_dir)
-        .expect("Unable to generate C header")
-        .write_to_file("fuzzylog.h");
+    match cbindgen::generate(crate_dir) {
+        Ok(bindings) => { bindings.write_to_file("fuzzylog.h"); },
+        Err(e) => eprintln!("{}", e),
+    }
 }

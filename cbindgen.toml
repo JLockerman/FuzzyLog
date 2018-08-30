@@ -9,6 +9,9 @@ language = "C"
 style = "Type"
 documentation = true
 
+[parse]
+parse_deps = false
+
 [export]
 exclude = [
     "WriteId", "WriteIdAndLocs", "Box_DAG", "HashMap_order__entry", "ReaderAndWriter", "Vals",
@@ -21,7 +24,7 @@ exclude = [
     "start_servers_from_config", "try_wait_for_any_append",
     "try_wait_for_any_append_and_location", "wait_for_a_specific_append",
     "wait_for_a_specific_append_and_locations", "wait_for_all_appends",
-    "wait_for_any_append", "close_dag_handle"]
+    "wait_for_any_append", "close_dag_handle", "ColorId", "colors"]
 
 [fn]
 args = "Auto"

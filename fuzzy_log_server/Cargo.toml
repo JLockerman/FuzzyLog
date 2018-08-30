@@ -21,13 +21,3 @@ env_logger = "0.3"
 [features]
 no_trace = ["log/max_level_info"]
 print_stats = []
-
-[profile.release]
-opt-level = 3
-# debug = true
-debug = false
-rpath = false
-lto = false
-debug-assertions = false
-codegen-units = 1
-panic = "abort"
