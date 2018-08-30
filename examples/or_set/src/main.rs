@@ -20,8 +20,6 @@ extern crate env_logger;
 #[cfg(test)]
 extern crate fuzzy_log_server;
 
-// #[macro_use] extern crate matches;
-
 #[macro_use] extern crate structopt;
 
 use std::fs::File;
