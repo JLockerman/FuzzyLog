@@ -5,7 +5,7 @@ _This work is funded by [NSF grant 1637385](https://nsf.gov/awardsearch/showAwar
 
 This repository contains the unified code for the clients and servers for the FuzzyLog project;
 an experiment in partially ordered SMR.
-A [companion repository](https://github.com/JLockerman/delos-apps) contains the remaining benchmark code.
+A [companion repository](https://github.com/JLockerman/FuzzyLog-apps) contains the remaining benchmark code.
 
 ## C Bindings
 
@@ -17,10 +17,14 @@ Download and install [rust](https://www.rust-lang.org) (easiest way is `curl htt
 Clone this repository.  
 To run local tests
 
-    cargo test --release
+    cargo test
 
 **NOTE:** The first build will be much slower than subsequent ones
-as it needs to download dependencies.
+as it needs to download dependencies.  
+**NOTE:** Due to the very large number of sockets the test suite opens, running
+the entire test sweet concurrently often causes tests to fail with
+`Too many open files`. To fix this either run in single threaded mode
+(`RUST_TEST_THREADS=1 cargo test`) or run only a subset of the test suite.
 
 ## Servers
 
