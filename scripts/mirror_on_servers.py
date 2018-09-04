@@ -41,7 +41,7 @@ def update_rust():
     # run('rustup update')
 
 def export(dir):
-    run("echo 'export DELOS_RUST_LOC=" + dir + "' >> ~/.bashrc")
+    run("echo 'export FUZZY_LOG_SRC_LOC=" + dir + "' >> ~/.bashrc")
 
 
 @parallel
@@ -76,8 +76,8 @@ def mirror(cmd=''):
 @parallel
 def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stats="", nt=""):
     with settings(hide('warnings'), warn_only=True):
-        run("pkill delos_tcp_serve")
-        run("pkill delos_tcp_server")
+        run("pkill fuzzy_log_serve")
+        run("pkill fuzzy_log_server")
         run("pkill gdb")
     host_index = index_of_host()
     #cmd = "cd servers/tcp_server && "
@@ -98,10 +98,10 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
     else:
         if nt != "":
             cmd += "--features \"no_trace\" "
-    # cmd += "&& gdb -ex=run --args ./target/release/delos_tcp_server " + port
+    # cmd += "&& gdb -ex=run --args ./target/release/fuzzy_log_server " + port
     cmd += "-- " + port
 
-    # cmd = "cargo build --release && perf record --quiet --call-graph dwarf -o perf.data -- ./target/release/delos_tcp_server " + port + " ""
+    # cmd = "cargo build --release && perf record --quiet --call-graph dwarf -o perf.data -- ./target/release/fuzzy_log_server " + port + " ""
 
     my_chain = []
     index_in_chain = 0
@@ -138,8 +138,8 @@ def run_chain(chain_hosts="", port="13289", trace="", workers="", debug="", stat
 @parallel
 def kill_server():
     with settings(hide('warnings'), warn_only=True):
-        run("pkill delos_tcp_serve")
-        run("pkill delos_tcp_server")
+        run("pkill fuzzy_log_serve")
+        run("pkill fuzzy_log_server")
 
 # servers should be of the form <server addr>(^<server addr>)*
 # (yes '^' is being used as the separator)

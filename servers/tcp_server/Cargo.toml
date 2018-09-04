@@ -1,5 +1,5 @@
 [package]
-name = "delos_tcp_server"
+name = "fuzzy_log_server"
 version = "0.1.0"
 authors = ["Joshua Lockerman <joshua.lockerman@yale.edu>"]
 
