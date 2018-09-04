@@ -1,7 +1,0 @@
-[package]
-name = "map"
-version = "0.1.0"
-authors = ["Joshua Lockerman <>"]
-
-[dependencies]
-fuzzy_log = {path = "../.."}
