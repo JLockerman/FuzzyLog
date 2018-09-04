@@ -9,6 +9,8 @@ extern crate reactor;
 
 pub use fuzzy_log_util::hash;
 
+pub use fuzzy_log::log_handle::*;
+
 pub mod fuzzy_log;
 pub mod colors;
 pub mod store;

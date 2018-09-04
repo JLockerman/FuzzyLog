@@ -1,7 +1,13 @@
 [package]
-name = "map"
+name = "simple_map"
 version = "0.1.0"
 authors = ["Joshua Lockerman <>"]
 
 [dependencies]
-fuzzy_log = {path = "../.."}
+bincode = "0.8.0"
+fuzzy_log_client = {path = "../../fuzzy_log_client"}
+serde = "1"
+serde_derive = "1"
+
+[dev-dependencies]
+fuzzy_log_server = {path = "../../fuzzy_log_server"}
