@@ -34,6 +34,7 @@ A CLI binding for starting FuzzyLog servers can be found in [servers/tcp_server]
 - [src/tests](src) the FuzzyLog regression tests.  
 - [examples](examples) sample code which uses the client library to perform vaious tasks, of note are:  
     - [hello_c](examples/hello_c) a C helloworld example.
+    - [hello_rust](examples/hello_rust) the corresponding rust example.
 - [servers/tcp_server](servers/tcp_server) a TCP based fuzzy log sever.  
 - [clients](clients) various DPDK based clients for use in testing (obsolescent).  
 - [fuzzy_log_server](fuzzy_log_server) the fuzzy log server implementation library.  

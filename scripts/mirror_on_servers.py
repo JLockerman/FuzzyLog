@@ -41,7 +41,7 @@ def update_rust():
     # run('rustup update')
 
 def export(dir):
-    run("echo 'export FUZZY_LOG_SRC_LOC=" + dir + "' >> ~/.bashrc")
+    run("echo 'export FUZZYLOG_SRC_LOC=" + dir + "' >> ~/.bashrc")
 
 
 @parallel

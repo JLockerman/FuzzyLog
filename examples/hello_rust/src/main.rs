@@ -1,4 +1,6 @@
 
+// The rust library is designed with the experimenter in mind,
+// and contains experimental features in addition to the core FuzzyLog api.
 extern crate fuzzy_log;
 
 use std::env;
