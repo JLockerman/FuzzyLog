@@ -9,7 +9,7 @@ A [companion repository](https://github.com/JLockerman/FuzzyLog-apps) contains t
 
 ## C Bindings
 
-C bindings and documentation are currently located in [`fuzzylog.h`](fuzzy_log.h).  
+C bindings and documentation are currently located in [`fuzzylog.h`](fuzzylog.h).  
 A helloworld using them can be found in [examples/hello_c](examples/hello_c)
 
 ## To Build
