@@ -321,8 +321,35 @@ pub mod c_binidings {
             .collect();
 
         let id = handle.simpler_causal_append(data, &mut colors);
-        handle.wait_for_a_specific_append(id);
+        handle.wait_for_a_specific_append(id).unwrap();
         1
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_async_append(
+        handle: FLPtr,
+        data: *const c_char,
+        data_size: usize,
+        colors: *const ColorSpec,
+        num_colors: usize,
+    ) -> WriteId {
+        assert!(
+            !data.is_null() || data_size == 0
+            "args: data = {:?}, data_size = {} is not valid\nEither data = NULL or data_size > 0"
+        );
+        assert!(!colors.is_null());
+        assert!((&*colors).is_valid());
+
+        let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
+        let data = slice::from_raw_parts(data as *const u8, data_size);
+        let colors = slice::from_raw_parts(colors, num_colors);
+
+        let mut colors: Vec<_> = (&*colors).iter()
+            .map(|c| order::from(c.local_chain))
+            .collect();
+
+        let id = handle.simpler_causal_append(data, &mut colors);
+        WriteId::from_uuid(id)
     }
 
     /// Sync a local view with the FuzzyLog.
@@ -677,20 +704,20 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn wait_for_all_appends(dag: *mut DAG) {
-        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+    pub unsafe extern "C" fn wait_for_all_appends(handle: FLPtr) {
+        let dag = handle.as_mut().expect("need to provide a valid DAGHandle");
         dag.wait_for_all_appends().unwrap();
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn wait_for_a_specific_append(dag: *mut DAG, write_id: WriteId) {
-        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+    pub unsafe extern "C" fn wait_for_a_specific_append(handle: FLPtr, write_id: WriteId) {
+        let dag = handle.as_mut().expect("need to provide a valid DAGHandle");
         dag.wait_for_a_specific_append(write_id.to_uuid()).unwrap();
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn wait_for_any_append(dag: *mut DAG) -> WriteId {
-        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+    pub unsafe extern "C" fn wait_for_any_append(handle: FLPtr) -> WriteId {
+        let dag = handle.as_mut().expect("need to provide a valid DAGHandle");
         let id = dag.wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
         WriteId::from_uuid(id)
     }
@@ -705,8 +732,8 @@ pub mod c_binidings {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn try_wait_for_any_append(dag: *mut DAG) -> WriteId {
-        let dag = dag.as_mut().expect("need to provide a valid DAGHandle");
+    pub unsafe extern "C" fn try_wait_for_any_append(handle: FLPtr) -> WriteId {
+        let dag = handle.as_mut().expect("need to provide a valid DAGHandle");
         let id = dag.try_wait_for_any_append().map(|t| t.0).unwrap_or(Uuid::nil());
         WriteId::from_uuid(id)
     }
