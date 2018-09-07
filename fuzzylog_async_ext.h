@@ -11,22 +11,73 @@
 #include <fuzzylog.h>
 
 typedef struct {
-    uint64_t p1;
-    uint64_t p2;
+    uint8_t bytes[16];
 } WriteId;
 
+typedef struct {
+    const WriteId *id;
+    const char *data;
+    uintptr_t data_size;
+    const OrderIndex *inhabits;
+    uintptr_t inhabits_len;
+} FuzzyLogEvent;
+
+/*
+ * Asynchronously append a node to the FuzzyLog.
+ * Unlike `fuzzylog_append` this function does not wait for the append to
+ * be ack'd by the server, but rather return immediately with a WriteId
+ * which can be used to wait for the ack at a latter point in time.
+ *
+ * args:
+ * handle: the client handle which will perform the append
+ *
+ * data: the data to be contained in the new node
+ * data_size: the number of bytes in `data`
+ *
+ * colors: the colors the new node should inhabit. Note that only
+ * `local_color` will be read from these colors.
+ * num_colors: the number of colors in `colors`
+ */
 WriteId fuzzylog_async_append(FLPtr handle,
                               const char *data,
                               uintptr_t data_size,
                               const ColorSpec *colors,
                               uintptr_t num_colors);
 
-WriteId try_wait_for_any_append(FLPtr handle);
+/*
+ * Sync a local view with the FuzzyLog.
+ *
+ * args:
+ * handle: the client handle which will perform the sync
+ * callback: a callback which will be called on every new event.
+ * args are: the passed in `callback_state`, the event's `data`,
+ * the events `data_size`
+ * callback_state: a pointer passed as the first argument to callback.
+ * May be `NULL`.
+ */
+SnapId fuzzylog_sync_events(FLPtr handle,
+                            void (*callback)(void*, FuzzyLogEvent),
+                            void *callback_state);
 
-void wait_for_a_specific_append(FLPtr handle, WriteId write_id);
+/*
+ * Check if any append written by this client has been ack'd by the server
+ * return WriteId{0} if no such append exists.
+ */
+WriteId fuzzylog_try_wait_for_any_append(FLPtr handle);
 
-void wait_for_all_appends(FLPtr handle);
+/*
+ * Wait for a specific append sent by this client to be ack'd by the server.
+ */
+void fuzzylog_wait_for_a_specific_append(FLPtr handle, WriteId write_id);
 
-WriteId wait_for_any_append(FLPtr handle);
+/*
+ * Wait for all outstanding appends to be ack'd by the server.
+ */
+void fuzzylog_wait_for_all_appends(FLPtr handle);
+
+/*
+ * Wait for any append sent by this client to be ack'd by the server.
+ */
+WriteId fuzzylog_wait_for_any_append(FLPtr handle);
 
 #endif /* FuzzyLog_C_bindings_h */

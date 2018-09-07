@@ -114,8 +114,6 @@ pub mod c_binidings {
 
     use mio;
 
-    use byteorder::{ByteOrder, NativeEndian};
-
     pub type DAG = LogHandle<[u8]>;
     pub type ColorID = u64;
 
@@ -134,8 +132,7 @@ pub mod c_binidings {
     #[repr(C)]
     #[derive(Copy, Clone)]
     pub struct WriteId {
-        p1: u64,
-        p2: u64,
+        bytes: [u8; 16],
     }
 
     #[repr(C)]
@@ -152,18 +149,13 @@ pub mod c_binidings {
 
     impl WriteId {
         fn from_uuid(id: Uuid) -> Self {
-            let bytes = id.as_bytes();
-            WriteId {
-                p1: NativeEndian::read_u64(&bytes[0..8]),
-                p2: NativeEndian::read_u64(&bytes[8..16]),
-            }
+            let bytes = *id.as_bytes();
+            WriteId { bytes, }
         }
 
         fn to_uuid(self) -> Uuid {
-            let WriteId {p1, p2} = self;
+            let WriteId {bytes} = self;
             let mut bytes = [0u8; 16];
-            NativeEndian::write_u64(&mut bytes[0..8], p1);
-            NativeEndian::write_u64(&mut bytes[8..16], p2);
             Uuid::from_bytes(&bytes[..]).unwrap()
         }
 
@@ -325,6 +317,20 @@ pub mod c_binidings {
         1
     }
 
+    /// Asynchronously append a node to the FuzzyLog.
+    /// Unlike `fuzzylog_append` this function does not wait for the append to
+    /// be ack'd by the server, but rather return immediately with a WriteId
+    /// which can be used to wait for the ack at a latter point in time.
+    ///
+    /// args:
+    ///   handle: the client handle which will perform the append
+    ///
+    ///   data: the data to be contained in the new node
+    ///   data_size: the number of bytes in `data`
+    ///
+    ///   colors: the colors the new node should inhabit. Note that only
+    ///           `local_color` will be read from these colors.
+    ///   num_colors: the number of colors in `colors`
     #[no_mangle]
     pub unsafe extern "C" fn fuzzylog_async_append(
         handle: FLPtr,
@@ -378,6 +384,73 @@ pub mod c_binidings {
             Ok(entries) => Box::into_raw(entries.into()),
             Err(..) => ptr::null_mut(),
         }
+    }
+
+    #[repr(C)]
+    pub struct FuzzyLogEvent {
+        pub id: *const WriteId,
+        pub data: *const c_char,
+        pub data_size: usize,
+        pub inhabits: *const OrderIndex,
+        pub inhabits_len: usize,
+    }
+
+    /// Sync a local view with the FuzzyLog.
+    ///
+    /// args:
+    ///   handle: the client handle which will perform the sync
+    ///   callback: a callback which will be called on every new event.
+    ///   args are: the passed in `callback_state`, the event's `data`,
+    ///             the events `data_size`
+    ///   callback_state: a pointer passed as the first argument to callback.
+    ///                   May be `NULL`.
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_sync_events(
+        handle: FLPtr,
+        callback: fn(*mut c_void, FuzzyLogEvent) -> (),
+        callback_state: *mut c_void,
+    ) -> SnapId {
+        let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
+        let entries_seen = handle.sync_events(|e| {
+            let event = FuzzyLogEvent {
+                id: e.id as *const Uuid as *const WriteId,
+                data: e.data.as_ptr() as *const c_char,
+                data_size: e.data.len(),
+                inhabits: e.inhabits.as_ptr(),
+                inhabits_len: e.inhabits.len(),
+            };
+            callback(callback_state, event);
+        });
+        match entries_seen {
+            Ok(entries) => Box::into_raw(entries.into()),
+            Err(..) => ptr::null_mut(),
+        }
+    }
+
+
+    /// Wait for all outstanding appends to be ack'd by the server.
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_wait_for_all_appends(handle: FLPtr) {
+        wait_for_all_appends(handle)
+    }
+
+    /// Wait for a specific append sent by this client to be ack'd by the server.
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_wait_for_a_specific_append(handle: FLPtr, write_id: WriteId) {
+        wait_for_a_specific_append(handle, write_id)
+    }
+
+    /// Wait for any append sent by this client to be ack'd by the server.
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_wait_for_any_append(handle: FLPtr) -> WriteId {
+        wait_for_any_append(handle)
+    }
+
+    /// Check if any append written by this client has been ack'd by the server
+    /// return WriteId{0} if no such append exists.
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_try_wait_for_any_append(handle: FLPtr) -> WriteId {
+        try_wait_for_any_append(handle)
     }
 
     #[no_mangle]

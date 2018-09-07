@@ -40,4 +40,5 @@ debug-assertions = false
 panic = 'abort'
 
 [workspace]
-exclude = ["servers/", "examples", "clients", "benchers", "fuzzy_views", "tokio_server"]
+exclude = ["servers/", "examples", "clients", "benchers", "fuzzy_views", "tokio_server",
+    "fuzzy_log.h", "fuzzylog_async_ext.h"]
