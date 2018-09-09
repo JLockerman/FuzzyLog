@@ -1,5 +1,5 @@
-#ifndef FuzzyLog_C_bindings_h
-#define FuzzyLog_C_bindings_h
+#ifndef FuzzyLog_C_async_ext_h
+#define FuzzyLog_C_async_ext_h
 
 /* Generated with cbindgen:0.6.3 */
 
@@ -18,8 +18,6 @@ typedef struct {
     const WriteId *id;
     const char *data;
     uintptr_t data_size;
-    const OrderIndex *inhabits;
-    uintptr_t inhabits_len;
 } FuzzyLogEvent;
 
 /*
@@ -80,4 +78,4 @@ void fuzzylog_wait_for_all_appends(FLPtr handle);
  */
 WriteId fuzzylog_wait_for_any_append(FLPtr handle);
 
-#endif /* FuzzyLog_C_bindings_h */
+#endif /* FuzzyLog_C_async_ext_h */

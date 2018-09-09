@@ -155,7 +155,6 @@ pub mod c_binidings {
 
         fn to_uuid(self) -> Uuid {
             let WriteId {bytes} = self;
-            let mut bytes = [0u8; 16];
             Uuid::from_bytes(&bytes[..]).unwrap()
         }
 
@@ -391,8 +390,8 @@ pub mod c_binidings {
         pub id: *const WriteId,
         pub data: *const c_char,
         pub data_size: usize,
-        pub inhabits: *const OrderIndex,
-        pub inhabits_len: usize,
+        // pub inhabits: *const OrderIndex,
+        // pub inhabits_len: usize,
     }
 
     /// Sync a local view with the FuzzyLog.
@@ -416,8 +415,8 @@ pub mod c_binidings {
                 id: e.id as *const Uuid as *const WriteId,
                 data: e.data.as_ptr() as *const c_char,
                 data_size: e.data.len(),
-                inhabits: e.inhabits.as_ptr(),
-                inhabits_len: e.inhabits.len(),
+                // inhabits: e.inhabits.as_ptr(),
+                // inhabits_len: e.inhabits.len(),
             };
             callback(callback_state, event);
         });
