@@ -34,7 +34,7 @@ typedef DAG *FLPtr;
 typedef struct {
     uint64_t local_chain;
     uintptr_t num_remote_chains;
-    const uint64_t *remote_chains;
+    uint64_t *remote_chains;
 } ColorSpec;
 
 /*

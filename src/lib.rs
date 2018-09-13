@@ -179,7 +179,7 @@ pub mod c_binidings {
     pub struct ColorSpec {
         local_chain: u64,
         num_remote_chains: usize,
-        remote_chains: *const u64,
+        remote_chains: *mut u64,
     }
 
     impl ColorSpec {
@@ -411,6 +411,30 @@ pub mod c_binidings {
     ) -> SnapId {
         let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
         let entries_seen = handle.sync_events(|e| {
+            let event = FuzzyLogEvent {
+                id: e.id as *const Uuid as *const WriteId,
+                data: e.data.as_ptr() as *const c_char,
+                data_size: e.data.len(),
+                // inhabits: e.inhabits.as_ptr(),
+                // inhabits_len: e.inhabits.len(),
+            };
+            callback(callback_state, event);
+        });
+        match entries_seen {
+            Ok(entries) => Box::into_raw(entries.into()),
+            Err(..) => ptr::null_mut(),
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_sync_chain(
+        handle: FLPtr,
+        chain: u64,
+        callback: fn(*mut c_void, FuzzyLogEvent) -> (),
+        callback_state: *mut c_void,
+    ) -> SnapId {
+        let handle = handle.as_mut().expect("need to provide a valid DAGHandle");
+        let entries_seen = handle.sync_events_for_chain(chain.into(), |e| {
             let event = FuzzyLogEvent {
                 id: e.id as *const Uuid as *const WriteId,
                 data: e.data.as_ptr() as *const c_char,

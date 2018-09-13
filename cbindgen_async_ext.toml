@@ -26,7 +26,7 @@ exclude = [
     "colors", "ColorSpec", "ServerSpec", "FLPtr", "SnapId", "delete_snap_id",
     "fuzzylog_append", "fuzzylog_close", "fuzzylog_sync", "fuzzylog_trim",
     "new_fuzzylog_instance", "HashMap", "try_wait_for_any_append", "wait_for_a_specific_append",
-    "wait_for_all_appends", "wait_for_any_append"]
+    "wait_for_all_appends", "wait_for_any_append", "fuzzylog_sync_chain"]
 
 [fn]
 args = "Auto"
