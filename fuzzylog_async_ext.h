@@ -18,6 +18,8 @@ typedef struct {
     const WriteId *id;
     const char *data;
     uintptr_t data_size;
+    const void *inhabits;
+    uintptr_t inhabits_len;
 } FuzzyLogEvent;
 
 /*
@@ -41,6 +43,8 @@ WriteId fuzzylog_async_append(FLPtr handle,
                               uintptr_t data_size,
                               const ColorSpec *colors,
                               uintptr_t num_colors);
+
+bool fuzzylog_event_inhabits_chain(FuzzyLogEvent event, uint64_t chain);
 
 /*
  * Sync a local view with the FuzzyLog.

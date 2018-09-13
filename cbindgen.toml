@@ -25,7 +25,8 @@ exclude = [
     "try_wait_for_any_append_and_location", "wait_for_a_specific_append",
     "wait_for_a_specific_append_and_locations", "wait_for_all_appends",
     "wait_for_any_append", "close_dag_handle", "ColorId", "colors", "fuzzylog_async_append",
-    "fuzzylog_try_wait_for_any_append", "fuzzylog_wait_for_any_append", "fuzzylog_wait_for_all_appends", "fuzzylog_wait_for_a_specific_append", "fuzzylog_sync_events", "FuzzyLogEvent", "fuzzylog_sync_chain"]
+    "fuzzylog_try_wait_for_any_append", "fuzzylog_wait_for_any_append", "fuzzylog_wait_for_all_appends", "fuzzylog_wait_for_a_specific_append", "fuzzylog_sync_events", "FuzzyLogEvent", "fuzzylog_sync_chain",
+    "fuzzylog_event_inhabits_chain"]
 
 [fn]
 args = "Auto"

@@ -251,7 +251,11 @@ pub mod c_binidings {
             slice::from_raw_parts(color.remote_chains, color.num_remote_chains);
         let chains = remote_chains.iter()
             .map(|&c| order::from(c))
-            .chain(Some(order::from(color.local_chain)));
+            .chain(if color.local_chain != 0 {
+                Some(order::from(color.local_chain))
+            } else {
+                None
+            });
 
         let ServerSpec{ num_ips, head_ips, tail_ips } = servers;
         let heads: &[*mut c_char] = slice::from_raw_parts(head_ips, num_ips);
@@ -390,8 +394,8 @@ pub mod c_binidings {
         pub id: *const WriteId,
         pub data: *const c_char,
         pub data_size: usize,
-        // pub inhabits: *const OrderIndex,
-        // pub inhabits_len: usize,
+        inhabits: *const c_void,
+        inhabits_len: usize,
     }
 
     /// Sync a local view with the FuzzyLog.
@@ -415,8 +419,8 @@ pub mod c_binidings {
                 id: e.id as *const Uuid as *const WriteId,
                 data: e.data.as_ptr() as *const c_char,
                 data_size: e.data.len(),
-                // inhabits: e.inhabits.as_ptr(),
-                // inhabits_len: e.inhabits.len(),
+                inhabits: e.inhabits.as_ptr() as _,
+                inhabits_len: e.inhabits.len(),
             };
             callback(callback_state, event);
         });
@@ -439,8 +443,8 @@ pub mod c_binidings {
                 id: e.id as *const Uuid as *const WriteId,
                 data: e.data.as_ptr() as *const c_char,
                 data_size: e.data.len(),
-                // inhabits: e.inhabits.as_ptr(),
-                // inhabits_len: e.inhabits.len(),
+                inhabits: e.inhabits.as_ptr() as _,
+                inhabits_len: e.inhabits.len(),
             };
             callback(callback_state, event);
         });
@@ -448,6 +452,20 @@ pub mod c_binidings {
             Ok(entries) => Box::into_raw(entries.into()),
             Err(..) => ptr::null_mut(),
         }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fuzzylog_event_inhabits_chain(
+        event: FuzzyLogEvent,
+        chain: u64,
+    ) -> bool {
+        let inhabits = slice::from_raw_parts(
+            event.inhabits as *const OrderIndex, event.inhabits_len
+        );
+        for OrderIndex(o, _) in inhabits {
+            if *o == order::from(chain) { return true }
+        }
+        false
     }
 
 
