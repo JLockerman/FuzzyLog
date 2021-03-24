@@ -711,7 +711,7 @@ where V: Storeable {
         data: &V,
         inhabits: &mut [order],
         depends_on: &mut [order],
-        async: bool,
+        is_async: bool,
     ) -> (Uuid, Result<(), TryWaitRes>) {
         //TODO get rid of gratuitous copies
         assert!(inhabits.len() > 0);
@@ -743,7 +743,7 @@ where V: Storeable {
             trace!("multi  append");
             self.async_no_remote_multiappend(&*inhabits, data, &[])
         };
-        let res = if !async {
+        let res = if !is_async {
             self.wait_for_a_specific_append(id).map(|_| ())
         } else {
             Ok(())
@@ -756,7 +756,7 @@ where V: Storeable {
         data: &V,
         inhabits: &mut [order],
         deps: &mut [OrderIndex],
-        async: bool,
+        is_async: bool,
     ) -> (Uuid, Result<OrderIndex, TryWaitRes>) {
         if inhabits.len() == 0 {
             return (Uuid::nil(), Err(TryWaitRes::NothingReady))
@@ -773,7 +773,7 @@ where V: Storeable {
             self.async_no_remote_multiappend(inhabits, data, deps)
         };
         let mut loc = Err(TryWaitRes::NothingReady);
-        if !async {
+        if !is_async {
             loc = self.wait_for_a_specific_append(id).map(|v| v[0]);
         }
         (id, loc)

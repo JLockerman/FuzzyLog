@@ -1349,7 +1349,7 @@ impl WriteState {
     }
 
     fn layout(&self) -> EntryLayout {
-        let mut layout = unsafe { mem::uninitialized() };
+        let mut layout = unsafe { mem::MaybeUninit::uninit().assume_init() };
         self.with_packet(|p| {
             layout = bytes_as_entry(p).layout();
         });
