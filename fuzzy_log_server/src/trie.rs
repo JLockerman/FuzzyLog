@@ -414,7 +414,8 @@ impl Trie
     pub fn new() -> Self {
         unsafe {
             //FIXME gratuitously unsafe
-            let mut t = Trie { root: Box::new(mem::zeroed()) };
+            let root = Box::new(mem::MaybeUninit::zeroed().assume_init());
+            let mut t = Trie { root };
             ::std::ptr::write(&mut t.root.alloc, AllocPtr::new());
             //t.next_entry = 1;
             t

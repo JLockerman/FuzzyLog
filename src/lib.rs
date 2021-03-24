@@ -301,7 +301,7 @@ pub mod c_binidings {
         num_colors: usize,
     ) -> i32 {
         assert!(
-            !data.is_null() || data_size == 0
+            !data.is_null() || data_size == 0,
             "args: data = {:?}, data_size = {} is not valid\nEither data = NULL or data_size > 0"
         );
         assert!(!colors.is_null());
@@ -343,7 +343,7 @@ pub mod c_binidings {
         num_colors: usize,
     ) -> WriteId {
         assert!(
-            !data.is_null() || data_size == 0
+            !data.is_null() || data_size == 0,
             "args: data = {:?}, data_size = {} is not valid\nEither data = NULL or data_size > 0"
         );
         assert!(!colors.is_null());

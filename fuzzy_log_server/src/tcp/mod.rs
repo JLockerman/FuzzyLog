@@ -333,14 +333,14 @@ pub fn run_with_replication(
         #[cfg(feature = "print_stats")]
         loop {
             use std::sync::mpsc::RecvTimeoutError;
-            let msg = recv_from_workers.recv_timeout(Duration::from_secs(10));
+            let msg = recv_from_workers.recv_timeout(std::time::Duration::from_secs(10));
             match msg {
                 Ok(ToLog::New(buffer, storage, st)) => {
-                    assert!(!is_replica);
+                    // assert!(!is_replica);
                     log.handle_op(buffer, storage, st)
                 },
                 Ok(ToLog::Replication(tr, st)) => {
-                    assert!(is_replica);
+                    // assert!(is_replica);
                     log.handle_replication(tr, st)
                 },
                 Ok(ToLog::Recovery(r, st)) => log.handle_recovery(r, st),
